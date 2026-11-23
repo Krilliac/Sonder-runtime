@@ -43,22 +43,26 @@ def register(mcp: _McpServer, record: Any, *, runtime: Callable[[], Any]) -> Non
         task: str,
         name: str = "",
         role: str = "",
+        personality: str = "",
         tier: str = "",
         model: str = "",
         project: str = "",
         cwd: str = "",
         max_steps: int = 8,
+        read_only: bool | None = None,
     ) -> str:
         """Delegate one bounded subtask to a depth-1 child agent (depth 0 only)."""
         args: dict[str, Any] = {
             "task": task,
             "name": name,
             "role": role,
+            "personality": personality,
             "tier": tier,
             "model": model,
             "project": project,
             "cwd": cwd,
             "max_steps": max_steps,
+            "read_only": read_only,
         }
         return _run("delegate_task", args, lambda: _wiring.dispatch_delegation(runtime(), "delegate_task", args))
 
@@ -71,6 +75,7 @@ def register(mcp: _McpServer, record: Any, *, runtime: Callable[[], Any]) -> Non
         project: str = "",
         cwd: str = "",
         max_steps: int = 8,
+        read_only: bool | None = None,
     ) -> str:
         """Spawn multiple depth-1 child agents in parallel across Main and Node1 (depth 0 only)."""
         raw_tasks: Any = tasks if tasks not in (None, "") else tasks_json
@@ -88,6 +93,7 @@ def register(mcp: _McpServer, record: Any, *, runtime: Callable[[], Any]) -> Non
             "project": project,
             "cwd": cwd,
             "max_steps": max_steps,
+            "read_only": read_only,
         }
         return _run("spawn_agents", args, lambda: _wiring.dispatch_delegation(runtime(), "spawn_agents", args))
 

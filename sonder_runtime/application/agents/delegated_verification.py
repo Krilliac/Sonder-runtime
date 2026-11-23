@@ -549,41 +549,70 @@ class DelegatedVerificationService:
                     prepared.verification_id,
                 )
         except VerificationApprovalPending as pending:
-            evidence = asdict(pending.evidence)
-            if managed is None or evidence["expires_at"] <= time.time():
-                raise PermissionError("resumable pending approval unavailable")
-            with root_transaction(self.store, context) as tx:
-                current = current_verification_binding(
-                    tx, self.store, prepared, context
-                )
-                value = tx.verification_row(
-                    prepared.verification_id, context.principal_id
-                )
-                if (
-                    value["owner"] != owner
-                    or value["state"] != "approval_deciding"
-                    or value["job_ids"]
-                    or current["epoch"] != value["attachment_epoch"]
-                ):
-                    raise PermissionError("pending approval claim changed")
-                prior = value.get("pending_approval")
-                if prior and any(
-                    prior[k] != evidence[k]
-                    for k in ("tool", "call_digest", "surface", "call_id")
-                ):
-                    raise PermissionError("pending ledger identity changed")
-                value.update(
-                    state="approval_pending",
-                    owner="",
-                    code="APPROVAL_PENDING",
-                    pending_approval=evidence,
-                )
-                tx.save_verification(value)
-                tx.release_verification_barrier(
-                    prepared.parent_session_id,
-                    context.principal_id,
-                    prepared.verification_id,
-                )
+            try:
+                evidence = asdict(pending.evidence)
+                if managed is None or evidence["expires_at"] <= time.time():
+                    raise PermissionError("resumable pending approval unavailable")
+                with root_transaction(self.store, context) as tx:
+                    current = current_verification_binding(
+                        tx, self.store, prepared, context
+                    )
+                    value = tx.verification_row(
+                        prepared.verification_id, context.principal_id
+                    )
+                    if (
+                        value["owner"] != owner
+                        or value["state"] != "approval_deciding"
+                        or value["job_ids"]
+                        or current is None
+                        or current["epoch"] != value["attachment_epoch"]
+                    ):
+                        raise PermissionError("pending approval claim changed")
+                    prior = value.get("pending_approval")
+                    if prior and any(
+                        prior[k] != evidence[k]
+                        for k in ("tool", "call_digest", "surface", "call_id")
+                    ):
+                        raise PermissionError("pending ledger identity changed")
+                    value.update(
+                        state="approval_pending",
+                        owner="",
+                        code="APPROVAL_PENDING",
+                        pending_approval=evidence,
+                    )
+                    tx.save_verification(value)
+                    tx.release_verification_barrier(
+                        prepared.parent_session_id,
+                        context.principal_id,
+                        prepared.verification_id,
+                    )
+            except Exception:
+                with root_transaction(self.store, context) as tx:
+                    value = tx.verification_row(
+                        prepared.verification_id, context.principal_id
+                    )
+                    if (
+                        value["state"] == "approval_deciding"
+                        and value["owner"] in ("", owner)
+                    ):
+                        unknown_approval = managed is not None
+                        value.update(
+                            state="approval_unknown" if unknown_approval else "failed",
+                            owner="",
+                            code=(
+                                "APPROVAL_OUTCOME_UNKNOWN"
+                                if unknown_approval
+                                else "VERIFICATION_REFUSED"
+                            ),
+                        )
+                        tx.save_verification(value)
+                        tx.release_verification_barrier(
+                            prepared.parent_session_id,
+                            context.principal_id,
+                            prepared.verification_id,
+                        )
+                self.lanes.resume_after_verification(prepared.parent_session_id)
+                raise
         except Exception as exc:
             with root_transaction(self.store, context) as tx:
                 value = tx.verification_row(

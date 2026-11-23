@@ -1050,6 +1050,53 @@ def _default_route_plan(prompt, start, *, has_image=False):
         return tier_escalation.single(start)
 
 
+def _code_gate_allow_runtime_execution() -> bool:
+    """Whether the chat code gate may execute Python on the host runtime.
+
+    Falls back to static-only AST/compile checks when:
+    - a restricted caller role (such as a served public ``user`` account) is
+      bound and lacks ``run_code`` permission;
+    - the active permission mode is ``plan``; or
+    - a served or scoped caller (bound caller role or active permission-mode
+      scope, including local-open capped sessions) is in ``manual`` mode, where
+      unattended host execution is disallowed.
+    """
+    if _role_tool_policy.agent_refusal("run_code"):
+        return False
+    mode = permission_modes.current_mode()
+    if mode == "plan":
+        return False
+    if mode == "manual":
+        role_bound = (
+            _role_tool_policy._CALLER_ROLE.get(_role_tool_policy._UNBOUND)
+            is not _role_tool_policy._UNBOUND
+        )
+        mode_scoped = False
+        try:
+            import permission_modes as _pm_engine
+            mode_scoped = (
+                _pm_engine._MODE_SCOPE.get() is not None
+                or bool(_pm_engine._MODE_SCOPE_CAPPED.get())
+            )
+        except Exception:
+            mode_scoped = True
+        if role_bound or mode_scoped:
+            return False
+    return True
+
+
+def _redact_code_gate_text(text: str) -> str:
+    """Scrub secrets/tokens from code-gate failure text before prompt or banner use."""
+    raw = str(text or "")
+    if not raw:
+        return ""
+    try:
+        from sonder_runtime.domain.security import redaction as _redaction
+        return _redaction.redact_text(raw)
+    except Exception:
+        return "exited with an error"
+
+
 def _gate_answer_code(response, *, iid, prompt, history, model, system,
                       temperature, num_predict, num_ctx, cloud, tier_label):
     """Run the code gate on one chat answer with a repair bound to its model."""
@@ -1091,7 +1138,10 @@ def _gate_answer_code(response, *, iid, prompt, history, model, system,
         return repaired
 
     gated, verified, repaired = _apply_code_gate(
-        response, interaction_id=iid, regenerate=_repair,
+        response,
+        interaction_id=iid,
+        regenerate=_repair,
+        allow_execution=_code_gate_allow_runtime_execution(),
     )
     return gated, verified, repaired, usage
 
@@ -1100,12 +1150,13 @@ def served_work_project(project):
     """The directory a served natural-work request may run in, or ``''``.
 
     The served route namespaces ``project`` to an opaque per-principal id for
-    durable state; routed workbench work needs the directory itself. Only a
-    path-like value naming an existing directory inside the configured file
-    roots qualifies, so a client value scopes the agent to a directory the
-    deployment already exposes and never widens its reach. A bare name (a
-    memory namespace) or anything else yields ``''`` and the caller keeps
-    the namespaced id.
+    durable state; routed workbench work needs the directory itself. Only an
+    absolute path naming an existing directory inside the configured work-root
+    grants (``file_ops.lane_grant_roots()``, excluding Sonder's own checkout
+    and state home) qualifies, so a client value scopes the agent to a
+    directory the deployment explicitly exposes and never widens its reach. A
+    bare name (a memory namespace), relative path, or anything else yields
+    ``''`` and the caller keeps the namespaced id.
     """
     text = str(project or "").strip()
     if not text:
@@ -1117,20 +1168,31 @@ def served_work_project(project):
         expanded = file_ops._reject_network_path(os.path.expanduser(text))
     except PermissionError:
         return ""
-    path_like = (
-        os.path.isabs(expanded)
-        or bool(re.match(r"^[A-Za-z]:", expanded))
-        or expanded.startswith((".", "~"))
-        or "/" in expanded
-        or "\\" in expanded
-    )
-    if not path_like:
+    if file_ops._foreign_absolute(expanded) or not Path(expanded).is_absolute():
         return ""
     try:
-        candidate = os.path.realpath(os.path.abspath(expanded))
+        candidate = os.path.realpath(expanded)
     except (OSError, ValueError):
         return ""
-    if not os.path.isdir(candidate) or not file_ops.inside_allowed_roots(candidate):
+    if not os.path.isdir(candidate):
+        return ""
+    candidate_path = Path(candidate)
+    excluded = [file_ops.workspace_root()]
+    home = file_ops._validated_state_home()
+    if home is not None:
+        excluded.append(home)
+    for root in excluded:
+        try:
+            resolved_ex = root.resolve()
+        except OSError:
+            resolved_ex = root
+        if file_ops._is_inside(candidate_path, resolved_ex):
+            return ""
+    grant_roots = file_ops.lane_grant_roots()
+    if not any(
+        file_ops._is_inside(candidate_path, Path(root))
+        for root in grant_roots
+    ):
         return ""
     return candidate
 
@@ -4817,7 +4879,7 @@ def _persist_verified_code_repair(
     )
 
 
-def _apply_code_gate(reply, interaction_id=None, regenerate=None):
+def _apply_code_gate(reply, interaction_id=None, regenerate=None, *, allow_execution=None):
     """Compile+smoke-run the reply's runnable Python block before returning it.
 
     Returns (reply, verified, repaired):
@@ -4833,8 +4895,10 @@ def _apply_code_gate(reply, interaction_id=None, regenerate=None):
     """
     if not _code_gate_enabled():
         return reply, None, False
+    if allow_execution is None:
+        allow_execution = _code_gate_allow_runtime_execution()
     code = _code_gate_target(reply)
-    compile_only = False
+    compile_only = not allow_execution
     if code is None:
         code = _code_gate_compile_only_target(reply)
         if code is None:
@@ -4845,7 +4909,7 @@ def _apply_code_gate(reply, interaction_id=None, regenerate=None):
         static_err = _code_gate_static_errors(code)
         if static_err is None:
             return reply, None, False
-        failure = static_err
+        failure = _redact_code_gate_text(static_err)
     else:
         try:
             result = grounding.run_code_detail(
@@ -4868,18 +4932,22 @@ def _apply_code_gate(reply, interaction_id=None, regenerate=None):
             return reply, True, False
         if result.get("timed_out"):
             return reply, None, False
-        failure = (
+        raw_failure = (
             result.get("stderr") or result.get("stdout") or "exited with an error"
         ).strip()
+        failure = _redact_code_gate_text(raw_failure) or "exited with an error"
 
     if regenerate is not None:
         max_repairs = _code_gate_max_repairs()
-        last_code = code
+        seen_digests = {
+            hashlib.sha256(code.strip().encode("utf-8", errors="replace")).hexdigest()
+        }
         for attempt in range(1, max_repairs + 1):
+            safe_failure = _redact_code_gate_text(failure) or "exited with an error"
             repair_prompt = (
                 "The Python code block in your previous answer fails when run:\n"
                 "%s\n\nReturn the corrected complete answer with a fixed, "
-                "runnable Python code block." % failure[:1200]
+                "runnable Python code block." % safe_failure[:1200]
             )
             try:
                 repaired = str(regenerate(repair_prompt) or "")
@@ -4892,10 +4960,15 @@ def _apply_code_gate(reply, interaction_id=None, regenerate=None):
                 else None
             )
             repaired_code = repaired_runnable if repaired_runnable is not None else repaired_interactive
-            if not repaired_code or repaired_code == last_code:
+            if not repaired_code:
                 break
-            last_code = repaired_code
-            if repaired_runnable is not None:
+            digest = hashlib.sha256(
+                repaired_code.strip().encode("utf-8", errors="replace")
+            ).hexdigest()
+            if digest in seen_digests:
+                break
+            seen_digests.add(digest)
+            if repaired_runnable is not None and allow_execution:
                 try:
                     retry = grounding.run_code_detail(
                         repaired_runnable, timeout=_CODE_GATE_TIMEOUT,
@@ -4908,20 +4981,24 @@ def _apply_code_gate(reply, interaction_id=None, regenerate=None):
                 if retry.get("timed_out"):
                     failure = "%s (repair verification timed out)" % failure
                     break
-                failure = (
-                    retry.get("stderr") or retry.get("stdout") or failure
-                ).strip() or failure
+                retry_raw = (
+                    retry.get("stderr") or retry.get("stdout") or ""
+                ).strip()
+                if retry_raw:
+                    failure = _redact_code_gate_text(retry_raw) or failure
             else:
-                retry_static = _code_gate_static_errors(repaired_interactive)
+                retry_static = _code_gate_static_errors(repaired_code)
                 if retry_static is None:
                     return repaired, True, True
-                failure = retry_static
+                failure = _redact_code_gate_text(retry_static) or failure
 
+    safe_failure = _redact_code_gate_text(failure) or "exited with an error"
     summary = "exited with an error"
-    for line in reversed(failure.splitlines()):
+    for line in reversed(safe_failure.splitlines()):
         if line.strip():
             summary = line.strip()
             break
+    summary = _redact_code_gate_text(summary) or "exited with an error"
     _record_code_gate_failure(interaction_id)
     return (
         "%s\n\nNOT VERIFIED: the Python code block in this answer fails when "
@@ -10849,6 +10926,43 @@ def _file_developer_allowed(token: str = "") -> bool:
 
 _TRUSTED_REPOSITORY_APPROVAL = object()
 
+
+def _ledger_safe_tool_arguments(arguments):
+    """Strip internal sentinels and non-JSON values before HostObservationLedger.
+
+    ``_project_scope_args`` injects ``_TRUSTED_REPOSITORY_APPROVAL`` (an
+    ``object()`` sentinel) into ``policy_tool_args`` for ``text_patch``.
+    ``HostObservationLedger.observe`` canonicalizes ``arguments`` with
+    ``json.dumps(..., allow_nan=False)`` and permanently poisons itself on any
+    non-JSON value, so strip sentinels and sanitize NaN/Infinity/non-JSON
+    objects recursively while keeping all normal JSON data intact.
+    """
+    if not isinstance(arguments, dict):
+        return arguments
+
+    def _clean(value):
+        if value is _TRUSTED_REPOSITORY_APPROVAL:
+            return None
+        if value is None or isinstance(value, (bool, int, str)):
+            return value
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, dict):
+            return {
+                str(k): _clean(v)
+                for k, v in value.items()
+                if v is not _TRUSTED_REPOSITORY_APPROVAL
+            }
+        if isinstance(value, (list, tuple)):
+            return [
+                _clean(item)
+                for item in value
+                if item is not _TRUSTED_REPOSITORY_APPROVAL
+            ]
+        return str(value)
+
+    return _clean(arguments)
+
 _RETIRED_APPROVAL_CODE_WARNED = threading.Event()
 
 
@@ -13249,6 +13363,120 @@ def workspace_run(
 # ── Sonder developer-workflow tools ──────────────────────────────────────
 
 
+_TEST_DISCOVER_STATIC_ONLY: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "sonder_test_discover_static_only", default=False,
+)
+
+
+def _static_test_discover(root: str = ".", framework: str = "auto") -> dict:
+    """Static-only test discovery for read-only / plan contexts.
+
+    Resolves ``root`` through ``harness_tools._resolve_root`` for identical
+    confinement, then inspects files via filename/AST scanning without spawning
+    pytest, cargo, go, jest, vitest, or dotnet (zero repo code execution and
+    zero ``__pycache__``/``.pytest_cache``/``target`` writes).
+    """
+    import ast as _ast
+
+    resolved = Path(harness_tools._resolve_root(root))
+    fw = str(framework or "auto").strip().lower() or "auto"
+    if fw == "auto":
+        if (resolved / "Cargo.toml").is_file():
+            fw = "cargo"
+        elif (resolved / "go.mod").is_file():
+            fw = "go"
+        elif any(resolved.glob("*.csproj")) or any(resolved.glob("*.sln")):
+            fw = "dotnet"
+        elif (resolved / "vitest.config.ts").is_file() or (resolved / "vitest.config.js").is_file():
+            fw = "vitest"
+        elif (resolved / "jest.config.js").is_file() or (resolved / "jest.config.ts").is_file():
+            fw = "jest"
+        else:
+            fw = "pytest"
+
+    skip_dirs = {
+        ".git", ".hg", ".svn", ".pytest_cache", "__pycache__", "node_modules",
+        "target", "dist", "build", ".venv", "venv", ".mypy_cache", ".ruff_cache",
+    }
+    test_files: list[str] = []
+    test_count = 0
+    max_files = 500
+
+    for dirpath, dirnames, filenames in os.walk(resolved, followlinks=False):
+        cur = Path(dirpath)
+        kept: list[str] = []
+        for d in sorted(dirnames):
+            if d in skip_dirs or d.startswith("."):
+                continue
+            cand = cur / d
+            if cand.is_symlink() or file_ops._is_reparse_point(cand):
+                continue
+            if file_ops.is_credential_store(cand):
+                continue
+            kept.append(d)
+        dirnames[:] = kept
+        for fname in sorted(filenames):
+            if len(test_files) >= max_files:
+                break
+            fpath = cur / fname
+            if fpath.is_symlink() or file_ops._is_reparse_point(fpath):
+                continue
+            if file_ops.is_credential_store(fpath):
+                continue
+            rel = fpath.relative_to(resolved).as_posix()
+            lower = fname.lower()
+            is_py_test = lower.endswith(".py") and (
+                lower.startswith("test_") or lower.endswith("_test.py")
+            )
+            is_js_test = bool(re.search(r"\.(test|spec)\.(js|jsx|ts|tsx|mjs|cjs)$", lower))
+            is_go_test = lower.endswith("_test.go")
+            is_rs_test = lower.endswith(".rs") and (
+                "/tests/" in ("/" + rel) or lower.endswith("_test.rs")
+            )
+            is_cs_test = lower.endswith("tests.cs") or lower.endswith("test.cs")
+            matched = (
+                (fw in ("pytest", "unittest") and is_py_test)
+                or (fw in ("jest", "vitest") and is_js_test)
+                or (fw == "go" and is_go_test)
+                or (fw == "cargo" and is_rs_test)
+                or (fw == "dotnet" and is_cs_test)
+            )
+            if not matched:
+                continue
+            test_files.append(rel)
+            try:
+                raw = fpath.read_bytes()[:262144].decode("utf-8", errors="replace")
+            except OSError:
+                continue
+            if is_py_test:
+                try:
+                    tree = _ast.parse(raw, filename=rel)
+                    test_count += sum(
+                        1 for node in _ast.walk(tree)
+                        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                        and node.name.startswith("test_")
+                    )
+                except SyntaxError:
+                    pass
+            elif is_js_test:
+                test_count += len(re.findall(r"\b(?:it|test)\s*\(", raw))
+            elif is_go_test:
+                test_count += len(re.findall(r"^\s*func\s+Test\w*\s*\(", raw, re.MULTILINE))
+            elif is_rs_test:
+                test_count += len(re.findall(r"#\[\s*(?:tokio::)?test\b", raw))
+            elif is_cs_test:
+                test_count += len(re.findall(r"\[\s*(?:Fact|Theory|Test|TestMethod)\b", raw))
+        if len(test_files) >= max_files:
+            break
+
+    return {
+        "framework": fw,
+        "test_count": test_count,
+        "test_files": test_files,
+        "static_only": True,
+    }
+
+
 @mcp.tool()
 def test_discover(
     root: str = ".",
@@ -13258,8 +13486,12 @@ def test_discover(
     _maybe_live_reload()
     started = time.time()
     args = {"root": root, "framework": framework}
+    static_only = _TEST_DISCOVER_STATIC_ONLY.get() or permission_modes.current_mode() == "plan"
     try:
-        data = harness_tools.test_discover(root=root, framework=framework)
+        if static_only:
+            data = _static_test_discover(root=root, framework=framework)
+        else:
+            data = harness_tools.test_discover(root=root, framework=framework)
     except Exception as exc:
         _record_direct_tool("test_discover", args, ok=False, started=started, summary=str(exc))
         return "ERROR: %s" % exc
@@ -14108,13 +14340,20 @@ def verify_artifact(
         "expect_publisher": expect_publisher, "sha256": sha256,
     }
     try:
-        data = artifact_fetch_module.verify_artifact(
+        bypass = _file_bypass_allowed(token, approval)
+        resolved_path = file_ops.require_read_access(
             path,
+            extra_roots=extra_roots if bypass else "",
+            bypass=bypass,
+            developer_authorized=_file_developer_allowed(token),
+        )
+        data = artifact_fetch_module.verify_artifact(
+            str(resolved_path),
             expect_type=expect_type,
             expect_publisher=expect_publisher,
             sha256=sha256,
-            extra_roots=extra_roots if _file_bypass_allowed(token, approval) else "",
-            bypass=_file_bypass_allowed(token, approval),
+            extra_roots=extra_roots if bypass else "",
+            bypass=bypass,
         )
     except Exception as exc:
         _record_direct_tool(
@@ -16634,10 +16873,11 @@ def artifact_ground(
     _maybe_live_reload()
     started = time.time()
     try:
-        resolved = file_ops.resolve_path(
+        resolved = file_ops.require_read_access(
             path,
             extra_roots=extra_roots,
             bypass=_file_bypass_allowed(token, approval),
+            developer_authorized=_file_developer_allowed(token),
         )
         requirements = artifact_grounding.parse_requirements(requirements_json)
         result = artifact_grounding.validate(resolved, recipe, requirements)
@@ -17732,7 +17972,17 @@ def _repository_scope_path_error(tool_name, args, project_root):
     if not project_root or tool_name not in scoped_tools:
         return ""
     try:
-        root = Path(str(project_root)).expanduser().resolve(strict=True)
+        raw_project_root = str(project_root).strip()
+        try:
+            if "\\??\\" in raw_project_root:
+                raise PermissionError(raw_project_root)
+            raw_project_root = file_ops._reject_network_path(raw_project_root)
+        except PermissionError:
+            refusal = "ERROR: agent project path rejected: project root uses a %s" % (
+                _network_spelling.REFUSAL
+            )
+            return refusal
+        root = Path(raw_project_root).expanduser().resolve(strict=True)
         if not root.is_dir():
             raise ValueError("project root is not a directory")
         if tool_name == "workspace_run":
@@ -17746,6 +17996,10 @@ def _repository_scope_path_error(tool_name, args, project_root):
                 ("input path", args.get("input_path") or ""),
                 ("output path", args.get("output_path") or ""),
             ]
+        elif tool_name == "schema_validate":
+            targets = [("path", args.get("path") or "")]
+            if str(args.get("schema_path") or "").strip():
+                targets.append(("schema path", args.get("schema_path")))
         elif tool_name == "repo_diff":
             targets = [("repository root", args.get("root") or ".")]
             if str(args.get("path") or "").strip():
@@ -17844,6 +18098,9 @@ def _repository_scope_path_error(tool_name, args, project_root):
             except PermissionError:
                 refusal = "ERROR: agent project path rejected: %s uses a %s" % (
                     label, _network_spelling.REFUSAL)
+                return refusal
+            if file_ops._foreign_absolute(raw):
+                refusal = "ERROR: agent project path rejected: %s uses a non-native or drive-relative path" % label
                 return refusal
             target = Path(raw.replace("\\", "/") if os.name != "nt" else raw).expanduser()
             if not target.is_absolute():
@@ -18070,7 +18327,11 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
     if scope_error:
         return scope_error
     try:
-        if tool_name in {"file_read", "file_digest", "file_read_range", "image_inspect", "document_extract", "media_inspect", "data_inspect", "data_query", "log_inspect", "artifact_risk_inspect"}:
+        if tool_name in {
+            "file_read", "file_digest", "file_read_range", "image_inspect",
+            "document_extract", "media_inspect", "data_inspect", "data_query",
+            "log_inspect", "artifact_risk_inspect", "artifact_ground", "verify_artifact",
+        }:
             file_ops.resolve_repository_read_path(
                 args.get("path", ""),
                 allow_workspace_root=False,
@@ -18670,7 +18931,7 @@ def _agent_dispatch(
             stdin=args.get("stdin", ""),
             timeout=args.get("timeout", 10),
         )
-    if tool_name in ("delegate_task", "spawn_agents", "report_progress", "post_to_board", "read_board"):
+    if tool_name in ("delegate_task", "spawn_agents", "report_progress", "post_status", "post_to_board", "read_board"):
         from sonder_runtime.bootstrap import delegation_wiring as _dw
         return _dw.dispatch_agent_tool(sys.modules[__name__], tool_name, args, read_only=read_only, repository_extra_roots=repository_extra_roots, allow_web=allow_web)
     if tool_name in ("tool_help", "tool_search"):
@@ -19516,15 +19777,58 @@ def _agent_dispatch(
             agent_id=args.get("agent_id", args.get("selector", "")),
         )
     if tool_name in ("master_retry", "agent_retry"):
+        if not _delegation_can_delegate():
+            refusal = (
+                "ERROR: HOST POLICY: delegation depth limit reached; %s is "
+                "only allowed at depth 0." % tool_name
+            )
+            return refusal
         return master_retry(
             agent_id=args.get("agent_id", args.get("selector", "")),
             tier=args.get("tier", ""),
         )
     if tool_name in ("master_orchestrate", "master"):
-        # The agent model chose this project: it must stay inside the file roots.
-        project_refusal = served_project_refusal(args.get("project", ""))
-        if project_refusal:
-            return project_refusal
+        if not _delegation_can_delegate():
+            refusal = (
+                "ERROR: HOST POLICY: delegation depth limit reached; %s is "
+                "only allowed at depth 0." % tool_name
+            )
+            return refusal
+        requested_project = str(args.get("project", "") or "").strip()
+        if repository_extra_roots:
+            if not requested_project:
+                requested_project = repository_extra_roots
+            else:
+                try:
+                    raw_root = file_ops._reject_network_path(
+                        str(repository_extra_roots).strip()
+                    )
+                    bound_root = Path(raw_root).expanduser().resolve(strict=True)
+                    if not bound_root.is_dir():
+                        raise ValueError("project root is not a directory")
+                    raw_req = file_ops._reject_network_path(requested_project)
+                    if file_ops._foreign_absolute(raw_req):
+                        raise PermissionError(
+                            "drive-relative or foreign absolute project path"
+                        )
+                    req_path = Path(raw_req).expanduser()
+                    if not req_path.is_absolute():
+                        req_path = bound_root / req_path
+                    req_resolved = req_path.resolve(strict=False)
+                    req_resolved.relative_to(bound_root)
+                    requested_project = str(req_resolved)
+                except (OSError, PermissionError, ValueError) as exc:
+                    refusal = (
+                        "ERROR: agent project path rejected: master_orchestrate "
+                        "project is outside the host-selected project root (%s)"
+                        % exc
+                    )
+                    return refusal
+        else:
+            # The agent model chose this project: it must stay inside the file roots.
+            project_refusal = served_project_refusal(requested_project)
+            if project_refusal:
+                return project_refusal
         return master_orchestrate(
             task=args.get("task", args.get("prompt", "")),
             mode=args.get("mode", "ask"),
@@ -19532,7 +19836,7 @@ def _agent_dispatch(
             worker_cap=args.get("worker_cap", 0),
             tier=args.get("tier", "auto"),
             learn=args.get("learn", False),
-            project=args.get("project", ""),
+            project=requested_project,
         )
     if tool_name == "self_heal_check":
         return self_heal_check()
@@ -19602,6 +19906,15 @@ def _agent_dispatch(
     # closed.
     with harness_tools.authorized_root_scope(repository_extra_roots):
         if tool_name == "test_discover":
+            if read_only:
+                _td_token = _TEST_DISCOVER_STATIC_ONLY.set(True)
+                try:
+                    return test_discover(
+                        root=args.get("root", "."),
+                        framework=args.get("framework", "auto"),
+                    )
+                finally:
+                    _TEST_DISCOVER_STATIC_ONLY.reset(_td_token)
             return test_discover(
                 root=args.get("root", "."),
                 framework=args.get("framework", "auto"),
@@ -19917,7 +20230,9 @@ def _agent_run_tool_refusal(
             return "an active local write-enabled standalone controller"
     if _canonical_agent_tool_name(tool_name) in _AGENT_SYSTEM_OPERATOR_TOOLS:
         return "system operation"
-    if _canonical_agent_tool_name(tool_name) in ("delegate_task", "spawn_agents") and not _delegation_can_delegate():
+    if _canonical_agent_tool_name(tool_name) in (
+        "delegate_task", "spawn_agents", "master_orchestrate", "master_retry",
+    ) and not _delegation_can_delegate():
         return "delegation depth limit"
     if unsafe:
         # unsafe_lab resets read_only/allow_web/allow_location/project in
@@ -19953,15 +20268,16 @@ def _cloud_agent_tool_policy_error(tool_name, *, unsafe=False):
 def _scope_arg_is_rooted(raw):
     """Whether ``_project_scope_args`` must keep ``raw`` as given instead of joining it under the project.
 
-    True for an absolute or drive-qualified path, and for a UNC, device or
-    NT-namespace spelling judged on the raw value: on POSIX such a backslash
-    spelling is not ``os.path.isabs``, and rebasing it under the project would
-    hide it from the dispatch scope check that must refuse it.
+    True for an absolute or drive-qualified (including drive-relative ``D:foo``)
+    path, and for a UNC, device or NT-namespace spelling judged on the raw
+    value: on POSIX such a backslash spelling is not ``os.path.isabs``, and
+    rebasing it under the project would hide it from the dispatch scope check
+    that must refuse it.
     """
     return (
         _is_network_spelling_raw(raw)
         or os.path.isabs(raw)
-        or bool(re.match(r"^[A-Za-z]:[\\/]", raw))
+        or bool(re.match(r"^[A-Za-z]:", raw))
     )
 
 
@@ -19999,6 +20315,14 @@ def _project_scope_args(tool_name, args, project):
 
     if tool_name == "data_convert":
         for key in ("input_path", "output_path"):
+            raw_path = str(scoped.get(key) or "").strip()
+            is_abs = _scope_arg_is_rooted(raw_path)
+            if raw_path and not is_abs:
+                scoped[key] = os.path.normpath(os.path.join(project, raw_path))
+        return scoped
+
+    if tool_name == "schema_validate":
+        for key in ("path", "schema_path"):
             raw_path = str(scoped.get(key) or "").strip()
             is_abs = _scope_arg_is_rooted(raw_path)
             if raw_path and not is_abs:
@@ -20095,8 +20419,20 @@ def _project_scope_args(tool_name, args, project):
     key = _project_scoped_path_key(tool_name)
     raw = str(scoped.get(key) or "").strip()
     is_abs = _scope_arg_is_rooted(raw)
-    if not raw or raw == ".":
+    if raw == ".":
         scoped[key] = project
+    elif not raw:
+        # Only directory-taking tools default an omitted/empty path to the
+        # project root. Single-file tools (file_read, file_write, file_delete,
+        # etc.) keep an empty path so downstream validation reports "path is
+        # required" instead of targeting the project root directory.
+        if key == "root" or tool_name in {
+            "directory_digest", "repo_log", "repo_show", "repo_blame",
+            "code_metrics", "workspace_inventory", "dependency_inventory",
+            "directory_tree", "repository_symbol_index", "project_detect",
+            "artifact_ground",
+        }:
+            scoped[key] = project
     elif not is_abs:
         scoped[key] = os.path.join(project, raw)
     return scoped
@@ -21083,7 +21419,10 @@ def _agent_turn(
     # at most one wasted read-only call and never touches durable state).
     _predictor = sonder_speculation.default_predictor()
     _spec_enabled = (
-        sonder_speculation.speculation_enabled() and not cloud and restricted is None
+        sonder_speculation.speculation_enabled()
+        and not cloud
+        and restricted is None
+        and tool_policy is None
     )
 
     def _spec_dispatch(tool_name, args):
@@ -21533,6 +21872,7 @@ def _agent_turn(
             _spec_enabled
             and _spec_prediction is not None
             and _spec_prediction[0] in _SPECULATABLE_ARGFREE_TOOLS
+            and (allowed_tools is None or _spec_prediction[0] in allowed_tools)
             and _predictor.should_speculate(_spec_prediction[1])
         ):
             _predicted_tool = _spec_prediction[0]
@@ -21545,7 +21885,12 @@ def _agent_turn(
                 _agent_call_signature(_predicted_tool, _predicted_args),
                 _predicted_args,
             )
-        if _spec_enabled and not _spec_issued and _predictor.should_speculate(0.5):
+        if (
+            _spec_enabled
+            and not _spec_issued
+            and (allowed_tools is None or "file_read" in allowed_tools)
+            and _predictor.should_speculate(0.5)
+        ):
             # Fall back to the stream prefetcher: a concrete predicted
             # file_read from the last observed listing (argument-level
             # speculation, still strictly read-only).
@@ -22184,7 +22529,8 @@ def _agent_turn(
                     semantic_stall = (tool_name, outcome_class, len(distinct_signatures))
         if host_controller is not None:
             host_controller.observe_host_tool(
-                tool=tool_name, arguments=policy_tool_args,
+                tool=tool_name,
+                arguments=_ledger_safe_tool_arguments(policy_tool_args),
                 observation=observation_text, dispatched=bool(tool_dispatched),
                 success=bool(tool_ok),
                 dirty=bool(mutation_attempt_may_have_changed or execution_may_have_changed),

@@ -125,27 +125,44 @@ def approval_hook(handle, store, *, wait_seconds=APPROVAL_PARK_SECONDS):
     return hook
 
 
-def admission_scope(store, *, wait_seconds=APPROVAL_PARK_SECONDS):
+_ADMISSION_SPAN_OWNERS: contextvars.ContextVar[tuple[str, str]] = contextvars.ContextVar(
+    "sonder_http_work_span_owners", default=("", ""),
+)
+
+
+def admission_scope(store, *, wait_seconds=APPROVAL_PARK_SECONDS,
+                    feed_owner=None, reasoning_owner=None):
     """Capture the admission-time permission scope; return the runner's ``body_scope``.
 
     The (principal, session) mode scope bound while the request is admitted is
     re-entered on the run's own thread, so the body never depends on which
     context copy its thread happened to inherit.  The approval hook is bound
-    for the whole body.
+    for the whole body.  Activity feed and reasoning owners from the admission
+    span are captured here too so deferred work threads stay isolated to their
+    originating owner.
     """
     from sonder_runtime.adapters.security.permission_policy import permission_policy
     # ``_MODE_SCOPE`` has no public reader; the provider forwards the engine's.
     pair = permission_policy._MODE_SCOPE.get()
+    cur_feed, cur_reasoning = activity_tracker.current_span_owners()
+    captured_owners = (
+        cur_feed if feed_owner is None else str(feed_owner or ""),
+        cur_reasoning if reasoning_owner is None else str(reasoning_owner or ""),
+    )
 
     def body_scope(handle):
         @contextmanager
         def scope():
-            with ExitStack() as stack:
-                if pair is not None:
-                    stack.enter_context(permission_policy.mode_scope(*pair))
-                stack.enter_context(permission_policy.agent_approval_hook(
-                    approval_hook(handle, store, wait_seconds=wait_seconds)))
-                yield
+            owners_token = _ADMISSION_SPAN_OWNERS.set(captured_owners)
+            try:
+                with ExitStack() as stack:
+                    if pair is not None:
+                        stack.enter_context(permission_policy.mode_scope(*pair))
+                    stack.enter_context(permission_policy.agent_approval_hook(
+                        approval_hook(handle, store, wait_seconds=wait_seconds)))
+                    yield
+            finally:
+                _ADMISSION_SPAN_OWNERS.reset(owners_token)
         return scope()
 
     return body_scope
@@ -203,10 +220,25 @@ def admission_result(result, session_ref=""):
                           "refused" if isinstance(result, str) else "unknown", session_ref=session_ref)
 
 
-def run_scoped(run_id, link_run, acknowledgement, activity_id, function):
+def run_scoped(
+    run_id, link_run, acknowledgement, activity_id, function,
+    *, feed_owner=None, reasoning_owner=None,
+):
     from sonder_runtime.application.ports.work_narration import bind_activity
+    inherited_feed, inherited_reasoning = _ADMISSION_SPAN_OWNERS.get()
+    if not inherited_feed and not inherited_reasoning:
+        inherited_feed, inherited_reasoning = activity_tracker.current_span_owners()
+    effective_feed = inherited_feed if feed_owner is None else str(feed_owner or "")
+    effective_reasoning = (
+        inherited_reasoning if reasoning_owner is None else str(reasoning_owner or "")
+    )
     with narration_scope(run_id, link_run, acknowledgement, activity_id):
-        with activity_tracker.response_span("work run", surface="http-work"):
+        with activity_tracker.response_span(
+            "work run",
+            surface="http-work",
+            feed_owner=effective_feed,
+            reasoning_owner=effective_reasoning,
+        ):
             bind_activity(activity_tracker.current_response_id() or "")
             return function()
 

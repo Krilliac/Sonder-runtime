@@ -1377,3 +1377,80 @@ def test_requires_repository_tools_detects_explicit_file_paths():
     # Embedded evidence still short-circuits to False (answer from the excerpt).
     assert not master_orchestrator.requires_repository_tools(
         "summarize /home/u/app/main.py\n```\nclass A: pass\n```")
+
+
+def test_reserved_slots_subtracted_from_total_capacity_not_requested(monkeypatch):
+    _fake_hardware(monkeypatch, cpus=16, ram_avail_gib=32, vram_gib=0.0, ollama_parallel=6)
+    monkeypatch.setattr(master_orchestrator, "_FLEET_WORKER_CAP", None)
+    monkeypatch.setattr(
+        "sonder_runtime.bootstrap.delegation_wiring.fleet_pool_route",
+        lambda _srv: None,
+    )
+    monkeypatch.setattr(
+        "sonder_runtime.bootstrap.delegation_wiring.effective_cluster_parallel",
+        lambda local_p, _srv, model=None: local_p,
+    )
+    with master_orchestrator._LOCK:
+        saved_reserved = master_orchestrator._RESERVED_SLOTS
+        master_orchestrator._RESERVED_SLOTS = 2
+    try:
+        # Total capacity is 6 (ollama_num_parallel=6, cpu=8, policy=8); 2 reserved => 4 free.
+        # Requesting 3 must get all 3 (previously max(1, 3 - 2) = 1!).
+        cap_small = master_orchestrator.capacity(requested_agents=3)
+        assert cap_small["worker_slots"] == 3
+
+        # Requesting 6 with 2 reserved out of 6 capacity => capped to 4 by reserved_capacity.
+        cap_full = master_orchestrator.capacity(requested_agents=6)
+        assert cap_full["worker_slots"] == 4
+        assert cap_full["bound_by"] == "reserved_capacity"
+    finally:
+        with master_orchestrator._LOCK:
+            master_orchestrator._RESERVED_SLOTS = saved_reserved
+
+
+def test_dispatch_lanes_runs_workers_at_depth_1_with_copied_context():
+    import contextvars
+    from sonder_runtime.application.agents import delegation_runtime as _drt
+
+    marker: contextvars.ContextVar[str] = contextvars.ContextVar("test_dispatch_marker", default="")
+    observed: list[tuple[int, bool, str]] = []
+
+    class _FakeScheduler:
+        def __init__(self) -> None:
+            self._lanes = ["lane-1"]
+            self.pending: list[str] = []
+
+        def admit(self):
+            out = list(self._lanes)
+            self._lanes.clear()
+            return out
+
+        def sink(self, lane_id: str):
+            return lambda _outcome: None
+
+        def complete(self, lane_id: str) -> None:
+            pass
+
+        def record_handler_failure(self) -> None:
+            pass
+
+        def summary(self):
+            return {"completed": 1}
+
+    def run_lane(lane_id: str, _sink: object):
+        observed.append((_drt.current_depth(), _drt.can_delegate(), marker.get()))
+        return "ok"
+
+    token = marker.set("parent-scope-val")
+    try:
+        master_orchestrator.dispatch_lanes(
+            _FakeScheduler(),
+            1,
+            run_lane,
+            collect=lambda _lid, _res: None,
+            on_error=lambda _lid, _exc: None,
+        )
+    finally:
+        marker.reset(token)
+
+    assert observed == [(1, False, "parent-scope-val")]

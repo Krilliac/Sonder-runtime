@@ -53,7 +53,7 @@ _DISPATCH_ARGUMENTS = {
     "master_capacity": {"agents": "requested_agents"},
     "task_delete": {"id": "task_id"}, "task_depend": {"id": "task_id"},
     "task_ledger": {"id": "goal_id"}, "task_show": {"id": "task_id"}, "task_update": {"id": "task_id"},
-    "checklist_show": {"id": "checklist_id"}, "checklist_update": {"id": "checklist_id", "item_id": "item_id"},
+    "checklist_show": {"id": "checklist_id"}, "checklist_update": {"id": "checklist_id", "item_id": "item"},
     "task_plan": {"items": "steps"}, "artifact_ground": {"requirements": "requirements_json"},
     "artifact_generate": {"prompt": "brief"}, "tune_emotion_vectors": {"text": "feedback_text"},
     **{name: {"root": "path"} for name in (

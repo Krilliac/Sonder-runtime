@@ -188,7 +188,7 @@ def test_native_compute_tools_are_bounded_and_require_explicit_remote_consent():
     ]
     assert registry.require("compute_artifact_fetch").input_schema[
         "properties"
-    ]["max_bytes"]["maximum"] == 98_304
+    ]["max_bytes"]["maximum"] == 80_000
 
 
 def test_native_compute_submit_status_and_cancel_route_to_compute_service(monkeypatch):

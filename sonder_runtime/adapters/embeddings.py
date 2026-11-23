@@ -158,6 +158,23 @@ def canonical_model_name(model):
 
 EMBED_IDENTITY = canonical_model_name(EMBED_MODEL)
 _REVISION_PREFIX = "ollama-manifest-sha256:"
+_TAGS_RESPONSE_LIMIT = 1024 * 1024
+_EMBED_RESPONSE_LIMIT = 16 * 1024 * 1024
+
+
+def _read_bounded_response(response, limit: int) -> bytes:
+    """Read up to ``limit`` bytes from an HTTP response; raise ValueError on overflow."""
+    try:
+        raw = response.read(limit + 1)
+    except TypeError:
+        # Test doubles such as FakeResponse.read(self) take no size arg.
+        raw = response.read()
+    if not isinstance(raw, (bytes, bytearray)):
+        raise ValueError("embedding response body is not bytes")
+    data = bytes(raw)
+    if len(data) > limit:
+        raise ValueError("embedding response exceeds byte limit")
+    return data
 
 
 def _bounded_manifest_digest(path, limit=8 * 1024 * 1024):
@@ -234,8 +251,9 @@ def serving_model_revision(model=None, base=None, timeout=0.5):
             ), ollama_endpoint.open_url(
                 "%s/api/tags" % selected_base, timeout=timeout,
             ) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except (OSError, TimeoutError, ValueError, urllib.error.URLError):
+                raw = _read_bounded_response(response, _TAGS_RESPONSE_LIMIT)
+                payload = json.loads(raw.decode("utf-8"))
+        except (OSError, TimeoutError, ValueError, RecursionError, urllib.error.URLError):
             return ""
         for item in payload.get("models", []) if isinstance(payload, dict) else []:
             if not isinstance(item, dict):
@@ -704,7 +722,8 @@ def _embed_at(text, timeout=30, base=None, model=None, force_cpu=False):
             body["keep_alive"] = keep_alive
         try:
             with _admitted_embeddings_response(body, selected_base, timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                raw = _read_bounded_response(resp, _EMBED_RESPONSE_LIMIT)
+                data = json.loads(raw.decode("utf-8"))
                 vector = data.get("embedding") if isinstance(data, dict) else None
                 revision_after = (
                     current_revision(model=selected_model, base=selected_base)
@@ -731,14 +750,16 @@ def _embed_at(text, timeout=30, base=None, model=None, force_cpu=False):
                 if npu_fallback_pending:
                     _record_npu_fallback_handler(True)
                 return vector
-        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, ValueError, RecursionError, OSError) as exc:
             code = getattr(exc, "code", None)
             # An admission refusal (queue, memory floor, store) says nothing
             # about the embed endpoint's transport, so it never trips its circuit.
             _EMBED_STATE.transport_failed = (
                 code in _UNAVAILABLE_HTTP_CODES
                 if isinstance(exc, urllib.error.HTTPError)
-                else not isinstance(exc, (ValueError, gpu_admission.GpuAdmissionRefused))
+                else not isinstance(
+                    exc, (ValueError, RecursionError, gpu_admission.GpuAdmissionRefused)
+                )
             )
             if npu_fallback_pending:
                 _record_npu_fallback_handler(False)

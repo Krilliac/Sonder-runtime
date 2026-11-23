@@ -181,6 +181,7 @@ class LauncherStatus {
 
 class SonderLauncherApi {
   static const _actions = {'start', 'stop', 'restart'};
+  static const _maxLauncherResponseBytes = 256 * 1024;
   static final Random _secureRandom = Random.secure();
 
   final String baseUrl;
@@ -210,15 +211,17 @@ class SonderLauncherApi {
   }
 
   LauncherStatus _decode(http.Response response) {
-    Map<String, dynamic> body;
-    try {
-      body =
-          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-    } catch (_) {
-      throw SonderException('Could not parse host launcher response.');
+    if (response.statusCode >= 300 && response.statusCode < 400) {
+      throw SonderException(
+        'Host launcher returned an unexpected redirect (HTTP ${response.statusCode}).',
+        httpStatus: response.statusCode,
+      );
     }
     if (response.statusCode == 401) {
-      throw SonderException('Host launcher authentication failed.');
+      throw SonderException(
+        'Host launcher authentication failed.',
+        httpStatus: 401,
+      );
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       // responseException reads only string fields, so an envelope never
@@ -228,6 +231,13 @@ class SonderLauncherApi {
         'Host launcher returned HTTP ${response.statusCode}.',
       );
     }
+    Map<String, dynamic> body;
+    try {
+      body =
+          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+    } catch (_) {
+      throw SonderException('Could not parse host launcher response.');
+    }
     return LauncherStatus.fromJson(body);
   }
 
@@ -236,13 +246,18 @@ class SonderLauncherApi {
       throw SonderException('Host launcher URL is not configured.');
     }
     try {
-      final response = await http
-          .get(_uri('/v1/launcher/status'), headers: _headers())
-          .timeout(const Duration(seconds: 8));
+      final response = await requestGet(
+        _uri('/v1/launcher/status'),
+        headers: _headers(),
+        timeout: const Duration(seconds: 8),
+        maxBodyBytes: _maxLauncherResponseBytes,
+      );
       return _decode(response);
+    } on ResponseTooLargeException {
+      throw SonderException('Host launcher response was too large.');
     } catch (error) {
       if (error is SonderException) rethrow;
-      throw SonderException('Cannot reach host launcher: $error');
+      throw SonderException.transport(error, baseUrl);
     }
   }
 
@@ -266,17 +281,18 @@ class SonderLauncherApi {
       throw SonderException('Invalid host launcher idempotency key.');
     }
     try {
-      final response = await http
-          .post(
-            _uri('/v1/launcher/$action'),
-            headers: {
-              ..._headers(),
-              'Content-Type': 'application/json',
-              'Idempotency-Key': requestKey,
-            },
-            body: jsonEncode({'context_size': contextSize}),
-          )
-          .timeout(const Duration(seconds: 8));
+      final response = await sendRequest(
+        'POST',
+        _uri('/v1/launcher/$action'),
+        headers: {
+          ..._headers(),
+          'Content-Type': 'application/json',
+          'Idempotency-Key': requestKey,
+        },
+        body: jsonEncode({'context_size': contextSize}),
+        timeout: const Duration(seconds: 8),
+        maxBodyBytes: _maxLauncherResponseBytes,
+      );
       final accepted = _decode(response);
       if (response.statusCode != 202) return accepted;
 
@@ -294,6 +310,8 @@ class SonderLauncherApi {
         onProgress: onProgress,
         isCancelled: isCancelled,
       );
+    } on ResponseTooLargeException {
+      throw SonderException('Host launcher response was too large.');
     } catch (error) {
       if (error is SonderException) rethrow;
       if (error is TimeoutException) {
@@ -302,7 +320,7 @@ class SonderLauncherApi {
           'accepted it; refresh Host Launcher status before retrying.',
         );
       }
-      throw SonderException('Host launcher request failed: $error');
+      throw SonderException.transport(error, baseUrl);
     }
   }
 
@@ -354,18 +372,20 @@ class SonderLauncherApi {
         final requestTimeout = remaining < const Duration(seconds: 8)
             ? remaining
             : const Duration(seconds: 8);
-        response = await http
-            .get(
-              _uri(
-                '/v1/launcher/operations/'
-                '${Uri.encodeComponent(operationId)}',
-              ),
-              headers: _headers(),
-            )
-            .timeout(requestTimeout);
+        response = await requestGet(
+          _uri(
+            '/v1/launcher/operations/'
+            '${Uri.encodeComponent(operationId)}',
+          ),
+          headers: _headers(),
+          timeout: requestTimeout,
+          maxBodyBytes: _maxLauncherResponseBytes,
+        );
+      } on ResponseTooLargeException {
+        throw SonderException('Host launcher response was too large.');
       } catch (error) {
         if (error is SonderException) rethrow;
-        final detail = error.toString();
+        final detail = SonderException.transport(error, baseUrl).message;
         lastPollError =
             detail.length > 240 ? '${detail.substring(0, 240)}…' : detail;
         continue;

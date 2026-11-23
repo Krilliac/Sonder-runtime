@@ -81,6 +81,7 @@ class SQLiteSessionRepository:
         self._admissions_stopped = False
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_DDL)
 
     @contextmanager
@@ -94,8 +95,8 @@ class SQLiteSessionRepository:
         connection = None
         try:
             connection = owned_sqlite_connect(str(self._db_path), timeout=5.0)
-            connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("PRAGMA foreign_keys=ON")
             with connection:
                 yield connection
         finally:

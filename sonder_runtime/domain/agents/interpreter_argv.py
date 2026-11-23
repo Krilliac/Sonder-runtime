@@ -148,8 +148,12 @@ _GETOPT_GRAMMAR: dict[str, _Grammar] = {
 # entry point, so callers match on the top-level module name before `.`.
 _PYTHON_STDIN_REPL_MODULES = frozenset({"code", "asyncio", "_pyrepl", "pdb"})
 # `python -m timeit` executes arbitrary Python statements given in argv
-# without `-c`.
-_PYTHON_INLINE_MODULES = frozenset({"timeit"})
+# without `-c`, and pass-through/launcher modules (`runpy`, `cProfile`,
+# `profile`, `trace`, `idlelib`, `ipython`) can invoke another module or
+# inline code (synced with `workbench._PYTHON_CODE_MODULES`).
+_PYTHON_INLINE_MODULES = frozenset({
+    "timeit", "runpy", "profile", "cprofile", "trace", "idlelib", "ipython",
+})
 _PERL_MODULE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_:]*(?:'[A-Za-z0-9_:]+)*")
 _RUBY_STDIN_REPL_SCRIPTS = frozenset({"irb", "pry"})
 _WIN_EXT = r"(?:\.(?:exe|cmd|bat|com))?"
@@ -200,7 +204,7 @@ def interpreter_family(name: str) -> str:
         return "awk"
     if re.fullmatch(r"env%s" % _WIN_EXT, name):
         return "env"
-    if re.fullmatch(r"powershell(?:_ise)?%s" % _WIN_EXT, name):
+    if re.fullmatch(r"(?:powershell(?:_ise)?|powers~\d+)%s" % _WIN_EXT, name):
         return "powershell"
     if re.fullmatch(r"pwsh%s" % _WIN_EXT, name):
         return "pwsh"
@@ -427,7 +431,7 @@ def _python_runs_inline_module(tokens: Sequence[str]) -> bool:
             rest = cluster[position + 1:]
             if letter == "m":
                 module = rest or (texts[index + 1] if index + 1 < len(texts) else "")
-                return module.split(".", 1)[0] in _PYTHON_INLINE_MODULES
+                return module.strip().split(".", 1)[0].casefold() in _PYTHON_INLINE_MODULES
             if letter in grammar.stop:
                 break
     return False
@@ -600,7 +604,7 @@ def _reading_runs_stdin(
                             texts[index + 1 + consumed]
                             if index + 1 + consumed < len(texts) else "-"
                         )
-                        top_module = module.split(".", 1)[0]
+                        top_module = module.strip().split(".", 1)[0].casefold()
                         return forced or module == "-" or top_module in _PYTHON_STDIN_REPL_MODULES
                     if not attached:
                         consumed += 1

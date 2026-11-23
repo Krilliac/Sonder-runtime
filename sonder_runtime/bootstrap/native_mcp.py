@@ -47,7 +47,7 @@ _AGENT_ASSIST_TOOLS = (
     ToolDescriptor(
         "tool_help", "Describe one advertised tool or find up to five by query",
         {"type": "object", "properties": {"name": {"type": "string"}, "query": {"type": "string"}},
-         "oneOf": [{"required": ["name"]}, {"required": ["query"]}], "additionalProperties": False},
+         "additionalProperties": False},
     ),
     ToolDescriptor(
         "file_check", "Check one guarded source file with available local checkers",
@@ -138,7 +138,7 @@ _COMPUTE_TOOLS = (
         {"type": "object", "properties": {
             "controller_job_id": {"type": "string", "minLength": 1, "maxLength": 128},
             "name": {"type": "string", "minLength": 1, "maxLength": 4096},
-            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 98_304},
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 80_000},
         }, "required": ["controller_job_id", "name"], "additionalProperties": False},
     ),
 )
@@ -1074,7 +1074,7 @@ def run_native_mcp(application, *, input_stream: TextIO | None = None,
                 payload = service.fetch_artifact(
                     arguments["controller_job_id"],
                     arguments["name"],
-                    max_bytes=arguments.get("max_bytes", 98_304),
+                    max_bytes=arguments.get("max_bytes", 80_000),
                 )
                 artifact = payload.receipt
                 output = {

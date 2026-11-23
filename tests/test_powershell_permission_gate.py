@@ -241,7 +241,7 @@ def test_argv_program_paths_are_normalized_before_matching(monkeypatch, program)
     assert gate.powershell_arguments("run_project", project) is not None
 
 
-@pytest.mark.parametrize("program", ["pwsh.sln", "python", "powershell_ise.exe", r"C:\PowerShell\notes.txt", "pwsh-x"])
+@pytest.mark.parametrize("program", ["pwsh.sln", "python", r"C:\PowerShell\notes.txt", "pwsh-x"])
 def test_argv_programs_that_are_not_powershell_stay_unselected(program):
     assert gate.powershell_arguments("workspace_run", {"program": program, "args_json": "[]"}) is None
 

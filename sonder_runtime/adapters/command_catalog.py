@@ -1569,6 +1569,18 @@ def _is_execution(name: str) -> bool:
     )
 
 
+def _is_mutation(name: str) -> bool:
+    """Whether ``name`` is declared in ``permission_modes.MUTATION_TOOLS``."""
+    permission_modes = importlib.import_module(
+        "permission_modes"
+    )  # lazy: permission_modes imports this module
+
+    stem = str(name or "").strip().lstrip("/")
+    if not stem:
+        return False
+    return stem in getattr(permission_modes, "MUTATION_TOOLS", frozenset())
+
+
 def _declared_native_risk(stem: str, hit) -> str:
     """Risk for a native command that fronts no registered tool.
 
@@ -1597,7 +1609,7 @@ def _risk_for(name: str, server) -> str:
         return "dangerous"
     if _is_execution(name):
         return "execution"
-    if name in getattr(server, "_WORK_MUTATION_TOOLS", frozenset()):
+    if _is_mutation(name) or name in getattr(server, "_WORK_MUTATION_TOOLS", frozenset()):
         return "mutation"
     # A tool that resolves a caller-supplied root with no allowed-roots check is
     # never "safe", however read-only its own body is: `plan` allows everything

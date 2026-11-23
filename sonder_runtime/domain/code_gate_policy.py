@@ -13,6 +13,94 @@ CODE_GATE_SIGNS = re.compile(
 )
 
 _BUILTIN_NAMES: frozenset[str] = frozenset(dir(builtins))
+_MATCH_NAME_NODES = tuple(
+    node_cls
+    for node_cls in (getattr(ast, "MatchAs", None), getattr(ast, "MatchStar", None))
+    if node_cls is not None
+)
+_MATCH_MAPPING_NODE = getattr(ast, "MatchMapping", None)
+
+
+def uses_interactive_stdin(code: str) -> bool:
+    """Detect interactive stdin calls via AST (``input``, ``getpass.getpass``, ``sys.stdin.read*``).
+
+    Ignores comments, string literals, and unrelated method calls like ``obj.input()``.
+    Returns ``False`` when ``code`` does not parse so syntax errors are still caught by
+    the normal code gate rather than silently skipped.
+    """
+    try:
+        tree = ast.parse(str(code or ""))
+    except (SyntaxError, ValueError, OverflowError, RecursionError):
+        return False
+
+    builtins_modules: set[str] = {"builtins"}
+    getpass_modules: set[str] = {"getpass"}
+    getpass_funcs: set[str] = set()
+    sys_modules: set[str] = {"sys"}
+    stdin_names: set[str] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".", 1)[0]
+                if alias.name == "builtins":
+                    builtins_modules.add(bound)
+                elif alias.name == "getpass":
+                    getpass_modules.add(bound)
+                elif alias.name == "sys":
+                    sys_modules.add(bound)
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if mod == "getpass" and alias.name == "getpass":
+                    getpass_funcs.add(bound)
+                elif mod == "sys" and alias.name == "stdin":
+                    stdin_names.add(bound)
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "stdin"
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id in sys_modules
+        ):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    stdin_names.add(target.id)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name):
+            if func.id == "input" or func.id in getpass_funcs:
+                return True
+        elif isinstance(func, ast.Attribute):
+            if (
+                func.attr == "input"
+                and isinstance(func.value, ast.Name)
+                and func.value.id in builtins_modules
+            ):
+                return True
+            if (
+                func.attr == "getpass"
+                and isinstance(func.value, ast.Name)
+                and func.value.id in getpass_modules
+            ):
+                return True
+            if func.attr.startswith("read"):
+                if isinstance(func.value, ast.Name) and func.value.id in stdin_names:
+                    return True
+                if (
+                    isinstance(func.value, ast.Attribute)
+                    and func.value.attr == "stdin"
+                    and isinstance(func.value.value, ast.Name)
+                    and func.value.value.id in sys_modules
+                ):
+                    return True
+    return False
 
 
 def code_gate_target(
@@ -34,7 +122,7 @@ def code_gate_target(
     code = block.get("code") or ""
     if not CODE_GATE_SIGNS.search(code):
         return None
-    if re.search(r"\binput\s*\(", code):
+    if uses_interactive_stdin(code):
         return None
     return code
 
@@ -43,7 +131,7 @@ def code_gate_compile_only_target(
     reply: str,
     extract_runnable_code_block: Callable[[str], dict | None],
 ) -> str | None:
-    """Return interactive fenced Python code (using ``input()``) for static verification."""
+    """Return interactive fenced Python code (using interactive stdin) for static verification."""
     if "```" not in str(reply or ""):
         return None
     block = extract_runnable_code_block(reply)
@@ -52,7 +140,7 @@ def code_gate_compile_only_target(
     code = block.get("code") or ""
     if not CODE_GATE_SIGNS.search(code):
         return None
-    if not re.search(r"\binput\s*\(", code):
+    if not uses_interactive_stdin(code):
         return None
     return code
 
@@ -69,7 +157,7 @@ def check_python_static_errors(code: str) -> str | None:
     try:
         compile(code, "<reply>", "exec")
         tree = ast.parse(code)
-    except (SyntaxError, ValueError, OverflowError) as exc:
+    except (SyntaxError, ValueError, OverflowError, RecursionError) as exc:
         return f"compile failed\n{type(exc).__name__}: {exc}"
 
     defined: set[str] = set(_BUILTIN_NAMES) | {
@@ -92,8 +180,12 @@ def check_python_static_errors(code: str) -> str | None:
                     has_star_import = True
                 else:
                     defined.add(alias.asname or alias.name)
-        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
             defined.add(node.id)
+        elif _MATCH_NAME_NODES and isinstance(node, _MATCH_NAME_NODES) and getattr(node, "name", None):
+            defined.add(node.name)
+        elif _MATCH_MAPPING_NODE is not None and isinstance(node, _MATCH_MAPPING_NODE) and getattr(node, "rest", None):
+            defined.add(node.rest)
         elif isinstance(node, ast.ExceptHandler) and node.name:
             defined.add(node.name)
         elif isinstance(node, (ast.Global, ast.Nonlocal)):

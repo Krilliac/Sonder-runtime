@@ -13,6 +13,7 @@ import json
 import locale
 import logging
 import ntpath
+import re
 import shutil
 import signal
 import subprocess
@@ -50,7 +51,7 @@ SUPPORTED_LANGUAGES = {
     "powershell": {
         "aliases": {"powershell", "pwsh", "ps1"},
         "suffix": ".ps1",
-        "cmd": lambda path: [_powershell_exe(), "-NoProfile", "-File", path],
+        "cmd": lambda path: [_powershell_exe(), "-NoProfile", "-NonInteractive", "-File", path],
         "missing": "PowerShell executable not found on PATH",
     },
     "cpp": {
@@ -1297,8 +1298,11 @@ def _live_quota_message():
     )
 
 
+_UNSAFE_BATCH_PATH_RE = re.compile(r'[&|<>^%!()"\r\n]')
+
+
 def _bat_quote(value):
-    return '"%s"' % str(value).replace('"', "")
+    return '"%s"' % str(value).replace('"', "").replace("%", "%%")
 
 
 def _write_launcher(run_dir, lines):
@@ -1431,13 +1435,14 @@ def _find_visual_studio_vcvars():
 
 def _msvc_compile_result(vcvars, sources, exe, cwd, timeout, language):
     bat = os.path.join(cwd, "sonder_build_msvc.bat")
-    quoted_sources = " ".join('"%s"' % src for src in sources)
+    quoted_sources = " ".join(_bat_quote(src) for src in sources)
+    flags = "/nologo /std:c11" if language == "c" else "/nologo /EHsc /std:c++17"
     with open(bat, "w", encoding="utf-8") as f:
         f.write(
-            '@echo off\r\n'
-            'call "%s" >nul\r\n'
-            'cl /nologo /EHsc /std:c++17 /Fe:"%s" %s\r\n'
-            % (vcvars, exe, quoted_sources)
+            "@echo off\r\n"
+            "call %s >nul\r\n"
+            "cl %s /Fe:%s %s\r\n"
+            % (_bat_quote(vcvars), flags, _bat_quote(exe), quoted_sources)
         )
     return _run_process(["cmd", "/c", bat], cwd, "", timeout, language)
 
@@ -1448,7 +1453,7 @@ def _c_compiler():
         if found:
             return candidate, found
     if os.name == "nt":
-        vcvars = _find_vcvars64()
+        vcvars = _find_visual_studio_vcvars()
         if vcvars:
             return "msvc-vcvars", vcvars
     return None, None
@@ -1756,20 +1761,47 @@ def format_result(result):
         lines.append("error: %s" % result["error"])
     stdout = result.get("stdout") or ""
     stderr = result.get("stderr") or ""
+    lang = result.get("language")
+    timed_out = result.get("error", "").startswith("timed out")
+    stdout_lower = stdout.lower()
+    stderr_lower = stderr.lower()
+    prompt_like = bool(
+        stdout and any(word in stdout_lower for word in ("enter", "guess", "input", "prompt"))
+    )
+    noninteractive_hint_added = False
     if "EOFError" in stderr:
         lines.append(
             "note: this program tried to read keyboard input, but /run is non-interactive."
         )
+        noninteractive_hint_added = True
+    elif lang == "powershell" and not result.get("ok") and (
+        "noninteractive" in stderr_lower
+        or "cannot prompt" in stderr_lower
+        or "read-host" in stderr_lower
+    ):
+        lines.append(
+            "note: this PowerShell script tried to prompt for input, but /run is non-interactive. Pass values via arguments or stdin."
+        )
+        noninteractive_hint_added = True
+    elif not result.get("ok") and not timed_out and lang in ("csharp", "cpp", "c", "javascript", "project"):
+        if (
+            (prompt_like and any(tok in stderr_lower for tok in ("eof", "formatexception", "nullreferenceexception", "invalid_argument", "readline", "err_use_after_close")))
+            or (lang == "javascript" and "readline" in stderr_lower and ("closed" in stderr_lower or "eof" in stderr_lower))
+        ):
+            lines.append(
+                "note: this program appears to have failed reading console input (EOF) because /run is non-interactive. Add a scripted demo path or provide stdin."
+            )
+            noninteractive_hint_added = True
     if (
-        result.get("error", "").startswith("timed out")
-        and result.get("language") in ("csharp", "cpp", "project")
-        and stdout
-        and ("enter" in stdout.lower() or "guess" in stdout.lower() or "input" in stdout.lower())
+        not noninteractive_hint_added
+        and timed_out
+        and lang in ("csharp", "cpp", "c", "powershell", "javascript", "project")
+        and prompt_like
     ):
         lines.append(
             "note: the program appears to be waiting for console input. For /run, add a scripted demo path or provide stdin."
         )
-    if result.get("error", "").startswith("timed out"):
+    if timed_out:
         lines.append("note: use a bounded smoke test or auto-exit path for /run.")
     if stdout:
         lines.extend(["", "stdout:", stdout])
@@ -1816,6 +1848,7 @@ def _project_files_from_json(files_json):
         raise ValueError("too many project files (max %d)" % MAX_PROJECT_FILES)
     total = 0
     clean = []
+    seen_paths = {}
     for item in files:
         if not isinstance(item, dict):
             raise ValueError("each project file must be an object")
@@ -1825,6 +1858,15 @@ def _project_files_from_json(files_json):
             raise ValueError("each project file needs path and content")
         if os.path.isabs(path) or path.startswith("../") or "/../" in path or path == "..":
             raise ValueError("unsafe project path: %r" % path)
+        norm_key = ntpath.normpath(path).replace("\\", "/").casefold()
+        if norm_key in ("", ".", "..") or norm_key.startswith("../"):
+            raise ValueError("unsafe project path: %r" % path)
+        if norm_key in seen_paths:
+            raise ValueError(
+                "duplicate or case-colliding project path: %r conflicts with %r"
+                % (path, seen_paths[norm_key])
+            )
+        seen_paths[norm_key] = path
         total += len(str(content).encode("utf-8"))
         if total > MAX_PROJECT_BYTES:
             raise ValueError("project content too large (max %d bytes)" % MAX_PROJECT_BYTES)
@@ -1913,15 +1955,18 @@ def _auto_project_commands(root, files):
             return [{"cmd": ["__missing_cpp_compiler__"], "cwd": ""}]
         exe = os.path.abspath(os.path.join(root, "app.exe" if os.name == "nt" else "app"))
         if name == "msvc-vcvars":
+            for rel_src in cpp_files:
+                if _UNSAFE_BATCH_PATH_RE.search(rel_src):
+                    raise ValueError("unsafe batch character in project filename: %r" % rel_src)
             sources = [os.path.abspath(os.path.join(root, p)) for p in cpp_files]
             bat = os.path.join(root, "sonder_build_msvc.bat")
-            quoted_sources = " ".join('"%s"' % src for src in sources)
+            quoted_sources = " ".join(_bat_quote(src) for src in sources)
             with open(bat, "w", encoding="utf-8") as f:
                 f.write(
-                    '@echo off\r\n'
-                    'call "%s" >nul\r\n'
-                    'cl /nologo /EHsc /std:c++17 /Fe:"%s" %s\r\n'
-                    % (compiler, exe, quoted_sources)
+                    "@echo off\r\n"
+                    "call %s >nul\r\n"
+                    "cl /nologo /EHsc /std:c++17 /Fe:%s %s\r\n"
+                    % (_bat_quote(compiler), _bat_quote(exe), quoted_sources)
                 )
             compile_cmd = ["cmd", "/c", bat]
         elif name == "cl":
@@ -1938,7 +1983,9 @@ def run_project(files_json, commands_json="", stdin="", timeout=MAX_TIMEOUT):
     files = _project_files_from_json(files_json)
     commands = _commands_from_json(commands_json)
     timeout = _clamp_timeout(timeout)
-    with tempfile.TemporaryDirectory(prefix="sonder-project-") as root:
+    with tempfile.TemporaryDirectory(
+        prefix="sonder-project-", ignore_cleanup_errors=(os.name == "nt")
+    ) as root:
         root = os.path.abspath(root)
         _write_project_files(root, files)
         if commands is None:

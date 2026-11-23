@@ -845,18 +845,25 @@ def _validate_target(url):
     return _web_tools()._validated_public_target(url)
 
 
-def _open_request(url, headers, timeout):
+def _open_request(url, headers, timeout, *, deadline=None):
     parsed, addresses = _validate_target(url)
     del parsed
     request = urllib.request.Request(url, headers=dict(headers))
     request._sonder_addresses = tuple(addresses)
+    if deadline is not None:
+        request._sonder_deadline = deadline
     return _web_tools()._urlopen(request, timeout=timeout)
 
 
-def _part_path(dest):
+def _part_path(dest, url=""):
     # Keeps the real extension so Authenticode (which dispatches on extension)
     # can run on the partial, while living at a path no later step mistakes for
-    # the finished artifact.
+    # the finished artifact. Binding the staging path to the origin URL digest
+    # ensures resume=True never splices partial bytes from a different URL.
+    dest = Path(dest)
+    if url:
+        url_tag = hashlib.sha256(str(url).encode("utf-8")).hexdigest()[:16]
+        return dest.with_name("%s.%s.part%s" % (dest.name, url_tag, dest.suffix))
     return dest.with_name(dest.name + ".part" + dest.suffix)
 
 
@@ -949,7 +956,7 @@ def fetch_artifact(
     resolved = file_ops.resolve_path(
         str(dest), extra_roots=extra_roots, bypass=bypass,
     )
-    part = _part_path(resolved)
+    part = _part_path(resolved, url)
     # The destination, the staging file and the provenance sidecar are all
     # written (or replaced, or deleted) below; none may be protected
     # control-plane state, under any name (the file tools' shared guard).
@@ -1091,16 +1098,30 @@ def _download(url, part, *, max_bytes, timeout, resume, expect_type, dest_name):
     binary_expected = bool(wanted) and not set(wanted) & _TEXTY_TYPES
 
     offset = 0
-    if resume and part.exists():
-        offset = part.stat().st_size
-        if offset >= max_bytes:
-            offset = 0
+    if resume and (part.exists() or part.is_symlink()):
+        if part.is_symlink():
             _discard(part)
+        else:
+            offset = part.stat().st_size
+            if offset >= max_bytes:
+                offset = 0
+                _discard(part)
 
+    deadline = time.monotonic() + float(timeout)
     response = None
     status = 0
     content_type = ""
     for _hop in range(MAX_REDIRECTS + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            checks.append(_check(
+                "transport", False, "TimeoutError: artifact fetch exceeded total timeout",
+            ))
+            return {
+                "ok": False, "checks": checks, "redirect_chain": chain,
+                "final_url": current, "status": 0, "content_type": "",
+                "bytes": 0, "sha256": "", "resumed_from": 0, "block": None,
+            }
         headers = {
             "User-Agent": _web_tools().USER_AGENT,
             "Accept": "*/*",
@@ -1109,7 +1130,7 @@ def _download(url, part, *, max_bytes, timeout, resume, expect_type, dest_name):
         if offset:
             headers["Range"] = "bytes=%d-" % offset
         try:
-            response = _open_request(current, headers, timeout)
+            response = _open_request(current, headers, remaining, deadline=deadline)
         except Exception as exc:
             checks.append(_check(
                 "transport", False, "%s: %s" % (type(exc).__name__, exc),
@@ -1134,8 +1155,23 @@ def _download(url, part, *, max_bytes, timeout, resume, expect_type, dest_name):
                     "final_url": current, "status": status, "content_type": "",
                     "bytes": 0, "sha256": "", "resumed_from": 0, "block": None,
                 }
+            next_url = urllib.parse.urljoin(current, location)
+            current_scheme = urllib.parse.urlparse(current).scheme.lower()
+            next_scheme = urllib.parse.urlparse(next_url).scheme.lower()
+            if current_scheme == "https" and next_scheme != "https":
+                reason = (
+                    "refusing HTTPS-to-HTTP redirect downgrade (%s -> %s)"
+                    if next_scheme == "http"
+                    else "refusing HTTPS redirect to non-HTTPS scheme (%s -> %s)"
+                ) % (current, next_url)
+                checks.append(_check("redirect", False, reason))
+                return {
+                    "ok": False, "checks": checks, "redirect_chain": chain,
+                    "final_url": next_url, "status": status, "content_type": "",
+                    "bytes": 0, "sha256": "", "resumed_from": 0, "block": None,
+                }
             chain.append({"url": current, "status": status, "location": location})
-            current = urllib.parse.urljoin(current, location)
+            current = next_url
             continue
         break
     else:
@@ -1271,6 +1307,8 @@ def _download(url, part, *, max_bytes, timeout, resume, expect_type, dest_name):
                         )
                     digest.update(chunk)
                     handle.write(chunk)
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("artifact fetch exceeded total timeout")
                     chunk = response.read(STREAM_CHUNK)
         except ArtifactFetchError as exc:
             _discard(part)

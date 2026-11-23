@@ -960,3 +960,209 @@ def test_delegated_child_inherits_parent_allow_web_without_escalation(
     assert len(seen) == 2
     assert all(call["allow_web"] is expected_allow_web for call in seen)
     assert all(call["read_only"] is expected_read_only for call in seen)
+
+
+def test_wave2_delegation_blocks_cloud_tier_when_project_bound_or_local_parent(monkeypatch, tmp_path):
+    pm.set_mode(pm.AUTO)
+    called = []
+    monkeypatch.setattr(server, "_agent_impl", lambda prompt, **kw: called.append(kw) or "leaked")
+
+    # 1. Project-bound parent must refuse cloud tier even if cloud is enabled.
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    out_proj = delegation_wiring.dispatch_delegation(
+        server,
+        "delegate_task",
+        {"task": "read private code", "tier": "cloud-code"},
+        repository_extra_roots=str(tmp_path),
+    )
+    assert out_proj.startswith("ERROR:")
+    assert "cloud/hosted" in out_proj
+    assert called == []
+
+    # 2. Local-only parent (open_agent_run cloud=False) must refuse cloud tier even with empty project.
+    bridge = delegation_wiring.open_agent_run(
+        server, prompt="parent", model="qwen3.5:9b", max_steps=4, cloud=False, read_only=False,
+    )
+    try:
+        out_local = delegation_wiring.dispatch_delegation(
+            server,
+            "delegate_task",
+            {"task": "exfil to cloud", "tier": "cloud-general"},
+            repository_extra_roots="",
+        )
+    finally:
+        bridge.close(ok=True, summary="done")
+    assert out_local.startswith("ERROR:")
+    assert "local-only parent" in out_local
+    assert called == []
+
+
+def test_wave2_mcp_schemas_preserve_read_only_and_personality():
+    from sonder_runtime.domain.agents.tool_args import normalize_tool_args
+
+    delegate_entry = server.mcp._tool_manager.get_tool("delegate_task")
+    delegate_schema = getattr(delegate_entry, "parameters", None)
+    norm_d, notes_d = normalize_tool_args(
+        "delegate_task",
+        {"task": "audit file", "read_only": True, "personality": "paranoid auditor"},
+        delegate_schema,
+    )
+    assert norm_d.get("read_only") is True
+    assert norm_d.get("personality") == "paranoid auditor"
+    assert not any("dropped unknown argument read_only" in n for n in notes_d), notes_d
+
+    spawn_entry = server.mcp._tool_manager.get_tool("spawn_agents")
+    spawn_schema = getattr(spawn_entry, "parameters", None)
+    norm_s, notes_s = normalize_tool_args(
+        "spawn_agents",
+        {"tasks": [{"task": "a"}], "read_only": True},
+        spawn_schema,
+    )
+    assert norm_s.get("read_only") is True
+    assert not any("dropped unknown argument read_only" in n for n in notes_s), notes_s
+
+
+def test_wave2_spec_model_routes_without_type_error_on_real_agent_impl(monkeypatch, tmp_path):
+    pm.set_mode(pm.AUTO)
+    seen_targets = []
+
+    def fake_serve_target(tier_arg, strict, **_kw):
+        seen_targets.append(tier_arg)
+        return (str(tier_arg), False, False, f"model:{tier_arg}")
+
+    monkeypatch.setattr(server, "_serve_target", fake_serve_target)
+    monkeypatch.setattr(
+        server,
+        "_make_tier_generate",
+        lambda *_a, **_k: (lambda _prompt, history=None: '{"final": "model-ok"}'),
+    )
+    out = delegation_wiring.dispatch_delegation(
+        server,
+        "delegate_task",
+        {"task": "quick check", "model": "qwen3.6:35b", "max_steps": 2},
+        repository_extra_roots=str(tmp_path),
+    )
+    assert "TypeError" not in out
+    assert "delegation completed: 1/1 succeeded" in out
+    assert "qwen3.6:35b" in seen_targets
+
+
+def test_wave2_child_isolates_parent_contextvars(monkeypatch, tmp_path):
+    from sonder_runtime.application.chat import tool_loop
+    from sonder_runtime.interfaces.http import work_runs as http_work_runs
+
+    pm.set_mode(pm.AUTO)
+    observed = {}
+
+    def fake_agent_impl(_prompt, **_kw):
+        observed["current_run"] = http_work_runs.current_run_id()
+        observed["active_turn"] = tool_loop.current_turn()
+        observed["spent_approval"] = pm._SPENT_APPROVAL.get()
+        observed["call_spends"] = pm._CALL_SPENDS.get()
+        observed["approval_hook"] = pm.current_agent_approval_hook()
+        observed["attended"] = pm.mode_change_attended()
+        observed["bypass_confirmed"] = pm._BYPASS_CONFIRMED.get()
+        return "isolated-ok"
+
+    monkeypatch.setattr(server, "_agent_impl", fake_agent_impl)
+    fake_turn = object()
+    fake_spends = SimpleNamespace(spends=[])
+    t_run = http_work_runs._CURRENT_RUN.set("parent-run-123")
+    t_spent = pm._SPENT_APPROVAL.set(("run_code", "abc"))
+    t_spends = pm._CALL_SPENDS.set(fake_spends)
+    try:
+        with (
+            tool_loop.bind_turn(fake_turn),
+            pm.agent_approval_hook(lambda *_a: None),
+            pm.attended_mode_change(),
+            pm.attended_bypass_confirm(),
+        ):
+            out = delegation_wiring.dispatch_delegation(
+                server,
+                "delegate_task",
+                {"task": "check isolation"},
+                repository_extra_roots=str(tmp_path),
+            )
+            assert "isolated-ok" in out
+            # Parent ContextVars remain intact after child finishes.
+            assert http_work_runs.current_run_id() == "parent-run-123"
+            assert tool_loop.current_turn() is fake_turn
+            assert pm._SPENT_APPROVAL.get() == ("run_code", "abc")
+            assert pm._CALL_SPENDS.get() is fake_spends
+    finally:
+        pm._CALL_SPENDS.reset(t_spends)
+        pm._SPENT_APPROVAL.reset(t_spent)
+        http_work_runs._CURRENT_RUN.reset(t_run)
+
+    assert observed == {
+        "current_run": "",
+        "active_turn": None,
+        "spent_approval": None,
+        "call_spends": None,
+        "approval_hook": None,
+        "attended": False,
+        "bypass_confirmed": False,
+    }
+
+
+def test_wave2_resolve_pool_slots_caps_by_model_carriers():
+    class CarrierPool:
+        enabled = True
+
+        def pool_capacity_summary(self):
+            return {"total_slots": 6, "healthy_worker_count": 3}
+
+        def model_slot_counts(self, model):
+            if model == "qwen3.6:35b":
+                return {"total": 2, "local_total": 0, "remote_total": 2, "workers": 1}
+            return {}
+
+        def origins_for_model(self, model):
+            if model == "qwen3.6:35b":
+                return ("https://10.77.0.2:8443",)
+            return ()
+
+    fake_server = SimpleNamespace(
+        OLLAMA_POOL=CarrierPool(),
+        TIERS={"code": "qwen3.6:35b"},
+        master_orchestrator=SimpleNamespace(capacity=lambda **_kw: {"worker_slots": 6}),
+    )
+    slots = delegation_wiring._resolve_pool_slots(fake_server, requested=6, model="qwen3.6:35b")
+    assert slots == 2
+
+
+def test_wave2_preamble_workspace_discipline_and_fair_share_report():
+    from sonder_runtime.domain.agents.delegation import (
+        DelegationChildResult,
+        build_agent_drive_preamble,
+        format_delegation_report,
+    )
+
+    child_preamble = build_agent_drive_preamble(
+        handle="coder", role="coder", personality="focused", peers=["scout"], depth=1,
+    )
+    assert "Workspace discipline" in child_preamble
+    assert "auto-injected" in child_preamble
+
+    root_preamble = build_agent_drive_preamble(
+        handle="coordinator", role="coordinator", personality="direct", depth=0,
+    )
+    assert "Workspace discipline" not in root_preamble
+
+    verbose_child = DelegationChildResult(
+        agent_id="verbose", task="t1", status="completed", ok=True, summary="s1",
+        output="A" * 10000, elapsed_ms=10,
+    )
+    quiet_child = DelegationChildResult(
+        agent_id="quiet", task="t2", status="completed", ok=True, summary="s2",
+        output="QUIET_RESULT_INTACT", elapsed_ms=12,
+    )
+    report = format_delegation_report([verbose_child, quiet_child], max_total_output_chars=1200)
+    assert "QUIET_RESULT_INTACT" in report
+    assert "truncated" in report
+    assert len(report) < 2000
+
+    all_failed = format_delegation_report([
+        DelegationChildResult(agent_id="c1", task="t1", status="failed", ok=False, summary="boom", error="boom"),
+    ])
+    assert all_failed.startswith("ERROR: delegation completed: 0/1 succeeded")

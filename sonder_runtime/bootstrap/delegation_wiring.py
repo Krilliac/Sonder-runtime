@@ -42,6 +42,131 @@ from sonder_runtime.platform.runtime_threads import ThreadPoolExecutor
 _logger = logging.getLogger(__name__)
 _PROMPTS_PERSONAS_DIR = Path(__file__).resolve().parents[2] / "prompts" / "personas"
 _SOFT_ERRORS = (RuntimeError, ValueError, TypeError, AttributeError, OSError, KeyError, LookupError)
+_PARENT_CLOUD: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
+    "delegation_parent_cloud", default=None,
+)
+
+
+@contextlib.contextmanager
+def _reset_cvar(cvar: Any, value: Any) -> Iterator[None]:
+    if cvar is None or not hasattr(cvar, "set") or not hasattr(cvar, "reset"):
+        yield
+        return
+    token = cvar.set(value)
+    try:
+        yield
+    finally:
+        cvar.reset(token)
+
+
+@contextlib.contextmanager
+def _child_delegation_isolation_scope() -> Iterator[None]:
+    """Isolate per-turn/parent ContextVars so child runs cannot clobber parent state."""
+    from sonder_runtime.application.chat import tool_loop as _tool_loop
+    from sonder_runtime.interfaces.http import work_runs as _http_work_runs
+
+    _pm = PermissionPolicyProvider()
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(_pm.clear_preapproved_scope())
+        stack.enter_context(_tool_loop.bind_turn(None))
+        stack.enter_context(_reset_cvar(getattr(_http_work_runs, "_CURRENT_RUN", None), ""))
+        stack.enter_context(_reset_cvar(getattr(_pm, "_SPENT_APPROVAL", None), None))
+        stack.enter_context(_reset_cvar(getattr(_pm, "_CALL_SPENDS", None), None))
+        stack.enter_context(_reset_cvar(getattr(_pm, "_AGENT_APPROVAL_HOOK", None), None))
+        stack.enter_context(_reset_cvar(getattr(_pm, "_ATTENDED_MODE_CHANGE", None), False))
+        stack.enter_context(_reset_cvar(getattr(_pm, "_BYPASS_CONFIRMED", None), False))
+        yield
+
+
+def _spec_targets_cloud(server: Any, spec: DelegationTaskSpec) -> bool:
+    """Return True if ``spec.tier`` or ``spec.model`` resolves to a cloud/hosted target."""
+    tier_name = str(spec.tier or "").strip()
+    model_name = str(spec.model or "").strip()
+    if not tier_name and not model_name:
+        return False
+
+    tier_lc = tier_name.lower()
+    model_lc = model_name.lower()
+    if tier_lc.startswith("cloud") or tier_lc.endswith((":cloud", "-cloud")):
+        return True
+    if model_lc.endswith((":cloud", "-cloud")):
+        return True
+
+    is_cloud_tier = getattr(server, "_is_cloud_tier", None)
+    if callable(is_cloud_tier):
+        with contextlib.suppress(*_SOFT_ERRORS):
+            if tier_name and bool(is_cloud_tier(tier_name, model_name or None)):
+                return True
+            if model_name and bool(is_cloud_tier(model_name, model_name)):
+                return True
+
+    is_cloud_model = getattr(server, "_is_cloud_model_name", None)
+    if callable(is_cloud_model) and model_name:
+        with contextlib.suppress(*_SOFT_ERRORS):
+            if bool(is_cloud_model(model_name)):
+                return True
+
+    from sonder_runtime.application.chat import provider_bridge as _provider_bridge
+
+    provider_for_tier = getattr(server, "_bridge_provider_for_tier", None)
+    if callable(provider_for_tier):
+        for candidate in (tier_name, model_name, f"model:{model_name}" if model_name else ""):
+            if not candidate:
+                continue
+            with contextlib.suppress(*_SOFT_ERRORS):
+                provider = provider_for_tier(candidate)
+                if provider and _provider_bridge.is_hosted(provider):
+                    return True
+
+    serve_target = getattr(server, "_serve_target", None)
+    if callable(serve_target):
+        selector = model_name or tier_name
+        with contextlib.suppress(*_SOFT_ERRORS):
+            resolved = serve_target(selector, None)
+            if isinstance(resolved, tuple) and len(resolved) >= 4:
+                _res_model, res_cloud, _res_aug, res_label = resolved[:4]
+                if bool(res_cloud) or res_label == "cloud-disabled":
+                    return True
+                if callable(provider_for_tier) and res_label:
+                    provider = provider_for_tier(res_label)
+                    if provider and _provider_bridge.is_hosted(provider):
+                        return True
+    return False
+
+
+def _child_cloud_refusal(
+    server: Any,
+    spec: DelegationTaskSpec,
+    *,
+    parent_project: str,
+) -> str:
+    """Refuse cloud/hosted child targets when project-bound or parent is local-only."""
+    if not _spec_targets_cloud(server, spec):
+        return ""
+    target = spec.model or spec.tier
+    if str(parent_project or "").strip():
+        return (
+            f"{LEGACY_ERROR_PREFIX} HOST POLICY: project-bound delegation cannot route "
+            f"child to cloud/hosted target {target!r}; select a local tier/model"
+        )
+    if _PARENT_CLOUD.get() is False:
+        return (
+            f"{LEGACY_ERROR_PREFIX} HOST POLICY: local-only parent agent cannot delegate "
+            f"child to cloud/hosted target {target!r}; select a local tier/model"
+        )
+    return ""
+
+
+def _resolve_spec_model_hint(server: Any, spec: DelegationTaskSpec) -> str:
+    if spec.model:
+        return spec.model.strip()
+    tiers = getattr(server, "TIERS", None)
+    tier_key = (spec.tier or "code").strip().lower()
+    if isinstance(tiers, Mapping):
+        mapped = str(tiers.get(tier_key) or "").strip()
+        if mapped:
+            return mapped
+    return fleet_model_name()
 
 
 def _resolve_persona_text(persona_file: str) -> str:
@@ -56,7 +181,13 @@ def _resolve_persona_text(persona_file: str) -> str:
     return ""
 
 
-def _resolve_pool_slots(server: Any, *, requested: int) -> int:
+def _resolve_pool_slots(
+    server: Any,
+    *,
+    requested: int,
+    model: str = "",
+    models: Sequence[str] = (),
+) -> int:
     """Compute bounded concurrency across local capacity and Main+Node1 worker pool."""
     desired = max(1, min(MAX_DELEGATED_TASKS, int(requested or 1)))
     local_slots = 1
@@ -71,14 +202,41 @@ def _resolve_pool_slots(server: Any, *, requested: int) -> int:
             _logger.debug("delegation capacity lookup failed: %s", exc)
     pool_slots = 0
     pool = getattr(server, "OLLAMA_POOL", None)
+    pool_enabled = bool(getattr(pool, "enabled", False))
     summary_fn = getattr(pool, "pool_capacity_summary", None)
-    if callable(summary_fn) and bool(getattr(pool, "enabled", False)):
+    if callable(summary_fn) and pool_enabled:
         try:
             summary = summary_fn()
             if isinstance(summary, Mapping):
                 pool_slots = int(summary.get("total_slots") or 0)
         except _SOFT_ERRORS as exc:
             _logger.debug("delegation pool capacity lookup failed: %s", exc)
+    if pool_enabled:
+        candidate_models = [str(m).strip() for m in (*models, model) if str(m or "").strip()]
+        if not candidate_models:
+            tiers = getattr(server, "TIERS", None)
+            default_model = str(tiers.get("code") or "").strip() if isinstance(tiers, Mapping) else ""
+            default_model = default_model or fleet_model_name()
+            if default_model:
+                candidate_models = [default_model]
+        unique_models = list(dict.fromkeys(candidate_models))
+        carrier_totals: list[int] = []
+        all_known = bool(unique_models)
+        for item_model in unique_models:
+            carriers = _model_carriers(pool, item_model)
+            if carriers is None:
+                all_known = False
+                break
+            total_for_model = int(carriers[1].get("total") or 0)
+            if total_for_model < 1:
+                all_known = False
+                break
+            carrier_totals.append(total_for_model)
+        if all_known and carrier_totals:
+            carrier_slots = sum(carrier_totals)
+            if pool_slots > 0:
+                carrier_slots = min(carrier_slots, pool_slots)
+            return max(1, min(desired, carrier_slots, MAX_DELEGATED_TASKS))
     combined = max(local_slots, pool_slots, 1)
     return max(1, min(desired, combined, MAX_DELEGATED_TASKS))
 
@@ -244,7 +402,8 @@ def _run_one_child(
     child_project, boundary_err = _resolve_child_project(server, spec, parent_project=parent_project)
     tier = spec.tier or "code"
     resolved_model = spec.model or ""
-    if boundary_err:
+    refusal_err = boundary_err or _child_cloud_refusal(server, spec, parent_project=parent_project)
+    if refusal_err:
         board.emit(
             agent_id=spec.agent_id,
             parent_id=parent_agent_id,
@@ -254,18 +413,18 @@ def _run_one_child(
             model=resolved_model,
             ok=False,
             elapsed_ms=int((time.monotonic() - started) * 1000),
-            summary=boundary_err,
+            summary=refusal_err,
         )
         return DelegationChildResult(
             agent_id=spec.agent_id,
             task=spec.task,
             status="refused",
             ok=False,
-            summary=boundary_err,
+            summary=refusal_err,
             output="",
             tier=tier,
             model=resolved_model,
-            error=boundary_err,
+            error=refusal_err,
             role=spec.role,
             personality=spec.personality,
         )
@@ -320,9 +479,8 @@ def _run_one_child(
     else:
         route_ctx = contextlib.nullcontext()
 
-    clear_preapproved: Any = PermissionPolicyProvider().clear_preapproved_scope()
     with (
-        clear_preapproved,
+        _child_delegation_isolation_scope(),
         _rt.depth_scope(1),
         _rt.bind_board(board),
         _rt.agent_identity_scope(
@@ -337,7 +495,7 @@ def _run_one_child(
     ):
         try:
             call_kwargs: dict[str, Any] = {
-                "tier": tier,
+                "tier": spec.model or tier,
                 "max_steps": spec.max_steps,
                 "allow_web": bool(parent_allow_web) and not effective_read_only,
                 "read_only": effective_read_only,
@@ -345,8 +503,6 @@ def _run_one_child(
                 "auto_checklist": False,
                 "return_host_receipt": False,
             }
-            if spec.model:
-                call_kwargs["model_override"] = spec.model
             output = str(server._agent_impl(child_prompt, **call_kwargs) or "")
             origin_info["model"] = _rt.current_agent_model() or origin_info["model"]
             last_route_fn = getattr(pool, "last_route", None)
@@ -455,7 +611,8 @@ def make_delegation_executor(server: Any) -> _rt.DelegationExecutor:
             )
         spec_list = list(specs)
         peer_handles = [parent_agent_id, *[item.agent_id for item in spec_list]]
-        slots = _resolve_pool_slots(server, requested=len(spec_list))
+        spec_models = [_resolve_spec_model_hint(server, item) for item in spec_list]
+        slots = _resolve_pool_slots(server, requested=len(spec_list), models=spec_models)
         if len(spec_list) == 1 or slots == 1:
             results: list[DelegationChildResult] = []
             for item in spec_list:
@@ -524,6 +681,12 @@ def dispatch_delegation(
     owns_board = _rt.current_board() is None
     executor = _rt.current_delegation_executor() or make_delegation_executor(server)
     owns_exec = _rt.current_delegation_executor() is None
+    parent_project = str(repository_extra_roots or "")
+    if not owns_exec:
+        for spec in specs:
+            cloud_refusal = _child_cloud_refusal(server, spec, parent_project=parent_project)
+            if cloud_refusal:
+                return cloud_refusal
     detach = attach_board_observers(board) if owns_board else (lambda: None)
     try:
         with (
@@ -533,7 +696,7 @@ def dispatch_delegation(
             results = _rt.run_delegated_specs(
                 specs,
                 tool_name=tool_name,
-                parent_project=str(repository_extra_roots or ""),
+                parent_project=parent_project,
                 parent_read_only=bool(read_only),
                 parent_allow_web=bool(allow_web),
             )
@@ -985,6 +1148,7 @@ def open_agent_run(
                 default_origin=str(getattr(server, "BASE", "") or ""),
             )
         if _rt.current_depth() == 0:
+            stack.enter_context(_reset_cvar(_PARENT_CLOUD, bool(cloud)))
             stack.enter_context(
                 _rt.agent_identity_scope("coordinator", role="coordinator", model=model, origin=origin_hint)
             )

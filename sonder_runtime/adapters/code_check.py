@@ -7,19 +7,27 @@ so an agent can repair a file in the next step.
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 import tomllib
-import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+
+import sonder_runtime.adapters.process_tree as process_tree
+from ..platform import logging as sonder_logging
+from ..platform.runtime_threads import Thread as owned_runtime_thread
+
+_REAL_SUBPROCESS_RUN = subprocess.run
+_MAX_EXTERNAL_CAPTURE = 256_000
 
 MAX_BYTES = 1_000_000
 MAX_SECONDS = 10.0
@@ -77,21 +85,141 @@ def _ruff_path() -> str | None:
     return shutil.which("ruff")
 
 
+def _drain_stream(pipe, sink: bytearray, limit: int) -> None:
+    try:
+        while True:
+            chunk = pipe.read(65536)
+            if not chunk:
+                break
+            remaining = limit - len(sink)
+            if remaining > 0:
+                sink.extend(chunk[:remaining])
+    finally:
+        with contextlib.suppress(OSError):
+            pipe.close()
+
+
+def _run_external_process(command: list[str], remaining: float) -> tuple[int, str, str, bool]:
+    """Run *command* with scrubbed env, DEVNULL stdin, and ProcessTree cleanup."""
+    env = sonder_logging.child_environment()
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    if subprocess.run is not _REAL_SUBPROCESS_RUN:
+        run_kwargs: dict[str, object] = {
+            "capture_output": True,
+            "text": True,
+            "timeout": remaining,
+            "check": False,
+            "shell": False,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "stdin": subprocess.DEVNULL,
+            "env": env,
+        }
+        if creationflags:
+            run_kwargs["creationflags"] = creationflags
+        try:
+            completed = subprocess.run(command, **run_kwargs)
+        except subprocess.TimeoutExpired:
+            return -1, "", "", True
+        return completed.returncode, completed.stdout or "", completed.stderr or "", False
+
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+        env=env,
+        **process_tree.group_popen_kwargs(creationflags),
+    )
+    tree = (
+        process_tree.ProcessTree.owning(proc)
+        if process_tree.is_real_popen(proc) else None
+    )
+    out_buf = bytearray()
+    err_buf = bytearray()
+    threads = []
+    timed_out = False
+    try:
+        for pipe, buf in ((proc.stdout, out_buf), (proc.stderr, err_buf)):
+            if pipe is not None:
+                t = owned_runtime_thread(
+                    target=_drain_stream,
+                    args=(pipe, buf, _MAX_EXTERNAL_CAPTURE),
+                    daemon=True,
+                )
+                t.start()
+                threads.append(t)
+        if tree is not None:
+            outcome = tree.wait(timeout=remaining, sweep_on_exit=True, grace_seconds=0.2)
+            timed_out = outcome.state is process_tree.TreeState.TIMED_OUT
+        else:
+            try:
+                proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                    proc.wait(timeout=5)
+    finally:
+        if tree is not None:
+            with contextlib.suppress(OSError):
+                tree.close()
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    stream.close()
+        for t in threads:
+            t.join(timeout=2)
+    stdout = bytes(out_buf).decode("utf-8", errors="replace")
+    stderr = bytes(err_buf).decode("utf-8", errors="replace")
+    return (proc.returncode if proc.returncode is not None else -1), stdout, stderr, timed_out
+
+
+def _is_ruff_footer_line(text: str) -> bool:
+    stripped = text.strip()
+    return (
+        not stripped
+        or bool(re.fullmatch(r"Found \d+ errors?\.?", stripped))
+        or stripped.startswith("[*]")
+        or stripped.startswith("No fixes available")
+    )
+
+
+def _tsc_command(target: Path) -> list[str] | None:
+    tsc = shutil.which("tsc")
+    if not tsc:
+        return None
+    if os.name == "nt" and tsc.lower().endswith((".cmd", ".bat")):
+        shim_dir = Path(tsc).parent
+        node = shutil.which("node")
+        if node:
+            for candidate in (
+                shim_dir / "node_modules" / "typescript" / "bin" / "tsc",
+                shim_dir / "node_modules" / "typescript" / "lib" / "tsc.js",
+                shim_dir.parent / "typescript" / "bin" / "tsc",
+            ):
+                if candidate.is_file():
+                    return [node, str(candidate), "--noEmit", str(target)]
+        return None
+    return [tsc, "--noEmit", str(target)]
+
+
 def _external(command: list[str], checker: str, deadline: float) -> list[CheckIssue]:
     remaining = min(MAX_SECONDS, deadline - time.monotonic())
     if remaining <= 0:
         return [_issue(1, 1, checker, "timeout", "check budget exhausted")]
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=remaining,
-                                   check=False, shell=False, encoding="utf-8", errors="replace")
-    except subprocess.TimeoutExpired:
-        return [_issue(1, 1, checker, "timeout", "checker timed out")]
+        returncode, stdout, stderr, timed_out = _run_external_process(command, remaining)
     except OSError as exc:
         return [_issue(1, 1, checker, "error", "checker failed: %s" % exc)]
-    if completed.returncode == 0:
+    if timed_out:
+        return [_issue(1, 1, checker, "timeout", "checker timed out")]
+    if returncode == 0:
         return []
     issues: list[CheckIssue] = []
-    output = completed.stdout + completed.stderr
+    output = stdout + stderr
     if checker == "node":
         location = re.search(r"^.+?:(\d+)(?::(\d+))?\s*$", output, re.M)
         error = re.search(r"^(SyntaxError|Error):\s*(.*)$", output, re.M)
@@ -99,6 +227,8 @@ def _external(command: list[str], checker: str, deadline: float) -> list[CheckIs
             return [_issue(int(location[1]) if location else 1, int(location[2] or 1) if location else 1,
                            checker, error[1], error[2])]
     for text in output.splitlines():
+        if checker == "ruff" and _is_ruff_footer_line(text):
+            continue
         # ruff: path:line:col: CODE message; node/tsc have related forms.
         if checker == "tsc":
             tsc_match = re.search(r"\((\d+),(\d+)\):\s*(?:error\s+)?(TS\d+)?\s*:?\s*(.*)$", text)
@@ -119,7 +249,7 @@ def _external(command: list[str], checker: str, deadline: float) -> list[CheckIs
         if text.strip():
             issues.append(_issue(1, 1, checker, "error", text))
     if not issues:
-        issues.append(_issue(1, 1, checker, "error", "checker failed with exit code %s" % completed.returncode))
+        issues.append(_issue(1, 1, checker, "error", "checker failed with exit code %s" % returncode))
     return issues
 
 
@@ -187,7 +317,7 @@ def check_file(path: str | os.PathLike[str], max_items: int = 30, *, project_roo
     if b"\0" in raw:
         return _bounded(f"file_check {requested}: 1 issue(s)\n1:1: file_check binary binary file refused")
     try:
-        source = raw.decode("utf-8")
+        source = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         return _bounded(f"file_check {requested}: 1 issue(s)\n1:1: file_check binary non-UTF-8 file refused")
     suffix = target.suffix.lower()
@@ -197,15 +327,14 @@ def check_file(path: str | os.PathLike[str], max_items: int = 30, *, project_roo
     if suffix == ".py":
         issues.extend(_syntax_python(target, source))
         if not issues:
-            if importlib.util.find_spec("pyflakes") is None:
-                ruff = _ruff_path()
-                if ruff:
-                    issues.extend(_external([ruff, "check", "--isolated", "--no-fix", "--no-cache",
-                                             "--output-format", "concise", str(target)], "ruff", deadline))
-                else:
-                    issues.append(_issue(1, 1, "file_check", "note", "no linter available"))
-            else:
+            ruff = _ruff_path()
+            if ruff:
+                issues.extend(_external([ruff, "check", "--isolated", "--no-fix", "--no-cache",
+                                         "--output-format", "concise", str(target)], "ruff", deadline))
+            elif importlib.util.find_spec("pyflakes") is not None:
                 issues.extend(_external([sys.executable, "-I", "-m", "pyflakes", str(target)], "pyflakes", deadline))
+            else:
+                issues.append(_issue(1, 1, "file_check", "note", "no linter available"))
     elif suffix in {".js", ".mjs", ".cjs"}:
         node = shutil.which("node")
         if node:
@@ -221,9 +350,9 @@ def check_file(path: str | os.PathLike[str], max_items: int = 30, *, project_roo
     elif suffix in {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp"}:
         issues.append(_issue(1, 1, "file_check", "note", "C/C++ checker skipped; use build.ps1"))
     elif suffix == ".ts":
-        tsc = shutil.which("tsc")
-        if tsc:
-            issues.extend(_external([tsc, "--noEmit", str(target)], "tsc", deadline))
+        tsc_cmd = _tsc_command(target)
+        if tsc_cmd:
+            issues.extend(_external(tsc_cmd, "tsc", deadline))
         else:
             issues.append(_issue(1, 1, "file_check", "note", "tsc not available"))
     else:

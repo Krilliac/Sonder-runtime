@@ -411,10 +411,15 @@ def _resolve_destination(
 ) -> Path:
     if not str(destination or "").strip():
         raise ValueError("archive destination is required")
-    candidate = Path(file_ops._reject_network_path(str(destination))).expanduser()
+    cleaned = file_ops._reject_network_path(str(destination))
+    file_ops._require_plain_name_spelling(cleaned)
+    candidate = Path(cleaned).expanduser()
     if not candidate.is_absolute():
         candidate = root / candidate
     _reject_linked_request(candidate, "archive destination parent", parent_only=True)
+    normalized = Path(os.path.normpath(os.path.abspath(str(candidate))))
+    if _is_reparse(candidate) or _is_reparse(normalized):
+        raise PermissionError("archive destination may not be a symlink or junction")
     resolved = file_ops.resolve_repository_read_path(
         str(candidate), allow_workspace_root=False, reject_sensitive=True,
         extra_roots=str(root) + os.pathsep + str(extra_roots or ""),

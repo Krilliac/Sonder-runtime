@@ -22,12 +22,14 @@ from sonder_runtime.application.testing.legacy_runs import retired_extra_args
 from sonder_runtime.adapters import git_change_targets
 from sonder_runtime.adapters import live_checkout
 from sonder_runtime.adapters import git_program_guard
+from sonder_runtime.adapters import process_tree
 from sonder_runtime.adapters import protected_write_scope
 from sonder_runtime.adapters import secret_scan as _secret_scan_adapter
 from sonder_runtime.adapters.git_mutation_guard import (
     ConcurrentGitMutation,
     guard_git_mutation,
 )
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 import git_tools
 import sonder_logging
 import unsafe_lab
@@ -134,6 +136,11 @@ def _resolve_target_path(root, path):
     text = str(path or "").strip()
     if not text:
         return ""
+    if any(ch in text for ch in ("\0", "\r", "\n")):
+        raise ValueError("invalid path control character: %r" % text)
+    if text.startswith("-"):
+        raise ValueError("path must not start with '-': %r" % text)
+    text = file_ops._reject_network_path(text)
     root = Path(root)
     candidate = Path(text)
     resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
@@ -143,9 +150,12 @@ def _resolve_target_path(root, path):
             % (text, root)
         )
     try:
-        return str(resolved.relative_to(root)) or "."
+        rel = str(resolved.relative_to(root)) or "."
     except ValueError:
-        return str(resolved)
+        rel = str(resolved)
+    if rel.startswith("-"):
+        raise ValueError("path must not start with '-': %r" % text)
+    return rel
 
 
 _AUTHORIZED_ROOT = contextvars.ContextVar("harness_authorized_root", default="")
@@ -208,24 +218,58 @@ def _child_env():
     return env
 
 
+def _drain_pipe(pipe, sink, state, limit):
+    """Drain *pipe* continuously while bounding retained RAM to *limit* bytes."""
+    head_limit = limit // 2
+    try:
+        while True:
+            block = pipe.read(65536)
+            if not block:
+                break
+            state["bytes"] += len(block)
+            sink.extend(block)
+            if len(sink) > limit:
+                del sink[head_limit:len(sink) - (limit - head_limit)]
+    finally:
+        with contextlib.suppress(OSError):
+            pipe.close()
+
+
+def _write_stdin(pipe, payload):
+    try:
+        if payload:
+            pipe.write(payload)
+            pipe.flush()
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            pipe.close()
+
+
+def _format_captured_stream(sink, total_bytes, limit=MAX_OUTPUT):
+    if total_bytes <= limit:
+        return _trim(bytes(sink).decode("utf-8", errors="replace"), limit=limit)
+    head_limit = limit // 2
+    head = bytes(sink[:head_limit]).decode("utf-8", errors="replace")
+    tail = bytes(sink[head_limit:]).decode("utf-8", errors="replace")
+    return head + "\n... [trimmed %d bytes] ...\n" % (total_bytes - limit) + tail
+
+
 def _run(cmd, *, cwd, timeout=DEFAULT_TIMEOUT, stdin_bytes=b"", env=None):
     started = time.time()
-    timed_out = False
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
-        proc = subprocess.run(
-            cmd, cwd=str(cwd), timeout=timeout,
-            capture_output=True, input=stdin_bytes,
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            stdin=subprocess.PIPE if stdin_bytes else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
             env=env or _child_env(),
+            **process_tree.group_popen_kwargs(creationflags),
         )
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        return {
-            "ok": False, "returncode": -1, "timed_out": True,
-            "elapsed_ms": int((time.time() - started) * 1000),
-            "stdout": _trim(exc.stdout.decode("utf-8", errors="replace") if exc.stdout else ""),
-            "stderr": _trim(exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""),
-            "command": [str(c) for c in cmd],
-        }
     except FileNotFoundError:
         return {
             "ok": False, "returncode": -1, "timed_out": False,
@@ -233,13 +277,89 @@ def _run(cmd, *, cwd, timeout=DEFAULT_TIMEOUT, stdin_bytes=b"", env=None):
             "stdout": "", "stderr": "command not found: %s" % cmd[0],
             "command": [str(c) for c in cmd],
         }
+    tree = (
+        process_tree.ProcessTree.owning(proc)
+        if process_tree.is_real_popen(proc) else None
+    )
+    stdout_bytes = bytearray()
+    stderr_bytes = bytearray()
+    stdout_state = {"bytes": 0}
+    stderr_state = {"bytes": 0}
+    threads = []
+    timed_out = False
+    try:
+        readers = [
+            owned_runtime_thread(
+                target=_drain_pipe,
+                args=(proc.stdout, stdout_bytes, stdout_state, MAX_OUTPUT),
+                daemon=True,
+            ),
+            owned_runtime_thread(
+                target=_drain_pipe,
+                args=(proc.stderr, stderr_bytes, stderr_state, MAX_OUTPUT),
+                daemon=True,
+            ),
+        ]
+        if stdin_bytes and proc.stdin is not None:
+            readers.append(
+                owned_runtime_thread(
+                    target=_write_stdin,
+                    args=(proc.stdin, stdin_bytes),
+                    daemon=True,
+                )
+            )
+        for thread in readers:
+            thread.start()
+            threads.append(thread)
+        if tree is not None:
+            outcome = tree.wait(timeout=timeout, sweep_on_exit=True, grace_seconds=0.2)
+            timed_out = outcome.state is process_tree.TreeState.TIMED_OUT
+        else:
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                    proc.wait(timeout=5)
+    except BaseException:
+        if tree is not None:
+            with contextlib.suppress(OSError):
+                tree.terminate(grace_seconds=0.2, kill_wait_seconds=5.0)
+        else:
+            with contextlib.suppress(OSError):
+                proc.kill()
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+        raise
+    finally:
+        if tree is not None:
+            with contextlib.suppress(OSError):
+                tree.close()
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    stream.close()
+        for thread in threads:
+            thread.join(timeout=2)
+    stdout = _format_captured_stream(stdout_bytes, stdout_state["bytes"], MAX_OUTPUT)
+    stderr = _format_captured_stream(stderr_bytes, stderr_state["bytes"], MAX_OUTPUT)
+    if timed_out:
+        return {
+            "ok": False, "returncode": -1, "timed_out": True,
+            "elapsed_ms": int((time.time() - started) * 1000),
+            "stdout": stdout,
+            "stderr": stderr,
+            "command": [str(c) for c in cmd],
+        }
     return {
         "ok": proc.returncode == 0,
         "returncode": proc.returncode,
         "timed_out": False,
         "elapsed_ms": int((time.time() - started) * 1000),
-        "stdout": _trim(proc.stdout.decode("utf-8", errors="replace")),
-        "stderr": _trim(proc.stderr.decode("utf-8", errors="replace")),
+        "stdout": stdout,
+        "stderr": stderr,
         "command": [str(c) for c in cmd],
     }
 
@@ -908,21 +1028,63 @@ def _detect_package_manager(root):
     return "pip"
 
 
+_SAFE_PACKAGE_SPEC_RE = re.compile(r"^[A-Za-z0-9@][A-Za-z0-9._/@:^~<>=!,+\-\[\]*]*$")
+_DISALLOWED_PACKAGE_PREFIXES = ("file:", "git+", "hg+", "svn+", "bzr+", "http:", "https:", "ssh:")
+
+
+def _parse_and_validate_packages(packages_json, *, allow_empty=False):
+    """Parse and validate a JSON list of safe package specifiers (no flag/URL/path injection)."""
+    if allow_empty and (packages_json is None or str(packages_json).strip() == ""):
+        return [], None
+    try:
+        packages = json.loads(packages_json)
+    except (json.JSONDecodeError, TypeError):
+        return None, "invalid JSON in packages_json"
+    if not isinstance(packages, list) or (not allow_empty and not packages):
+        return None, "packages_json must be a non-empty JSON array of package names"
+    cleaned = []
+    for item in packages:
+        if not isinstance(item, str):
+            return None, "each package in packages_json must be a non-empty string"
+        spec = item.strip()
+        if not spec or spec != item:
+            return None, "invalid package specifier: %r" % item
+        if spec.startswith("-"):
+            return None, "package specifier must not start with '-': %r" % spec
+        lowered = spec.lower()
+        if (
+            "://" in spec
+            or lowered.startswith(_DISALLOWED_PACKAGE_PREFIXES)
+            or ".." in spec
+            or "\\" in spec
+            or spec.startswith("/")
+            or any(ch in spec for ch in ("\0", "\r", "\n"))
+            or re.search(r"\s", spec)
+            or not _SAFE_PACKAGE_SPEC_RE.fullmatch(spec)
+        ):
+            return None, "unsafe package specifier: %r" % spec
+        cleaned.append(spec)
+    return cleaned, None
+
+
 def dependency_add(root=".", packages_json="[]", dev=False, timeout=60, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
-    try:
-        packages = json.loads(packages_json)
-        if not isinstance(packages, list) or not packages:
-            return {"ok": False, "error": "packages_json must be a non-empty JSON array of package names"}
-    except json.JSONDecodeError:
-        return {"ok": False, "error": "invalid JSON in packages_json"}
+    packages, err = _parse_and_validate_packages(packages_json, allow_empty=False)
+    if err:
+        return {"ok": False, "error": err}
+    live = _live_refusal("dependency_add", root)
+    if live:
+        return live
+    refused = protected_write_scope.scope_refusal("dependency_add", root, root)
+    if refused:
+        return {"ok": False, "error": refused}
 
     mgr = _detect_package_manager(root)
     if mgr == "pip":
-        cmd = [sys.executable, "-m", "pip", "install"] + packages
+        cmd = [sys.executable, "-m", "pip", "install", "--"] + packages
     elif mgr == "uv":
-        cmd = ["uv", "add"] + (["--dev"] if dev else []) + packages
+        cmd = ["uv", "add"] + (["--dev"] if dev else []) + ["--"] + packages
     elif mgr == "npm":
         cmd = ["npm", "install"] + (["--save-dev"] if dev else []) + packages
     elif mgr == "pnpm":
@@ -932,7 +1094,7 @@ def dependency_add(root=".", packages_json="[]", dev=False, timeout=60, extra_ro
     elif mgr == "bun":
         cmd = ["bun", "add"] + (["-d"] if dev else []) + packages
     elif mgr == "cargo":
-        cmd = ["cargo", "add"] + (["--dev"] if dev else []) + packages
+        cmd = ["cargo", "add"] + (["--dev"] if dev else []) + ["--"] + packages
     elif mgr == "go":
         cmd = ["go", "get"] + packages
     elif mgr == "dotnet":
@@ -940,7 +1102,7 @@ def dependency_add(root=".", packages_json="[]", dev=False, timeout=60, extra_ro
     elif mgr in ("dart", "flutter"):
         cmd = [mgr, "pub", "add"] + ([f"dev:{p}" for p in packages] if dev else packages)
     elif mgr == "composer":
-        cmd = ["composer", "require"] + (["--dev"] if dev else []) + packages
+        cmd = ["composer", "require"] + (["--dev"] if dev else []) + ["--"] + packages
     elif mgr == "bundler":
         cmd = ["bundle", "add"] + packages
     else:
@@ -955,18 +1117,21 @@ def dependency_add(root=".", packages_json="[]", dev=False, timeout=60, extra_ro
 def dependency_remove(root=".", packages_json="[]", timeout=60, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
-    try:
-        packages = json.loads(packages_json)
-        if not isinstance(packages, list) or not packages:
-            return {"ok": False, "error": "packages_json must be a non-empty JSON array"}
-    except json.JSONDecodeError:
-        return {"ok": False, "error": "invalid JSON"}
+    packages, err = _parse_and_validate_packages(packages_json, allow_empty=False)
+    if err:
+        return {"ok": False, "error": err}
+    live = _live_refusal("dependency_remove", root)
+    if live:
+        return live
+    refused = protected_write_scope.scope_refusal("dependency_remove", root, root)
+    if refused:
+        return {"ok": False, "error": refused}
 
     mgr = _detect_package_manager(root)
     if mgr == "pip":
-        cmd = [sys.executable, "-m", "pip", "uninstall", "-y"] + packages
+        cmd = [sys.executable, "-m", "pip", "uninstall", "-y", "--"] + packages
     elif mgr == "uv":
-        cmd = ["uv", "remove"] + packages
+        cmd = ["uv", "remove", "--"] + packages
     elif mgr == "npm":
         cmd = ["npm", "uninstall"] + packages
     elif mgr == "pnpm":
@@ -976,13 +1141,13 @@ def dependency_remove(root=".", packages_json="[]", timeout=60, extra_roots=""):
     elif mgr == "bun":
         cmd = ["bun", "remove"] + packages
     elif mgr == "cargo":
-        cmd = ["cargo", "remove"] + packages
+        cmd = ["cargo", "remove", "--"] + packages
     elif mgr == "dotnet":
         cmd = ["dotnet", "remove", "package", packages[0]]
     elif mgr in ("dart", "flutter"):
         cmd = [mgr, "pub", "remove"] + packages
     elif mgr == "composer":
-        cmd = ["composer", "remove"] + packages
+        cmd = ["composer", "remove", "--"] + packages
     elif mgr == "bundler":
         cmd = ["bundle", "remove"] + packages
     else:
@@ -997,17 +1162,20 @@ def dependency_remove(root=".", packages_json="[]", timeout=60, extra_roots=""):
 def dependency_update(root=".", packages_json="[]", timeout=120, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
-    try:
-        packages = json.loads(packages_json)
-        if not isinstance(packages, list):
-            packages = []
-    except json.JSONDecodeError:
-        packages = []
+    packages, err = _parse_and_validate_packages(packages_json, allow_empty=True)
+    if err:
+        return {"ok": False, "error": err}
+    live = _live_refusal("dependency_update", root)
+    if live:
+        return live
+    refused = protected_write_scope.scope_refusal("dependency_update", root, root)
+    if refused:
+        return {"ok": False, "error": refused}
 
     mgr = _detect_package_manager(root)
     if mgr == "pip":
         if packages:
-            cmd = [sys.executable, "-m", "pip", "install", "--upgrade"] + packages
+            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "--"] + packages
         else:
             cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "-r", "requirements.txt"]
     elif mgr == "uv":
@@ -1027,7 +1195,7 @@ def dependency_update(root=".", packages_json="[]", timeout=120, extra_roots="")
     elif mgr in ("dart", "flutter"):
         cmd = [mgr, "pub", "upgrade"] + packages
     elif mgr == "composer":
-        cmd = ["composer", "update"] + packages
+        cmd = ["composer", "update"] + (["--"] + packages if packages else [])
     elif mgr == "bundler":
         cmd = ["bundle", "update"] + packages
     elif mgr == "mix":
@@ -1132,18 +1300,34 @@ def git_commit(root=".", message="", paths_json="[]", all_tracked=False, timeout
     return result
 
 
+def _invalid_git_ref_error(value, label):
+    if not isinstance(value, str):
+        return "invalid git %s: must be a string" % label
+    text = value.strip()
+    if text.startswith("-") or any(ch in text for ch in ("\0", "\r", "\n")):
+        return "invalid git %s: %r (must not start with '-')" % (label, text)
+    return None
+
+
 @_guarded_git_mutation("git_branch")
 def git_branch(root=".", name="", checkout=True, base="", timeout=10, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not name:
         return {"ok": False, "error": "branch name is required"}
+    err = _invalid_git_ref_error(name, "branch name")
+    if err:
+        return {"ok": False, "error": err}
+    if base:
+        err = _invalid_git_ref_error(base, "base ref")
+        if err:
+            return {"ok": False, "error": err}
     refused = _live_refusal("git_branch", root)
     if refused:
         return refused
     if checkout:
         cmd = ["checkout", "-b", name]
     else:
-        cmd = ["branch", name]
+        cmd = ["branch", "--", name]
     if base:
         cmd.append(base)
     return _run_git(root, cmd, timeout=timeout)
@@ -1154,6 +1338,9 @@ def git_checkout(root=".", ref="", timeout=10, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not ref:
         return {"ok": False, "error": "ref is required (branch name, tag, or commit)"}
+    err = _invalid_git_ref_error(ref, "ref")
+    if err:
+        return {"ok": False, "error": err}
     refused = _live_refusal("git_checkout", root)
     if refused:
         return refused
@@ -1223,15 +1410,18 @@ def git_tag(root=".", name="", message="", delete=False, timeout=10, extra_roots
     root = _resolve_root(root, extra_roots)
     if not name:
         return {"ok": False, "error": "tag name is required"}
+    err = _invalid_git_ref_error(name, "tag name")
+    if err:
+        return {"ok": False, "error": err}
     refused = _live_refusal("git_tag", root)
     if refused:
         return refused
     if delete:
-        cmd = ["tag", "-d", name]
+        cmd = ["tag", "-d", "--", name]
     elif message:
-        cmd = ["tag", "-a", name, "-m", message]
+        cmd = ["tag", "-a", "-m", message, "--", name]
     else:
-        cmd = ["tag", name]
+        cmd = ["tag", "--", name]
     return _run_git(root, cmd, timeout=timeout)
 
 
@@ -1240,6 +1430,9 @@ def git_merge(root=".", branch="", no_ff=True, message="", timeout=30, extra_roo
     root = _resolve_root(root, extra_roots)
     if not branch:
         return {"ok": False, "error": "branch name is required"}
+    err = _invalid_git_ref_error(branch, "branch name")
+    if err:
+        return {"ok": False, "error": err}
     cmd = ["merge"]
     if no_ff:
         cmd.append("--no-ff")
@@ -1261,6 +1454,12 @@ def git_cherry_pick(root=".", commits_json="[]", timeout=30, extra_roots=""):
             return {"ok": False, "error": "commits_json must be a non-empty JSON array of commit SHAs"}
     except json.JSONDecodeError:
         return {"ok": False, "error": "invalid JSON"}
+    for commit in commits:
+        if not isinstance(commit, str) or not commit.strip():
+            return {"ok": False, "error": "each commit in commits_json must be a non-empty string"}
+        err = _invalid_git_ref_error(commit, "commit")
+        if err:
+            return {"ok": False, "error": err}
     refused = _live_refusal("git_cherry_pick", root)
     if refused:
         return refused
