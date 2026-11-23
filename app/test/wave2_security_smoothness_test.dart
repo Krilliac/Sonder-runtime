@@ -5,7 +5,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sonder_runtime/account_session.dart';
 import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/chat/backend.dart';
 import 'package:sonder_runtime/chat/connection.dart';
