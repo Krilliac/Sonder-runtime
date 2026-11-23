@@ -514,13 +514,18 @@ def generate_chat_image(
 ) -> GeneratedImageResult:
     """Generate an image and format it as an inline Markdown ``data:`` reply."""
     clean_prompt = re.sub(r"\s+", " ", str(prompt or "").strip()) or "a random image"
+    effective_prompt = (
+        f"{random.choice(_RANDOM_STYLES)}, vivid lighting, rich detail"
+        if _RANDOM_PROMPT_RE.match(clean_prompt)
+        else clean_prompt
+    )
     backend = discover_image_backend(
         model_override=model_override,
         ollama_endpoints=ollama_endpoints,
     )
     out_dir = _output_dir(state_home)
     out_dir.mkdir(parents=True, exist_ok=True)
-    slug = _slug_from_prompt(clean_prompt)
+    slug = _slug_from_prompt(effective_prompt)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     nonce = secrets.token_hex(3)
 
@@ -533,24 +538,24 @@ def generate_chat_image(
 
     if backend.kind == "openai_api":
         try:
-            raw_bytes, mime = _call_openai_image_api(backend, clean_prompt, timeout=timeout)
+            raw_bytes, mime = _call_openai_image_api(backend, effective_prompt, timeout=timeout)
         except Exception as err:
             logger.warning("OpenAI-compatible image API failed (%s); falling back to assetgen", err)
             used_fallback = True
             fallback_note = f"Image API `{backend.model}` failed ({type(err).__name__}); used local raster fallback."
             active_kind = "assetgen"
             active_model = "sonder-assetgen"
-            raw_bytes, mime = _render_assetgen_png(clean_prompt, out_dir / f"{slug}-{stamp}-{nonce}.png")
+            raw_bytes, mime = _render_assetgen_png(effective_prompt, out_dir / f"{slug}-{stamp}-{nonce}.png")
     elif backend.kind == "ollama":
         try:
-            raw_bytes, mime = _call_ollama_image(backend, clean_prompt, timeout=timeout)
+            raw_bytes, mime = _call_ollama_image(backend, effective_prompt, timeout=timeout)
         except Exception as err:
             logger.warning("Ollama image model %r failed (%s); falling back to assetgen", backend.model, err)
             used_fallback = True
             fallback_note = f"Ollama image model `{backend.model}` failed ({type(err).__name__}); used local raster fallback."
             active_kind = "assetgen"
             active_model = "sonder-assetgen"
-            raw_bytes, mime = _render_assetgen_png(clean_prompt, out_dir / f"{slug}-{stamp}-{nonce}.png")
+            raw_bytes, mime = _render_assetgen_png(effective_prompt, out_dir / f"{slug}-{stamp}-{nonce}.png")
     else:
         used_fallback = True
         fallback_note = (
@@ -559,7 +564,7 @@ def generate_chat_image(
             "`SONDER_IMAGE_MODEL` / `SONDER_IMAGE_API_URL` and image prompts "
             "will automatically route to it."
         )
-        raw_bytes, mime = _render_assetgen_png(clean_prompt, out_dir / f"{slug}-{stamp}-{nonce}.png")
+        raw_bytes, mime = _render_assetgen_png(effective_prompt, out_dir / f"{slug}-{stamp}-{nonce}.png")
 
     raw_bytes, mime = _fit_inline_budget(raw_bytes, mime)
     ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}.get(mime, "png")
@@ -569,7 +574,7 @@ def generate_chat_image(
 
     width, height = _sniff_dimensions(raw_bytes)
     b64 = base64.b64encode(raw_bytes).decode("ascii")
-    alt = _clean_alt_text(clean_prompt)
+    alt = _clean_alt_text(effective_prompt)
     dims = f"{width}x{height}" if width > 0 and height > 0 else f"{len(raw_bytes):,} bytes"
 
     lines = [
