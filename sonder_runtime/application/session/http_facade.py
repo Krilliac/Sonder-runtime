@@ -53,6 +53,10 @@ class HttpSessionFacade:
             raise ValueError("max_replay_events must be between 1 and 100000")
         self._query = SessionQueryEngine(repository, max_page_size=max_page_size,
                                           max_scan=max_scan)
+        self._replay_query = SessionQueryEngine(
+            repository, max_page_size=max_page_size,
+            max_scan=max(max_scan, max_replay_events),
+        )
         self._repository = repository
         self._max_page_size = max_page_size
         self._transcript_max_bytes = transcript_max_bytes
@@ -152,7 +156,7 @@ class HttpSessionFacade:
         return self._ok(document)
 
     TITLE_CHARS = 80
-    _TITLE_SCAN_EVENTS = 16
+    _TITLE_SCAN_EVENTS = 64
 
     def list_sessions(self, *, limit: int = 20, after: str | None = None) -> HttpSessionResult:
         """One page of sessions, newest activity first, each with a redacted title.
@@ -271,7 +275,7 @@ class HttpSessionFacade:
             result = crash_safe_replay(self._repository, session_id, max_events=bound)
             # Use the export primitive for the public projection so transcript
             # content receives the same recursive redaction as normal reads.
-            exported = self._query.export_events(session_id, max_events=bound)
+            exported = self._replay_query.export_events(session_id, max_events=bound)
         except (IntegrityFailure, InvalidInput, QueryExportError):
             return self._error(409 if isinstance(session_id, str) and session_id.strip() else 400,
                                "session_replay_unavailable")

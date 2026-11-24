@@ -152,9 +152,15 @@ def _guarded_destination(
 ) -> Path:
     if not str(path or "").strip():
         raise ValueError("archive destination is required")
-    _reject_linked_path(path, "archive destination parent", parent_only=True)
+    cleaned = file_ops._reject_network_path(str(path))
+    file_ops._require_plain_name_spelling(cleaned)
+    _reject_linked_path(cleaned, "archive destination parent", parent_only=True)
+    requested = _requested_path(cleaned)
+    normalized = Path(os.path.normpath(str(requested)))
+    if _is_reparse(requested) or _is_reparse(normalized):
+        raise PermissionError("archive destination may not be a symlink or junction")
     destination = file_ops.resolve_repository_read_path(
-        path, allow_workspace_root=False, reject_sensitive=True,
+        cleaned, allow_workspace_root=False, reject_sensitive=True,
         extra_roots=extra_roots,
     )
     file_ops._require_mutation_access(destination, developer_authorized)
@@ -314,8 +320,18 @@ def _validate_entries(entries: list[dict], limits: dict, source_bytes: int) -> N
     folded = {}
     folded_types = {}
     folded_components = {}
+    source_indices = {}
     for row in entries:
         path = row["path"]
+        source_index = row.get("source_index")
+        if source_index is not None:
+            previous_path = source_indices.get(source_index)
+            if previous_path is not None:
+                raise ArchiveRejected(
+                    "duplicate archive entry header offset: %s and %s"
+                    % (previous_path, path)
+                )
+            source_indices[source_index] = path
         if path in exact:
             raise ArchiveRejected("duplicate archive entry path: %s" % path)
         key = _collision_key(path)
@@ -407,7 +423,7 @@ def _plan(source: Path, limits: dict, *, deadline: float | None = None) -> dict:
         raise ArchiveRejected("archive prevalidation exceeded time ceiling")
     entries = []
     try:
-        _plan_entries(source, kind, limits, deadline, entries)
+        _plan_entries(source, kind, limits, deadline, entries, source_bytes=signature[0])
     except (TarMetadataLimitError, ZipCentralDirectoryLimitError) as exc:
         # Parser-bound violations are policy rejections, not corrupt input.
         raise ArchiveRejected(str(exc)) from None
@@ -425,6 +441,7 @@ def _plan(source: Path, limits: dict, *, deadline: float | None = None) -> dict:
 
 def _plan_entries(
     source: Path, kind: str, limits: dict, deadline: float, entries: list,
+    *, source_bytes: int | None = None,
 ) -> None:
     if kind == "zip":
         # The end-of-central-directory record is read first, so the entry
@@ -442,14 +459,18 @@ def _plan_entries(
                     raise ArchiveRejected("archive prevalidation exceeded time ceiling")
                 entries.append(_zip_entry(info, limits))
     else:
+        compressed_source = max(
+            1, source.stat().st_size if source_bytes is None else int(source_bytes),
+        )
         with open_bounded(source) as archive:
             if archive.pax_headers:
                 raise ArchiveRejected("TAR global PAX special metadata is not allowed")
             # Reaching the next header of a compressed TAR decompresses the
-            # previous payload, so the aggregate *payload* budget is checked
-            # per member rather than after every header was read.  Header
-            # metadata (long names, PAX records) is bounded separately by
-            # open_bounded before tarfile reads it.
+            # previous payload, so both the aggregate *payload* budget and the
+            # compression-ratio ceiling are checked per member rather than
+            # after every header was read.  Header metadata (long names, PAX
+            # records) is bounded separately by open_bounded before tarfile
+            # reads it.
             walked_bytes = 0
             for info in archive:
                 if time.monotonic() > deadline:
@@ -461,6 +482,8 @@ def _plan_entries(
                 walked_bytes += entry["bytes"]
                 if walked_bytes > limits["max_total_bytes"]:
                     raise ArchiveRejected("archive exceeds aggregate byte ceiling")
+                if walked_bytes and float(walked_bytes) / float(compressed_source) > limits["max_ratio"]:
+                    raise ArchiveRejected("archive exceeds aggregate compression-ratio ceiling")
 
 
 def list_archive(

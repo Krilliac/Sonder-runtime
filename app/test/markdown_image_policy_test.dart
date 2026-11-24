@@ -4,6 +4,7 @@
 // names the URL.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sonder_runtime/models.dart';
 import 'package:sonder_runtime/theme.dart';
 import 'package:sonder_runtime/workspace_ui.dart';
 
@@ -52,6 +53,16 @@ void main() {
     expect(providers, hasLength(1));
     expect(providers.single, isA<MemoryImage>());
     expect(find.byKey(const Key('markdown-image-blocked')), findsNothing);
+    expect(find.byKey(const Key('markdown-image-card')), findsOneWidget);
+    expect(find.byKey(const Key('markdown-image-zoom')), findsOneWidget);
+    expect(find.byKey(const Key('markdown-image-copy')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('markdown-image-zoom')));
+    await tester.pumpAndSettle();
+    expect(find.byType(InteractiveViewer), findsOneWidget);
+    await tester.tap(find.byTooltip('Close'));
+    await tester.pumpAndSettle();
+    expect(find.byType(InteractiveViewer), findsNothing);
   });
 
   test('the policy allows only bounded data: images', () {
@@ -62,5 +73,20 @@ void main() {
     expect(markdownImageAllowed(Uri.parse('file://host/share/a.png')), isFalse);
     final huge = 'data:image/png;base64,${'A' * (3 * 1024 * 1024)}';
     expect(markdownImageAllowed(Uri.parse(huge)), isFalse);
+  });
+
+  test('ChatMessage.toWire strips inline base64 data images while keeping local content',
+      () {
+    final hugeMd =
+        '![synthwave desert](data:image/png;base64,${'A' * 650000})\n\nGenerated via `sdxl-turbo`.';
+    final msg = ChatMessage(role: Role.assistant, content: hugeMd);
+    final wire = msg.toWire();
+    expect(wire['content'], isNot(contains('data:image/')));
+    expect(wire['content'], contains('[Generated image: synthwave desert]'));
+    expect(wire['content'], contains('Generated via `sdxl-turbo`.'));
+    expect(wire['content']!.length, lessThan(200));
+    // Local content & JSON cache remain intact so the UI keeps rendering the image.
+    expect(msg.content, equals(hugeMd));
+    expect(msg.toJson()['content'], equals(hugeMd));
   });
 }

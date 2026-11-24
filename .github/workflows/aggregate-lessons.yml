@@ -2,9 +2,9 @@
 #
 # This does NOT run or host the model — it only merges small, opt-in,
 # already-scrubbed lesson text files that users contributed under contrib/
-# (via contribute.py + a PR) into a single deduped community_lessons.jsonl
+# (via scripts/contribute.py + a PR) into a single deduped community_lessons.jsonl
 # at the repo root. Users then pull that file and merge it locally with
-# pull_community.py. No GPU, no network calls to any model, no secrets.
+# scripts/pull_community.py. No GPU, no network calls to any model, no secrets.
 name: aggregate-lessons
 
 on:

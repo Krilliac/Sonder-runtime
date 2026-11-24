@@ -25,7 +25,10 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-TASK_CLASSES = ("simple", "search", "code", "reasoning", "vision", "long_context")
+TASK_CLASSES = (
+    "simple", "search", "code", "reasoning", "vision", "long_context",
+    "security", "creative", "draft",
+)
 
 # Escalation reasons the caller may report to step up a tier.
 ESCALATION_REASONS = ("failed", "low_confidence", "empty_response", "explicit_hard")

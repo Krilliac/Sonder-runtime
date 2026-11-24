@@ -424,4 +424,125 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('unavailable'), findsOneWidget);
   });
+
+  testWidgets(
+      '8-tier bindings with tier_models, image_generation, and '
+      'security_floor_relaxed render cleanly', (tester) async {
+    final copied = _captureClipboard(tester);
+    final json = ecosystemJson(
+      provider: 'openai_compatible',
+      inference: inferenceStatusJson()
+        ..['models'] = ['astra-cyber-35b-a3b:latest']
+        ..['tier_models'] = {'security': 'astra-cyber-35b-a3b:latest'},
+    );
+    final providers = json['providers'] as Map<String, dynamic>;
+    providers['tier_providers'] = {
+      'fast': 'openai_compatible',
+      'general': 'openai_compatible',
+      'code': 'openai_compatible',
+      'reasoning': 'openai_compatible',
+      'vision': 'ollama',
+      'security': 'sonder_inference',
+      'creative': 'openai_compatible',
+      'draft': 'openai_compatible',
+    };
+    (providers['status'] as Map<String, dynamic>)['openai_compatible'] = {
+      'provider': 'openai_compatible',
+      'state': 'unknown',
+      'configured': true,
+      'base_url': 'http://127.0.0.1:18080',
+      'model': 'bonsai-27b-pq2',
+      'tier_models': {
+        'fast': 'bonsai-9b-mtp',
+        'general': 'bonsai-27b-pq2',
+        'code': 'bonsai-27b-pq2',
+        'reasoning': 'bonsai-27b-pq2',
+        'creative': 'bonsai-27b-pq2',
+        'draft': 'bonsai-4b-mtp',
+      },
+      'detail': 'configured (unprobed)',
+    };
+    json['image_generation'] = {
+      'configured': true,
+      'backend': 'openai_api',
+      'api_url': 'http://127.0.0.1:11440',
+      'model': 'sdxl-turbo',
+      'loopback': true,
+    };
+    json['model_tool_policy'] = {
+      'security_floor_relaxed': true,
+    };
+
+    final semantics = tester.ensureSemantics();
+    await _pump(tester,
+        reading: _reading(json), size: const Size(1000, 2400));
+
+    // All 8 tiers appear with their resolved per-tier models.
+    for (final tier in ecosystemTierNames) {
+      expect(find.byKey(Key('ecosystem-tier-$tier')), findsOneWidget,
+          reason: tier);
+    }
+    expect(
+        find.bySemanticsLabel(
+            'Tier fast uses OpenAI-compatible (bonsai-9b-mtp)'),
+        findsOneWidget);
+    expect(
+        find.bySemanticsLabel(
+            'Tier draft uses OpenAI-compatible (bonsai-4b-mtp)'),
+        findsOneWidget);
+    expect(
+        find.bySemanticsLabel(
+            'Tier security uses Sonder Inference (astra-cyber-35b-a3b:latest)'),
+        findsOneWidget);
+
+    // Image generation section shows configured backend/model and copies URL.
+    expect(find.byKey(const Key('ecosystem-image-generation')), findsOneWidget);
+    expect(find.text('sdxl-turbo on 127.0.0.1:11440'), findsOneWidget);
+    expect(find.text('sdxl-turbo'), findsOneWidget);
+    expect(find.text('http://127.0.0.1:11440'), findsOneWidget);
+    expect(find.text('OpenAI-compatible image API'), findsOneWidget);
+
+    // Security-floor relaxed badge and restrained warning note.
+    expect(find.byKey(const Key('ecosystem-model-tool-policy')), findsOneWidget);
+    expect(find.byKey(const Key('ecosystem-security-floor-badge')),
+        findsOneWidget);
+    expect(find.text('FLOOR RELAXED'), findsOneWidget);
+    expect(find.text(securityFloorRelaxedNote), findsOneWidget);
+    semantics.dispose();
+
+    await tester.tap(find.byTooltip('Copy image endpoint'));
+    await tester.pump();
+    expect(copied.single, 'http://127.0.0.1:11440');
+
+    // Also verify narrow phone width + light theme renders with zero overflow.
+    await _pump(tester,
+        reading: _reading(json),
+        theme: SonderTheme.light,
+        size: const Size(390, 2800));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'absent/false security_floor_relaxed and absent image_generation stay '
+      'hidden; unconfigured image_generation reads off', (tester) async {
+    await _pump(tester, reading: _reading(ecosystemReadySynthetic()));
+    expect(find.byKey(const Key('ecosystem-image-generation')), findsNothing);
+    expect(find.byKey(const Key('ecosystem-model-tool-policy')), findsNothing);
+    expect(find.text('FLOOR RELAXED'), findsNothing);
+
+    final unconfigured = ecosystemReadySynthetic()
+      ..['image_generation'] = {
+        'configured': false,
+        'backend': null,
+        'api_url': null,
+        'model': null,
+      }
+      ..['model_tool_policy'] = {'security_floor_relaxed': false};
+    await _pump(tester, reading: _reading(unconfigured));
+    expect(find.byKey(const Key('ecosystem-model-tool-policy')), findsNothing);
+    final imageRow = find.byKey(const Key('ecosystem-image-state'));
+    expect(find.descendant(of: imageRow, matching: find.text('off')),
+        findsOneWidget);
+    expect(find.text('No dedicated image backend configured.'), findsOneWidget);
+  });
 }

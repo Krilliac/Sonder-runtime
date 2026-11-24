@@ -490,11 +490,39 @@ class ChatMessage {
     );
   }
 
+  static final RegExp _mdDataImageRe = RegExp(
+    r'!\[([^\]]*)\]\(\s*data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+\)',
+    caseSensitive: false,
+  );
+  static final RegExp _bareDataImageRe = RegExp(
+    r'data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+',
+    caseSensitive: false,
+  );
+
+  /// Replaces inline base64 image URIs with a short placeholder for wire history
+  /// so prior generated images never blow past the HTTP body limit or pollute
+  /// text-LLM context windows while keeping the full image in local UI state.
+  static String stripInlineDataImages(String text) {
+    if (!text.contains('data:image/')) return text;
+    var cleaned = text.replaceAllMapped(_mdDataImageRe, (m) {
+      final alt = (m.group(1) ?? '').trim();
+      return alt.isEmpty ? '[Generated image]' : '[Generated image: $alt]';
+    });
+    if (cleaned.contains('data:image/')) {
+      cleaned = cleaned.replaceAll(_bareDataImageRe, '[inline image]');
+    }
+    return cleaned;
+  }
+
   /// Wire format for the OpenAI-compatible /v1/chat/completions endpoint.
   ///
-  /// Intentionally omits [reasoning]: replaying a model's own thoughts back to
-  /// it as history is not something the server asked for.
-  Map<String, String> toWire() => {'role': role.name, 'content': content};
+  /// Intentionally omits [reasoning] and strips inline base64 `data:image/`
+  /// payloads so replaying chat history never exceeds HTTP body caps or bloats
+  /// the text-LLM context window.
+  Map<String, String> toWire() => {
+        'role': role.name,
+        'content': stripInlineDataImages(content),
+      };
 
   Map<String, Object> toJson() => {
         'role': role.name,

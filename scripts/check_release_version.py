@@ -217,8 +217,11 @@ def check_repository(
     require_release: bool = False,
 ) -> dict[str, Any]:
     root = root.resolve()
+    version_path = root / "runtime" / "sonder_version.py"
+    if not version_path.is_file():
+        version_path = root / "sonder_version.py"
     return evaluate(
-        parse_runtime_version(root / "sonder_version.py"),
+        parse_runtime_version(version_path),
         parse_app_version(root / "app/pubspec.yaml"),
         tag_raw=tag,
         revision=revision or git_revision(root),

@@ -26,7 +26,7 @@ CLIENT_DELEGATABLE_TOOL_DEFINITIONS: tuple[ChatToolDefinition, ...] = (
         name="run_code",
         description=(
             "Execute a short standalone code snippet on the user's client machine "
-            "(python, js, powershell, bash, cpp, csharp) and return stdout/stderr."
+            "(python, js, powershell, bash) and return stdout/stderr."
         ),
         parameters={
             "type": "object",
@@ -34,7 +34,7 @@ CLIENT_DELEGATABLE_TOOL_DEFINITIONS: tuple[ChatToolDefinition, ...] = (
                 "code": {"type": "string", "description": "Source code to execute."},
                 "language": {
                     "type": "string",
-                    "enum": ["python", "js", "powershell", "bash", "cpp", "csharp"],
+                    "enum": ["python", "js", "powershell", "bash"],
                     "default": "python",
                 },
                 "stdin": {"type": "string", "default": ""},
@@ -266,7 +266,7 @@ _SLASH_ALIASES: dict[str, str] = {
 }
 
 _RUN_CODE_LANGUAGES: frozenset[str] = frozenset({
-    "python", "py", "js", "javascript", "node", "powershell", "ps1", "bash", "sh", "cpp", "c++", "csharp", "cs",
+    "python", "py", "js", "javascript", "node", "powershell", "ps1", "bash", "sh",
 })
 _LANG_CANONICAL: dict[str, str] = {
     "py": "python",
@@ -274,8 +274,6 @@ _LANG_CANONICAL: dict[str, str] = {
     "node": "js",
     "ps1": "powershell",
     "sh": "bash",
-    "c++": "cpp",
-    "cs": "csharp",
 }
 
 
@@ -326,7 +324,7 @@ def _parse_run_code_arg(arg: str) -> dict[str, Any]:
         if body_lines and body_lines[-1].strip() == "```":
             body_lines = body_lines[:-1]
         language = _LANG_CANONICAL.get(lang_tag, lang_tag) or "python"
-        if language not in {"python", "js", "powershell", "bash", "cpp", "csharp"}:
+        if language not in {"python", "js", "powershell", "bash"}:
             language = "python"
         return {"code": "\n".join(body_lines), "language": language}
     first_line, _, rest = text.partition("\n")

@@ -49,7 +49,7 @@ _REFUSED = [
 @pytest.mark.parametrize("rel_path", _REFUSED)
 @pytest.mark.parametrize("mode", ["acceptEdits", "bypass"])
 def test_write_to_credential_path_is_refused(tmp_path: Path, rel_path: str, mode: str):
-    policy = ClientAgentPolicy(workspace_root=tmp_path, mode="manual")
+    policy = ClientAgentPolicy(workspace_root=tmp_path, mode="manual", can_bypass=(mode == "bypass"))
     policy.set_mode(mode, confirm_bypass=True)
 
     res = execute_client_tool("file_write", {"path": rel_path, "content": "x\n"}, policy=policy)
@@ -119,7 +119,7 @@ def test_credential_path_is_refused_when_the_root_is_part_of_the_store(
 ):
     root = tmp_path / "home" / root_rel
     root.mkdir(parents=True)
-    policy = ClientAgentPolicy(workspace_root=root, mode="manual")
+    policy = ClientAgentPolicy(workspace_root=root, mode="manual", can_bypass=(mode == "bypass"))
     policy.set_mode(mode, confirm_bypass=True)
 
     res = execute_client_tool("file_write", {"path": rel_path, "content": "x\n"}, policy=policy)

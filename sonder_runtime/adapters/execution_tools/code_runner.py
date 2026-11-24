@@ -13,6 +13,7 @@ import json
 import locale
 import logging
 import ntpath
+import re
 import shutil
 import signal
 import subprocess
@@ -50,13 +51,18 @@ SUPPORTED_LANGUAGES = {
     "powershell": {
         "aliases": {"powershell", "pwsh", "ps1"},
         "suffix": ".ps1",
-        "cmd": lambda path: [_powershell_exe(), "-NoProfile", "-File", path],
+        "cmd": lambda path: [_powershell_exe(), "-NoProfile", "-NonInteractive", "-File", path],
         "missing": "PowerShell executable not found on PATH",
     },
     "cpp": {
         "aliases": {"cpp", "c++", "cc", "cxx"},
         "suffix": ".cpp",
         "missing": "C++ compiler not found (tried g++, clang++, cl, and Visual Studio vcvars64.bat)",
+    },
+    "c": {
+        "aliases": {"c", "c11", "c99"},
+        "suffix": ".c",
+        "missing": "C compiler not found (tried gcc, clang, cl, and Visual Studio vcvars64.bat)",
     },
     "csharp": {
         "aliases": {"csharp", "cs", "c#"},
@@ -125,6 +131,107 @@ SUPPORTED_LANGUAGES = {
         "aliases": {"rust", "rs"},
         "suffix": ".rs",
         "missing": "rustc not found on PATH",
+    },
+    "dart": {
+        "aliases": {"dart"},
+        "suffix": ".dart",
+        "cmd": lambda path: ["dart", "run", path],
+        "missing": "dart SDK not found on PATH",
+    },
+    "zig": {
+        "aliases": {"zig"},
+        "suffix": ".zig",
+        "cmd": lambda path: ["zig", "run", path],
+        "missing": "zig compiler not found on PATH",
+    },
+    "kotlin": {
+        "aliases": {"kotlin", "kt"},
+        "suffix": ".kt",
+        "missing": "kotlinc/kotlin toolchain not found on PATH",
+    },
+    "swift": {
+        "aliases": {"swift"},
+        "suffix": ".swift",
+        "cmd": lambda path: ["swift", path],
+        "missing": "swift toolchain not found on PATH",
+    },
+    "elixir": {
+        "aliases": {"elixir", "ex", "exs"},
+        "suffix": ".exs",
+        "cmd": lambda path: ["elixir", path],
+        "missing": "elixir executable not found on PATH",
+    },
+    "scala": {
+        "aliases": {"scala"},
+        "suffix": ".scala",
+        "cmd": lambda path: ["scala", path],
+        "missing": "scala executable not found on PATH",
+    },
+    "haskell": {
+        "aliases": {"haskell", "hs"},
+        "suffix": ".hs",
+        "cmd": lambda path: ["runghc", path],
+        "missing": "runghc (GHC Haskell) not found on PATH",
+    },
+    "julia": {
+        "aliases": {"julia", "jl"},
+        "suffix": ".jl",
+        "cmd": lambda path: ["julia", path],
+        "missing": "julia executable not found on PATH",
+    },
+    "nim": {
+        "aliases": {"nim"},
+        "suffix": ".nim",
+        "cmd": lambda path: ["nim", "c", "-r", "--hints:off", "--verbosity:0", path],
+        "missing": "nim compiler not found on PATH",
+    },
+    "sql": {
+        "aliases": {"sql", "sqlite", "sqlite3"},
+        "suffix": ".sql",
+        "cmd": lambda path: [
+            sys.executable, "-c",
+            (
+                "import sqlite3, sys\n"
+                "sql = open(sys.argv[1], encoding='utf-8').read()\n"
+                "con = sqlite3.connect(':memory:')\n"
+                "cur = con.cursor()\n"
+                "stmts, buf, in_s, in_d, i, n = [], [], False, False, 0, len(sql)\n"
+                "while i < n:\n"
+                "    ch = sql[i]\n"
+                "    if ch == \"'\" and not in_d:\n"
+                "        if in_s and i + 1 < n and sql[i + 1] == \"'\":\n"
+                "            buf.append(\"''\"); i += 2; continue\n"
+                "        in_s = not in_s\n"
+                "    elif ch == '\"' and not in_s:\n"
+                "        in_d = not in_d\n"
+                "    elif ch == ';' and not in_s and not in_d:\n"
+                "        s = ''.join(buf).strip()\n"
+                "        if s: stmts.append(s)\n"
+                "        buf = []; i += 1; continue\n"
+                "    buf.append(ch); i += 1\n"
+                "tail = ''.join(buf).strip()\n"
+                "if tail: stmts.append(tail)\n"
+                "for s in stmts:\n"
+                "    cur.execute(s)\n"
+                "    if cur.description:\n"
+                "        cols = [d[0] for d in cur.description]\n"
+                "        rows = cur.fetchall()\n"
+                "        print(' | '.join(cols))\n"
+                "        print('-+-'.join('-' * max(3, len(c)) for c in cols))\n"
+                "        for r in rows:\n"
+                "            print(' | '.join('NULL' if v is None else str(v) for v in r))\n"
+                "con.commit()\n"
+                "con.close()\n"
+            ),
+            path,
+        ],
+        "missing": "python sqlite3 runtime not available",
+    },
+    "batch": {
+        "aliases": {"batch", "bat", "cmd"},
+        "suffix": ".bat",
+        "cmd": lambda path: ["cmd", "/d", "/c", path],
+        "missing": "cmd.exe not available",
     },
 }
 
@@ -1191,8 +1298,11 @@ def _live_quota_message():
     )
 
 
+_UNSAFE_BATCH_PATH_RE = re.compile(r'[&|<>^%!()"\r\n]')
+
+
 def _bat_quote(value):
-    return '"%s"' % str(value).replace('"', "")
+    return '"%s"' % str(value).replace('"', "").replace("%", "%%")
 
 
 def _write_launcher(run_dir, lines):
@@ -1325,15 +1435,65 @@ def _find_visual_studio_vcvars():
 
 def _msvc_compile_result(vcvars, sources, exe, cwd, timeout, language):
     bat = os.path.join(cwd, "sonder_build_msvc.bat")
-    quoted_sources = " ".join('"%s"' % src for src in sources)
+    quoted_sources = " ".join(_bat_quote(src) for src in sources)
+    flags = "/nologo /std:c11" if language == "c" else "/nologo /EHsc /std:c++17"
     with open(bat, "w", encoding="utf-8") as f:
         f.write(
-            '@echo off\r\n'
-            'call "%s" >nul\r\n'
-            'cl /nologo /EHsc /std:c++17 /Fe:"%s" %s\r\n'
-            % (vcvars, exe, quoted_sources)
+            "@echo off\r\n"
+            "call %s >nul\r\n"
+            "cl %s /Fe:%s %s\r\n"
+            % (_bat_quote(vcvars), flags, _bat_quote(exe), quoted_sources)
         )
     return _run_process(["cmd", "/c", bat], cwd, "", timeout, language)
+
+
+def _c_compiler():
+    for candidate in ("gcc", "clang", "cl"):
+        found = shutil.which(candidate)
+        if found:
+            return candidate, found
+    if os.name == "nt":
+        vcvars = _find_visual_studio_vcvars()
+        if vcvars:
+            return "msvc-vcvars", vcvars
+    return None, None
+
+
+def _run_c(path, tmp, stdin, timeout, cwd):
+    name, compiler = _c_compiler()
+    if not compiler:
+        return _error_result("c", cwd, timeout, SUPPORTED_LANGUAGES["c"]["missing"])
+    exe_name = "snippet.exe" if os.name == "nt" or name in ("msvc-vcvars", "cl") else "snippet"
+    exe = os.path.join(tmp, exe_name)
+    if name == "msvc-vcvars":
+        compile_result = _msvc_compile_result(compiler, [path], exe, tmp, timeout, "c")
+    elif name == "cl":
+        compile_cmd = [compiler, "/nologo", "/std:c11", "/Fe:" + exe, path]
+        compile_result = _run_process(compile_cmd, tmp, "", timeout, "c")
+    else:
+        compile_cmd = [compiler, "-std=c11", path, "-o", exe]
+        compile_result = _run_process(compile_cmd, tmp, "", timeout, "c")
+    if not compile_result.get("ok"):
+        return compile_result
+    return _run_process([exe], cwd, stdin, timeout, "c")
+
+
+def _run_kotlin(path, tmp, stdin, timeout, cwd):
+    kotlinc = shutil.which("kotlinc")
+    java_exe = shutil.which("java")
+    if kotlinc and java_exe:
+        jar = os.path.join(tmp, "snippet.jar")
+        compile_result = _run_process(
+            [kotlinc, path, "-include-runtime", "-d", jar],
+            tmp, "", timeout, "kotlin",
+        )
+        if not compile_result.get("ok"):
+            return compile_result
+        return _run_process([java_exe, "-jar", jar], cwd, stdin, timeout, "kotlin")
+    kotlin_exe = shutil.which("kotlin")
+    if kotlin_exe:
+        return _run_process([kotlin_exe, path], cwd, stdin, timeout, "kotlin")
+    return _error_result("kotlin", cwd, timeout, SUPPORTED_LANGUAGES["kotlin"]["missing"])
 
 
 def _run_cpp(path, tmp, stdin, timeout, cwd):
@@ -1491,7 +1651,7 @@ def run_code(
     cfg = SUPPORTED_LANGUAGES[language]
     if limits is not None and not isinstance(limits, RunLimits):
         raise TypeError("limits must be a RunLimits")
-    if limits is not None and language in ("cpp", "csharp", "rust"):
+    if limits is not None and language in ("c", "cpp", "csharp", "rust", "kotlin"):
         # Their compile steps and launchers are not wired for limits; refuse
         # rather than run a "limited" snippet without them.
         raise ValueError("run limits are not supported for %s" % language)
@@ -1509,12 +1669,16 @@ def run_code(
         path = os.path.join(tmp, "snippet" + cfg["suffix"])
         with open(path, "w", encoding="utf-8") as f:
             f.write(code)
+        if language == "c":
+            return _run_c(path, tmp, stdin, timeout, cwd)
         if language == "cpp":
             return _run_cpp(path, tmp, stdin, timeout, cwd)
         if language == "csharp":
             return _run_csharp(path, tmp, stdin, timeout, cwd)
         if language == "rust":
             return _run_rust(path, tmp, stdin, timeout, cwd)
+        if language == "kotlin":
+            return _run_kotlin(path, tmp, stdin, timeout, cwd)
         cmd = cfg["cmd"](path)
         if limits is None:
             return _run_process(cmd, cwd, stdin, timeout, language)
@@ -1597,20 +1761,47 @@ def format_result(result):
         lines.append("error: %s" % result["error"])
     stdout = result.get("stdout") or ""
     stderr = result.get("stderr") or ""
+    lang = result.get("language")
+    timed_out = result.get("error", "").startswith("timed out")
+    stdout_lower = stdout.lower()
+    stderr_lower = stderr.lower()
+    prompt_like = bool(
+        stdout and any(word in stdout_lower for word in ("enter", "guess", "input", "prompt"))
+    )
+    noninteractive_hint_added = False
     if "EOFError" in stderr:
         lines.append(
             "note: this program tried to read keyboard input, but /run is non-interactive."
         )
+        noninteractive_hint_added = True
+    elif lang == "powershell" and not result.get("ok") and (
+        "noninteractive" in stderr_lower
+        or "cannot prompt" in stderr_lower
+        or "read-host" in stderr_lower
+    ):
+        lines.append(
+            "note: this PowerShell script tried to prompt for input, but /run is non-interactive. Pass values via arguments or stdin."
+        )
+        noninteractive_hint_added = True
+    elif not result.get("ok") and not timed_out and lang in ("csharp", "cpp", "c", "javascript", "project"):
+        if (
+            (prompt_like and any(tok in stderr_lower for tok in ("eof", "formatexception", "nullreferenceexception", "invalid_argument", "readline", "err_use_after_close")))
+            or (lang == "javascript" and "readline" in stderr_lower and ("closed" in stderr_lower or "eof" in stderr_lower))
+        ):
+            lines.append(
+                "note: this program appears to have failed reading console input (EOF) because /run is non-interactive. Add a scripted demo path or provide stdin."
+            )
+            noninteractive_hint_added = True
     if (
-        result.get("error", "").startswith("timed out")
-        and result.get("language") in ("csharp", "cpp", "project")
-        and stdout
-        and ("enter" in stdout.lower() or "guess" in stdout.lower() or "input" in stdout.lower())
+        not noninteractive_hint_added
+        and timed_out
+        and lang in ("csharp", "cpp", "c", "powershell", "javascript", "project")
+        and prompt_like
     ):
         lines.append(
             "note: the program appears to be waiting for console input. For /run, add a scripted demo path or provide stdin."
         )
-    if result.get("error", "").startswith("timed out"):
+    if timed_out:
         lines.append("note: use a bounded smoke test or auto-exit path for /run.")
     if stdout:
         lines.extend(["", "stdout:", stdout])
@@ -1657,6 +1848,7 @@ def _project_files_from_json(files_json):
         raise ValueError("too many project files (max %d)" % MAX_PROJECT_FILES)
     total = 0
     clean = []
+    seen_paths = {}
     for item in files:
         if not isinstance(item, dict):
             raise ValueError("each project file must be an object")
@@ -1666,6 +1858,15 @@ def _project_files_from_json(files_json):
             raise ValueError("each project file needs path and content")
         if os.path.isabs(path) or path.startswith("../") or "/../" in path or path == "..":
             raise ValueError("unsafe project path: %r" % path)
+        norm_key = ntpath.normpath(path).replace("\\", "/").casefold()
+        if norm_key in ("", ".", "..") or norm_key.startswith("../"):
+            raise ValueError("unsafe project path: %r" % path)
+        if norm_key in seen_paths:
+            raise ValueError(
+                "duplicate or case-colliding project path: %r conflicts with %r"
+                % (path, seen_paths[norm_key])
+            )
+        seen_paths[norm_key] = path
         total += len(str(content).encode("utf-8"))
         if total > MAX_PROJECT_BYTES:
             raise ValueError("project content too large (max %d bytes)" % MAX_PROJECT_BYTES)
@@ -1754,15 +1955,18 @@ def _auto_project_commands(root, files):
             return [{"cmd": ["__missing_cpp_compiler__"], "cwd": ""}]
         exe = os.path.abspath(os.path.join(root, "app.exe" if os.name == "nt" else "app"))
         if name == "msvc-vcvars":
+            for rel_src in cpp_files:
+                if _UNSAFE_BATCH_PATH_RE.search(rel_src):
+                    raise ValueError("unsafe batch character in project filename: %r" % rel_src)
             sources = [os.path.abspath(os.path.join(root, p)) for p in cpp_files]
             bat = os.path.join(root, "sonder_build_msvc.bat")
-            quoted_sources = " ".join('"%s"' % src for src in sources)
+            quoted_sources = " ".join(_bat_quote(src) for src in sources)
             with open(bat, "w", encoding="utf-8") as f:
                 f.write(
-                    '@echo off\r\n'
-                    'call "%s" >nul\r\n'
-                    'cl /nologo /EHsc /std:c++17 /Fe:"%s" %s\r\n'
-                    % (compiler, exe, quoted_sources)
+                    "@echo off\r\n"
+                    "call %s >nul\r\n"
+                    "cl /nologo /EHsc /std:c++17 /Fe:%s %s\r\n"
+                    % (_bat_quote(compiler), _bat_quote(exe), quoted_sources)
                 )
             compile_cmd = ["cmd", "/c", bat]
         elif name == "cl":
@@ -1779,7 +1983,9 @@ def run_project(files_json, commands_json="", stdin="", timeout=MAX_TIMEOUT):
     files = _project_files_from_json(files_json)
     commands = _commands_from_json(commands_json)
     timeout = _clamp_timeout(timeout)
-    with tempfile.TemporaryDirectory(prefix="sonder-project-") as root:
+    with tempfile.TemporaryDirectory(
+        prefix="sonder-project-", ignore_cleanup_errors=(os.name == "nt")
+    ) as root:
         root = os.path.abspath(root)
         _write_project_files(root, files)
         if commands is None:

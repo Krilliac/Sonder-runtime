@@ -105,8 +105,13 @@ def native_delegate_reply(task, *, context_of, project="", policy,
 def handle_agent_work_request(handler, method, path, payload, *, application_of,
                               context_of, background_of, policy, logger,
                               query=None, query_of=None, state_home_of=None,
-                              allow_creation_of=None):
-    if path != "/v1/background-work" and path != "/v1/agent-lanes" and not path.startswith("/v1/agent-lanes/"):
+                              allow_creation_of=None, clear_background_of=None):
+    if (
+        path != "/v1/background-work"
+        and path != "/v1/background-work/clear"
+        and path != "/v1/agent-lanes"
+        and not path.startswith("/v1/agent-lanes/")
+    ):
         return False
     auth = handler._request_auth_context()
     if not auth.get("authorized"):
@@ -131,6 +136,29 @@ def handle_agent_work_request(handler, method, path, payload, *, application_of,
             result = dispatch_background_work_route(
                 background_of(application, auth), method, path, context=context, query=query,
             )
+        elif path == "/v1/background-work/clear":
+            from .background_work import BackgroundWorkHttpResult
+            if method != "POST":
+                result = BackgroundWorkHttpResult({"error": "METHOD_NOT_ALLOWED"}, 405)
+            elif clear_background_of is None:
+                result = BackgroundWorkHttpResult({"error": "NOT_FOUND"}, 404)
+            else:
+                project = str(payload.get("project") or query.get("project") or "").strip()
+                result = BackgroundWorkHttpResult(clear_background_of(auth, project=project), 200)
+        elif path == "/v1/agent-lanes/clear":
+            lane_facade = sys.modules.get(
+                "sonder_runtime.interfaces.http.facades.agent_lanes"
+            )
+            if lane_facade is None:
+                from .facades import agent_lanes as lane_facade
+            if method != "POST":
+                result = lane_facade.AgentLaneHttpResult({"error": "METHOD_NOT_ALLOWED"}, 405)
+            else:
+                lane_ids = payload.get("lane_ids")
+                result = lane_facade.AgentLaneHttpResult(
+                    _service(application).clear_finished(context, lane_ids=lane_ids),
+                    200,
+                )
         else:
             # Resolve the facade at request time.  Besides keeping the
             # boundary injectable, this preserves test and embedding hosts

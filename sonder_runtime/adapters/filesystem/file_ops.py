@@ -1881,7 +1881,9 @@ def resolve_repository_read_path(
 
 
 def _requested_path(path: str) -> Path:
-    candidate = Path(_reject_network_path(path)).expanduser()
+    cleaned = _reject_network_path(path)
+    _require_plain_name_spelling(cleaned)
+    candidate = Path(cleaned).expanduser()
     if not candidate.is_absolute():
         candidate = workspace_root() / candidate
     return candidate.absolute()
@@ -2125,8 +2127,31 @@ def _delete_through_intent(
         ) from exc
 
 
+_WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+    *(f"COM{suffix}" for suffix in "0123456789¹²³"),
+    *(f"LPT{suffix}" for suffix in "0123456789¹²³"),
+})
+
+
+def _windows_reserved_device_component(path: str) -> str:
+    """The first component of *path* naming a Windows reserved device, or ``""``."""
+    if os.name != "nt":
+        return ""
+    windows = PureWindowsPath(os.fspath(path))
+    parts = windows.parts[1:] if windows.anchor else windows.parts
+    for part in parts:
+        if part in (".", ".."):
+            continue
+        stem = part.split(".", 1)[0].rstrip(" ").upper()
+        if stem in _WINDOWS_RESERVED_DEVICE_BASENAMES:
+            return part
+    return ""
+
+
 def _require_plain_name_spelling(path: str) -> None:
-    """Refuse a caller's raw text that Windows reads as another name (``x.``, ``x ``, ``x::$DATA``).
+    """Refuse a caller's raw text that Windows reads as another name (``x.``, ``x ``, ``x::$DATA``)
+    or a reserved DOS device name (``CON``, ``NUL``, ``AUX``, ``PRN``, ``COM1``-``9``, ``LPT1``-``9``).
 
     ``Path.resolve`` trims those before any comparison, so the protected-path
     checks would see an ordinary name; the raw text is what must be refused.
@@ -2136,6 +2161,11 @@ def _require_plain_name_spelling(path: str) -> None:
         raise PermissionError(
             "refusing path with a Windows alias component (%r): a trailing dot or space or a ':' "
             "names the same file as its trimmed spelling" % alias
+        )
+    device = _windows_reserved_device_component(path)
+    if device:
+        raise PermissionError(
+            "refusing path with a Windows reserved device name (%r)" % device
         )
 
 
@@ -2168,6 +2198,8 @@ def resolve_path(path: str, *, extra_roots: str = "", bypass: bool | None = None
     if not (path or "").strip():
         raise ValueError("empty path")
     path = _reject_network_path(path)
+    if _foreign_absolute(path.strip()):
+        raise PermissionError("path uses a foreign absolute path form")
     _require_plain_name_spelling(path)
     candidate = Path(path).expanduser()
     if not candidate.is_absolute():
@@ -2319,6 +2351,8 @@ def read_file(
     _require_read_access(p, developer_authorized or bypass)
     if not p.exists():
         raise FileNotFoundError("file not found: %s" % p)
+    if p.is_dir():
+        raise ValueError("%s is a directory; use directory_tree or file_find" % p)
     if not p.is_file():
         raise ValueError("path is not a file: %s" % p)
     size = p.stat().st_size
@@ -3017,6 +3051,8 @@ def write_file(
     mode = (mode or "create").lower()
     if mode not in {"create", "overwrite", "append"}:
         raise ValueError("mode must be create, overwrite, or append")
+    if p.is_dir():
+        raise ValueError("%s is a directory; cannot write file to a directory path" % p)
     if mode == "create" and p.exists():
         raise FileExistsError("file exists (use mode=overwrite to replace): %s" % p)
     missing_parents = []
@@ -3086,7 +3122,9 @@ def _batch_payload(operations):
 
 def _batch_requested_path(path: str) -> Path:
     """Return the lexical requested path used for reparse-point checks."""
-    candidate = Path(_reject_network_path(path)).expanduser()
+    cleaned = _reject_network_path(path)
+    _require_plain_name_spelling(cleaned)
+    candidate = Path(cleaned).expanduser()
     if not candidate.is_absolute():
         candidate = workspace_root() / candidate
     return candidate.absolute()
@@ -3402,6 +3440,8 @@ def edit_file(
     # preserves bytes outside the edited span, including mixed line endings.
     if not p.exists():
         raise FileNotFoundError("file not found: %s" % p)
+    if p.is_dir():
+        raise ValueError("%s is a directory; use directory_tree or file_find" % p)
     if not p.is_file():
         raise ValueError("path is not a file: %s" % p)
     if p.stat().st_size > MAX_READ_BYTES:
@@ -3688,8 +3728,14 @@ def _inspect_jsonl(p: Path, max_bytes: int) -> dict:
 def _inspect_toml(p: Path, max_bytes: int) -> dict:
     import tomllib
 
+    size = p.stat().st_size
+    if size > max_bytes:
+        raise _InspectSizeError(size)
     with p.open("rb") as fh:
-        payload = tomllib.load(fh)
+        raw = fh.read(max_bytes + 1)
+    if len(raw) > max_bytes:
+        raise _InspectSizeError(len(raw))
+    payload = tomllib.loads(raw.decode("utf-8"))
     tables = list(payload.keys())
     return {
         "kind": "toml",

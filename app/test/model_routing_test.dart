@@ -301,4 +301,137 @@ void main() {
           '(qwen3:14b); 52 exact models run directly on Ollama.');
     });
   });
+
+  group('8-tier routing, openai_compatible tier_models, and image models', () {
+    EcosystemStatus fullStackEcosystem({bool allOpenAi = false}) {
+      final json = ecosystemJson(
+        provider: 'openai_compatible',
+        inference: inferenceStatusJson()
+          ..['models'] = ['astra-cyber-35b-a3b:latest']
+          ..['tier_models'] = {'security': 'astra-cyber-35b-a3b:latest'},
+      );
+      final providers = json['providers'] as Map<String, dynamic>;
+      providers['tier_providers'] = {
+        'fast': 'openai_compatible',
+        'general': 'openai_compatible',
+        'code': 'openai_compatible',
+        'reasoning': 'openai_compatible',
+        'vision': allOpenAi ? 'openai_compatible' : 'ollama',
+        'security': allOpenAi ? 'openai_compatible' : 'sonder_inference',
+        'creative': 'openai_compatible',
+        'draft': 'openai_compatible',
+      };
+      (providers['status'] as Map<String, dynamic>)['openai_compatible'] = {
+        'provider': 'openai_compatible',
+        'state': 'unknown',
+        'configured': true,
+        'base_url': 'http://127.0.0.1:18080',
+        'model': 'bonsai-27b-pq2',
+        'models': ['bonsai-9b-mtp', 'bonsai-27b-pq2', 'bonsai-4b-mtp'],
+        'tier_models': {
+          'fast': 'bonsai-9b-mtp',
+          'general': 'bonsai-27b-pq2',
+          'code': 'bonsai-27b-pq2',
+          'reasoning': 'bonsai-27b-pq2',
+          'creative': 'bonsai-27b-pq2',
+          'draft': 'bonsai-4b-mtp',
+        },
+      };
+      json['image_generation'] = {
+        'configured': true,
+        'backend': 'openai_api',
+        'api_url': 'http://127.0.0.1:11440',
+        'model': 'sdxl-turbo',
+        'loopback': true,
+      };
+      return _status(json);
+    }
+
+    test('all 8 tiers are recognized as routes even without ecosystem/origins',
+        () {
+      const bare = ModelRouting();
+      for (final tier in ecosystemTierNames) {
+        expect(bare.isRoute(tier), isTrue, reason: tier);
+      }
+      expect(bare.isRoute('sonder'), isTrue);
+      expect(bare.isRoute('local'), isTrue);
+      expect(bare.isRoute('sdxl-turbo'), isFalse);
+      expect(bare.isRoute('llama3:8b'), isFalse);
+    });
+
+    test('resolves per-tier openai_compatible and sonder_inference tier_models',
+        () {
+      final routing = ModelRouting.of(fullStackEcosystem(), origins: const {
+        'sonder': ModelOrigin(kind: 'route', provider: 'openai_compatible'),
+      });
+
+      expect(providerDisplayName('openai_compatible'), 'OpenAI-compatible');
+      expect(providerDisplayName('openai-compatible'), 'OpenAI-compatible');
+
+      expect(routing.routeServedModel('fast'), 'bonsai-9b-mtp');
+      expect(routing.routeServedModel('general'), 'bonsai-27b-pq2');
+      expect(routing.routeServedModel('code'), 'bonsai-27b-pq2');
+      expect(routing.routeServedModel('reasoning'), 'bonsai-27b-pq2');
+      expect(routing.routeServedModel('creative'), 'bonsai-27b-pq2');
+      expect(routing.routeServedModel('draft'), 'bonsai-4b-mtp');
+      expect(routing.routeServedModel('security'), 'astra-cyber-35b-a3b:latest');
+      // Default route resolves to the bound provider's general tier model
+      // even when /v1/models omits served_model and models has >1 entry.
+      expect(routing.routeServedModel('sonder'), 'bonsai-27b-pq2');
+
+      expect(routing.pickerLabel('fast'),
+          'fast · OpenAI-compatible (bonsai-9b-mtp)');
+      expect(routing.pickerLabel('draft'),
+          'draft · OpenAI-compatible (bonsai-4b-mtp)');
+      expect(routing.pickerLabel('security'),
+          'security · Sonder Inference (astra-cyber-35b-a3b:latest)');
+      expect(routing.pickerLabel('sonder'),
+          'sonder · OpenAI-compatible (bonsai-27b-pq2)');
+
+      final panel = routing.modelsPanelText(
+          offered: const ['sonder', ...ecosystemTierNames]);
+      expect(panel, contains('OpenAI-compatible serves'));
+      expect(panel, contains('bonsai-9b-mtp'));
+      expect(panel, contains('bonsai-27b-pq2'));
+      expect(panel, contains('bonsai-4b-mtp'));
+      expect(panel, contains('Sonder Inference serves the security route with '
+          'astra-cyber-35b-a3b:latest.'));
+      expect(panel, contains('Ollama runs the vision route'));
+    });
+
+    test('unanimous openai_compatible bindings resolve sonder without origins',
+        () {
+      final routing = ModelRouting(fullStackEcosystem(allOpenAi: true));
+      expect(routing.routeProvider('sonder'), openaiCompatibleProvider);
+      expect(routing.routeServedModel('sonder'), 'bonsai-27b-pq2');
+    });
+
+    test('identifies and labels image models distinctly from Ollama direct',
+        () {
+      final routing = ModelRouting(fullStackEcosystem());
+      expect(routing.isImageModel('sdxl-turbo'), isTrue);
+      expect(routing.isImageModel('x/z-image-turbo'), isTrue);
+      expect(routing.isImageModel('x/flux2-klein'), isTrue);
+      expect(routing.isImageModel('qwen2.5-vl:7b'), isFalse);
+      expect(routing.isImageModel('llava:13b'), isFalse);
+      expect(routing.isImageModel('vision'), isFalse);
+      expect(routing.isImageModel('bonsai-27b-pq2'), isFalse);
+
+      expect(routing.pickerLabel('sdxl-turbo'),
+          'sdxl-turbo · Image generation (127.0.0.1:11440)');
+      expect(routing.servedBy('sdxl-turbo', 'local'),
+          'Image (127.0.0.1:11440)');
+      expect(routing.pickerLabel('x/flux2-klein'),
+          'x/flux2-klein · Image generation');
+
+      final summary = routing.connectionSummary([
+        'sonder',
+        ...ecosystemTierNames,
+        'sdxl-turbo',
+        'llama3:8b',
+      ]);
+      expect(summary, contains('1 image model (sdxl-turbo)'));
+      expect(summary, contains('1 exact model runs directly on Ollama.'));
+    });
+  });
 }

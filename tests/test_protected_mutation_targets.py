@@ -161,14 +161,15 @@ def no_download(monkeypatch):
 @pytest.mark.parametrize("case", ["destination", "staging", "sidecar"])
 def test_fetch_artifact_never_writes_a_protected_path(policy_files, monkeypatch, no_download, case):
     folder = policy_files.repo / "state"
+    url = "https://example.invalid/x.bin"
     if case == "destination":
         dest = policy_files.data / "model_tool_policy.json"
         protected = dest
     elif case == "staging":
-        # ``<dest>.part<suffix>`` is the overlay.
-        protected = folder / "b.json.part.json"
-        monkeypatch.setenv(mtp.OVERLAY_ENV, str(protected))
+        # ``<dest>.<url_tag>.part<suffix>`` is the overlay.
         dest = folder / "b.json"
+        protected = artifact_fetch._part_path(dest, url)
+        monkeypatch.setenv(mtp.OVERLAY_ENV, str(protected))
     else:
         # ``<dest>.provenance.json`` is the overlay.
         protected = folder / ("a" + artifact_fetch.PROVENANCE_SUFFIX)
@@ -177,12 +178,13 @@ def test_fetch_artifact_never_writes_a_protected_path(policy_files, monkeypatch,
     protected.write_text("{}\n", encoding="utf-8")
     before = protected.read_bytes()
     with pytest.raises(PermissionError, match=PROTECTED):
-        artifact_fetch.fetch_artifact("https://example.invalid/x.bin", str(dest), overwrite=True)
+        artifact_fetch.fetch_artifact(url, str(dest), overwrite=True)
     assert no_download == []
     assert protected.read_bytes() == before
     # Control: an ordinary destination reaches the download.
-    artifact_fetch.fetch_artifact("https://example.invalid/x.bin", str(policy_files.project / "x.bin"))
-    assert no_download == [policy_files.project / "x.bin.part.bin"]
+    control_dest = policy_files.project / "x.bin"
+    artifact_fetch.fetch_artifact(url, str(control_dest))
+    assert no_download == [artifact_fetch._part_path(control_dest, url)]
 
 
 # ---- apply_patch and the git tools ---------------------------------------------------

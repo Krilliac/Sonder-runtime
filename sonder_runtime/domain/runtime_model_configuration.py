@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 OPTIONAL_LOCAL_TIERS = (
     ("reasoning", "SONDER_REASONING"),
     ("vision", "SONDER_VISION"),
+    ("security", "SONDER_SECURITY"),
+    ("creative", "SONDER_CREATIVE"),
+    ("draft", "SONDER_DRAFT"),
 )
 
 
@@ -98,6 +101,9 @@ class RuntimeModelConfiguration:
                 ("general", str(env.get("SONDER_GENERAL", lists["default_local_models"]["general"]))),
                 ("reasoning", str(env.get("SONDER_REASONING", lists["default_local_models"]["reasoning"]))),
                 ("vision", str(env.get("SONDER_VISION", lists["default_local_models"]["vision"]))),
+                ("security", str(env.get("SONDER_SECURITY", lists["default_local_models"]["security"]))),
+                ("creative", str(env.get("SONDER_CREATIVE", lists["default_local_models"]["creative"]))),
+                ("draft", str(env.get("SONDER_DRAFT", lists["default_local_models"]["draft"]))),
                 ("cloud-code", cloud_code),
                 ("cloud-general", cloud_general),
             ),

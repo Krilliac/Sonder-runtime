@@ -6,7 +6,7 @@ def test_server_production_paths_do_not_call_local_retry_compatibility_wrappers(
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     names = {"_local_model_retries", "_local_retry_delay"}
     calls = [
         node

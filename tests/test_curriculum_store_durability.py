@@ -76,8 +76,11 @@ def test_append_refuses_symlinked_store(tmp_path):
 # --- append: cross-process serialization ----------------------------------
 
 _WRITER = r"""
-import sys
-sys.path.insert(0, sys.argv[1])
+import os, sys
+root = sys.argv[1]
+for sub in (os.path.join(root, "scripts"), os.path.join(root, "runtime"), root):
+    if sub not in sys.path:
+        sys.path.insert(0, sub)
 import curriculum_store
 path, worker, batches = sys.argv[2], sys.argv[3], int(sys.argv[4])
 blob = "x" * 65536

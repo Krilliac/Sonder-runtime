@@ -17,9 +17,9 @@ sonder commands · ### in ## groups
     basic        ##  help, new
     chat          #  model, route
     context      ##  context, compact
-    creative     ##  game, asset
-    data          #  data_query, data_convert
-    dev          ##  test, build
+    creative     ##  #d, gif
+    data         ##  doc, calc
+    dev          ##  loc, test
     diagnostics  ##  commands, activity
     execution    ##  run, scripts
     filesystem   ##  read, search

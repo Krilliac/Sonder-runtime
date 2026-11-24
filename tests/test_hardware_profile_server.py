@@ -66,4 +66,4 @@ def test_hardware_profile_is_advertised_reloadable_and_packaged():
     assert "hardware_profile" in server._PROJECT_BOUND_AGENT_TOOLS
     assert "hardware_profile" in server._AGENT_DEDUPLICATED_INSPECTION_TOOLS
     assert "sonder_hardware" in server.LIVE_RELOAD_MODULES
-    assert "sonder_hardware.py" in package.REQUIRED_FILES
+    assert "runtime/sonder_hardware.py" in package.REQUIRED_FILES

@@ -19,7 +19,11 @@ DEVELOPER_REQUIRED = "refused %s: developer or admin authentication is required"
 
 def slash_commands(intent: Mapping[str, object]) -> list[str]:
     """The slash lines an intent's run and train actions stand for, run first."""
-    commands = ["/run"] if intent.get("run") else []
+    commands = []
+    if intent.get("run_window"):
+        commands.append("/runwindow")
+    elif intent.get("run"):
+        commands.append("/run")
     train = intent.get("train")
     if isinstance(train, int) and not isinstance(train, bool):
         commands.append(f"/train {train}")

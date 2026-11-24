@@ -185,7 +185,7 @@ def test_current_tier_model_binding_is_read_on_each_call(monkeypatch, tmp_path):
 
 
 def test_server_callers_use_packaged_router_and_payload_wiring():
-    tree = ast.parse(Path("server.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("runtime/server.py").read_text(encoding="utf-8"))
     funcs = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     route_body = ast.unparse(funcs["route_request"])
     improve_body = ast.unparse(funcs["improve_function"])
@@ -211,7 +211,7 @@ def _server_callers(tiers, source, replies):
         # The real tool-lane check, on a default policy: an ordinary tier is not refused.
         "_tool_lane_guard": tool_lane_guard, "_RUNTIME_POLICY": runtime_policy.default_policy({}),
     }
-    tree = ast.parse((Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
                  and node.name in {"route_request", "improve_function"}]
     for node in functions:

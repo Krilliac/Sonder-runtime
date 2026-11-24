@@ -15,7 +15,7 @@ no environment access: collecting live secret *values* (e.g. from
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from typing import Any, Callable, Iterable
 
 from sonder_runtime.domain.security.credential_formats import REDACTION_FORMATS
 
@@ -110,7 +110,20 @@ PATTERNS: tuple[re.Pattern, ...] = (
     # serialized header dict: ``"Authorization": "Basic ..."``.
     re.compile(
         r"(?i)\b(authorization(?:\\?[\"'])?\s*[:=]\s*)"
-        r"(\[REDACTED\](?=\s|$)|\S+(?:\s+\S+)?)"
+        r"(\[REDACTED\](?=[\s,;}\])\"']|$)"
+        r"|\"(?:[^\"\\\r\n]++|\\[^\r\n])*+\""
+        r"|'(?:[^'\\\r\n]++|\\[^\r\n])*+'"
+        r"|\\\"(?:[^\"\\\r\n]++|\\(?!\"))*+\\\""
+        r"|\\'(?:[^'\\\r\n]++|\\(?!'))*+\\'"
+        r"|\S++(?:[ \t]++[A-Za-z0-9_.-]++="
+        r"(?:\"(?:[^\"\\\r\n]++|\\[^\r\n])*+\"|'(?:[^'\\\r\n]++|\\[^\r\n])*+'"
+        r"|\\\"(?:[^\"\\\r\n]++|\\(?!\"))*+\\\"|\\'(?:[^'\\\r\n]++|\\(?!'))*+\\'"
+        r"|[^\s\"',\r\n]++)"
+        r"(?:[ \t]*+,[ \t]*+[A-Za-z0-9_.-]++="
+        r"(?:\"(?:[^\"\\\r\n]++|\\[^\r\n])*+\"|'(?:[^'\\\r\n]++|\\[^\r\n])*+'"
+        r"|\\\"(?:[^\"\\\r\n]++|\\(?!\"))*+\\\"|\\'(?:[^'\\\r\n]++|\\(?!'))*+\\'"
+        r"|[^\s\"',\r\n]++))*+"
+        r"|[ \t]++\S++)?)"
     ),
     re.compile(r"(?i)\b((?:set-)?cookie(?:\\?[\"'])?\s*:\s*)([^\r\n]+)"),
     re.compile(r"(?i)\b(bearer\s+)([a-z0-9._~+/=-]{8,})"),
@@ -181,7 +194,8 @@ _SPLIT_QUOTED_CREDENTIAL = re.compile(
     r"|'(?:api[-_]?key|auth[-_]?secret|secret|token|password|"
     r"passwd|credential|(?:pwd|(?:aws[-_])?secret[-_]access[-_]key))')"
     r"\s*[:=]\s*)"
-    r"(\[REDACTED\][ \t]++[^\"'\r\n:={}\[\],;]++[\"'])"
+    r"(\[REDACTED\](?:[ \t,;]*+[^\"'\r\n{}\[\]\s,;](?:[^\"\r\n{}\[\]\\]++|\\[^\r\n])*+\"(?=[\s,;}\])]|$)"
+    r"|[ \t,;]*+[^\"'\r\n{}\[\]\s,;](?:[^'\r\n{}\[\]\\]++|\\[^\r\n])*+'(?=[\s,;}\])]|$)))"
 )
 
 
@@ -341,8 +355,14 @@ def _redact_secret_leaf(value):
 
 
 def redact_structure(
-    value, redact=None, *, sensitive_keys=False, _depth=0, _budget=None, _under_secret=False,
-):
+    value: Any,
+    redact: Callable[[str], str] | None = None,
+    *,
+    sensitive_keys: bool = False,
+    _depth: int = 0,
+    _budget: list[int] | None = None,
+    _under_secret: bool = False,
+) -> Any:
     """Redact every string inside a JSON-shaped structure, preserving shape.
 
     ``redact`` is a ``str -> str`` callable (defaults to :func:`redact_text`

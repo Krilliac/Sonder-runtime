@@ -10,6 +10,6 @@ if not defined SONDER_PYTHON (
   echo [sonder] ERROR: no bundled or system Python runtime was found.
   endlocal & exit /b 3
 )
-"%SONDER_PYTHON%" "%REPO%sonder_headless.py" %*
+"%SONDER_PYTHON%" "%REPO%runtime\sonder_headless.py" %*
 set "EXIT_CODE=%ERRORLEVEL%"
 endlocal & exit /b %EXIT_CODE%

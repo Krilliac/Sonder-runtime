@@ -275,10 +275,10 @@ List<OverviewRow> overviewRows({
           headline: 'Console only',
           detail: 'approve from the console (/approvals)',
           category: 'permissions'));
-    } else if (approvals.pending.isNotEmpty) {
-      final n = approvals.pending.length;
+    } else if (approvals.actionablePending.isNotEmpty) {
+      final n = approvals.actionablePending.length;
       final tools = {
-        for (final item in approvals.pending)
+        for (final item in approvals.actionablePending)
           if (item.tool.isNotEmpty) item.tool,
       }.toList();
       rows.add(OverviewRow(

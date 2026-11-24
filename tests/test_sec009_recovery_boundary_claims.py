@@ -280,7 +280,7 @@ def _repository_overclaims() -> dict[str, list[str]]:
         found = overclaims(path.read_text(encoding="utf-8", errors="replace"))
         if found:
             findings[relative] = found
-    for path in _tracked(("sonder_runtime/*.py", "selfmod*.py", "scripts/*selfmod*.py")):
+    for path in _tracked(("sonder_runtime/*.py", "runtime/selfmod*.py", "scripts/*selfmod*.py")):
         if not path.is_file():
             continue
         relative = path.relative_to(ROOT).as_posix()
@@ -309,12 +309,12 @@ def test_scan_actually_covers_the_operator_documents_and_runtime():
     markdown = {p.relative_to(ROOT).as_posix() for p in _tracked(("*.md",))}
     python = {
         p.relative_to(ROOT).as_posix()
-        for p in _tracked(("sonder_runtime/*.py", "selfmod*.py", "scripts/*selfmod*.py"))
+        for p in _tracked(("sonder_runtime/*.py", "runtime/selfmod*.py", "scripts/*selfmod*.py"))
     }
     assert {"SELFMOD.md", "SECURITY.md", "README.md"} <= markdown
     assert {
-        "selfmod.py",
-        "selfmod_recover.py",
+        "runtime/selfmod.py",
+        "runtime/selfmod_recover.py",
         "sonder_runtime/application/security/recovery_boundary.py",
         "sonder_runtime/application/selfmod/selfmod_service.py",
     } <= python

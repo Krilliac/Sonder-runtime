@@ -1,7 +1,9 @@
 import 'dart:convert';
 import 'account_session.dart';
 import 'api/transport.dart' show CleartextKeyPolicy;
-import 'local_manager_models.dart';
+import 'local_manager.dart';
+import 'settings/persona_choice.dart' show normalizePersona, parsePersona;
+import 'settings/reasoning_effort.dart' show normalizeEffort, parseEffort;
 import 'settings/temperature.dart'
     show normalizeTemperature, parseTemperature;
 import 'package:flutter/foundation.dart';
@@ -80,6 +82,8 @@ class Settings {
   static const _kAllowHosted = 'sonder_allow_hosted';
   static const _kContextSize = 'sonder_context_size';
   static const _kTemperature = 'sonder_temperature';
+  static const _kReasoningEffort = 'sonder_reasoning_effort';
+  static const _kPersona = 'sonder_persona';
   static const _kKeepServerRunning = 'sonder_keep_server_running';
   static const _kAllowApproximateLocation = 'sonder_allow_approximate_location';
   static const _kLauncherUrl = 'sonder_launcher_url';
@@ -102,6 +106,18 @@ class Settings {
   /// Test-only override for the web credential policy; null means "web".
   @visibleForTesting
   static bool? debugMemoryOnlyCredentials;
+
+  /// Test-only override for the platform default of [clientExecEnabled];
+  /// null uses [LocalManager.canRunLocalTools] (`true` on desktop, `false` on
+  /// Web/Android/iOS).
+  @visibleForTesting
+  static bool? debugDefaultClientExecEnabled;
+
+  /// Default value of [clientExecEnabled] on the current platform: enabled on
+  /// desktop where native tools run in-process, disabled on Web/mobile so
+  /// remote and phone users do not get stuck waiting for a local companion.
+  static bool get defaultClientExecEnabled =>
+      debugDefaultClientExecEnabled ?? LocalManager.canRunLocalTools;
 
   /// On the web, bearer keys are kept in memory only by default: browser
   /// storage is readable by any script on the origin (plan P2-20).
@@ -145,6 +161,16 @@ class Settings {
   /// Sampling temperature for new chat requests, 0 to 2 in steps of 0.05;
   /// null is Auto (the model's own preset applies).
   double? temperature;
+
+  /// Reasoning effort for chat requests (`off`, `minimal`, `low`, `medium`,
+  /// `high`, `xhigh`); null is Auto (the server/model default applies).
+  String? reasoningEffort;
+
+  /// Persona for chat requests (`off`, or one of the 9 canonical personas);
+  /// null is Auto (auto-route by tier and prompt).
+  String? _persona;
+  String? get persona => _persona;
+  set persona(String? value) => _persona = normalizePersona(value);
   bool keepServerRunning;
   bool allowApproximateLocation;
   String launcherUrl;
@@ -191,6 +217,8 @@ class Settings {
     this.allowHosted = false,
     this.contextSize = '8192',
     double? temperature,
+    String? reasoningEffort,
+    String? persona,
     this.keepServerRunning = false,
     this.allowApproximateLocation = false,
     this.launcherUrl = '',
@@ -198,12 +226,15 @@ class Settings {
     this.observatoryExecutable = '',
     this.observatoryWebUrl = '',
     this.cleartextKeyHosts = const [],
-    this.clientExecEnabled = true,
+    bool? clientExecEnabled,
     this.clientPermissionMode = 'manual',
     this.clientWorkspaceRoot = '',
     this.clientAgentUrl = defaultClientAgentUrl,
     this.clientAgentToken = '',
-  })  : temperature = normalizeTemperature(temperature),
+  })  : clientExecEnabled = clientExecEnabled ?? defaultClientExecEnabled,
+        temperature = normalizeTemperature(temperature),
+        reasoningEffort = normalizeEffort(reasoningEffort),
+        _persona = normalizePersona(persona),
         serverUrl = serverUrl ?? defaultServerUrl;
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
@@ -221,6 +252,10 @@ class Settings {
     String? contextSize,
     double? temperature,
     bool autoTemperature = false,
+    String? reasoningEffort,
+    bool autoReasoningEffort = false,
+    String? persona,
+    bool autoPersona = false,
     bool? keepServerRunning,
     bool? allowApproximateLocation,
     String? launcherUrl,
@@ -246,6 +281,10 @@ class Settings {
         contextSize: contextSize ?? this.contextSize,
         temperature:
             autoTemperature ? null : temperature ?? this.temperature,
+        reasoningEffort: autoReasoningEffort
+            ? null
+            : reasoningEffort ?? this.reasoningEffort,
+        persona: autoPersona ? null : persona ?? this.persona,
         keepServerRunning: keepServerRunning ?? this.keepServerRunning,
         allowApproximateLocation:
             allowApproximateLocation ?? this.allowApproximateLocation,
@@ -276,6 +315,18 @@ class Settings {
 
   bool get hasHostLauncher => effectiveLauncherUrl.isNotEmpty;
 
+  static bool _isStrictLoopbackHost(String host) {
+    final h = host.toLowerCase();
+    if (h == 'localhost' || h == '::1' || h == '0:0:0:0:0:0:0:1') return true;
+    final octets = h.split('.');
+    return octets.length == 4 &&
+        octets.first == '127' &&
+        octets.every((part) {
+          final n = int.tryParse(part);
+          return n != null && n >= 0 && n <= 255 && n.toString() == part;
+        });
+  }
+
   String? get launcherConfigurationError {
     if (!hasHostLauncher) return null;
     final uri = Uri.tryParse(effectiveLauncherUrl);
@@ -283,14 +334,12 @@ class Settings {
         !const {'http', 'https'}.contains(uri.scheme.toLowerCase()) ||
         uri.host.isEmpty ||
         uri.userInfo.isNotEmpty ||
+        uri.hasQuery ||
+        uri.hasFragment ||
         uri.path.isNotEmpty && uri.path != '/') {
       return 'Host launcher URL must be an http(s) origin without credentials or a path.';
     }
-    final host = uri.host.toLowerCase();
-    final loopback = host == 'localhost' ||
-        host == '::1' ||
-        host == '0:0:0:0:0:0:0:1' ||
-        host.startsWith('127.');
+    final loopback = _isStrictLoopbackHost(uri.host);
     if (!loopback && uri.scheme.toLowerCase() != 'https') {
       return 'A non-loopback host launcher requires an HTTPS endpoint.';
     }
@@ -316,31 +365,50 @@ class Settings {
     final p = await SharedPreferences.getInstance();
     final credentials =
         credentialStore ?? testingCredentialStore ?? _credentials;
-    final apiKey = await _readCredential(
-      credentials: credentials,
-      preferences: p,
-      key: _kKey,
-    );
-    final launcherToken = await _readCredential(
-      credentials: credentials,
-      preferences: p,
-      key: _kLauncherToken,
-    );
-    final clientAgentToken = await _readCredential(
-      credentials: credentials,
-      preferences: p,
-      key: _kClientAgentToken,
-    );
+    var apiKey = '';
+    var launcherToken = '';
+    var clientAgentToken = '';
     AccountSession? account;
-    try {
-      final raw = await credentials.read(_kAccount);
-      if (raw != null) {
-        final data = jsonDecode(raw) as Map<String, dynamic>;
-        account = AccountSession(
-            token: data['token'] as String, origin: data['origin'] as String);
+    if (memoryOnlyCredentials) {
+      // Memory-only means nothing at rest on Web: purge any legacy plaintext
+      // or older browser-stored tokens rather than restoring or migrating them.
+      for (final key in const [
+        _kKey,
+        _kLauncherToken,
+        _kClientAgentToken,
+        _kAccount,
+      ]) {
+        await p.remove(key);
+        try {
+          await credentials.delete(key);
+        } catch (_) {}
       }
-    } catch (_) {
-      account = null;
+    } else {
+      apiKey = await _readCredential(
+        credentials: credentials,
+        preferences: p,
+        key: _kKey,
+      );
+      launcherToken = await _readCredential(
+        credentials: credentials,
+        preferences: p,
+        key: _kLauncherToken,
+      );
+      clientAgentToken = await _readCredential(
+        credentials: credentials,
+        preferences: p,
+        key: _kClientAgentToken,
+      );
+      try {
+        final raw = await credentials.read(_kAccount);
+        if (raw != null) {
+          final data = jsonDecode(raw) as Map<String, dynamic>;
+          account = AccountSession(
+              token: data['token'] as String, origin: data['origin'] as String);
+        }
+      } catch (_) {
+        account = null;
+      }
     }
     final cleartextKeyHosts =
         p.getStringList(_kCleartextKeyHosts) ?? const <String>[];
@@ -355,13 +423,16 @@ class Settings {
       allowHosted: p.getBool(_kAllowHosted) ?? false,
       contextSize: p.getString(_kContextSize) ?? '8192',
       temperature: _temperatureFrom(p),
+      reasoningEffort: _reasoningEffortFrom(p),
+      persona: _personaFrom(p),
       keepServerRunning: p.getBool(_kKeepServerRunning) ?? false,
       allowApproximateLocation: p.getBool(_kAllowApproximateLocation) ?? false,
       launcherUrl: p.getString(_kLauncherUrl) ?? '',
       launcherToken: launcherToken,
       observatoryExecutable: p.getString(_kObservatoryExecutable) ?? '',
       observatoryWebUrl: p.getString(_kObservatoryWebUrl) ?? '',
-      clientExecEnabled: p.getBool(_kClientExecEnabled) ?? true,
+      clientExecEnabled:
+          p.getBool(_kClientExecEnabled) ?? defaultClientExecEnabled,
       clientPermissionMode:
           p.getString(_kClientPermissionMode) ?? 'manual',
       clientWorkspaceRoot: p.getString(_kClientWorkspaceRoot) ?? '',
@@ -375,6 +446,24 @@ class Settings {
   static double? _temperatureFrom(SharedPreferences p) {
     try {
       return parseTemperature(p.getString(_kTemperature));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The stored reasoning effort; a missing or garbled value is Auto (null).
+  static String? _reasoningEffortFrom(SharedPreferences p) {
+    try {
+      return parseEffort(p.getString(_kReasoningEffort));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The stored persona; a missing or garbled value is Auto (null).
+  static String? _personaFrom(SharedPreferences p) {
+    try {
+      return parsePersona(p.getString(_kPersona));
     } catch (_) {
       return null;
     }
@@ -491,6 +580,18 @@ class Settings {
       await p.remove(_kTemperature);
     } else {
       await p.setString(_kTemperature, '$stagedTemperature');
+    }
+    final stagedEffort = reasoningEffort;
+    if (stagedEffort == null) {
+      await p.remove(_kReasoningEffort);
+    } else {
+      await p.setString(_kReasoningEffort, stagedEffort);
+    }
+    final stagedPersona = persona;
+    if (stagedPersona == null) {
+      await p.remove(_kPersona);
+    } else {
+      await p.setString(_kPersona, stagedPersona);
     }
     await p.setBool(_kKeepServerRunning, keepServerRunning);
     await p.setBool(_kAllowApproximateLocation, allowApproximateLocation);

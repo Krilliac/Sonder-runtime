@@ -1847,6 +1847,64 @@ def prune(
     }
 
 
+def clear_finished(project: str = "") -> int:
+    """Delete terminal non-lane fleet runs that have no active children or queued mail."""
+    project = str(project or "").strip()
+    with _write_transaction() as conn:
+        lane_mailbox = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_lane_messages'"
+        ).fetchone()
+        retained_clause = (
+            " AND message_id NOT IN (SELECT message_id FROM agent_lane_messages)"
+            if lane_mailbox else ""
+        )
+        proj_sql = " AND project=?" if project else ""
+        proj_args = (project,) if project else ()
+        rows = conn.execute(
+            f"""
+            SELECT id FROM fleet_agents
+            WHERE role<>'agent_lane'
+              AND status NOT IN ('queued', 'running')
+              {proj_sql}
+              AND id NOT IN (
+                WITH RECURSIVE active_tree(id) AS (
+                    SELECT id FROM fleet_agents WHERE status IN ('queued', 'running')
+                    UNION
+                    SELECT sender_id FROM fleet_messages WHERE status='queued'
+                    UNION
+                    SELECT recipient_id FROM fleet_messages WHERE status='queued'
+                    UNION
+                    SELECT parent.parent_id
+                    FROM fleet_agents AS parent
+                    JOIN active_tree ON parent.id=active_tree.id
+                    WHERE parent.parent_id<>''
+                )
+                SELECT id FROM active_tree
+              )
+            """,
+            proj_args,
+        ).fetchall()
+        ids = [row[0] for row in rows]
+        if not ids:
+            return 0
+        marks = ",".join("?" for _ in ids)
+        conn.execute(
+            f"DELETE FROM fleet_messages WHERE (sender_id IN ({marks}) OR recipient_id IN ({marks}))"
+            " AND status<>'queued'" + retained_clause,
+            (*ids, *ids),
+        )
+        conn.execute(f"DELETE FROM fleet_events WHERE agent_id IN ({marks})", ids)
+        conn.execute(f"DELETE FROM fleet_agents WHERE id IN ({marks})", ids)
+        conn.execute(
+            """
+            DELETE FROM fleet_owners
+            WHERE closed_ts IS NOT NULL
+              AND owner_id NOT IN (SELECT DISTINCT owner_id FROM fleet_agents)
+            """
+        )
+        return len(ids)
+
+
 def clear_all() -> None:
     with _write_transaction() as conn:
         conn.execute("DELETE FROM fleet_messages")

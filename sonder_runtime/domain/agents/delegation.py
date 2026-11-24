@@ -79,7 +79,7 @@ DEFAULT_AGENT_PERSONAS: dict[str, tuple[str, str, str]] = {
     "security": (
         "paranoid, receipts-first boundary auditor",
         "Probe trust boundaries, inputs, permissions, and refusal paths ruthlessly; never trust unverified claims or silent no-op checks.",
-        "reviewer.md",
+        "security.md",
     ),
     "skeptic": (
         "blunt, edge-case-hunting contrarian",
@@ -207,6 +207,12 @@ def build_agent_drive_preamble(
         "Honesty & boundaries: Never invent tool outputs, file reads, paths, or test passes. "
         "Respect all permission/role/project/depth rules."
     )
+    if depth >= 1:
+        lines.append(
+            "Workspace discipline: Stay focused on your assigned files and task; do not re-read or poll "
+            "teammates' unrelated files. Peer board updates are auto-injected between steps, so post to "
+            "the board only on handoffs, blockers, or completion."
+        )
     lines.append(
         "Peer board: Use post_to_board to share discoveries, handoffs (@name), praise, pushback/complaints, "
         "or a brief quip; use read_board to inspect updates from teammates."
@@ -486,20 +492,61 @@ def normalize_batch_tasks(
     return tuple(specs)
 
 
+DEFAULT_REPORT_OUTPUT_BUDGET = 6000
+MIN_CHILD_OUTPUT_CHARS = 300
+
+
+def _fair_share_child_details(
+    details: Sequence[str],
+    *,
+    total_budget: int = DEFAULT_REPORT_OUTPUT_BUDGET,
+) -> list[str]:
+    """Bound per-child output via water-filling so verbose early children don't starve siblings."""
+    items = list(details)
+    if not items or total_budget <= 0:
+        return items
+    if sum(len(text) for text in items) <= total_budget:
+        return items
+    remaining = int(total_budget)
+    caps: dict[int, int] = {}
+    ordered_indices = sorted(range(len(items)), key=lambda idx: len(items[idx]))
+    for pos, idx in enumerate(ordered_indices):
+        left = len(ordered_indices) - pos
+        share = max(MIN_CHILD_OUTPUT_CHARS, remaining // max(1, left))
+        if len(items[idx]) <= share:
+            caps[idx] = len(items[idx])
+            remaining = max(0, remaining - len(items[idx]))
+        else:
+            caps[idx] = share
+            remaining = max(0, remaining - share)
+    bounded: list[str] = []
+    for idx, text in enumerate(items):
+        cap = caps.get(idx, len(text))
+        if len(text) <= cap:
+            bounded.append(text)
+        else:
+            omitted = len(text) - cap
+            bounded.append(f"{text[:cap]}... (truncated {omitted} chars)")
+    return bounded
+
+
 def format_delegation_report(
     results: Sequence[DelegationChildResult],
     *,
     events_summary: Sequence[str] = (),
     board_summary: Sequence[str] = (),
+    max_total_output_chars: int = DEFAULT_REPORT_OUTPUT_BUDGET,
 ) -> str:
     """Format child outcomes and board coordination into a concise grounded observation."""
     rows = list(results)
     succeeded = sum(1 for item in rows if item.ok)
-    lines = [f"delegation completed: {succeeded}/{len(rows)} succeeded"]
-    for item in rows:
+    prefix = "ERROR: " if (rows and succeeded == 0) else ""
+    lines = [f"{prefix}delegation completed: {succeeded}/{len(rows)} succeeded"]
+    raw_details = [item.output or item.summary or item.error or "(no output)" for item in rows]
+    bounded_details = _fair_share_child_details(raw_details, total_budget=max_total_output_chars)
+    for item, detail in zip(rows, bounded_details, strict=True):
         meta = [part for part in (item.status, item.role, item.origin or item.tier or item.model) if part]
         meta_label = f" [{', '.join(meta)}]" if meta else ""
-        detail = item.output or item.summary or item.error or "(no output)"
         lines.append(f"- @{item.agent_id}{meta_label} ({item.elapsed_ms}ms): {detail}")
     if board_summary:
         lines.append("peer board:")

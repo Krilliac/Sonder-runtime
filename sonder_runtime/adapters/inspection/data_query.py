@@ -66,9 +66,15 @@ def _bounded_timeout(value):
 def _resolve_target(
     path, *, extra_roots="", bypass=False, developer_authorized=False,
 ) -> Path:
-    requested = file_ops._requested_path(str(path or ""))
-    if file_ops._is_reparse_point(requested):
-        raise DataQueryError("query target must not be a symlink or junction")
+    try:
+        requested = file_ops._requested_path(str(path or ""))
+        file_ops._require_no_reparse_components(requested)
+    except PermissionError as exc:
+        if "symlink or junction" in str(exc):
+            raise DataQueryError("query target must not be a symlink or junction") from exc
+        raise DataQueryError("query path rejected: %s" % exc) from exc
+    except (OSError, TypeError, ValueError) as exc:
+        raise DataQueryError("query path rejected: %s" % exc) from exc
     try:
         target = file_ops.require_read_access(
             str(path or ""), extra_roots=extra_roots, bypass=bypass,

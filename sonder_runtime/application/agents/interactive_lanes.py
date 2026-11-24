@@ -1582,6 +1582,18 @@ class AgentLaneService:
         self._done()
         return receipt
 
+    def clear_finished(self, context, *, lane_ids=None):
+        """Remove finished, quiescent lanes owned by *context.principal_id*."""
+        if lane_ids is not None:
+            if not isinstance(lane_ids, list) or len(lane_ids) > 500:
+                raise ValueError("lane_ids must be a list of at most 500 ids")
+            lane_ids = [_text(item, "lane_id", 160) for item in lane_ids]
+        self.store.flush()
+        with self._transaction(context) as tx:
+            cleared = tx.clear_finished(context.principal_id, lane_ids=lane_ids)
+        self._done()
+        return {"cleared_lanes": cleared}
+
     def _root_control(self, tx, lane, context):
         from .lane_continuation import require_root_admission
 

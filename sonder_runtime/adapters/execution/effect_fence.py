@@ -97,6 +97,20 @@ def reason_lost(fence: Fence | None) -> str:
         return "the fence %s could not be verified: %s" % (fence.label, exc)
 
 
+def check_all() -> str:
+    """Return "" while every active fence in ``_STACK`` holds, else the first loss reason."""
+    stack = _STACK.get()
+    if not stack:
+        current_fence = _FENCE.get()
+        if current_fence is not None:
+            stack = (current_fence,)
+    for fence in stack:
+        lost = reason_lost(fence)
+        if lost:
+            return lost
+    return ""
+
+
 def autopilot_fence(run_id: str, owner_id: str) -> Fence:
     """The fence for one autopilot worker: its lease on ``run_id`` as ``owner_id``."""
     from ..persistence import autopilot_store
@@ -164,6 +178,6 @@ def selfmod_fence(run_id: str, owner_id: str) -> Fence:
 
 
 __all__ = [
-    "Fence", "autopilot_fence", "current", "fleet_fence", "held", "reason_lost",
+    "Fence", "autopilot_fence", "check_all", "current", "fleet_fence", "held", "reason_lost",
     "selfmod_fence",
 ]

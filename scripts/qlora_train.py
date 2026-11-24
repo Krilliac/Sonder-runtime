@@ -1,0 +1,543 @@
+"""Train a QLoRA adapter for the base model selected by Sonder Runtime.
+
+⚠️  NOT RUN. This script has been prepared but never executed. It needs an
+    ATTENDED first run — watch VRAM usage, watch for OOM, be ready to Ctrl-C.
+    Do NOT launch it unattended (e.g. from a fleet/cron/loop).
+
+What this does: reads training_data.jsonl (chat-format {"messages":[user,
+assistant]} pairs exported by export_training_data.py), formats each example
+with the Qwen chat template, masks the prompt so loss is only computed on the
+assistant span, and QLoRA-fine-tunes a small Qwen2.5-Coder base in 4-bit (NF4)
+with a LoRA adapter on top. The adapter is saved to
+./sonder-personal-lora/ by default.
+
+This is an internal training child, not a standalone entrypoint. Use
+``adaptive_training.py start --confirm`` (or ``/training start --confirm``) to
+select the model, create an integrity-bound run manifest, and issue the fresh
+one-use launch capability required by :func:`authorize_launch`. Direct
+invocation is rejected before heavyweight imports and there is never a silent
+CPU-training fallback.
+
+Supported launch (after `pip install -r requirements-train.txt`):
+    python adaptive_training.py start --confirm --model auto
+
+This file must remain importable/py_compile-able WITHOUT torch/transformers/
+peft/bitsandbytes installed — all heavy imports are deferred into main().
+"""
+import hashlib
+import hmac
+import json
+import os
+import socket
+import sys
+import time
+from pathlib import Path
+
+import training_data
+from sonder_runtime.adapters.process_liveness import process_identity
+
+# ---------------------------------------------------------------------------
+# Configuration (override via env vars; kept as simple constants on purpose)
+# ---------------------------------------------------------------------------
+
+# Direct use defaults to 1.5B; the lifecycle manager supplies its planned base.
+BASE = os.environ.get("SONDER_BASE", "Qwen/Qwen2.5-Coder-1.5B-Instruct")
+HF_REVISIONS = {
+    "Qwen/Qwen2.5-Coder-1.5B-Instruct": "2e1fd397ee46e1388853d2af2c993145b0f1098a",
+    "Qwen/Qwen2.5-Coder-3B-Instruct": "488639f1ff808d1d3d0ba301aef8c11461451ec5",
+    "Qwen/Qwen2.5-Coder-7B-Instruct": "c03e6d358207e414f1eca0bb1891e29f1db0e242",
+}
+HF_REVISION = os.environ.get("SONDER_HF_REVISION", HF_REVISIONS.get(BASE, ""))
+
+DATA_PATH = os.environ.get("SONDER_DATA", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "training_data.jsonl"))
+OUTPUT_DIR = os.environ.get("SONDER_LORA_OUT", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sonder-personal-lora"))
+
+MAX_LEN = int(os.environ.get("SONDER_MAX_LEN", "1024"))
+
+# Public aliases remain monkeypatchable in boundary tests while all producers
+# share the implementation and reviewed defaults in training_data.py.
+MAX_TRAINING_FILE_BYTES = training_data.MAX_TRAINING_FILE_BYTES
+MAX_TRAINING_RECORD_BYTES = training_data.MAX_TRAINING_RECORD_BYTES
+MAX_TRAINING_FIELD_CHARS = training_data.MAX_TRAINING_FIELD_CHARS
+MAX_TRAINING_TOTAL_CHARS = training_data.MAX_TRAINING_TOTAL_CHARS
+MAX_TRAINING_EXAMPLES = training_data.MAX_TRAINING_EXAMPLES
+MAX_FORMATTED_TOKENS = 2_000_000
+FORMATTED_TOKEN_BYTES_ESTIMATE = 192
+
+# LoRA hyperparameters
+LORA_R = int(os.environ.get("SONDER_LORA_R", "16"))
+LORA_ALPHA = int(os.environ.get("SONDER_LORA_ALPHA", "32"))
+LORA_DROPOUT = float(os.environ.get("SONDER_LORA_DROPOUT", "0.05"))
+# Attention + MLP projection modules for the Qwen2 architecture.
+LORA_TARGET_MODULES = [
+    "q_proj", "k_proj", "v_proj", "o_proj",       # attention
+    "gate_proj", "up_proj", "down_proj",           # MLP
+]
+
+# Conservative defaults; the lifecycle manager supplies its planned values.
+PER_DEVICE_BATCH_SIZE = int(os.environ.get("SONDER_BATCH_SIZE", "1"))
+GRAD_ACCUM_STEPS = int(os.environ.get("SONDER_GRAD_ACCUM", "8"))
+NUM_EPOCHS = float(os.environ.get("SONDER_EPOCHS", "3"))
+LEARNING_RATE = float(os.environ.get("SONDER_LR", "2e-4"))
+LR_SCHEDULER = "cosine"
+WARMUP_RATIO = 0.03
+LOGGING_STEPS = 5
+SAVE_STRATEGY = "epoch"
+SEED = 42
+
+
+def _write_json_atomic(path, payload):
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp-%s" % os.getpid())
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _training_limits():
+    return training_data.Limits(
+        file_bytes=MAX_TRAINING_FILE_BYTES,
+        record_bytes=MAX_TRAINING_RECORD_BYTES,
+        field_chars=MAX_TRAINING_FIELD_CHARS,
+        total_chars=MAX_TRAINING_TOTAL_CHARS,
+        examples=MAX_TRAINING_EXAMPLES,
+    )
+
+
+def authorize_launch(now=None):
+    """Consume the lifecycle controller's fresh, one-use launch capability."""
+    reviewed_revision = HF_REVISIONS.get(BASE, "")
+    if (
+        len(HF_REVISION) != 40
+        or any(char not in "0123456789abcdef" for char in HF_REVISION)
+        or not reviewed_revision
+        or not hmac.compare_digest(HF_REVISION, reviewed_revision)
+    ):
+        raise RuntimeError(
+            "training base revision does not match the reviewed Hugging Face commit"
+        )
+    manifest_path = Path(os.environ.get("SONDER_TRAINING_MANIFEST", ""))
+    token = os.environ.get("SONDER_TRAINING_LAUNCH_TOKEN", "")
+    if not manifest_path.is_file() or not token:
+        raise RuntimeError("QLoRA must be launched by `training start --confirm`")
+    claim_path = manifest_path.with_name(".launch-claimed")
+    try:
+        claim_fd = os.open(claim_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise RuntimeError("training launch authorization was already claimed") from exc
+    with os.fdopen(claim_fd, "w", encoding="ascii") as stream:
+        json.dump({
+            "pid": os.getpid(), "host": socket.gethostname(),
+            "process_identity": process_identity(os.getpid()),
+            "started": time.time(), "purpose": "QLoRA training child",
+        }, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("training launch manifest is unreadable") from exc
+    now = int(time.time() if now is None else now)
+    expected = str(manifest.get("launch_token_sha256") or "")
+    supplied = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    if not expected or not hmac.compare_digest(expected, supplied):
+        raise RuntimeError("training launch authorization is invalid")
+    if manifest.get("launch_consumed_ts"):
+        raise RuntimeError("training launch authorization was already consumed")
+    age = now - int(manifest.get("created_ts") or 0)
+    if age < 0 or age > 300:
+        raise RuntimeError("training launch authorization expired")
+    if manifest.get("schema") != 2:
+        raise RuntimeError("training launch manifest schema is unsupported")
+    if manifest_path.name != "training-plan.json" or manifest_path.parent.name != manifest.get("run_id"):
+        raise RuntimeError("training launch manifest is outside its approved run directory")
+    required = {
+        "base_hf": BASE,
+        "hf_revision": HF_REVISION,
+        "data_path": str(Path(DATA_PATH).resolve()),
+        "adapter_dir": str(Path(OUTPUT_DIR).resolve()),
+        "gpu_index": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+    }
+    for key, actual in required.items():
+        value = manifest.get(key) if key == "gpu_index" else manifest.get(key) or ""
+        if str(value) != actual:
+            raise RuntimeError("training launch %s does not match the controller plan" % key)
+    inspection = training_data.inspect_jsonl(
+        DATA_PATH,
+        str(manifest.get("data_sha256") or ""),
+        limits=_training_limits(),
+    )
+    recorded = {
+        "data_examples": len(inspection.examples),
+        "data_bytes": inspection.file_bytes,
+        "data_content_chars": inspection.content_chars,
+    }
+    for key, actual in recorded.items():
+        if key in manifest and int(manifest[key]) != actual:
+            raise RuntimeError("training %s does not match the controller plan" % key)
+    manifest["launch_consumed_ts"] = now
+    manifest.pop("launch_token_sha256", None)
+    _write_json_atomic(manifest_path, manifest)
+    return manifest
+
+
+def _print_vram_guidance():
+    print("=" * 78)
+    print("Sonder Runtime QLoRA training — attended run required")
+    print("=" * 78)
+    print(f"Base model : {BASE}")
+    print(f"Data       : {DATA_PATH}")
+    print(f"Output     : {OUTPUT_DIR}")
+    print()
+    print("The hardware planner selected this configuration. Keep the first run")
+    print("attended, watch `nvidia-smi` / Task Manager, and be ready to Ctrl-C.")
+    print("=" * 78)
+
+
+def load_examples(path, expected_sha256=""):
+    """Strictly read a bounded ``{"messages": [user, assistant]}`` JSONL file.
+
+    The authorized snapshot is an all-or-nothing training input: malformed or
+    unsupported records abort the load rather than silently changing the
+    approved corpus by skipping rows.
+    """
+    limits = training_data.Limits(
+        file_bytes=MAX_TRAINING_FILE_BYTES,
+        record_bytes=MAX_TRAINING_RECORD_BYTES,
+        field_chars=MAX_TRAINING_FIELD_CHARS,
+        total_chars=MAX_TRAINING_TOTAL_CHARS,
+        examples=MAX_TRAINING_EXAMPLES,
+    )
+    return training_data.inspect_jsonl(
+        path, expected_sha256=expected_sha256, limits=limits,
+    ).examples
+
+
+def formatted_token_limit(ram_budget_gb=None):
+    """Return a conservative cap for simultaneously materialized token lists."""
+    value = (
+        os.environ.get("SONDER_TRAIN_RAM_BUDGET_GB", "4")
+        if ram_budget_gb is None
+        else ram_budget_gb
+    )
+    try:
+        ram_bytes = float(value) * (1024 ** 3)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("training RAM budget is invalid") from exc
+    if ram_bytes <= 0:
+        raise RuntimeError("training RAM budget must be positive")
+    derived = int((ram_bytes * 0.08) / FORMATTED_TOKEN_BYTES_ESTIMATE)
+    return max(10_000, min(MAX_FORMATTED_TOKENS, derived))
+
+
+def format_training_examples(tokenizer, examples, max_len, *, ram_budget_gb=None):
+    """Tokenize examples while enforcing the reviewed in-memory expansion cap."""
+    limit = formatted_token_limit(ram_budget_gb)
+    total_tokens = 0
+    formatted = []
+    for example in examples:
+        item = build_supervised_example(tokenizer, example["messages"], max_len)
+        total_tokens += len(item["input_ids"])
+        if total_tokens > limit:
+            raise RuntimeError(
+                "formatted training corpus exceeds the safe in-memory token budget"
+            )
+        formatted.append(item)
+    return formatted
+
+
+def build_training_arguments(
+    training_arguments_cls, *, output_dir, use_bf16=False, use_fp16=False,
+):
+    """Construct the real Trainer arguments before any model is downloaded."""
+    return training_arguments_cls(
+        output_dir=str(output_dir),
+        per_device_train_batch_size=PER_DEVICE_BATCH_SIZE,
+        gradient_accumulation_steps=GRAD_ACCUM_STEPS,
+        num_train_epochs=NUM_EPOCHS,
+        learning_rate=LEARNING_RATE,
+        lr_scheduler_type=LR_SCHEDULER,
+        warmup_ratio=WARMUP_RATIO,
+        logging_steps=LOGGING_STEPS,
+        save_strategy=SAVE_STRATEGY,
+        bf16=bool(use_bf16),
+        fp16=bool(use_fp16),
+        gradient_checkpointing=True,
+        report_to=[],
+        seed=SEED,
+    )
+
+
+def build_supervised_example(tokenizer, messages, max_len):
+    """Format one {"messages": [...]} example with the Qwen chat template and
+    tokenize it, masking everything except the final assistant turn's tokens
+    (labels = -100 for prompt tokens, real ids for the assistant span).
+
+    Returns a dict with input_ids, attention_mask, labels (python lists).
+    """
+    # Prompt = everything up to (not including) the assistant reply, with the
+    # generation prompt appended so the template matches inference exactly.
+    prompt_ids = tokenizer.apply_chat_template(
+        messages[:-1],
+        tokenize=True,
+        add_generation_prompt=True,
+    )
+    full_ids = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=False,
+    )
+
+    if max_len < 2:
+        raise ValueError("max_len must preserve prompt and assistant tokens")
+    if full_ids[:len(prompt_ids)] != prompt_ids:
+        raise ValueError("chat template prompt is not a prefix of the full example")
+    assistant_ids = full_ids[len(prompt_ids):]
+    if not assistant_ids:
+        raise ValueError("chat template produced no assistant training tokens")
+
+    if len(full_ids) <= max_len:
+        input_ids = list(full_ids)
+        prompt_len = len(prompt_ids)
+    else:
+        # Preserve the generation marker and tail of a long prompt while
+        # reserving assistant loss tokens. Keep at least one prompt token so
+        # the generation boundary remains represented for very long answers.
+        assistant_budget = min(len(assistant_ids), max_len - 1)
+        prompt_budget = min(len(prompt_ids), max_len - assistant_budget)
+        input_ids = list(prompt_ids[-prompt_budget:]) if prompt_budget else []
+        input_ids.extend(assistant_ids[:assistant_budget])
+        prompt_len = prompt_budget
+    labels = [-100] * prompt_len + input_ids[prompt_len:]
+    if not any(label != -100 for label in labels):
+        raise ValueError("supervised example contains no assistant loss tokens")
+
+    attention_mask = [1] * len(input_ids)
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "labels": labels,
+    }
+
+
+def main():
+    launch_manifest = authorize_launch()
+    _print_vram_guidance()
+
+    if os.environ.get("SONDER_ALLOW_CPU_OFFLOAD", "0") == "1":
+        print("ERROR: QLoRA CPU offload is disabled for this training backend.")
+        print("Hugging Face documents device_map='auto' as an inference-only path;")
+        print("Sonder Runtime will not use it for weight training. Choose a smaller")
+        print("GPU-resident plan or configure a separately validated training backend.")
+        return 5
+
+    if not os.path.exists(DATA_PATH):
+        print(f"ERROR: training data not found at {DATA_PATH}")
+        print("Run: python export_training_data.py")
+        sys.exit(1)
+
+    examples = load_examples(DATA_PATH, launch_manifest["data_sha256"])
+    print(f"Loaded {len(examples)} training examples from {DATA_PATH}")
+    if len(examples) == 0:
+        print("ERROR: no examples to train on. Run export_training_data.py first"
+              " (and use Sonder Runtime so it has good-outcome interactions).")
+        sys.exit(1)
+    if len(examples) < 20:
+        print(f"WARNING: only {len(examples)} examples — this is a proof-of-pipeline")
+        print("         run, not a run that should meaningfully move model behavior.")
+
+    # --- heavy imports, deferred so this file stays py_compile-able without
+    # the training deps installed ---------------------------------------
+    try:
+        import torch
+        from datasets import Dataset
+        from transformers import (
+            AutoModelForCausalLM,
+            AutoTokenizer,
+            BitsAndBytesConfig,
+            DataCollatorForSeq2Seq,
+            Trainer,
+            TrainingArguments,
+        )
+        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    except ImportError as e:
+        print()
+        print("ERROR: training dependencies are not installed.")
+        print(f"  ({e})")
+        print("Install them with:")
+        print("    python -m pip install -r requirements-train.txt")
+        print("See TRAINING.md for the full setup + feasibility notes (bitsandbytes")
+        print("on native Windows is finicky; WSL2 is the smoother path).")
+        sys.exit(1)
+
+    torch.manual_seed(SEED)
+
+    has_cuda = torch.cuda.is_available()
+    print(f"CUDA available: {has_cuda}")
+    if has_cuda:
+        print(f"  device: {torch.cuda.get_device_name(0)}")
+        total_vram = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        print(f"  total VRAM: {total_vram:.1f} GB")
+    else:
+        print("ERROR: no CUDA GPU is visible. Sonder Runtime will not silently fall back")
+        print("to CPU weight training. Verify the CUDA torch build and driver, or")
+        print("use `training plan` on a supported host.")
+        return 3
+
+    compute_dtype = torch.bfloat16 if (has_cuda and torch.cuda.is_bf16_supported()) else torch.float16
+
+    # TrainingArguments performs Transformers' actual Trainer dependency and
+    # device compatibility checks (including the accelerate minimum). Do this
+    # before a tokenizer/model download so a stale training environment fails
+    # quickly without consuming GPU memory or Hub bandwidth.
+    training_args = build_training_arguments(
+        TrainingArguments,
+        output_dir=os.path.join(OUTPUT_DIR, "checkpoints"),
+        use_bf16=(compute_dtype == torch.bfloat16),
+        use_fp16=(compute_dtype == torch.float16),
+    )
+
+    print(f"Loading tokenizer + base model ({BASE}) in 4-bit NF4 ...")
+    tokenizer = AutoTokenizer.from_pretrained(
+        BASE, revision=HF_REVISION, trust_remote_code=False,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=compute_dtype,
+        bnb_4bit_use_double_quant=True,
+    )
+
+    model_kwargs = {
+        "quantization_config": bnb_config,
+        "device_map": {"": 0},
+        "revision": HF_REVISION,
+        "trust_remote_code": False,
+    }
+    model = AutoModelForCausalLM.from_pretrained(BASE, **model_kwargs)
+    model.gradient_checkpointing_enable()
+    model = prepare_model_for_kbit_training(model)
+
+    lora_config = LoraConfig(
+        r=LORA_R,
+        lora_alpha=LORA_ALPHA,
+        lora_dropout=LORA_DROPOUT,
+        target_modules=LORA_TARGET_MODULES,
+        bias="none",
+        revision=HF_REVISION,
+        task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
+
+    print("Formatting + tokenizing examples (prompt masked, assistant-only loss) ...")
+    formatted = format_training_examples(tokenizer, examples, MAX_LEN)
+    examples.clear()
+    dataset = Dataset.from_list(formatted)
+    del formatted
+
+    data_collator = DataCollatorForSeq2Seq(
+        tokenizer=tokenizer,
+        padding=True,
+        label_pad_token_id=-100,
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=dataset,
+        data_collator=data_collator,
+    )
+
+    print("Starting training ... (this is the attended part — watch VRAM)")
+    checkpoints_dir = os.path.join(OUTPUT_DIR, "checkpoints")
+    resume = None
+    if os.environ.get("SONDER_RESUME", "1") == "1" and os.path.isdir(checkpoints_dir):
+        candidates = [
+            os.path.join(checkpoints_dir, name)
+            for name in os.listdir(checkpoints_dir)
+            if name.startswith("checkpoint-") and name.split("-")[-1].isdigit()
+        ]
+        if candidates:
+            resume = max(candidates, key=lambda path: int(path.rsplit("-", 1)[-1]))
+            print(f"Resuming from checkpoint: {resume}")
+    try:
+        trainer.train(resume_from_checkpoint=resume)
+    except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
+        if not isinstance(exc, torch.cuda.OutOfMemoryError) and "out of memory" not in str(exc).lower():
+            raise
+        print("ERROR: CUDA out of memory. Training stopped cleanly; existing")
+        print("checkpoints are preserved. Re-run `training plan` with a smaller")
+        print("model/sequence length or enable supported CPU offload explicitly.")
+        if has_cuda:
+            torch.cuda.empty_cache()
+        return 4
+
+    print(f"Saving LoRA adapter to {OUTPUT_DIR} ...")
+    model.save_pretrained(OUTPUT_DIR)
+    tokenizer.save_pretrained(OUTPUT_DIR)
+    required_artifacts = ("adapter_config.json", "adapter_model.safetensors")
+    adapter_config_path = Path(OUTPUT_DIR) / "adapter_config.json"
+    try:
+        saved_adapter_config = json.loads(adapter_config_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError) as exc:
+        raise RuntimeError("training output adapter config is unreadable") from exc
+    if (
+        not isinstance(saved_adapter_config, dict)
+        or saved_adapter_config.get("base_model_name_or_path") != BASE
+        or saved_adapter_config.get("revision") != HF_REVISION
+    ):
+        raise RuntimeError(
+            "training output adapter config lost its pinned base provenance"
+        )
+    artifact_sha256 = {}
+    artifact_sizes = {}
+    for name in required_artifacts:
+        artifact_path = Path(OUTPUT_DIR) / name
+        if not artifact_path.is_file() or artifact_path.is_symlink():
+            raise RuntimeError(f"training output is missing trusted artifact {name}")
+        artifact_sha256[name] = _sha256_file(artifact_path)
+        artifact_sizes[name] = artifact_path.stat().st_size
+    manifest = dict(launch_manifest)
+    manifest.update({
+        "base_hf": BASE,
+        "completed_ts": int(time.time()),
+        "adapter_config": os.path.join(OUTPUT_DIR, "adapter_config.json"),
+        "artifact_sha256": artifact_sha256,
+        "artifact_sizes": artifact_sizes,
+    })
+    _write_json_atomic(Path(OUTPUT_DIR) / "training-manifest.json", manifest)
+    print("Done. Run `training deploy` for checked GGUF conversion and validation.")
+    return 0
+
+
+def _entrypoint():
+    try:
+        return main()
+    except RuntimeError as exc:
+        if "out of memory" not in str(exc).lower():
+            raise
+        print("ERROR: CUDA out of memory while loading/preparing the model.")
+        print("No CPU fallback was attempted. Preserve any existing checkpoints and")
+        print("re-run `training plan` with a smaller model or sequence length.")
+        return 4
+
+
+if __name__ == "__main__":
+    raise SystemExit(_entrypoint())

@@ -58,10 +58,14 @@
   pause/cancel decisions as final. Persist progress across restarts and require an
   explicit resume; never infer location inside an autonomous run.
 - Accept the host's shared local runtime policy as authoritative. Use only the
-  selected `fast`, `code`, or `general` tier for the current execution lane.
+  selected local tier (`fast`, `code`, `general`, `reasoning`, `vision`,
+  `security`, `creative`, or `draft`) for the current execution lane.
   Never rewrite model mappings unless the user explicitly requests a guarded
   `/runtime set` change, and never use that policy to enable cloud, widen roots
   or permissions, or store credentials.
+- `/image` and `/gif` are host-routed local media commands; never deny that
+  local image or animated GIF generation exists when those commands are
+  available.
 - Accept the host's atomic MCP refresh boundary. Updated tool implementations
   and schemas may appear after any tool/list request. If `/mcp status` reports a
   failed refresh, disclose it and keep using only the last known-good registered

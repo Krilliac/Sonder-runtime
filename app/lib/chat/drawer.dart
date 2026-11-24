@@ -292,6 +292,24 @@ class _ThreadRowState extends State<ThreadRow> {
           // Delete is a full 48 px target laid over the row, so the pill
           // can stay slim without shrinking what a finger has to hit.
           child: Stack(children: [
+            Positioned.fill(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: _pillInset),
+                child: AnimatedContainer(
+                  duration: SonderMotion.of(context, SonderMotion.fast),
+                  curve: SonderMotion.standard,
+                  decoration:
+                      BoxDecoration(color: background, borderRadius: radius),
+                  foregroundDecoration: BoxDecoration(
+                    borderRadius: radius,
+                    border: Border.all(
+                      color: _ring ? tokens.accentText : Colors.transparent,
+                      width: 1.5,
+                    ),
+                  ),
+                ),
+              ),
+            ),
             Material(
               type: MaterialType.transparency,
               child: InkWell(
@@ -305,8 +323,16 @@ class _ThreadRowState extends State<ThreadRow> {
                         ? () => setState(() => _revealed = true)
                         : null,
                 borderRadius: radius,
-                // The pill is the hover, press and focus feedback.
-                overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+                splashFactory: MediaQuery.disableAnimationsOf(context)
+                    ? NoSplash.splashFactory
+                    : null,
+                // Keep hover/focus on the pill while preserving InkSparkle on press.
+                overlayColor: WidgetStateProperty.resolveWith<Color?>((states) {
+                  if (states.contains(WidgetState.pressed)) {
+                    return tokens.accent.withValues(alpha: 0.28);
+                  }
+                  return Colors.transparent;
+                }),
                 onFocusChange: (focused) {
                   final keyboard = FocusManager.instance.highlightMode ==
                       FocusHighlightMode.traditional;
@@ -315,27 +341,19 @@ class _ThreadRowState extends State<ThreadRow> {
                 },
                 child: Padding(
                   padding: const EdgeInsets.symmetric(vertical: _pillInset),
-                  child: AnimatedContainer(
-                    duration: SonderMotion.of(context, SonderMotion.fast),
-                    curve: SonderMotion.standard,
+                  child: ConstrainedBox(
                     constraints: const BoxConstraints(
                         minHeight: _rowHeight - 2 * _pillInset),
-                    padding: EdgeInsets.only(
-                        left: SonderSpace.md,
-                        right: actionCount == 0
-                            ? SonderSpace.md
-                            : SonderSpace.x4 * actionCount +
-                                (showMore && showDelete ? SonderSpace.sm : 0)),
-                    decoration:
-                        BoxDecoration(color: background, borderRadius: radius),
-                    foregroundDecoration: BoxDecoration(
-                      borderRadius: radius,
-                      border: Border.all(
-                        color: _ring ? tokens.accentText : Colors.transparent,
-                        width: 1.5,
-                      ),
-                    ),
-                    child: Row(
+                    child: Padding(
+                      padding: EdgeInsets.only(
+                          left: SonderSpace.md,
+                          right: actionCount == 0
+                              ? SonderSpace.md
+                              : SonderSpace.x4 * actionCount +
+                                  (showMore && showDelete
+                                      ? SonderSpace.sm
+                                      : 0)),
+                      child: Row(
                       children: [
                         if (widget.running) ...[
                           Tooltip(
@@ -367,6 +385,7 @@ class _ThreadRowState extends State<ThreadRow> {
                           ),
                         ),
                       ],
+                    ),
                     ),
                   ),
                 ),

@@ -1,0 +1,361 @@
+"""Export proven, privacy-safe interactions as fine-tuning JSONL.
+
+Usage: python export_training_data.py [out_path]
+Default out_path: training_data.jsonl (gitignored).
+"""
+import sys as _sonder_sys
+from pathlib import Path as _SonderPath
+_SONDER_REPO_ROOT = _SonderPath(__file__).resolve().parents[1]
+for _sonder_p in (str(_SONDER_REPO_ROOT / "scripts"), str(_SONDER_REPO_ROOT / "runtime"), str(_SONDER_REPO_ROOT)):
+    if _sonder_p not in _sonder_sys.path:
+        _sonder_sys.path.insert(0, _sonder_p)
+import collections
+import hashlib
+import heapq
+import json
+import math
+import os
+from pathlib import Path
+import sys
+import tempfile
+import unicodedata
+
+import contribute
+import sonder_runtime.adapters.memory_store as memory_store
+from sonder_runtime.domain.memory import rules as reward_rules
+import sonder_paths
+import training_data
+
+MAX_TRAINING_FILE_BYTES = training_data.MAX_TRAINING_FILE_BYTES
+MAX_TRAINING_RECORD_BYTES = training_data.MAX_TRAINING_RECORD_BYTES
+MAX_TRAINING_FIELD_CHARS = training_data.MAX_TRAINING_FIELD_CHARS
+MAX_TRAINING_TOTAL_CHARS = training_data.MAX_TRAINING_TOTAL_CHARS
+MAX_TRAINING_EXAMPLES = training_data.MAX_TRAINING_EXAMPLES
+MAX_EXPORT_SOURCE_INTERACTIONS = 50_000
+MAX_EXPORT_EVIDENCE_ROWS = 200_000
+MAX_EXPORT_RETAINED_CHARS = MAX_TRAINING_TOTAL_CHARS * 2
+
+EXPORT_SCHEMA = 1
+
+
+def _canonical_prompt(text):
+    value = unicodedata.normalize("NFKC", text or "")
+    return " ".join(value.split()).casefold()
+
+
+def _privacy_reasons(task, response):
+    return sorted(set(
+        contribute.private_reasons(task or "")
+        + contribute.private_reasons(response or "")
+    ))
+
+
+def _select_examples(conn):
+    """Return deterministic examples and non-sensitive selection statistics.
+
+    Eligibility is fail closed: an interaction needs at least one grounded good
+    signal, any negative/unknown signal vetoes it, and task/response text that
+    trips the shared privacy classifier is omitted.  Duplicate prompts choose
+    the strongest-proven response, then the newest positive evidence.
+    """
+    rejected = collections.Counter()
+    accepted_populations = collections.Counter()
+    winners = {}
+    ranked = []
+    retained_chars = 0
+    interaction_count = 0
+    evidence_count = 0
+    eligible_count = 0
+    # Turns answered with reference passages in the prompt: the stored task is
+    # the bare question, so the pair would teach answers the task cannot carry.
+    reference_grounded = memory_store.learning_excluded_interaction_ids(
+        conn, memory_store.LEARNING_SKIP_REFERENCE_LOOKUP,
+    )
+
+    def finalize_group(group):
+        nonlocal eligible_count, retained_chars
+        first = group["first"]
+        if first.get("id") in reference_grounded:
+            rejected["reference_lookup"] += 1
+            return
+        task = (first.get("task") or "").strip()
+        response = (first.get("response") or "").strip()
+        if not task or not response:
+            rejected["empty_content"] += 1
+            return
+        if (
+            int(first.get("task_length") or 0) > MAX_TRAINING_FIELD_CHARS
+            or int(first.get("response_length") or 0) > MAX_TRAINING_FIELD_CHARS
+        ):
+            rejected["field_too_large"] += 1
+            return
+        if group["best"] is None:
+            rejected["no_good_outcome"] += 1
+            return
+        if group["contradictory"]:
+            rejected["contradictory_outcome"] += 1
+            return
+
+        privacy = _privacy_reasons(task, response)
+        if privacy:
+            rejected["privacy"] += 1
+            for reason in privacy:
+                rejected["privacy.%s" % reason] += 1
+            return
+
+        best = group["best"]
+        eligible_count += 1
+        candidate = {
+            "id": first["id"],
+            "task": task,
+            "response": response,
+            "prompt_key": _canonical_prompt(task),
+            "population": (
+                "caller" if best.get("outcome_source") == reward_rules.OUTCOME_SOURCE_CALLER
+                else reward_rules.signal_population(best.get("signal"))
+            ),
+            "evidence_rowid": int(best.get("outcome_rowid") or 0),
+            "interaction_rowid": int(first.get("interaction_rowid") or 0),
+            "chars": len(task) + len(response),
+        }
+        # Population first, price only inside it. Ordering by reward alone put
+        # self-graded "tests_passed" (1.0) above every caller-judged signal, so
+        # duplicate-prompt resolution and capacity eviction both preferred the
+        # runtime's own marking to a human's -- in a corpus already ~98%
+        # self-graded, that is the wrong row surviving every squeeze.
+        evidence_rank = reward_rules.evidence_rank(best.get("signal"))
+        # Provenance is the actual answer to who judged this row.  A caller
+        # recording a passing test has still reviewed the delegated work; do
+        # not demote that row merely because its signal name is execution-like.
+        if best.get("outcome_source") == reward_rules.OUTCOME_SOURCE_CALLER:
+            evidence_rank = (
+                evidence_rank[0], 2,
+                reward_rules.reward_score(best.get("signal")),
+            )
+        candidate["rank"] = (
+            evidence_rank,
+            candidate["evidence_rowid"],
+            candidate["interaction_rowid"],
+            candidate["id"],
+        )
+        key = candidate["prompt_key"]
+        current = winners.get(key)
+        if current is not None:
+            rejected["duplicate_prompt"] += 1
+            if candidate["rank"] <= current["rank"]:
+                return
+            retained_chars -= current["chars"]
+        winners[key] = candidate
+        retained_chars += candidate["chars"]
+        heapq.heappush(ranked, (candidate["rank"], key))
+
+        while (
+            len(winners) > MAX_TRAINING_EXAMPLES
+            or retained_chars > MAX_EXPORT_RETAINED_CHARS
+        ):
+            while ranked:
+                worst_rank, worst_key = heapq.heappop(ranked)
+                worst = winners.get(worst_key)
+                if worst is not None and worst["rank"] == worst_rank:
+                    break
+            else:
+                raise training_data.TrainingDataError(
+                    "training export selection heap became inconsistent"
+                )
+            retained_chars -= worst["chars"]
+            del winners[worst_key]
+            rejected["selection_capacity"] += 1
+
+    current = None
+
+    def row_evidence_rank(row):
+        signal = row.get("signal")
+        rank = reward_rules.evidence_rank(signal)
+        if row.get("outcome_source") == reward_rules.OUTCOME_SOURCE_CALLER:
+            rank = (rank[0], 2, reward_rules.reward_score(signal))
+        return rank, int(row.get("outcome_rowid") or 0)
+
+    for row in memory_store.interaction_outcome_evidence(
+        conn,
+        limit=MAX_EXPORT_EVIDENCE_ROWS + 1,
+        field_limit=MAX_TRAINING_FIELD_CHARS + 1,
+    ):
+        evidence_count += 1
+        if evidence_count > MAX_EXPORT_EVIDENCE_ROWS:
+            raise training_data.TrainingDataError(
+                "training export exceeds the supported outcome evidence limit"
+            )
+        if current is None or row["id"] != current["first"]["id"]:
+            if current is not None:
+                interaction_count += 1
+                if interaction_count > MAX_EXPORT_SOURCE_INTERACTIONS:
+                    raise training_data.TrainingDataError(
+                        "training export exceeds the supported interaction limit"
+                    )
+                finalize_group(current)
+            current = {"first": row, "best": None, "contradictory": False}
+        signal = row.get("signal")
+        try:
+            stored_reward = float(row.get("reward"))
+        except (TypeError, ValueError, OverflowError):
+            stored_reward = float("nan")
+        canonical = (
+            signal in reward_rules.VALID_SIGNALS
+            and math.isfinite(stored_reward)
+            and stored_reward == reward_rules.reward_score(signal)
+        )
+        if not canonical:
+            # A corrupt reward row is untrustworthy evidence.
+            current["contradictory"] = True
+        elif reward_rules.reward_is_good(signal):
+            # is_good is eligibility; evidence_rank is the ordering. Comparing
+            # rows by score() alone lets a self-graded pass displace the
+            # caller's judgement of the same interaction.
+            if current["best"] is None or (
+                row_evidence_rank(row) > row_evidence_rank(current["best"])
+            ):
+                current["best"] = row
+        elif reward_rules.reward_score(signal) < 0:
+            # Only a genuinely negative outcome disputes a good one. A weak
+            # positive below the good threshold - "compiled" (0.70) once
+            # GOOD_THRESHOLD rose to 0.71 - is not evidence against the work;
+            # it is merely not good enough to train on, so it is ignored
+            # rather than poisoning an otherwise-trainable interaction.
+            current["contradictory"] = True
+    if current is not None:
+        interaction_count += 1
+        if interaction_count > MAX_EXPORT_SOURCE_INTERACTIONS:
+            raise training_data.TrainingDataError(
+                "training export exceeds the supported interaction limit"
+            )
+        finalize_group(current)
+
+    examples = []
+    payload_bytes = 0
+    payload_chars = 0
+    accepted = []
+    for candidate in sorted(
+        winners.values(), key=lambda row: row["rank"], reverse=True,
+    ):
+        example = {"messages": [
+            {"role": "user", "content": candidate["task"]},
+            {"role": "assistant", "content": candidate["response"]},
+        ]}
+        try:
+            example = training_data.canonical_record(example)
+            encoded = (
+                json.dumps(example, ensure_ascii=False, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+        except (training_data.TrainingDataError, UnicodeError):
+            rejected["invalid_record"] += 1
+            continue
+        if len(encoded) > MAX_TRAINING_RECORD_BYTES:
+            rejected["record_too_large"] += 1
+            continue
+        if len(accepted) >= MAX_TRAINING_EXAMPLES:
+            rejected["example_limit"] += 1
+            continue
+        if payload_bytes + len(encoded) > MAX_TRAINING_FILE_BYTES:
+            rejected["file_size_limit"] += 1
+            continue
+        record_chars = sum(len(message["content"]) for message in example["messages"])
+        if payload_chars + record_chars > MAX_TRAINING_TOTAL_CHARS:
+            rejected["content_size_limit"] += 1
+            continue
+        accepted.append((candidate["prompt_key"], candidate["id"], example))
+        accepted_populations[candidate["population"] or "unknown"] += 1
+        payload_bytes += len(encoded)
+        payload_chars += record_chars
+    examples = [
+        example for _prompt, _identifier, example in sorted(accepted)
+    ]
+    stats = {
+        "interactions_with_outcomes": interaction_count,
+        "outcome_evidence_rows": evidence_count,
+        "eligible_before_deduplication": eligible_count,
+        "accepted": len(examples),
+        # Reported apart, never combined. A single "accepted" total hides that
+        # the corpus is overwhelmingly the runtime's own marking; a blended
+        # quality figure over both would read like accuracy and is not one.
+        "accepted_by_population": dict(sorted(accepted_populations.items())),
+        "rejected": interaction_count - len(examples),
+        "rejected_by_reason": dict(sorted(rejected.items())),
+    }
+    return examples, stats
+
+
+def build_examples(conn):
+    examples, _stats = _select_examples(conn)
+    return examples
+
+
+def _atomic_write(path, payload):
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", delete=False, dir=str(destination.parent),
+            prefix=destination.name + ".tmp-",
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def main(out_path="training_data.jsonl", db_path=None, manifest_path=None):
+    db_path = db_path or sonder_paths.memory_db_path()
+    manifest_path = manifest_path or (str(out_path) + ".manifest.json")
+    output_path = Path(out_path).resolve()
+    selection_path = Path(manifest_path).resolve()
+    if output_path == selection_path:
+        raise ValueError("training data and selection manifest paths must differ")
+    db_text = str(db_path)
+    if db_text != ":memory:" and not db_text.lower().startswith("file:"):
+        database_path = Path(db_path).resolve()
+        if database_path in {output_path, selection_path}:
+            raise ValueError("training outputs must not replace the memory database")
+    conn = memory_store.connect(db_path)
+    try:
+        examples, stats = _select_examples(conn)
+    finally:
+        conn.close()
+    payload = training_data.encode_jsonl(examples)
+    total_chars = sum(len(m["content"]) for ex in examples for m in ex["messages"])
+    digest = hashlib.sha256(payload).hexdigest()
+    manifest = {
+        "schema": EXPORT_SCHEMA,
+        "format": "sonder-chat-jsonl",
+        **stats,
+        "characters": total_chars,
+        "sha256": digest,
+        "privacy_policy": "exclude-shared-private-markers",
+    }
+    # A stale manifest must never claim a newly replaced dataset. Invalidate it
+    # before committing data; failures can leave no manifest, never a false one.
+    try:
+        Path(manifest_path).unlink()
+    except FileNotFoundError:
+        pass
+    _atomic_write(out_path, payload)
+    _atomic_write(
+        manifest_path,
+        (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+    )
+    print("exported %d examples to %s (%d total chars, ~%d tokens rough)"
+          % (len(examples), out_path, total_chars, total_chars // 4))
+    print("selection manifest: %s (sha256 %s)" % (manifest_path, digest))
+    return len(examples)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1] if len(sys.argv) > 1 else "training_data.jsonl")

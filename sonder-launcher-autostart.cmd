@@ -8,7 +8,7 @@ if /I "%~1"=="uninstall" (
 )
 if not defined SONDER_LAUNCHER_TOKEN (
   echo ERROR: Set a strong per-user SONDER_LAUNCHER_TOKEN first.
-  echo Example token generator: py "%~dp0sonder_launcher.py" --generate-token
+  echo Example token generator: py "%~dp0runtime\sonder_launcher.py" --generate-token
   exit /b 2
 )
 if not defined SONDER_LAUNCHER_CERT (

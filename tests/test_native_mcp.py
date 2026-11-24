@@ -111,14 +111,14 @@ def test_native_catalog_is_bounded_and_deterministic():
         "agent_lane",
         "approximate_location_lookup", "archive_create", "archive_extract", "archive_list", "artifact_risk_inspect",
         "build_fix", "build_fix_restore", "build_fix_result", "build_job", "build_job_result", "build_model",
-        "claim_check", "compute_artifact_fetch", "compute_cancel", "compute_status", "compute_submit",
-        "crash_digest", "crash_triage", "data_inspect", "data_query", "debug_run_result", "dependency_inventory",
-        "directory_create", "directory_digest", "directory_tree", "edit_file", "fetch_artifact",
+        "citation_audit", "claim_check", "code_audit", "code_graph", "code_metrics", "compute_artifact_fetch", "compute_cancel", "compute_status", "compute_submit",
+        "consistency_check", "crash_digest", "crash_triage", "data_inspect", "data_query", "data_transform", "debug_run_result", "dependency_inventory",
+        "diff_semantic", "directory_create", "directory_digest", "directory_tree", "document_extract", "edit_file", "error_diagnose", "fact_cross_check", "fetch_artifact",
         "file_batch_write", "file_check", "file_copy", "file_delete", "file_digest", "file_edit",
         "file_find", "file_move", "file_read", "file_read_range", "file_write", "image_inspect",
-        "json_patch", "log_inspect", "make_directory", "output_digest", "process_list", "process_memory_risk_inspect",
-        "profile_capture_digest", "profile_digest", "program_search", "project_detect", "read_file", "run_program", "run_script", "script_search", "secret_scan",
-        "test_run", "test_run_result", "text_patch", "text_search", "tool_help", "tool_inventory",
+        "json_patch", "language_matrix", "learn_tool", "log_inspect", "logic_verify", "make_directory", "math_eval", "media_inspect", "output_digest", "plan_fallback", "process_list", "process_memory_risk_inspect",
+        "profile_capture_digest", "profile_digest", "program_search", "project_detect", "prompt_shield", "read_file", "reasoning_board", "regex_lab", "run_program", "run_script", "runtime_resilience_check", "schema_validate", "script_search", "secret_scan",
+        "symbol_verify", "test_run", "test_run_result", "text_patch", "text_search", "tool_help", "tool_inventory",
         "verify_artifact", "vision_analyze", "weather_lookup", "web_fetch", "web_search", "workspace_compare", "workspace_run", "write_file",
     ]
 
@@ -126,11 +126,11 @@ def test_native_catalog_is_bounded_and_deterministic():
 def test_native_catalog_has_exact_packaged_adapter_executor_parity():
     packaged_executor = {
         "approximate_location_lookup", "archive_create", "archive_extract",
-        "artifact_risk_inspect", "directory_tree", "edit_file", "fetch_artifact",
+        "artifact_risk_inspect", "citation_audit", "code_audit", "code_graph", "code_metrics", "consistency_check", "data_transform", "diff_semantic", "directory_tree", "document_extract", "edit_file", "error_diagnose", "fact_cross_check", "fetch_artifact",
         "file_batch_write", "file_copy", "file_delete", "file_find", "file_move",
-        "file_read_range", "image_inspect", "json_patch", "make_directory",
-        "process_list", "process_memory_risk_inspect", "program_search", "read_file",
-        "run_program", "run_script", "script_search", "secret_scan", "text_patch",
+        "file_read_range", "image_inspect", "json_patch", "language_matrix", "learn_tool", "logic_verify", "make_directory", "math_eval", "media_inspect",
+        "process_list", "process_memory_risk_inspect", "plan_fallback", "program_search", "prompt_shield", "read_file", "reasoning_board", "regex_lab",
+        "run_program", "run_script", "runtime_resilience_check", "schema_validate", "script_search", "secret_scan", "symbol_verify", "text_patch",
         "text_search", "verify_artifact", "weather_lookup", "web_fetch", "web_search",
         "write_file",
     }
@@ -163,7 +163,7 @@ def test_native_catalog_has_exact_packaged_adapter_executor_parity():
         "compute_artifact_fetch", "agent_lane", "tool_help", "file_check", "claim_check",
     }
     assert canonical_native == packaged_executor | packaged_inspections
-    assert len(canonical_native) == 40
+    assert len(canonical_native) == 62
     assert compatibility_aliases == {
         "directory_create", "file_edit", "file_read", "file_write", "workspace_run",
     }
@@ -188,7 +188,7 @@ def test_native_compute_tools_are_bounded_and_require_explicit_remote_consent():
     ]
     assert registry.require("compute_artifact_fetch").input_schema[
         "properties"
-    ]["max_bytes"]["maximum"] == 98_304
+    ]["max_bytes"]["maximum"] == 80_000
 
 
 def test_native_compute_submit_status_and_cancel_route_to_compute_service(monkeypatch):

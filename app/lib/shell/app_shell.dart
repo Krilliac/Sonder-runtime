@@ -433,8 +433,13 @@ class _AppShellState extends State<AppShell>
   }
 
   Future<void> _openChatLink(String ref) async {
-    final thread =
+    var thread =
         isValidChatRef(ref) ? _session.chat.threadForSession(ref) : null;
+    if (thread == null && isValidChatRef(ref)) {
+      await _session.chat.syncServerSessions(force: true);
+      if (!mounted) return;
+      thread = _session.chat.threadForSession(ref);
+    }
     if (thread == null) {
       await _navigate(WorkspaceDestination.chat);
       if (!mounted) return;
@@ -637,6 +642,8 @@ class _AppShellState extends State<AppShell>
         onProjectFilter: (p) => setState(() => _projectFilter = p),
         onNewChat: () => unawaited(_newChat()),
         onSearch: () => unawaited(_openSearch()),
+        onRefreshThreads: () =>
+            unawaited(_session.chat.syncServerSessions(force: true)),
         onToggleCollapsed: inDrawer ? null : _toggleSidebar,
         onShowShortcuts: () => unawaited(showShortcutGuide(context)),
         onDestination: (d) => unawaited(_navigate(d)),

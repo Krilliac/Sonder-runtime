@@ -529,7 +529,7 @@ def test_the_shared_lane_system_builder_has_no_block(cloud):
 
 
 def test_only_the_served_chat_routes_add_the_block():
-    tree = ast.parse((ROOT / "server.py").read_text(encoding="utf-8-sig"))
+    tree = ast.parse((ROOT / "runtime" / "server.py").read_text(encoding="utf-8-sig"))
     callers = set()
     for function in ast.walk(tree):
         if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):

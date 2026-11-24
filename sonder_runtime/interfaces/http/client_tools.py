@@ -50,12 +50,30 @@ def _default_risk(tool_name: str) -> str:
 
 MAX_CLIENT_OUTPUT_CHARS = 65_536
 MAX_CLIENT_ERROR_CHARS = 4_096
+MAX_CLIENT_ARGS_BYTES = 65_536
+MAX_PENDING_CALLS_GLOBAL = 256
+MAX_PENDING_CALLS_PER_PRINCIPAL = 32
+MAX_TOTAL_CALLS = 768
 DEFAULT_CLIENT_TOOL_TIMEOUT_SECONDS = 120.0
 MAX_CLIENT_TOOL_TIMEOUT_SECONDS = 300.0
 DEFAULT_NON_STREAM_HANDOFF_TTL_SECONDS = 300.0
 _MAX_COMPLETED_RECORDS = 512
 _CALL_ID_RE = re.compile(r"^[0-9a-f]{8,64}$")
 _RESULT_ALLOWED_KEYS: frozenset[str] = frozenset({"ok", "output", "error", "denied", "session"})
+
+
+class ClientToolBrokerCapacityError(RuntimeError):
+    """Raised when pending client tool calls exceed global or per-principal limits."""
+
+    status_code = 429
+    code = "TOO_MANY_PENDING_CLIENT_CALLS"
+
+
+class ClientToolArgsTooLargeError(ValueError):
+    """Raised when serialized client tool arguments exceed ``MAX_CLIENT_ARGS_BYTES``."""
+
+    status_code = 413
+    code = "PAYLOAD_TOO_LARGE"
 
 
 @dataclass(frozen=True)
@@ -154,13 +172,40 @@ def _canonical_result_digest(ok: bool, output: str, error: str, denied: bool) ->
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _shrink_completed_call(call: ClientToolCall, *, clear_args: bool = True) -> None:
+    """Drop large result/argument payloads after completion while preserving digest and summary metadata."""
+    res = call.result
+    if res is not None and (res.output or len(res.error) > 512):
+        call.result = ClientToolPayload(
+            ok=res.ok,
+            output="",
+            error=res.error[:512],
+            denied=res.denied,
+            digest=res.digest,
+        )
+    if clear_args and call.args:
+        call.args = {}
+
+
 class ClientToolBroker:
     """In-memory per-listener registry of pending and completed client tool calls."""
 
-    def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] | None = None,
+        max_pending_calls: int = MAX_PENDING_CALLS_GLOBAL,
+        max_pending_per_principal: int = MAX_PENDING_CALLS_PER_PRINCIPAL,
+        max_total_calls: int = MAX_TOTAL_CALLS,
+        max_args_bytes: int = MAX_CLIENT_ARGS_BYTES,
+    ) -> None:
         self._lock = threading.Lock()
         self._calls: dict[str, ClientToolCall] = {}
         self._clock: Callable[[], float] = clock or time.time
+        self._max_pending_calls = max(1, int(max_pending_calls))
+        self._max_pending_per_principal = max(1, int(max_pending_per_principal))
+        self._max_total_calls = max(self._max_pending_calls, int(max_total_calls))
+        self._max_args_bytes = max(256, int(max_args_bytes))
 
     def create_call(
         self,
@@ -173,15 +218,25 @@ class ClientToolBroker:
         timeout_seconds: float = DEFAULT_CLIENT_TOOL_TIMEOUT_SECONDS,
         mode: str = "stream",
     ) -> ClientToolCall:
+        sanitized_args = _sanitize_args(args)
+        try:
+            encoded_args = json.dumps(sanitized_args, ensure_ascii=False, default=str).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"client tool args are not serializable: {exc}") from exc
+        if len(encoded_args) > self._max_args_bytes:
+            raise ClientToolArgsTooLargeError(
+                f"client tool args exceed {self._max_args_bytes} bytes"
+            )
         now = self._clock()
         ttl = max(1.0, min(float(timeout_seconds), MAX_CLIENT_TOOL_TIMEOUT_SECONDS))
         clean_tool = str(tool or "").strip().lstrip("/")
+        clean_principal = str(principal or "").strip()
         call = ClientToolCall(
             call_id=secrets.token_hex(16),
-            principal=str(principal or "").strip(),
+            principal=clean_principal,
             session=str(session or "").strip(),
             tool=clean_tool,
-            args=_sanitize_args(args),
+            args=sanitized_args,
             risk=str(risk or _default_risk(clean_tool)),
             created_at=now,
             expires_at=now + ttl,
@@ -189,30 +244,58 @@ class ClientToolBroker:
         )
         with self._lock:
             self._prune_locked(now)
+            global_pending = 0
+            principal_pending = 0
+            for item in self._calls.values():
+                if item.status == "awaiting_client_result":
+                    global_pending += 1
+                    if item.principal == clean_principal:
+                        principal_pending += 1
+            if global_pending >= self._max_pending_calls:
+                raise ClientToolBrokerCapacityError(
+                    f"too many pending client tool calls (limit {self._max_pending_calls})"
+                )
+            if principal_pending >= self._max_pending_per_principal:
+                raise ClientToolBrokerCapacityError(
+                    f"too many pending client tool calls for principal (limit {self._max_pending_per_principal})"
+                )
             self._calls[call.call_id] = call
+            self._enforce_total_cap_locked()
         return call
 
-    def _prune_locked(self, now: float) -> None:
-        expired_old = [
-            cid
+    def _enforce_total_cap_locked(self) -> None:
+        completed = [
+            (item.created_at, cid)
             for cid, item in self._calls.items()
-            if (item.status != "awaiting_client_result" and now - item.created_at > 600.0)
-            or (item.status == "awaiting_client_result" and now > item.expires_at + 300.0)
+            if item.status != "awaiting_client_result"
         ]
-        for cid in expired_old:
+        completed_excess = len(completed) - _MAX_COMPLETED_RECORDS
+        total_excess = len(self._calls) - self._max_total_calls
+        to_evict = max(completed_excess, total_excess, 0)
+        if to_evict <= 0:
+            return
+        completed.sort(key=lambda pair: pair[0])
+        for _, cid in completed[:to_evict]:
             self._calls.pop(cid, None)
-        if len(self._calls) > _MAX_COMPLETED_RECORDS:
-            ordered = sorted(
-                (
-                    (item.created_at, cid)
-                    for cid, item in self._calls.items()
-                    if item.status != "awaiting_client_result"
-                ),
-                key=lambda pair: pair[0],
-            )
-            excess = len(self._calls) - _MAX_COMPLETED_RECORDS
-            for _, cid in ordered[: max(0, excess)]:
-                self._calls.pop(cid, None)
+
+    def _prune_locked(self, now: float) -> None:
+        to_remove: list[str] = []
+        for cid, item in self._calls.items():
+            if item.status == "awaiting_client_result":
+                if now > item.expires_at + 300.0:
+                    to_remove.append(cid)
+                elif now > item.expires_at:
+                    item.status = "expired"
+                    item.event.set()
+                    item.args = {}
+            else:
+                if now - item.created_at > 600.0:
+                    to_remove.append(cid)
+                elif item.mode != "stream" or now - item.created_at > 30.0:
+                    _shrink_completed_call(item, clear_args=True)
+        for cid in to_remove:
+            self._calls.pop(cid, None)
+        self._enforce_total_cap_locked()
 
     def wait_for_result(
         self,
@@ -221,6 +304,7 @@ class ClientToolBroker:
         timeout_seconds: float | None = None,
         heartbeat_interval: float = 5.0,
         on_wait: Callable[[], None] | None = None,
+        is_aborted: Callable[[], bool] | None = None,
     ) -> ClientToolWaitOutcome:
         with self._lock:
             call = self._calls.get(call_id)
@@ -239,6 +323,24 @@ class ClientToolBroker:
         if timeout_seconds is not None:
             deadline = min(deadline, started + max(0.05, float(timeout_seconds)))
         while not call.event.is_set():
+            if is_aborted is not None and is_aborted():
+                with self._lock:
+                    if not call.event.is_set():
+                        call.status = "expired"
+                        call.event.set()
+                        call.args = {}
+                    else:
+                        break
+                elapsed = max(0, int(round((self._clock() - started) * 1000)))
+                return ClientToolWaitOutcome(
+                    call_id=call.call_id,
+                    status="expired",
+                    ok=False,
+                    output="",
+                    error="client disconnected while waiting for client tool result",
+                    denied=False,
+                    elapsed_ms=elapsed,
+                )
             now = self._clock()
             remaining = deadline - now
             if remaining <= 0:
@@ -246,6 +348,9 @@ class ClientToolBroker:
                     if not call.event.is_set():
                         call.status = "expired"
                         call.event.set()
+                        call.args = {}
+                    else:
+                        break
                 elapsed = max(0, int(round((self._clock() - started) * 1000)))
                 return ClientToolWaitOutcome(
                     call_id=call.call_id,
@@ -259,12 +364,16 @@ class ClientToolBroker:
             step = min(remaining, max(0.05, float(heartbeat_interval)))
             if call.event.wait(step):
                 break
+            if is_aborted is not None and is_aborted():
+                continue
             if on_wait is not None:
                 on_wait()
         elapsed = max(0, int(round((self._clock() - started) * 1000)))
         with self._lock:
             result = call.result
             status = call.status
+            if result is not None:
+                _shrink_completed_call(call, clear_args=False)
         if result is None:
             return ClientToolWaitOutcome(
                 call_id=call.call_id,
@@ -418,12 +527,26 @@ class ClientToolBroker:
                     }
                 },
             )
-        effective_session = str(body_session if body_session is not None else session or "").strip()
+        header_session = str(session or "").strip()
+        clean_body_session = body_session.strip() if isinstance(body_session, str) else ""
+        if header_session and clean_body_session and header_session != clean_body_session:
+            return ClientToolSubmitResult(
+                400,
+                {
+                    "error": {
+                        "message": "body session conflicts with X-Sonder-Session header",
+                        "type": "invalid_request",
+                        "code": "INVALID_REQUEST",
+                    }
+                },
+            )
+        effective_session = clean_body_session or header_session
         caller_principal = str(principal or "").strip()
         digest = _canonical_result_digest(ok_val, raw_output, raw_error, raw_denied)
         now = self._clock()
 
         with self._lock:
+            self._prune_locked(now)
             call = self._calls.get(cid)
             if call is None:
                 return ClientToolSubmitResult(
@@ -484,6 +607,7 @@ class ClientToolBroker:
             if call.status == "expired" or now > call.expires_at:
                 call.status = "expired"
                 call.event.set()
+                call.args = {}
                 return ClientToolSubmitResult(
                     410,
                     {
@@ -502,6 +626,8 @@ class ClientToolBroker:
                 digest=digest,
             )
             call.status = "denied" if raw_denied else ("finished" if ok_val else "error")
+            if call.mode != "stream":
+                _shrink_completed_call(call, clear_args=True)
             call.event.set()
             return ClientToolSubmitResult(
                 200,
@@ -560,16 +686,22 @@ def merge_client_tool_receipt(
 
 
 __all__ = [
+    "ClientToolArgsTooLargeError",
     "ClientToolBroker",
+    "ClientToolBrokerCapacityError",
     "ClientToolCall",
     "ClientToolPayload",
     "ClientToolSubmitResult",
     "ClientToolWaitOutcome",
     "DEFAULT_CLIENT_TOOL_TIMEOUT_SECONDS",
     "DEFAULT_NON_STREAM_HANDOFF_TTL_SECONDS",
+    "MAX_CLIENT_ARGS_BYTES",
     "MAX_CLIENT_ERROR_CHARS",
     "MAX_CLIENT_OUTPUT_CHARS",
     "MAX_CLIENT_TOOL_TIMEOUT_SECONDS",
+    "MAX_PENDING_CALLS_GLOBAL",
+    "MAX_PENDING_CALLS_PER_PRINCIPAL",
+    "MAX_TOTAL_CALLS",
     "handle_client_tool_result_post",
     "is_valid_client_call_id",
     "merge_client_tool_receipt",

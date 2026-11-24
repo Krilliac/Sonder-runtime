@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import conftest as root_conftest
+import tests._hermetic_plugin as root_conftest
 
 _MODULE_PATH = Path(__file__).resolve().parent.parent / "scripts" / "slow_tests.py"
 _spec = importlib.util.spec_from_file_location("slow_tests", _MODULE_PATH)

@@ -102,12 +102,15 @@ _SOURCE_PATHS = {
 
 
 def _source_path(name: str) -> str:
-    """Resolve packaged source first, with a legacy-root fallback."""
+    """Resolve packaged source first, then ``runtime/``, then legacy root."""
     packaged = _SOURCE_PATHS.get(os.path.basename(name))
     if packaged:
         packaged_path = os.path.join(_HERE, packaged)
         if os.path.exists(packaged_path):
             return packaged_path
+    runtime_path = os.path.join(_HERE, "runtime", name)
+    if os.path.exists(runtime_path):
+        return runtime_path
     return os.path.join(_HERE, name)
 
 
@@ -207,10 +210,33 @@ _CATEGORY_BY_TOOL = {
     "isolated_run": "execution",
     "sqlite_mutate": "data",
     "image_inspect": "creative",
+    "document_extract": "data",
+    "media_inspect": "creative",
+    "code_metrics": "dev",
+    "schema_validate": "data",
+    "language_matrix": "dev",
+    "math_eval": "data",
+    "logic_verify": "dev",
+    "regex_lab": "dev",
+    "code_graph": "dev",
+    "diff_semantic": "dev",
+    "reasoning_board": "basic",
+    "symbol_verify": "dev",
+    "citation_audit": "dev",
+    "fact_cross_check": "data",
+    "consistency_check": "data",
+    "plan_fallback": "dev",
+    "runtime_resilience_check": "system",
+    "prompt_shield": "dev",
+    "error_diagnose": "dev",
+    "code_audit": "dev",
+    "data_transform": "data",
+    "learn_tool": "dev",
     "ground_artifact": "creative",
     "weather_lookup": "web",
     "openrouter_models": "web",
     "mesh_generate": "execution",
+    "generate_3d_model": "creative",
     "security_eval": "data",
     "openrouter_account": "web",
     "approximate_location_lookup": "web",
@@ -346,7 +372,7 @@ _CATEGORY_BY_SLASH = {
     "/cot": "system", "/debug": "system", "/env": "system", "/toolstatus": "system",
     "/tools": "system", "/test": "dev", "/digest": "dev",
     "/crash": "dev", "/profile": "dev", "/build": "dev", "/fix-build": "dev",
-    "/trace": "system", "/strict": "system", "/temp": "system", "/dump": "system",
+    "/trace": "system", "/strict": "system", "/temp": "system", "/effort": "system", "/dump": "system",
     "/whoami": "security", "/admin": "security", "/accounts": "security",
     "/login": "security", "/register": "security", "/setaccount": "security",
     "/approve": "security", "/approvals": "security",
@@ -356,6 +382,7 @@ _CATEGORY_BY_SLASH = {
     "/write": "filesystem", "/edit": "filesystem", "/delete": "filesystem",
     "/read": "filesystem", "/files": "filesystem", "/filepolicy": "filesystem",
     "/run": "execution", "/runwindow": "execution",
+    "/img": "creative", "/gif": "creative", "/3d": "creative", "/model3d": "creative",
 }
 
 # A four-class ``_RISK_ORDER`` used to sit here -- no ``execution``, and, when
@@ -448,9 +475,9 @@ _READ_ONLY = frozenset({
     # (bootstrap/reference_agent_tools.py): query and count only, no model
     # call, no write, no network; the index path is never an argument.
     "reference_search",
-    # Transient in-memory agent progress / peer-board coordination only (no
-    # disk, database, network, or command execution).
-    "report_progress", "post_status", "post_to_board", "read_board",
+    # Transient in-memory agent progress / peer-board / reasoning scratchpad
+    # coordination only (no disk, database, network, or command execution).
+    "report_progress", "post_status", "post_to_board", "read_board", "reasoning_board",
 })
 
 # Branches whose real work is done by module-level functions that front no
@@ -587,6 +614,14 @@ _UNREGISTERED_BRANCH_WORK = {
     # the branch is graded by the strictest member it can reach.
     "/crash": "crash_digest",
     "/profile": "profile_capture_digest",
+    # ``/img`` and ``/gif`` invoke the local/configured image-generation adapter
+    # and persist outputs under ``<state_home>/generated-images/``. Record them
+    # here so ``/permissions`` and ``plan`` mode govern media generation just
+    # like ``/location`` and ``/hardware``.
+    "/img": "img",
+    "/gif": "gif",
+    "/3d": "generate_3d_model",
+    "/model3d": "generate_3d_model",
 }
 
 # Console branches that front *several* native typed tools, through the typed
@@ -1564,6 +1599,18 @@ def _is_execution(name: str) -> bool:
     )
 
 
+def _is_mutation(name: str) -> bool:
+    """Whether ``name`` is declared in ``permission_modes.MUTATION_TOOLS``."""
+    permission_modes = importlib.import_module(
+        "permission_modes"
+    )  # lazy: permission_modes imports this module
+
+    stem = str(name or "").strip().lstrip("/")
+    if not stem:
+        return False
+    return stem in getattr(permission_modes, "MUTATION_TOOLS", frozenset())
+
+
 def _declared_native_risk(stem: str, hit) -> str:
     """Risk for a native command that fronts no registered tool.
 
@@ -1592,7 +1639,7 @@ def _risk_for(name: str, server) -> str:
         return "dangerous"
     if _is_execution(name):
         return "execution"
-    if name in getattr(server, "_WORK_MUTATION_TOOLS", frozenset()):
+    if _is_mutation(name) or name in getattr(server, "_WORK_MUTATION_TOOLS", frozenset()):
         return "mutation"
     # A tool that resolves a caller-supplied root with no allowed-roots check is
     # never "safe", however read-only its own body is: `plan` allows everything

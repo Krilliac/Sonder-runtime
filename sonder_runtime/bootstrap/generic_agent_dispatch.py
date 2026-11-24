@@ -12,6 +12,7 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
+from ..adapters.security import role_tool_policy as _role_tool_policy
 from ..domain.cloud_access import LEGACY_ERROR_PREFIX
 
 # Existing specialized adapters for offload, master and agent_lane remain
@@ -20,16 +21,31 @@ RECURSIVE_ENTRYPOINTS = frozenset({
     "sonder", "agent", "workbench_agent", "loop", "offload",
     "delegate_task", "spawn_agents",
     "master_orchestrate", "master_retry", "master_cancel", "master",
-    "workflow_run", "agent_lane",
+    "workflow_run", "agent_lane", "computer_task",
 })
 # Tools the agent must not reach even through the fallback: ``isolated_run``
-# is direct-MCP only by design (developer-authorized container execution), and
+# is direct-MCP only by design (developer-authorized container execution),
 # ``codegen_build_loop`` is a verifier whose verdict only its hand-written
-# branch renders (``server._RENDERED_VERDICT_TOOLS``).
-DIRECT_ONLY_NAMES = frozenset({"isolated_run", "codegen_build_loop"})
+# branch renders (``server._RENDERED_VERDICT_TOOLS``), and operator/memory-
+# mutation/desktop/batch/fanout controls must never be bypassed by an agent
+# falling through generic dispatch.
+DIRECT_ONLY_NAMES = frozenset({
+    "isolated_run", "codegen_build_loop",
+    "learn_from_example", "sonder_remember_fact", "sonder_forget_fact", "playbook_note",
+    "computer_use_start", "computer_use_stop", "screen_capture", "window_list", "ui_action",
+    "batch_job_create", "batch_job_add_items", "batch_job_start",
+    "batch_job_resume", "batch_job_cancel",
+    "model_fanout", "model_fanout_resume", "model_fanout_cancel", "model_fanout_synthesize",
+    "session_export", "permission_approvals",
+})
 ADMIN_NAMES = frozenset({
     "elevate", "permission_mode", "permission_rule_set", "permission_approve",
     "runtime_policy_update", "runtime_source_update", "update_system_profile",
+})
+# Network-touching tools reachable through generic dispatch that must honor
+# per-run ``allow_web=False``.
+WEB_GATED_NAMES = frozenset({
+    "fetch_artifact", "local_service_probe", "openrouter_models", "openrouter_account",
 })
 # Arguments that carry or widen authority on the legacy MCP surface: a
 # developer token, an approval, reach beyond the configured roots. The
@@ -53,9 +69,9 @@ def reachable_names(registry: Any, system_operator_tools: Iterable[str] = ()) ->
 
 
 def generic_only_names(registry: Any, system_operator_tools: Iterable[str], literal_names: Iterable[str]) -> frozenset[str]:
-    # Newly exposed tools default to local agents. Existing explicit cloud
-    # adapters and their policy are unaffected by this fallback.
-    return reachable_names(registry, system_operator_tools) - frozenset(literal_names)
+    # Newly exposed and fallback-excluded tools default to local-only for cloud
+    # policy. Existing explicit cloud adapters remain unaffected.
+    return frozenset(registered_tools(registry)) - frozenset(literal_names)
 
 
 def generated_help_lines(
@@ -106,12 +122,17 @@ def dispatch(
     """Invoke a registered tool after host gate and per-run policy admission."""
     if tool_name in excluded_names(registry, system_operator_tools):
         return f"{LEGACY_ERROR_PREFIX} HOST POLICY: tool '{tool_name}' is excluded from generic agent dispatch."
+    role_refusal = _role_tool_policy.agent_refusal(tool_name)
+    if role_refusal:
+        return role_refusal
     refusal = run_refusal(
         tool_name, read_only=read_only, project_bound=project_bound,
         allow_web=allow_web, allow_location=allow_location, unsafe=unsafe,
     )
     if refusal:
         return f"{LEGACY_ERROR_PREFIX} HOST POLICY: tool '{tool_name}' requires {refusal}."
+    if not allow_web and not unsafe and tool_name in WEB_GATED_NAMES:
+        return f"{LEGACY_ERROR_PREFIX} HOST POLICY: tool '{tool_name}' requires allow_web=True."
     if not isinstance(args, dict):
         return f"{LEGACY_ERROR_PREFIX} tool args must be a JSON object"
     supplied_authority = sorted(AUTHORITY_ARGUMENTS & set(args))

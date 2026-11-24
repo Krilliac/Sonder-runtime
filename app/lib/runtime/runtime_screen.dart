@@ -267,9 +267,12 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   final Map<String, ActionOutcome> _runOutcomes = {};
 
   /// Approvals: call ids being checked, call ids being approved (after the
-  /// sheet), nonces being revoked, and each one's outcome.
+  /// sheet), nonces being revoked, bulk flags, and each one's outcome.
   final Set<String> _approvalBusy = {};
   final Set<String> _approving = {};
+  bool _bulkApproving = false;
+  bool _bulkDenying = false;
+  bool _bulkRevoking = false;
   final Map<String, ActionOutcome> _approvalOutcomes = {};
 
   /// The Developer console, newest first.
@@ -845,6 +848,416 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     await _loadExtras();
   }
 
+  Future<void> _deny(PendingApproval item) async {
+    final id = item.callId;
+    final busyKey = 'deny:$id';
+    if (_bulkApproving || _bulkDenying || !_approvalBusy.add(busyKey)) return;
+    setState(() => _approvalOutcomes.remove(id));
+    ActionOutcome outcome;
+    try {
+      await _data.denyCall(id, tool: item.tool, digest: item.digest);
+      outcome = ActionOutcome.ok(
+          'Denied ${item.tool.isEmpty ? 'call' : item.tool} '
+          '(${SonderStrings.shortCallId(id)}).',
+          word: 'denied');
+    } on SonderException catch (error) {
+      outcome = error.code == ApprovalsApi.unavailableCode
+          ? ActionOutcome(StatusKind.note, error.message)
+          : const {401, 403}.contains(error.httpStatus)
+              ? const ActionOutcome(
+                  StatusKind.warn, SonderStrings.approvalsNeedAdmin)
+              : ActionOutcome.failed('Could not deny', detail: error.message);
+    } finally {
+      _approvalBusy.remove(busyKey);
+    }
+    if (!mounted) return;
+    setState(() => _approvalOutcomes[id] = outcome);
+    await _loadExtras();
+  }
+
+  String _summarizeTools(List<PendingApproval> items) {
+    final counts = <String, int>{};
+    for (final item in items) {
+      final name = item.tool.isEmpty ? 'call' : item.tool;
+      counts[name] = (counts[name] ?? 0) + 1;
+    }
+    final entries = counts.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final shown = entries.take(5).map((e) => '${e.key} (${e.value})').join(', ');
+    return entries.length > 5 ? '$shown, +${entries.length - 5} more' : shown;
+  }
+
+  Future<void> _approveAll() async {
+    if (_bulkApproving || _bulkDenying) return;
+    setState(() {
+      _bulkApproving = true;
+      _approvalOutcomes.remove('_bulk');
+    });
+    List<PendingApproval> pending = const [];
+    ActionOutcome? preFailure;
+    try {
+      final fresh = await _data.approvals(limit: 200);
+      if (!fresh.supported) {
+        preFailure = const ActionOutcome(
+          StatusKind.note,
+          'This server cannot approve over HTTP. Approve from the console.',
+        );
+      } else {
+        pending = fresh.actionablePending;
+      }
+    } on SonderException catch (error) {
+      preFailure = const {401, 403}.contains(error.httpStatus)
+          ? const ActionOutcome(
+              StatusKind.warn, SonderStrings.approvalsNeedRole)
+          : ActionOutcome.failed('Could not load pending approvals',
+              detail: error.message);
+    }
+    if (!mounted) return;
+    if (preFailure != null || pending.isEmpty) {
+      setState(() {
+        _bulkApproving = false;
+        if (preFailure != null) {
+          _approvalOutcomes['_bulk'] = preFailure;
+        } else {
+          _approvalOutcomes['_bulk'] = const ActionOutcome(
+              StatusKind.note, 'No pending approvals waiting.');
+        }
+      });
+      await _loadExtras();
+      return;
+    }
+    setState(() => _bulkApproving = false);
+    unawaited(_confirmAndApproveAll(pending));
+  }
+
+  Future<void> _confirmAndApproveAll(List<PendingApproval> pending) async {
+    Duration selectedTtl = const Duration(minutes: 15);
+    final confirmedTtl = await showDialog<Duration>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          key: const Key('approvals-approve-all-dialog'),
+          title: Text('Approve all ${pending.length} pending calls?'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Each pending call will receive a one-shot approval bound to '
+                'its exact tool and arguments: ${_summarizeTools(pending)}.',
+              ),
+              const SizedBox(height: SonderSpace.md),
+              Wrap(
+                spacing: SonderSpace.xs,
+                children: [
+                  for (final option in const [
+                    (Duration(minutes: 5), '5 min'),
+                    (Duration(minutes: 15), '15 min'),
+                    (Duration(hours: 1), '1 hour'),
+                  ])
+                    ChoiceChip(
+                      label: Text(option.$2),
+                      selected: selectedTtl == option.$1,
+                      onSelected: (_) =>
+                          setDialogState(() => selectedTtl = option.$1),
+                    ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              key: const Key('approvals-approve-all-confirm'),
+              onPressed: () => Navigator.pop(context, selectedTtl),
+              child: Text('Approve all (${pending.length})'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmedTtl == null || !mounted) return;
+
+    setState(() {
+      _bulkApproving = true;
+      _approvalOutcomes.remove('_bulk');
+    });
+    var approvedCount = 0;
+    var failedCount = 0;
+    String? stopDetail;
+    try {
+      for (final item in pending) {
+        try {
+          await _data.approveCall(
+            item.callId,
+            ttl: confirmedTtl,
+            tool: item.tool,
+            digest: item.digest,
+          );
+          approvedCount++;
+        } on SonderException catch (error) {
+          failedCount++;
+          if (localOpenRefusalCodes.contains(error.code) ||
+              error.code == ApprovalsApi.unavailableCode ||
+              const {401, 403}.contains(error.httpStatus)) {
+            stopDetail = error.message;
+            break;
+          }
+          stopDetail ??= error.message;
+        }
+      }
+    } finally {
+      _bulkApproving = false;
+    }
+    if (!mounted) return;
+    final ActionOutcome outcome;
+    if (approvedCount == pending.length) {
+      outcome = ActionOutcome.ok(
+          'Approved all $approvedCount pending call${approvedCount == 1 ? '' : 's'}.',
+          word: 'approved');
+    } else if (approvedCount == 0) {
+      outcome = ActionOutcome.failed('No approvals were recorded',
+          detail: stopDetail);
+    } else {
+      outcome = ActionOutcome(
+        StatusKind.warn,
+        'Approved $approvedCount of ${pending.length} pending calls ($failedCount failed).',
+        detail: stopDetail,
+      );
+    }
+    setState(() => _approvalOutcomes['_bulk'] = outcome);
+    await _loadExtras();
+  }
+
+  Future<void> _denyAll() async {
+    if (_bulkApproving || _bulkDenying) return;
+    setState(() {
+      _bulkDenying = true;
+      _approvalOutcomes.remove('_bulk');
+    });
+    List<PendingApproval> pending = const [];
+    ActionOutcome? preFailure;
+    try {
+      final fresh = await _data.approvals(limit: 200);
+      if (!fresh.supported) {
+        preFailure = const ActionOutcome(
+          StatusKind.note,
+          'This server does not support HTTP denials.',
+        );
+      } else {
+        pending = fresh.actionablePending;
+      }
+    } on SonderException catch (error) {
+      preFailure = const {401, 403}.contains(error.httpStatus)
+          ? const ActionOutcome(
+              StatusKind.warn, SonderStrings.approvalsNeedRole)
+          : ActionOutcome.failed('Could not load pending approvals',
+              detail: error.message);
+    }
+    if (!mounted) return;
+    if (preFailure != null || pending.isEmpty) {
+      setState(() {
+        _bulkDenying = false;
+        if (preFailure != null) {
+          _approvalOutcomes['_bulk'] = preFailure;
+        } else {
+          _approvalOutcomes['_bulk'] = const ActionOutcome(
+              StatusKind.note, 'No pending approvals waiting.');
+        }
+      });
+      await _loadExtras();
+      return;
+    }
+    setState(() => _bulkDenying = false);
+    unawaited(_confirmAndDenyAll(pending));
+  }
+
+  Future<void> _confirmAndDenyAll(List<PendingApproval> pending) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('approvals-deny-all-dialog'),
+        title: Text('Deny all ${pending.length} pending calls?'),
+        content: Text(
+          'This declines every waiting call without running anything: '
+          '${_summarizeTools(pending)}.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            key: const Key('approvals-deny-all-confirm'),
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Deny all (${pending.length})'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() {
+      _bulkDenying = true;
+      _approvalOutcomes.remove('_bulk');
+    });
+    var deniedCount = 0;
+    var failedCount = 0;
+    String? stopDetail;
+    try {
+      for (final item in pending) {
+        try {
+          await _data.denyCall(
+            item.callId,
+            tool: item.tool,
+            digest: item.digest,
+          );
+          deniedCount++;
+        } on SonderException catch (error) {
+          failedCount++;
+          if (error.code == ApprovalsApi.unavailableCode ||
+              const {401, 403}.contains(error.httpStatus)) {
+            stopDetail = error.message;
+            break;
+          }
+          stopDetail ??= error.message;
+        }
+      }
+    } finally {
+      _bulkDenying = false;
+    }
+    if (!mounted) return;
+    final ActionOutcome outcome;
+    if (deniedCount == pending.length) {
+      outcome = ActionOutcome.ok(
+          'Denied all $deniedCount pending call${deniedCount == 1 ? '' : 's'}.',
+          word: 'denied');
+    } else if (deniedCount == 0) {
+      outcome = ActionOutcome.failed('No pending calls were denied',
+          detail: stopDetail);
+    } else {
+      outcome = ActionOutcome(
+        StatusKind.warn,
+        'Denied $deniedCount of ${pending.length} pending calls ($failedCount failed).',
+        detail: stopDetail,
+      );
+    }
+    setState(() => _approvalOutcomes['_bulk'] = outcome);
+    await _loadExtras();
+  }
+
+  Future<void> _revokeAll() async {
+    if (_bulkApproving || _bulkDenying || _bulkRevoking) return;
+    setState(() {
+      _bulkRevoking = true;
+      _approvalOutcomes.remove('_bulk');
+    });
+    List<IssuedApproval> open = const [];
+    ActionOutcome? preFailure;
+    try {
+      final fresh = await _data.approvals(limit: 200);
+      if (!fresh.supported) {
+        preFailure = const ActionOutcome(
+          StatusKind.note,
+          'This server does not support HTTP revocations.',
+        );
+      } else {
+        open = fresh.open;
+      }
+    } on SonderException catch (error) {
+      preFailure = const {401, 403}.contains(error.httpStatus)
+          ? const ActionOutcome(
+              StatusKind.warn, SonderStrings.approvalsNeedRole)
+          : ActionOutcome.failed('Could not load open approvals',
+              detail: error.message);
+    }
+    if (!mounted) return;
+    if (preFailure != null || open.isEmpty) {
+      setState(() {
+        _bulkRevoking = false;
+        _approvalOutcomes['_bulk'] = preFailure ??
+            const ActionOutcome(StatusKind.note, 'No open approvals to revoke.');
+      });
+      await _loadExtras();
+      return;
+    }
+    setState(() => _bulkRevoking = false);
+    unawaited(_confirmAndRevokeAll(open));
+  }
+
+  Future<void> _confirmAndRevokeAll(List<IssuedApproval> open) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('approvals-revoke-all-dialog'),
+        title: Text('Revoke all ${open.length} open approvals?'),
+        content: Text(
+          'This withdraws all ${open.length} unused one-shot approvals so '
+          'none of them can be spent.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            key: const Key('approvals-revoke-all-confirm'),
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Revoke all (${open.length})'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() {
+      _bulkRevoking = true;
+      _approvalOutcomes.remove('_bulk');
+    });
+    var revokedCount = 0;
+    var failedCount = 0;
+    String? stopDetail;
+    try {
+      for (final item in open) {
+        try {
+          await _data.revokeApproval(item.nonce);
+          revokedCount++;
+        } on SonderException catch (error) {
+          failedCount++;
+          if (error.code == ApprovalsApi.unavailableCode ||
+              const {401, 403}.contains(error.httpStatus)) {
+            stopDetail = error.message;
+            break;
+          }
+          stopDetail ??= error.message;
+        }
+      }
+    } finally {
+      _bulkRevoking = false;
+    }
+    if (!mounted) return;
+    final ActionOutcome outcome;
+    if (revokedCount == open.length) {
+      outcome = ActionOutcome.ok(
+          'Revoked all $revokedCount open approval${revokedCount == 1 ? '' : 's'}.',
+          word: 'done');
+    } else if (revokedCount == 0) {
+      outcome = ActionOutcome.failed('No approvals were revoked',
+          detail: stopDetail);
+    } else {
+      outcome = ActionOutcome(
+        StatusKind.warn,
+        'Revoked $revokedCount of ${open.length} open approvals ($failedCount failed).',
+        detail: stopDetail,
+      );
+    }
+    setState(() => _approvalOutcomes['_bulk'] = outcome);
+    await _loadExtras();
+  }
+
   Future<void> _revoke(IssuedApproval item) async {
     final nonce = item.nonce;
     if (!_approvalBusy.add(nonce)) return;
@@ -1330,7 +1743,7 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     return runs + agents + autopilot;
   }
 
-  int get _approvalsWaiting => _approvals?.pending.length ?? 0;
+  int get _approvalsWaiting => _approvals?.actionablePending.length ?? 0;
 
   /// The Server rail badge: a problem with the server or its launcher.
   StatusKind? get _serverProblem {

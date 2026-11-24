@@ -9,7 +9,17 @@ import '../api.dart';
 const quickCommands = <String, String>{
   '/stats': 'Show learning stats',
   '/context': 'Show context health',
+  '/version': 'Show Sonder runtime version',
+  '/env': 'Show host OS, Python, and toolchains',
+  '/hardware': 'Show detected CPU/GPU hardware profile',
+  '/route': 'Show which tier/model should handle a prompt',
+  '/img': 'Generate an inline image via local image model or fallback',
+  '/gif': 'Generate an animated GIF via local image model or GIF89a studio',
+  '/3d': 'Generate a 3D model (.glb) via local Hunyuan3D-2 with studio preview',
   '/temp': "Show or set this session's temperature (0-2, or auto)",
+  '/effort': "Show or set this session's reasoning effort (off|minimal|low|medium|high|xhigh|auto)",
+  '/persona':
+      "Show or set this session's persona (auto|off|architect|coder|concise|creative|explainer|mathematician|reviewer|security|teacher)",
   '/compact': 'Preview context compaction',
   '/commands': 'List command registry',
   '/activity': 'Show live tool/file activity',

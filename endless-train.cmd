@@ -27,7 +27,7 @@ if exist "%REPO%venv\Lib\site-packages" (
   set "PYTHONPATH=%REPO%venv\Lib\site-packages;%REPO%venv\Lib\site-packages\win32;%REPO%venv\Lib\site-packages\win32\lib;%REPO%venv\Lib\site-packages\pywin32_system32;%PYTHONPATH%"
 )
 
-"%SONDER_PYTHON%" "%REPO%sonder_headless.py" engine
+"%SONDER_PYTHON%" "%REPO%runtime\sonder_headless.py" engine
 if errorlevel 1 (
   echo [sonder] ERROR: local engine is unavailable or blocked by endpoint policy.
   endlocal & exit /b 2
@@ -36,7 +36,7 @@ if errorlevel 1 (
 echo [sonder] endless grounded-practice loop starting.
 echo [sonder] Stop with Ctrl+C.
 echo [sonder] Per round: %SONDER_ENDLESS_TOTAL% jobs, languages=%SONDER_ENDLESS_LANGUAGES%, tier=%SONDER_ENDLESS_TIER%
-"%SONDER_PYTHON%" "%REPO%endless_train.py"
+"%SONDER_PYTHON%" "%REPO%scripts\endless_train.py"
 set "RC=%ERRORLEVEL%"
 
 echo [sonder] endless practice exited with code %RC%.

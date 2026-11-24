@@ -78,13 +78,57 @@ def _wind_direction(degrees):
     return points[int((value + 11.25) // 22.5) % len(points)]
 
 
+_US_STATE_FULL_NAMES = frozenset(_US_STATE_NAMES.values())
+
+
+def _weather_place_candidates(location):
+    """Build ordered (query, qualifiers) pairs for Open-Meteo geocoding.
+
+    Handles both comma-separated locations ("Wichita, Kansas", "Wichita, KS")
+    and space-separated locations without commas ("wichita kansas",
+    "charlotte north carolina", "london uk") while trying the full phrase
+    first so multi-word city names like "Kansas City" match directly.
+    """
+    cleaned = " ".join(str(location or "").split()).strip()
+    if not cleaned:
+        return []
+    candidates = []
+    seen = set()
+
+    def _add(query, qualifiers):
+        q = query.strip()
+        if not q:
+            return
+        key = (q.lower(), tuple(qualifiers))
+        if key not in seen:
+            seen.add(key)
+            candidates.append((q, list(qualifiers)))
+
+    parts = [part.strip() for part in cleaned.split(",") if part.strip()]
+    comma_qualifiers = [
+        _US_STATE_NAMES.get(part.upper(), part.lower()) for part in parts[1:]
+    ]
+    _add(cleaned, comma_qualifiers)
+    if len(parts) > 1:
+        _add(parts[0], comma_qualifiers)
+    else:
+        tokens = cleaned.split()
+        if len(tokens) >= 3:
+            tail2 = " ".join(tokens[-2:]).lower()
+            if tail2 in _US_STATE_FULL_NAMES:
+                _add(" ".join(tokens[:-2]), [tail2])
+        if len(tokens) >= 2:
+            tail1 = tokens[-1]
+            tail1_norm = _US_STATE_NAMES.get(tail1.upper(), tail1.lower())
+            if tail1.upper() in _US_STATE_NAMES or tail1.lower() in _US_STATE_FULL_NAMES:
+                _add(" ".join(tokens[:-1]), [tail1_norm])
+            # Generic fallback for "City Country" (e.g. "paris france", "london uk").
+            _add(" ".join(tokens[:-1]), [tail1_norm])
+    return candidates
+
+
 def _weather_place(location, timeout):
-    queries = [location]
-    parts = [part.strip() for part in location.split(",") if part.strip()]
-    if len(parts) > 1 and parts[0].lower() != location.lower():
-        queries.append(parts[0])
-    qualifiers = [_US_STATE_NAMES.get(part.upper(), part.lower()) for part in parts[1:]]
-    for query in queries:
+    for query, qualifiers in _weather_place_candidates(location):
         geocode_url = "%s?%s" % (OPEN_METEO_GEOCODING_URL, urllib.parse.urlencode({
             "name": query, "count": 10, "language": "en", "format": "json",
         }))
@@ -98,11 +142,11 @@ def _weather_place(location, timeout):
         if not matches:
             continue
 
-        def score(place):
+        def score(place, _qualifiers=qualifiers):
             searchable = " ".join(str(place.get(key) or "").lower() for key in (
                 "name", "admin1", "admin2", "admin3", "country", "country_code",
             ))
-            return sum(1 for qualifier in qualifiers if qualifier in searchable)
+            return sum(1 for qualifier in _qualifiers if qualifier in searchable)
 
         return max(enumerate(matches), key=lambda row: (score(row[1]), -row[0]))[1]
     raise ValueError("no weather location matched %r" % location)

@@ -24,7 +24,7 @@ def test_public_guidance_does_not_force_one_gpu_shape():
 
 
 def test_runtime_help_does_not_advertise_one_developer_machine():
-    server = _read("server.py")
+    server = _read("runtime/server.py")
 
     assert "6 GB 4050" not in server
     assert '"project":"D:\\\\repo"' not in server

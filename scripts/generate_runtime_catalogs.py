@@ -22,7 +22,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+    sys.path[:0] = [str(ROOT), str(ROOT / "runtime"), str(ROOT / "scripts")]
 
 from sonder_runtime.application.ports.tool_registry import InMemoryToolRegistry, ToolDescriptor
 from sonder_runtime.application.tools.catalog_artifacts import check_catalog_artifacts, write_catalog_artifacts

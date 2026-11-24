@@ -486,7 +486,7 @@ def test_no_module_the_server_watches_is_reported_stale(clean_baseline, monkeypa
     monkeypatch.setattr(live_reload, "_SIGNATURES", dict(live_reload._SIGNATURES))
     monkeypatch.setattr(live_reload, "_MTIMES", dict(live_reload._MTIMES))
     live_reload.prime_modules(server.LIVE_RELOAD_MODULES)
-    root = os.path.dirname(os.path.abspath(server.__file__))
+    root = os.path.dirname(os.path.dirname(os.path.abspath(server.__file__)))
     loaded_source.observe(root)
     assert len(loaded_source._BASELINE) > 100
     for name in list(loaded_source._BASELINE):

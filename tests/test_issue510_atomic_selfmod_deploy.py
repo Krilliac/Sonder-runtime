@@ -85,8 +85,8 @@ def test_rollback_restores_only_deployed_file_and_preserves_unchanged_scope_edit
         fixture_helpers.git(root, "add", "tests/test_calc.py")
     if restart:
         subprocess.run([
-            sys.executable, "-c", "import sys; sys.path.insert(0, %r); import selfmod; selfmod.rollback(%r)"
-            % (str(Path(selfmod.__file__).parent), run["id"]),
+            sys.executable, "-c", "import sys; sys.path[:0] = [%r, %r]; import selfmod; selfmod.rollback(%r)"
+            % (str(Path(selfmod.__file__).resolve().parent), str(Path(selfmod.__file__).resolve().parents[1]), run["id"]),
         ], cwd=root, capture_output=True, text=True, check=True, timeout=15)
     else:
         selfmod.rollback(run["id"])
@@ -113,8 +113,8 @@ def test_restart_recovery_uses_tested_write_set_before_inventory_publication(iso
             (selfmod.socket.gethostname(), time.time() - 1, run["id"]),
         )
     subprocess.run([
-        sys.executable, "-c", "import sys; sys.path.insert(0, %r); import selfmod; assert selfmod.reconcile_stale_deployment() == 1"
-        % str(Path(selfmod.__file__).parent),
+        sys.executable, "-c", "import sys; sys.path[:0] = [%r, %r]; import selfmod; assert selfmod.reconcile_stale_deployment() == 1"
+        % (str(Path(selfmod.__file__).resolve().parent), str(Path(selfmod.__file__).resolve().parents[1])),
     ], cwd=root, capture_output=True, text=True, check=True, timeout=15)
     assert (root / "calc.py").read_bytes() == original
     assert sibling.read_text(encoding="utf-8") == annotation

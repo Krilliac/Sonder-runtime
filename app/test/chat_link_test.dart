@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sonder_runtime/api.dart';
 import 'package:sonder_runtime/chat/drawer.dart';
 import 'package:sonder_runtime/chat_store.dart';
 import 'package:sonder_runtime/models.dart';
@@ -435,6 +436,48 @@ void main() {
       await _settle(tester);
       expect(find.byKey(const Key('chat-not-found')), findsOneWidget);
       expect(_selected(tester, 'bad id'), isFalse);
+      await unmountChat(tester);
+    });
+
+    testWidgets('a link to a server-synced chat not in local storage opens it',
+        (tester) async {
+      final link = ValueNotifier<ChatLinkRequest?>(
+        const ChatLinkRequest('server-chat-42', 1),
+      );
+      final backend = FakeChatBackend()
+        ..serverSessions = SessionPage(
+          sessions: [
+            SessionSummary(
+              id: 'server-chat-42',
+              title: 'Synced thread',
+              turns: 2,
+              updatedAt: _now,
+            ),
+          ],
+        );
+      SharedPreferences.setMockInitialValues(_seed());
+      ChatStore.backend = PrefsChatStoreBackend();
+      ChatStore.resetCache();
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      final settings = await Settings.load();
+      settings.serverUrl = _origin;
+      await tester.pumpWidget(MaterialApp(
+        theme: SonderTheme.dark,
+        home: AppShell(
+          settings: settings,
+          onSettingsChanged: (_) {},
+          backendFactory: (_) => backend,
+          approvals: () async => null,
+          clock: () => _now,
+          deepLink: link,
+          shareOrigin: _origin,
+        ),
+      ));
+      await _settle(tester);
+      expect(find.byKey(const Key('chat-not-found')), findsNothing);
+      expect(_selected(tester, 'server-chat-42'), isTrue);
       await unmountChat(tester);
     });
   });

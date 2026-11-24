@@ -31,6 +31,7 @@ SONDER = os.environ.get("SONDER_RUNTIME", os.path.join(os.path.dirname(os.path.a
 # dropped half the game loop, which parses cleanly and would have been reported
 # as a successful build.
 SHRINK_FLOOR = 0.75
+sys.path.insert(0, os.path.join(SONDER, "runtime"))
 sys.path.insert(0, SONDER)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

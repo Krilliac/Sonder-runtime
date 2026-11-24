@@ -119,7 +119,8 @@ function Assert-SafeVenvRemoval {
 $repo = Split-Path -Parent $PSScriptRoot
 $requirementsFile = Join-Path $repo 'requirements-runtime.txt'
 if (-not (Test-Path -LiteralPath $requirementsFile -PathType Leaf) -or
-    -not (Test-Path -LiteralPath (Join-Path $repo 'sonder_version.py') -PathType Leaf)) {
+    (-not (Test-Path -LiteralPath (Join-Path $repo 'runtime\sonder_version.py') -PathType Leaf) -and
+     -not (Test-Path -LiteralPath (Join-Path $repo 'sonder_version.py') -PathType Leaf))) {
   throw "this script must run from packaging\ inside a Sonder Runtime checkout (expected $requirementsFile)"
 }
 Set-Location -LiteralPath $repo
@@ -222,7 +223,7 @@ if ($ManagedRuntime) {
 
 if (-not $SkipModelAlias) {
   Write-Host '[sonder] creating the sonder:latest Ollama alias (needs Ollama running)...'
-  $aliasArgs = @((Join-Path $repo 'setup_alias.py'))
+  $aliasArgs = @((Join-Path $repo 'scripts\setup_alias.py'))
   if ($BaseModel) { $aliasArgs += @('--model', $BaseModel) }
   & $venvPython @aliasArgs
   if ($LASTEXITCODE -ne 0) {
@@ -246,5 +247,5 @@ if ($ManagedRuntime) {
 }
 Write-Host '  2. State lives under %LOCALAPPDATA%\sonder (override with SONDER_HOME).'
 if ($SkipModelAlias) {
-  Write-Host "  3. Create a model alias when ready: $venvPython $(Join-Path $repo 'setup_alias.py')"
+  Write-Host "  3. Create a model alias when ready: $venvPython $(Join-Path $repo 'scripts\setup_alias.py')"
 }

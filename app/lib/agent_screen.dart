@@ -115,7 +115,7 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
   AgentFilter _filter = AgentFilter.all;
   bool _groupByParent = true;
   bool _loading = true, _refreshing = false, _hasMore = false;
-  bool _manualRefreshing = false, _loadingMore = false;
+  bool _manualRefreshing = false, _loadingMore = false, _clearing = false;
   bool _initialConsumed = false;
   bool _wide = true;
   int _listCursor = 0, _generation = 0;
@@ -981,6 +981,112 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
     );
   }
 
+  static const _terminalLaneStatuses = {
+    'completed',
+    'failed',
+    'cancelled',
+    'interrupted',
+    'archived',
+  };
+
+  int get _finishedLaneCount => _lanes.values
+      .where((lane) =>
+          _terminalLaneStatuses.contains(lane.status.toLowerCase().trim()))
+      .length;
+
+  int get _finishedBackgroundCount =>
+      _background.fleets.where((f) => !f.cancelable).length +
+      _background.autopilot.where((r) => !r.cancelable).length;
+
+  bool get _hasClearableLanes => _finishedLaneCount > 0 || _hasMore;
+  bool get _hasClearableBackground => _finishedBackgroundCount > 0;
+
+  Future<void> _clearFinished({
+    required bool lanes,
+    required bool background,
+  }) async {
+    if (_clearing) return;
+    final laneCount = lanes ? _finishedLaneCount : 0;
+    final bgCount = background ? _finishedBackgroundCount : 0;
+    if (laneCount == 0 && bgCount == 0 && !(lanes && _hasMore)) return;
+
+    final parts = <String>[
+      if (lanes && (laneCount > 0 || _hasMore))
+        '${laneCount > 0 ? '$laneCount${_hasMore ? '+' : ''}' : 'all'} finished '
+            'conversation${laneCount == 1 && !_hasMore ? '' : 's'}',
+      if (background && bgCount > 0)
+        '$bgCount finished background '
+            'run${bgCount == 1 ? '' : 's'}',
+    ];
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('agents-clear-finished-dialog'),
+        title: const Text('Clear finished agents?'),
+        content: Text(
+          'This permanently removes ${parts.join(' and ')} from the list. '
+          'Active or running agents will not be touched.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            key: const Key('agents-clear-finished-confirm'),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Clear finished'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _clearing = true);
+    var clearedLanes = 0;
+    var clearedBg = 0;
+    String? errorMessage;
+    try {
+      if (lanes) {
+        clearedLanes = await widget.api.clearFinishedAgentLanes();
+      }
+      if (background) {
+        final bg = await widget.api.clearFinishedBackgroundWork();
+        clearedBg = bg.autopilot + bg.fleets;
+      }
+    } catch (error) {
+      errorMessage =
+          error is SonderException ? error.message : 'Could not clear agents.';
+    } finally {
+      if (mounted) setState(() => _clearing = false);
+    }
+    if (!mounted) return;
+    if (lanes && clearedLanes > 0) {
+      setState(() {
+        _lanes.removeWhere((_, lane) =>
+            _terminalLaneStatuses.contains(lane.status.toLowerCase().trim()));
+        if (_selected != null && !_lanes.containsKey(_selected)) {
+          _selected = null;
+        }
+      });
+    }
+    if (background && clearedBg > 0) {
+      setState(() {
+        if (_selectedBackground != null) _selectedBackground = null;
+      });
+    }
+    await _refreshAll();
+    if (!mounted) return;
+    final total = clearedLanes + clearedBg;
+    final notice = errorMessage ??
+        (total == 0
+            ? 'No finished agents to clear.'
+            : 'Cleared $total finished agent${total == 1 ? '' : 's'}.');
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(notice)));
+  }
+
   Widget _refreshButton() => IconButton(
         tooltip: 'Refresh conversations',
         onPressed: _manualRefreshing ? null : _refreshAll,
@@ -1060,6 +1166,17 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
         key: const Key('background-group'),
         title: 'Background work',
         count: fleets.length + runs.length,
+        actions: [
+          if (_hasClearableBackground)
+            IconButton(
+              key: const Key('background-clear-finished'),
+              tooltip: 'Clear finished background work',
+              onPressed: _clearing
+                  ? null
+                  : () => _clearFinished(lanes: false, background: true),
+              icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+            ),
+        ],
       ),
       if (_backgroundError != null)
         _notice(_backgroundError!, actions: [
@@ -1134,6 +1251,15 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
         countSemantics: '${ordered.length} of ${_lanes.length} loaded'
             '${_hasMore ? ', more available' : ''}',
         actions: [
+          if (_hasClearableLanes)
+            IconButton(
+              key: const Key('agent-lanes-clear-finished'),
+              tooltip: 'Clear finished conversations',
+              onPressed: _clearing
+                  ? null
+                  : () => _clearFinished(lanes: true, background: false),
+              icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+            ),
           if (_lanes.isNotEmpty)
             IconButton(
                 tooltip:
@@ -2010,6 +2136,25 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
                       leading: leading,
                       title: const Text('Agents'),
                       actions: [
+                        if (_hasClearableLanes || _hasClearableBackground)
+                          TextButton.icon(
+                            key: const Key('agents-clear-all-finished'),
+                            onPressed: _clearing
+                                ? null
+                                : () => _clearFinished(
+                                    lanes: _hasClearableLanes,
+                                    background: _hasClearableBackground),
+                            icon: _clearing
+                                ? const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2),
+                                  )
+                                : const Icon(Icons.delete_sweep_outlined,
+                                    size: 18),
+                            label: const Text('Clear finished'),
+                          ),
                         // Wide layouts already show the list's search field;
                         // one search control per screen.
                         if (!wide &&

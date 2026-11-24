@@ -152,19 +152,19 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
     assert Path("pdf_risk.py") in module.RETIRED_ROOT_MODULES
     assert Path("live_reload.py") in module.RETIRED_ROOT_MODULES
     assert module.COMPATIBILITY_ROOT_MODULES["archive_create"] == Path(
-        "archive_create.py"
+        "runtime/archive_create.py"
     )
     assert module.COMPATIBILITY_ROOT_MODULES["code_runner"] == Path(
-        "code_runner.py"
+        "runtime/code_runner.py"
     )
     assert module.COMPATIBILITY_ROOT_MODULES["command_catalog"] == Path(
-        "command_catalog.py"
+        "runtime/command_catalog.py"
     )
     assert module.COMPATIBILITY_ROOT_MODULES["fanout_store"] == Path(
-        "fanout_store.py"
+        "runtime/fanout_store.py"
     )
     assert module.COMPATIBILITY_ROOT_MODULES["learning_health"] == Path(
-        "learning_health.py"
+        "runtime/learning_health.py"
     )
     assert "model_transport" not in module.ROOT_LEGACY_MODULES
     assert "runtime_policy" not in module.ROOT_LEGACY_MODULES
@@ -182,20 +182,20 @@ def test_legacy_root_allowlist_has_a_shrink_only_ratchet():
 def test_web_search_ownership_is_packaged():
     module = _architecture_module()
     assert module.WEB_SEARCH_CANONICAL_MODULE == "sonder_runtime.adapters.web_search"
-    assert module.WEB_SEARCH_COMPATIBILITY_ROOT == Path("web_tools.py")
+    assert module.WEB_SEARCH_COMPATIBILITY_ROOT == Path("runtime/web_tools.py")
 
 
 def test_web_fetch_ownership_is_packaged():
     module = _architecture_module()
     assert module.WEB_FETCH_CANONICAL_MODULE == "sonder_runtime.adapters.web_fetch"
-    assert module.WEB_FETCH_COMPATIBILITY_ROOT == Path("web_tools.py")
+    assert module.WEB_FETCH_COMPATIBILITY_ROOT == Path("runtime/web_tools.py")
 
 
 def test_weather_and_location_ownership_is_packaged():
     module = _architecture_module()
     assert module.WEATHER_CANONICAL_MODULE == "sonder_runtime.adapters.weather"
     assert module.LOCATION_CANONICAL_MODULE == "sonder_runtime.adapters.location"
-    assert module.WEATHER_LOCATION_COMPATIBILITY_ROOT == Path("web_tools.py")
+    assert module.WEATHER_LOCATION_COMPATIBILITY_ROOT == Path("runtime/web_tools.py")
 
 
 def test_unsafe_lab_stateful_owner_is_security_adapter(monkeypatch):
@@ -248,7 +248,7 @@ def test_production_callers_use_the_memory_adapter():
     module = _architecture_module()
     assert module.compatibility_import_offenders(
         "memory_store",
-        Path("memory_store.py"),
+        Path("runtime/memory_store.py"),
         allowed_paths=module.COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS["memory_store"],
     ) == ()
 
@@ -257,7 +257,7 @@ def test_autopilot_root_is_migration_only():
     module = _architecture_module()
     assert module.compatibility_import_offenders(
         "autopilot_store",
-        Path("autopilot_store.py"),
+        Path("runtime/autopilot_store.py"),
         allowed_paths=module.COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS["autopilot_store"],
     ) == ()
 
@@ -315,7 +315,7 @@ def test_the_ratchet_scan_covers_source_and_excludes_vendored_trees():
     directions: real first-party modules are in, and the trees named above
     are out.
     """
-    assert _is_repo_source(Path("server.py"))
+    assert _is_repo_source(Path("runtime/server.py"))
     assert _is_repo_source(Path("sonder_runtime/__init__.py"))
     assert _is_repo_source(Path("scripts/check_architecture.py"))
     assert not _is_repo_source(Path("tests/test_x.py"))
@@ -385,13 +385,13 @@ def test_applied_memory_baseline_remains_byte_for_byte_immutable():
     module = _architecture_module()
     assert module.COMPATIBILITY_ROOT_IMPORT_EXCEPTIONS == {
         "command_catalog": frozenset({
-            Path("command_registry.py"),
-            Path("command_router.py"),
-            Path("permission_modes.py"),
-            Path("reloadable_mcp.py"),
-            Path("slash_menu.py"),
+            Path("runtime/command_registry.py"),
+            Path("runtime/command_router.py"),
+            Path("runtime/permission_modes.py"),
+            Path("runtime/reloadable_mcp.py"),
+            Path("runtime/slash_menu.py"),
         }),
-        "learning_health": frozenset({Path("server.py")}),
+        "learning_health": frozenset({Path("runtime/server.py")}),
         "memory_store": frozenset({immutable_baseline}),
         "autopilot_store": frozenset({Path("migrations/autopilot/0001_baseline.py")}),
         "fleet_store": frozenset({Path("migrations/fleet/0001_baseline.py")}),
@@ -814,7 +814,7 @@ def test_production_inventory_ignores_generated_tree_but_catches_tracked_offende
     }
     assert inventory == {Path("real_offender.py")}
     assert module.compatibility_import_offenders(
-        "memory_store", Path("memory_store.py"), repo
+        "memory_store", Path("runtime/memory_store.py"), repo
     ) == (Path("real_offender.py"),)
 
 

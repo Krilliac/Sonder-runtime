@@ -503,6 +503,18 @@ def validation_covers(tool_name, args, mutations, observation=""):
             and os.path.splitext(target)[1].lower()
             in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ppm", ".svg"}
         )
+    if tool_name == "document_extract":
+        return bool(
+            target in paths
+            and os.path.splitext(target)[1].lower()
+            in {".docx", ".xlsx", ".pptx", ".html", ".htm", ".svg", ".srt", ".vtt"}
+        )
+    if tool_name == "media_inspect":
+        return bool(
+            target in paths
+            and os.path.splitext(target)[1].lower()
+            in {".wav", ".mid", ".midi", ".avi", ".glb", ".gltf", ".obj", ".stl"}
+        )
     if tool_name in {"file_read", "file_read_range"}:
         return bool(
             target in paths

@@ -1,0 +1,316 @@
+"""Install a hermetic Sonder state directory before test collection."""
+from __future__ import annotations
+
+import atexit
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+import pytest
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_TEST_STATE_ROOT = Path(tempfile.mkdtemp(prefix="sonder-pytest-")).resolve()
+# Work started without a project goes to ~/Sonder/workspaces by default; a test
+# must never create folders in the developer's real home.  Kept apart from the
+# state root because the default workspace root may not overlap the state home.
+_TEST_WORKSPACE_PARENT = Path(tempfile.mkdtemp(prefix="sonder-pytest-workspaces-")).resolve()
+_cleanup_complete = False
+
+_LIVE_PROVIDER_VARIABLES = (
+    "SONDER_LIVE_MODEL_GATEWAY",
+    "SONDER_LIVE_ALLOW_REMOTE",
+    "OLLAMA_HOST",
+    "SONDER_ALLOW_REMOTE_OLLAMA",
+    "SONDER_OLLAMA_WORKERS",
+    "SONDER_OPENAI_BASE_URL",
+    "SONDER_OPENAI_API_KEY",
+    "SONDER_OPENAI_MODEL",
+    "SONDER_OPENAI_EMBED_MODEL",
+    "SONDER_OPENAI_ALLOW_HTTP_NETWORKS",
+    "SONDER_OPENAI_PRICE_USD_PER_MTOK",
+    "SONDER_OPENAI_EMBED_PRICE_USD_PER_MTOK",
+    "SONDER_OPENAI_DAILY_USD",
+    "SONDER_OPENAI_MAX_TOKENS",
+    "SONDER_INFERENCE_BASE_URL",
+    "SONDER_INFERENCE_MODEL",
+    "SONDER_INFERENCE_API_KEY",
+    "SONDER_TEST_INFERENCE_URL",
+    "OPENROUTER_API_KEY",
+    "SONDER_OPENROUTER_BASE_URL",
+    "SONDER_OPENROUTER_MODEL",
+    "SONDER_OPENROUTER_TIER_MODELS",
+    "SONDER_OPENROUTER_PROVIDER",
+    "SONDER_OPENROUTER_PROVIDER_ORDER",
+    "SONDER_OPENROUTER_TIER_PROVIDER",
+    "SONDER_LIVE_ANTHROPIC",
+    "SONDER_ANTHROPIC_API_KEY",
+    "SONDER_ANTHROPIC_API_KEY_2",
+    "SONDER_ANTHROPIC_MODEL",
+    "SONDER_ANTHROPIC_BASE_URL",
+)
+_ANTHROPIC_SDK_VARIABLES = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+)
+_CAPTURED_LIVE_PROVIDER_ENV = {
+    name: os.environ[name]
+    for name in _LIVE_PROVIDER_VARIABLES
+    if name in os.environ
+}
+
+# Opt-in inputs of tests/live/test_isolated_live.py; captured before the scrub
+# below and restored only by the live_isolated_environment fixture.
+_LIVE_ISOLATED_VARIABLES = (
+    "SONDER_ISOLATED_LIVE",
+    "SONDER_ISOLATED_RUNTIME",
+    "SONDER_ISOLATED_ROOTS",
+    "SONDER_ISOLATED_IMAGE",
+    "SONDER_ISOLATED_VOLUME_IMAGE",
+)
+_CAPTURED_LIVE_ISOLATED_ENV = {
+    name: os.environ[name]
+    for name in _LIVE_ISOLATED_VARIABLES
+    if name in os.environ
+}
+
+
+# Test-harness controls, not runtime configuration: they survive the ambient
+# scrub so a developer can capture timings or rewrite REPL screen goldens.
+# SONDER_BLENDER lets the real-Blender integration tests (tests/test_meshgen_integration.py) run.
+# SONDER_TEST_PRIVATE_OLLAMA_WORKER (host:port) enables the live check in tests/test_ollama_endpoint_tls.py.
+# SONDER_TEST_MESHGEN_KIT (path to a trusted kit .py) enables the real-kit meshgen tests.
+_HARNESS_VARIABLES = frozenset({
+    "SONDER_TEST_TIMINGS",
+    "SONDER_UPDATE_GOLDENS",
+    "SONDER_BLENDER",
+    "SONDER_TEST_PRIVATE_OLLAMA_WORKER",
+    "SONDER_TEST_MESHGEN_KIT",
+})
+
+
+def _clear_ambient_deployment_variables() -> None:
+    for _ambient_variable in tuple(os.environ):
+        if (_ambient_variable.upper().startswith(("SONDER_", "OLLAMA_"))
+                and _ambient_variable.upper() not in _HARNESS_VARIABLES):
+            os.environ.pop(_ambient_variable, None)
+    # A hosted-provider key outside the SONDER_ namespace: tests must never
+    # see (or send) an operator's real key.
+    os.environ.pop("OPENROUTER_API_KEY", None)
+    # The Anthropic SDK reads these itself: a base URL or custom header from the
+    # operator's (or Claude Code's) environment must never reach a test client.
+    for _anthropic_variable in _ANTHROPIC_SDK_VARIABLES:
+        os.environ.pop(_anthropic_variable, None)
+
+
+_clear_ambient_deployment_variables()
+os.environ.update(
+    {
+        "SONDER_HOME": str(_TEST_STATE_ROOT),
+        "SONDER_DEFAULT_WORKSPACE_ROOT": str(_TEST_WORKSPACE_PARENT / "workspaces"),
+        "SONDER_DB": str(_TEST_STATE_ROOT / "memory.db"),
+        "SONDER_FLEET_DB": str(_TEST_STATE_ROOT / "fleet.db"),
+        "SONDER_FLEET_HEARTBEAT": "0",
+        # The embed cache would couple tests through shared state: a text
+        # embedded by one test would satisfy another test's embed from cache
+        # and skip its mocked HTTP path. Cache tests opt back in explicitly.
+        "SONDER_EMBED_CACHE": "0",
+        "SONDER_ALLOW_CLOUD": "0",
+        "SONDER_WEB_TOOLS": "0",
+        # The daily cloud model refresh thread (serve/MCP) stays off in tests.
+        "SONDER_CLOUD_MODEL_REFRESH": "0",
+        "SONDER_LIVE_RELOAD": "0",
+        "SONDER_FALLBACK_LOCAL": "0",
+        "SONDER_SERVER": "http://127.0.0.1:1",
+        "SONDER_LOCAL_FALLBACK": "http://127.0.0.1:1",
+        "OLLAMA_HOST": "127.0.0.1:1",
+    }
+)
+for _entry in (str(_REPO_ROOT / "scripts"), str(_REPO_ROOT / "runtime"), str(_REPO_ROOT)):
+    if _entry not in sys.path:
+        sys.path.insert(0, _entry)
+
+
+# Whether callers are authenticated is read from the environment at call time,
+# because that is genuinely where deployment posture lives. Production
+# entrypoints -- `serve`, and sonder_launcher -- export resolved config into
+# os.environ as a deliberate side effect, and that behaviour is itself under
+# test. The export outlives the test that triggered it, so every later test in
+# the session inherited SONDER_AUTH_MODE=api-key and any code consulting it
+# concluded the deployment authenticates callers. Invisible while nothing read
+# those variables per call; a session-wide false posture the moment something
+# did. Restore them around every test rather than per leaking test, because the
+# leak is a property of the code under test, not of any one caller.
+_POSTURE_VARS = ("SONDER_AUTH_MODE", "SONDER_API_KEY", "SONDER_REQUIRE_ACCOUNT")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_deployment_posture():
+    before = {name: os.environ.get(name) for name in _POSTURE_VARS}
+    yield
+    for name, value in before.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_workspace_dir():
+    default_ws = _TEST_WORKSPACE_PARENT / "workspaces"
+    yield
+    if default_ws.exists():
+        shutil.rmtree(default_ws, ignore_errors=True)
+
+
+# The shared system TLS context is process-global. A test that patches
+# ``ssl.create_default_context`` and reaches it would otherwise leave its fake in
+# the slot for whichever test runs next, so the slot is emptied around every test.
+# The module is looked up, never imported, so tests that do no TLS pay nothing.
+@pytest.fixture(autouse=True)
+def _fresh_shared_tls_context():
+    def reset() -> None:
+        module = sys.modules.get("sonder_runtime.adapters.tls_contexts")
+        if module is not None:
+            module.reset_https_contexts()
+
+    reset()
+    yield
+    reset()
+
+
+@pytest.fixture
+def live_provider_environment(request, monkeypatch):
+    """Restore only explicit live-provider inputs for doubly opted-in tests."""
+    run_live = request.config.getoption("--run-network") and request.config.getoption(
+        "--run-model"
+    )
+    if run_live:
+        values = dict(_CAPTURED_LIVE_PROVIDER_ENV)
+        if (
+            values.get("SONDER_LIVE_MODEL_GATEWAY", "").strip().lower() == "ollama"
+            and "OLLAMA_HOST" not in values
+        ):
+            values["OLLAMA_HOST"] = "http://127.0.0.1:11434"
+        for name, value in values.items():
+            monkeypatch.setenv(name, value)
+    yield
+
+
+def _restore_live_isolated_environment(monkeypatch, captured=None):
+    """Set the captured SONDER_ISOLATED_* inputs through *monkeypatch* and return them."""
+    values = dict(_CAPTURED_LIVE_ISOLATED_ENV if captured is None else captured)
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    return values
+
+
+@pytest.fixture
+def live_isolated_environment(monkeypatch):
+    """Restore the captured SONDER_ISOLATED_* inputs for one live test only."""
+    yield _restore_live_isolated_environment(monkeypatch)
+
+
+def _cleanup_test_state() -> None:
+    global _cleanup_complete
+    if _cleanup_complete:
+        return
+    _cleanup_complete = True
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    for root in (_TEST_STATE_ROOT, _TEST_WORKSPACE_PARENT):
+        try:
+            root.relative_to(temp_root)
+        except (ValueError, NotImplementedError):
+            continue
+        if root.name.startswith("sonder-pytest-"):
+            shutil.rmtree(root, ignore_errors=True)
+
+
+atexit.register(_cleanup_test_state)
+
+
+# --- Opt-in per-test timing capture -----------------------------------------
+# SONDER_TEST_TIMINGS=<path> appends one JSON line per test so slow tests can
+# be ranked and compared across runs (scripts/slow_tests.py). Off by default:
+# with the variable unset the hook body is two dict lookups per report.
+#
+# Under pytest-xdist each worker process writes to <path>.<workerid> -- a
+# shared append handle across processes interleaves partial lines on Windows.
+# The reader globs the suffixed files back together.
+_timing_records: list[dict] = []
+
+
+def _timings_path() -> str:
+    base = os.environ.get("SONDER_TEST_TIMINGS", "").strip()
+    if not base:
+        return ""
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "").strip()
+    return "%s.%s" % (base, worker) if worker else base
+
+
+def pytest_runtest_logreport(report) -> None:
+    if not os.environ.get("SONDER_TEST_TIMINGS", "").strip():
+        return
+    # One record per phase; the reader sums setup+call+teardown per test and
+    # keeps the worst outcome. Recording phases separately preserves the
+    # difference between a slow test body and a slow fixture.
+    _timing_records.append(
+        {
+            "nodeid": report.nodeid,
+            "phase": report.when,
+            "outcome": report.outcome,
+            "duration": round(report.duration, 6),
+        }
+    )
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:
+    del session, exitstatus
+    path = _timings_path()
+    if path and _timing_records:
+        import json
+
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                for record in _timing_records:
+                    handle.write(json.dumps(record, sort_keys=True) + "\n")
+        except OSError as error:
+            # Visible, not fatal: losing the timing file must not fail a run,
+            # but a silent loss would read as "no slow tests".
+            print("SONDER_TEST_TIMINGS write failed: %s" % error, file=sys.stderr)
+    _cleanup_test_state()
+
+
+def pytest_addoption(parser) -> None:
+    group = parser.getgroup("sonder")
+    group.addoption(
+        "--run-network",
+        action="store_true",
+        default=False,
+        help="run tests marked network",
+    )
+    group.addoption(
+        "--run-model",
+        action="store_true",
+        default=False,
+        help="run tests marked model",
+    )
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    for marker, option in (("network", "--run-network"), ("model", "--run-model")):
+        if config.getoption(option):
+            continue
+        skip = pytest.mark.skip(reason=f"requires explicit {option} opt-in")
+        for item in items:
+            # get_closest_marker, not `marker in item.keywords`: keywords also
+            # contain parametrize *values*, so a test parameterized with the
+            # literal string "model" or "network" was silently skipped even
+            # though it was never marked. A security assertion that skips
+            # itself reads exactly like a passing one.
+            if item.get_closest_marker(marker) is not None:
+                item.add_marker(skip)

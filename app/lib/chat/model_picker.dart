@@ -9,6 +9,9 @@ enum ModelGroupKind {
   /// `sonder`, `local` and the policy tiers: they follow the bindings.
   routes('Routes'),
 
+  /// Configured or discovered image-generation models (e.g. `sdxl-turbo`).
+  image('Image generation'),
+
   /// Exact models while every route runs on Ollama.
   local('Local models'),
 
@@ -28,8 +31,8 @@ class ModelGroup {
 }
 
 /// Split [models] (the `/v1/models` ids, in the server's order) into
-/// routes and exact models, keeping only those matching [query] (case
-/// insensitive, on the id and on its label).
+/// routes, image-generation models and exact models, keeping only those
+/// matching [query] (case insensitive, on the id and on its label).
 List<ModelGroup> groupModels(List<String> models, ModelRouting routing,
     {String query = ''}) {
   final needle = query.trim().toLowerCase();
@@ -41,12 +44,17 @@ List<ModelGroup> groupModels(List<String> models, ModelRouting routing,
     for (final m in models)
       if (routing.isRoute(m) && matches(m)) m
   ];
+  final image = [
+    for (final m in models)
+      if (!routing.isRoute(m) && routing.isImageModel(m) && matches(m)) m
+  ];
   final exact = [
     for (final m in models)
-      if (!routing.isRoute(m) && matches(m)) m
+      if (!routing.isRoute(m) && !routing.isImageModel(m) && matches(m)) m
   ];
   return [
     if (routes.isNotEmpty) ModelGroup(ModelGroupKind.routes, routes),
+    if (image.isNotEmpty) ModelGroup(ModelGroupKind.image, image),
     if (exact.isNotEmpty)
       ModelGroup(
           routing.bypassesBinding
@@ -57,11 +65,13 @@ List<ModelGroup> groupModels(List<String> models, ModelRouting routing,
 }
 
 /// The composer's short label for [id]: what will answer. A route bound off
-/// Ollama names the model it is served with (`sonder · qwen3:14b`); any
-/// other id keeps its picker label (`qwen3:14b · Ollama (direct)`,
-/// `sonder (local route)`). The picker rows keep the full binding.
+/// Ollama names the model it is served with (`sonder · qwen3:14b`); an image
+/// model says `sdxl-turbo · Image`; any other id keeps its picker label
+/// (`qwen3:14b · Ollama (direct)`, `sonder (local route)`). The picker rows
+/// keep the full binding.
 ///
-/// [dense] (a phone) also drops the default route's `(local route)`.
+/// [dense] (a phone) also drops the default route's `(local route)` and the
+/// image suffix.
 String compactModelLabel(String id, ModelRouting routing,
     {bool dense = false}) {
   if (routing.isRoute(id)) {
@@ -71,6 +81,9 @@ String compactModelLabel(String id, ModelRouting routing,
       return '$id · $served';
     }
     if (dense && routing.routeBinding(id) == null) return id;
+  }
+  if (routing.isImageModel(id)) {
+    return dense ? id : '$id · Image';
   }
   return routing.pickerLabel(id);
 }
@@ -145,6 +158,10 @@ class ModelPickerButton extends StatelessWidget {
                   borderRadius: BorderRadius.circular(SonderRadius.pill),
                 ),
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  if (routing.isImageModel(current)) ...[
+                    Icon(Icons.image_outlined, size: 14, color: tokens.muted),
+                    const SizedBox(width: SonderSpace.xs),
+                  ],
                   Flexible(
                     child: Text.rich(
                       modelLabelSpan(current, routing, tokens,
@@ -305,7 +322,7 @@ class _PopoverLayout extends SingleChildLayoutDelegate {
   static const _margin = SonderSpace.lg;
   static const _gap = SonderSpace.xs;
   static const _width = 400.0;
-  static const _maxHeight = 460.0;
+  static const _maxHeight = 560.0;
 
   bool _above(Size size) =>
       anchor.top - padding.top > size.height - anchor.bottom - padding.bottom;
@@ -449,8 +466,11 @@ class _ModelPickerPanelState extends State<_ModelPickerPanel> {
           key: i == _highlight ? _highlightKey : null,
           id: id,
           routing: widget.routing,
-          // Under a model heading the heading already names the host.
-          showBinding: group.kind == ModelGroupKind.routes,
+          // Under a model heading the heading already names the host; routes
+          // and image models keep their binding/endpoint summary.
+          showBinding: group.kind == ModelGroupKind.routes ||
+              group.kind == ModelGroupKind.image,
+          isImage: group.kind == ModelGroupKind.image,
           selected: id == widget.current,
           highlighted: i == _highlight,
           onTap: () => _pick(id),
@@ -532,6 +552,7 @@ class _GroupHeading extends StatelessWidget {
       child: Padding(
         key: Key(switch (kind) {
           ModelGroupKind.routes => 'model-group-routes',
+          ModelGroupKind.image => 'model-group-image',
           ModelGroupKind.local => 'model-group-local',
           ModelGroupKind.direct => 'model-group-ollama-direct',
         }),
@@ -547,6 +568,7 @@ class _ModelRow extends StatelessWidget {
   final String id;
   final ModelRouting routing;
   final bool showBinding;
+  final bool isImage;
   final bool selected;
   final bool highlighted;
   final VoidCallback onTap;
@@ -556,6 +578,7 @@ class _ModelRow extends StatelessWidget {
     required this.id,
     required this.routing,
     required this.showBinding,
+    this.isImage = false,
     required this.selected,
     required this.highlighted,
     required this.onTap,
@@ -604,6 +627,10 @@ class _ModelRow extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  if (isImage) ...[
+                    const SizedBox(width: SonderSpace.xs),
+                    Icon(Icons.image_outlined, size: 15, color: tokens.muted),
+                  ],
                 ]),
               ),
             ),

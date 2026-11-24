@@ -20,7 +20,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _run(code: str, *args: str) -> dict:
     # Live reload on, so the built registry reports its source identity.
-    env = dict(os.environ, SONDER_LIVE_RELOAD="1")
+    py_paths = [str(ROOT), str(ROOT / "runtime"), str(ROOT / "scripts")]
+    existing_pp = os.environ.get("PYTHONPATH", "")
+    if existing_pp:
+        py_paths.append(existing_pp)
+    env = dict(os.environ, SONDER_LIVE_RELOAD="1", PYTHONPATH=os.pathsep.join(py_paths))
     completed = subprocess.run(
         [sys.executable, "-c", code, *args],
         cwd=ROOT,

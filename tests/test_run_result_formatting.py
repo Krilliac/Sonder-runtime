@@ -210,7 +210,7 @@ def test_supplied_log_path_is_guarded_and_bytes_are_measured(tmp_path, monkeypat
 
 def _host_function(name, data):
     """Exercise the real host body without importing its live service graph."""
-    source = Path(__file__).resolve().parents[1] / "server.py"
+    source = Path(__file__).resolve().parents[1] / "runtime" / "server.py"
     node = next(node for node in ast.parse(source.read_text(encoding="utf-8")).body
                 if isinstance(node, ast.FunctionDef) and node.name == name)
     node.decorator_list = []

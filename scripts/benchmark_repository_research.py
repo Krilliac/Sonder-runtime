@@ -59,8 +59,8 @@ DEFAULT_CASES: tuple[dict[str, Any], ...] = (
         "question": "Locate report validation and the promotion decision.",
         "implementation_exists": True,
         "required_evidence": (
-            ("promotion_eval.py", "validate_model_report"),
-            ("promotion_eval.py", "promotion_decision"),
+            ("scripts/promotion_eval.py", "validate_model_report"),
+            ("scripts/promotion_eval.py", "promotion_decision"),
         ),
     },
     {

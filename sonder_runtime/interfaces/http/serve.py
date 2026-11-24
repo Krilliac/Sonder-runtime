@@ -86,7 +86,12 @@ from sonder_runtime.adapters.web import login_throttle_http
 import sonder_runtime.platform.config as runtime_config
 import sonder_runtime.platform.paths as runtime_paths
 from sonder_runtime.adapters.command_catalog import command_catalog
+from sonder_runtime.adapters import chat_effort as _chat_effort
 from sonder_runtime.adapters import chat_temperature as _chat_temperature
+from sonder_runtime.adapters.repl_services import (
+    command_router as _command_router,
+    personas as _personas,
+)
 from sonder_runtime.adapters.command_completion import (
     COMPLETE_DEFAULT_LIMIT,
     COMPLETE_MAX_LIMIT,
@@ -115,6 +120,8 @@ from sonder_runtime.application.extensions.facade import ExtensionAuthority
 from sonder_runtime.application.ports.model_gateway import ModelRequest
 from sonder_runtime.application.context import bind_operation_context
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
+from sonder_runtime.adapters import image_generation as _image_generation
+from sonder_runtime.adapters import model3d_generation as _model3d_generation
 from sonder_runtime.application.routing import long_context_overflow as _overflow
 import sonder_runtime.adapters.reference_lookup_lanes as _reference_lookup_lanes
 from sonder_runtime.domain import launcher_health as sonder_health, public_policy, thinking_controls as _thinking_controls
@@ -926,6 +933,7 @@ RUNTIME_ROLE = os.environ.get(sonder_health.ROLE_ENV, "")
 BOUND_PORT = None  # set by main() once the listener is actually bound
 TRACE = False
 STRICT = None  # None = env default (server._STRICT_DEFAULT)
+PERSONA = "auto"  # auto | off | <persona name>
 LAST_IID = None
 LAST_RESPONSE = None  # full last assistant turn (with footer), for /run
 LAST_RUN_SOURCE = None  # answer-only text; trace/footer removed for /run
@@ -1048,6 +1056,7 @@ class ConversationState:
 
     trace: bool = False
     strict: object = None
+    persona: str = "auto"
     last_iid: str | None = None
     last_response: str | None = None
     last_run_source: str | None = None
@@ -1105,6 +1114,15 @@ class _LegacyConversationState:
     def strict(self, value):
         global STRICT
         STRICT = value
+
+    @property
+    def persona(self):
+        return PERSONA
+
+    @persona.setter
+    def persona(self, value):
+        global PERSONA
+        PERSONA = value
 
     @property
     def last_iid(self):
@@ -2437,8 +2455,8 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     # reasoning through it, and an omission justified by a refusal must not
     # outlive the refusal.
     "/cot", "/chainofthought", "/thoughts",
-    # Shows operator prompt overrides and state-home paths.
-    "/prompts",
+    # Shows operator prompt overrides, host environment/hardware, and state-home paths.
+    "/prompts", "/persona", "/env", "/environment", "/hardware",
     "/filepolicy", "/files", "/find", "/read", "/write", "/append", "/edit",
     "/delete", "/master", "/master_orchestrate", "/delegate", "/pass", "/good", "/accept", "/accepted", "/used",
     "/copied", "/edited", "/fail", "/bad", "/trace", "/strict", "/run",
@@ -2447,8 +2465,19 @@ DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
     "/game", "/gamegen", "/gamefleet", "/gamecampaign",
     "/activity", "/tools", "/work", "/agent", "/report", "/endreport",
     "/checklist", "/plan", "/inventory", "/workspace", "/tree", "/folders", "/search", "/grep",
-    "/programs", "/programfind", "/scripts", "/scriptfind", "/image",
-    "/inspectimage", "/vision", "/analyzeimage", "/vision_analyze",
+    "/programs", "/programfind", "/scripts", "/scriptfind", "/image", "/img", "/gif", "/3d", "/model3d",
+    "/inspectimage", "/doc", "/document_extract", "/media", "/media_inspect",
+    "/loc", "/code_metrics", "/schema", "/schema_validate",
+    "/languages", "/language_matrix", "/calc", "/math_eval",
+    "/logic", "/logic_verify", "/regex", "/regex_lab",
+    "/graph", "/code_graph", "/sdiff", "/diff_semantic",
+    "/reason", "/reasoning_board", "/symcheck", "/symbol_verify",
+    "/citecheck", "/citation_audit", "/crosscheck", "/fact_cross_check",
+    "/consensus", "/consistency_check", "/fallback", "/plan_fallback",
+    "/resilience", "/runtime_resilience_check", "/shield", "/prompt_shield",
+    "/diagnose", "/error_diagnose", "/audit", "/code_audit",
+    "/transform", "/data_transform", "/learntool", "/learn_tool", "/discovertool",
+    "/vision", "/analyzeimage", "/vision_analyze",
     "/mkdir", "/runprogram", "/runscript",
     "/privacy", "/privacyreview", "/privacyfix", "/embeddings", "/embedfix",
     "/capacity", "/agentcapacity", "/agentcancel", "/cancelagents",
@@ -3280,8 +3309,37 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         return _dump_chat(
             messages=messages, label=arg.strip() or "chat", state=state
         )
+    if cmd in ("/image", "/img"):
+        image_prompt = arg.strip() or "a random image"
+        return _image_generation.generate_chat_image(image_prompt).markdown
+    if cmd == "/gif":
+        gif_prompt = arg.strip() or "a random animated gif"
+        return _image_generation.generate_chat_gif(gif_prompt).markdown
+    if cmd in ("/3d", "/model3d"):
+        model_prompt = arg.strip() or "a stylized glowing lantern"
+        return _model3d_generation.generate_chat_3d_model(model_prompt).markdown
     if cmd == "/stats":
         return server.sonder_stats()
+    if cmd == "/version":
+        from sonder_runtime.platform import version as build_identity
+        stamped = build_identity.stamped_build_info()
+        if stamped is not None:
+            return "sonder %s (commit %s, stamped release)" % (
+                stamped.version, stamped.commit_sha[:12],
+            )
+        return "sonder %s" % build_identity.runtime_version()
+    if cmd in ("/env", "/environment"):
+        return server.environment_status(
+            refresh=(arg or "").strip().lower() == "refresh",
+        )
+    if cmd == "/hardware":
+        return server.hardware_profile(
+            refresh=(arg or "").strip().lower() == "refresh",
+        )
+    if cmd == "/route":
+        if not arg.strip():
+            return "usage: /route <task or prompt>"
+        return server.route_request(arg.strip())
     if cmd == "/context":
         return server.context_health()
     if cmd == "/prompts":
@@ -3428,7 +3486,19 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         "/inventory", "/workspace",
         "/tree", "/folders", "/search", "/grep",
         "/programs", "/programfind", "/scripts", "/scriptfind",
-        "/image", "/inspectimage", "/vision", "/analyzeimage",
+        "/image", "/inspectimage", "/doc", "/document_extract",
+        "/media", "/media_inspect", "/loc", "/code_metrics",
+        "/schema", "/schema_validate", "/languages", "/language_matrix",
+        "/calc", "/math_eval", "/logic", "/logic_verify",
+        "/regex", "/regex_lab", "/graph", "/code_graph",
+        "/sdiff", "/diff_semantic", "/reason", "/reasoning_board",
+        "/symcheck", "/symbol_verify", "/citecheck", "/citation_audit",
+        "/crosscheck", "/fact_cross_check", "/consensus", "/consistency_check",
+        "/fallback", "/plan_fallback", "/resilience", "/runtime_resilience_check",
+        "/shield", "/prompt_shield", "/diagnose", "/error_diagnose",
+        "/audit", "/code_audit", "/transform", "/data_transform",
+        "/learntool", "/learn_tool", "/discovertool",
+        "/vision", "/analyzeimage",
         "/runprogram", "/runscript",
         "/artifactcheck", "/verifyartifact", "/groundartifact",
     ):
@@ -3600,6 +3670,26 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if cmd == "/temp":
         from sonder_runtime.interfaces.http.serve_policy import serve_lane_temperature
         return _chat_temperature.slash_temp(arg, storage_session, context, _state_principal, serve_lane_temperature())
+    if cmd == "/effort":
+        return _chat_effort.slash_effort(arg, storage_session, context, _state_principal)
+    if cmd == "/persona":
+        raw_arg = arg.strip()
+        available = list(_personas.MODES) + _personas.names()
+        if not raw_arg:
+            return "persona: %s (available: %s)" % (
+                state.persona or _personas.AUTO, ", ".join(available),
+            )
+        wanted = _personas.normalize_selection(raw_arg)
+        if wanted is None:
+            return "unknown persona %r; still %s (available: %s)" % (
+                raw_arg, state.persona or _personas.AUTO, ", ".join(available),
+            )
+        state.persona = wanted
+        if wanted == _personas.AUTO:
+            return "persona: auto (auto-routes by tier and prompt)"
+        if wanted == _personas.OFF:
+            return "persona: off (no persona prompt injected)"
+        return "persona: %s (pinned)" % wanted
     if cmd == "/trace":
         state.trace = _on_off(arg, state.trace)
         return "trace %s" % ("on" if state.trace else "off")
@@ -3798,6 +3888,62 @@ def _handle_intent(content, messages=None, state=None, context=None):
     return "\n".join(replies)
 
 
+# Curated slash commands eligible for HTTP natural-language auto-dispatch via
+# ``command_router.resolve()``.  Every resolved command still flows through
+# ``_handle_slash()`` so permission modes, deny rules, account-scope guards,
+# and role checks apply identically to a typed slash command.  Destructive,
+# file-mutating, and lifecycle commands (/delete, /write, /edit, /exit, /new,
+# /update, /stash) remain explicit-slash-only on HTTP.
+_HTTP_NATURAL_COMMANDS = frozenset({
+    # Per-session controls
+    "/persona", "/effort", "/temp",
+    # Read-only status, introspection, and environment probes
+    "/stats", "/context", "/contextsize", "/hardware", "/env", "/version",
+    "/diagnostics", "/updatecheck", "/tool_manifest", "/commands",
+    "/permissions", "/activity", "/agents", "/capacity", "/goal",
+    "/workflow_list", "/npu_status", "/calibration_status",
+    "/learning_health_status", "/mcp_runtime_status", "/status",
+    "/system_profile_text", "/evaluation_history_status",
+    # Read-only repository inspection
+    "/repo_status", "/repo_log", "/repo_diff",
+    # Scoped todo list & explicit todo creation
+    "/todo",
+    # Explicit tier-aware multi-model consultation / routing / ensemble
+    "/consult", "/route", "/ensemble",
+})
+
+
+def _handle_natural_command(
+    content, *, messages=None, state=None, project="", context=None,
+    idempotency_key="", workspace_project=None, lane_session="",
+    storage_session="",
+):
+    """Resolve curated plain-language commands through the gated slash handler."""
+    if context is not None and not _developer_authorized(context):
+        return None
+    resolved = _command_router.resolve(content)
+    if not resolved or not resolved.startswith("/"):
+        return None
+    head = _slash_head(resolved.split(None, 1)[0])
+    if head not in _HTTP_NATURAL_COMMANDS:
+        return None
+    if head == "/contextsize" and " " in resolved.strip():
+        return None
+    if context is not None and _dangerous_http_slash(resolved) and not _developer_authorized(context):
+        return None
+    return _handle_slash(
+        resolved,
+        messages=messages,
+        state=state,
+        project=project,
+        context=context,
+        idempotency_key=idempotency_key,
+        workspace_project=workspace_project,
+        lane_session=lane_session,
+        storage_session=storage_session,
+    )
+
+
 def _work_project_for_request(project, storage_project, content="", auth=None):
     """The project routed natural work runs under for one served request.
 
@@ -3876,22 +4022,52 @@ def _work_run_pending_text(run_id):
 
 
 def _bind_current_activity():
-    """Carry the request's activity span into the work-run thread."""
+    """Carry the request's activity span and reasoning effort into the work-run thread."""
     response_id = activity_tracker.current_response_id()
-    if not response_id:
+    effort = _chat_effort.active_turn_effort()
+    if not response_id and effort is None:
         return None
 
     def wrap(body):
         def bound():
-            with activity_tracker.bind_response(response_id):
+            with contextlib.ExitStack() as stack:
+                if response_id:
+                    stack.enter_context(activity_tracker.bind_response(response_id))
+                if effort is not None:
+                    stack.enter_context(_chat_effort.effort_scope(effort))
                 body()
         return bound
     return wrap
 
 
+def _append_session_transcript_event(session_id, event_type, content, *, turn_id, request_id="", extra=None):
+    """Best-effort redacted append to the durable session event log for UI/TUI sync."""
+    if not session_id or not isinstance(content, str) or not content.strip():
+        return
+    try:
+        from sonder_runtime.bootstrap.app import default_app
+        from sonder_runtime.domain.session_ref import is_valid_session_id
+        if not is_valid_session_id(session_id):
+            return
+        payload = {
+            "content": activity_tracker._redact_text(content),
+            "turn_id": turn_id,
+        }
+        if request_id:
+            payload["request_id"] = request_id
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                if key not in payload and value is not None:
+                    payload[key] = value
+        default_app().session_repository().append(session_id, event_type, payload)
+    except Exception:
+        _serve_logger.debug("session transcript append skipped (%s)", event_type, exc_info=True)
+
+
 def _handle_work_intent(content, project="", authorized=False, context=None,
                         idempotency_key="", session_id="", session_ref="",
-                        correlation_id="", with_receipt=False, tool_tier=""):
+                        correlation_id="", with_receipt=False, tool_tier="",
+                        record_transcript=False):
     """Route developer work through the bounded execution-mode chooser."""
     refusal = intents.containment_egress_refusal(content)
     if refusal:
@@ -3945,6 +4121,13 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                 )
             except Exception as error:
                 raise _LiveSessionCaptureFailure from error
+            work_turn_id = uuid.uuid4().hex if record_transcript else ""
+            if record_transcript:
+                _append_session_transcript_event(
+                    session_id, "user.message", content,
+                    turn_id=work_turn_id, request_id=correlation_id,
+                    extra={"lane": decision.lane, "work_run_id": current_work_run_id()},
+                )
             try:
                 output = _run_work_scoped(current_work_run_id(), http_work_runs.link_run,
                     acknowledgement, activity_tracker.current_response_id() or "", lambda: server.route_work_request(
@@ -3963,6 +4146,12 @@ def _handle_work_intent(content, project="", authorized=False, context=None,
                 terminal = receipts.finish(session_id, admission, status)
             except Exception as error:
                 raise _LiveSessionCaptureFailure from error
+            if record_transcript and isinstance(output, str) and output.strip():
+                _append_session_transcript_event(
+                    session_id, "model.response", output,
+                    turn_id=work_turn_id, request_id=correlation_id,
+                    extra={"lane": decision.lane, "work_run_id": current_work_run_id(), "status": status},
+                )
             return ChatWorkResult(
                 output if isinstance(output, str) else "", status,
                 decision.lane, session_ref, admission.event_id,
@@ -4057,6 +4246,13 @@ def _chat_model_selection_error(selector):
     """
     if not selector:
         return None
+    if _image_generation.is_image_generation_model_name(selector):
+        env_img = os.environ.get("SONDER_IMAGE_MODEL", "").strip()
+        if env_img and env_img.casefold() == str(selector).strip().casefold():
+            return None
+        discovered_imgs = _image_generation.list_discovered_image_models()
+        if any(name.casefold() == str(selector).strip().casefold() for name, _ in discovered_imgs):
+            return None
     try:
         _target, _cloud, _augment, tier_label = server._serve_target(selector, None)
         if tier_label == "cloud-disabled":
@@ -4111,11 +4307,18 @@ def _openai_model_rows():
         add(tier_name, "cloud" if cloud else "local")
     for name, record in records:
         if server._fanout_nonchat_reason(record):
+            if _image_generation.is_image_generation_model_name(name):
+                add(name, "local")
             continue
         cloud = server._is_cloud_model_name(name)
         if (cloud and not server.cloud_allowed()) or (not cloud and server.chat_model_unfit_reason(name)):
             continue
         add(name, "cloud" if cloud else "local")
+    for img_name, _origin in _image_generation.list_discovered_image_models():
+        add(img_name, "local")
+    env_img_model = os.environ.get("SONDER_IMAGE_MODEL", "").strip()
+    if env_img_model:
+        add(env_img_model, "local")
     return annotate_model_rows(rows, {"sonder", *server.available_tiers()}, serve_target=server._serve_target,  # per-row provider ids
                                bridge_provider=server._bridge_provider_for_tier, gateway=getattr(_live_telemetry_application(), "model_gateway", None))
 
@@ -4462,11 +4665,13 @@ def _chat_completion_object(
     receipt=None, activity_response=None,
 ):
     iid = iid or uuid.uuid4().hex[:12]
-    activity = server.activity_tracker.public_response(
-        activity_response, include_detail=False,
-    ) if isinstance(activity_response, dict) else (
-        server.activity_tracker.public_snapshot(include_detail=False) or {}
-    ).get("latest")
+    activity = (
+        server.activity_tracker.public_response(
+            activity_response, include_detail=False,
+        )
+        if isinstance(activity_response, dict)
+        else None
+    )
     obj = {
         "id": "chatcmpl-%s" % iid,
         "object": "chat.completion",
@@ -4785,7 +4990,15 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _cors(self):
-        origin = reflectable_origin(self.headers.get("Origin"))
+        if _request_route(getattr(self, "path", "")) == "/v1/local/server-log":
+            return
+        headers = getattr(self, "headers", None)
+        if headers is None:
+            return
+        origins = headers.get_all("Origin") if hasattr(headers, "get_all") else None
+        if origins is not None and len(origins) > 1:
+            return
+        origin = reflectable_origin(headers.get("Origin"))
         if origin is not None and origin in CORS_ORIGINS:
             if not (getattr(self, "_artifact_transfer_request", False) or getattr(self, "_app_control_request", False)):
                 _serve_logger.debug(f"_cors: allowing origin={origin!r}")
@@ -4909,7 +5122,27 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _reject_disallowed_origin(self):
-        origin = self.headers.get("Origin")
+        headers = getattr(self, "headers", None)
+        if headers is None:
+            return False
+        origins = headers.get_all("Origin") if hasattr(headers, "get_all") else None
+        if origins is not None and len(origins) > 1:
+            _serve_logger.debug("_reject_disallowed_origin: rejecting duplicate Origin headers")
+            if (
+                self.command == "POST"
+                and _request_route(self.path) == "/v1/chat/completions"
+            ):
+                self._record_chat_completion_metric(
+                    sonder_lifecycle.get(), "cors_rejected",
+                    getattr(self, "_request_started", time.monotonic()),
+                )
+            self._send_json_payload(
+                {"error": {"message": "origin is not allowed", "type": "cors",
+                           "code": "forbidden_origin"}},
+                status=403,
+            )
+            return True
+        origin = headers.get("Origin")
         if origin is None or origin in CORS_ORIGINS:
             return False
         if _WEB_APP.enabled and getattr(self, "_host_trusted", False) and web_app.same_origin_request(self.headers, https_declared=TLS_TERMINATED_BY_PROXY):
@@ -4940,15 +5173,27 @@ class Handler(BaseHTTPRequestHandler):
         # A served account's agent turn must never carry the owner's build
         # model: the brief shows only the principal this request declares.
         _bind_request_build_principal(context)
-        role_tool_policy.bind_caller_role(_restricted_tool_role(context))
-        permission_policy.bind_unauthenticated_caller(_chat_tool_stream.is_local_open_context(context))
+        role = _restricted_tool_role(context)
+        local_open = _chat_tool_stream.is_local_open_context(context)
         turn_stack = getattr(self, "_turn_stack", None)
         if turn_stack is not None and not getattr(self, "_mode_scope_bound", False):
+            turn_stack.enter_context(role_tool_policy.caller_role_scope(role))
+            permission_policy.bind_unauthenticated_caller(local_open)
+            turn_stack.callback(permission_policy.bind_unauthenticated_caller, False)
             session_hdr = str(self.headers.get("X-Sonder-Session", "") or "").strip()
+            state_principal = _state_principal(context)
+            mode_principal = _mode_principal(context)
             turn_stack.enter_context(_chat_tool_stream.request_mode_scope(
-                permission_policy, context, _state_principal(context), session_hdr,
+                permission_policy, context, state_principal, session_hdr,
             ))
+            if mode_principal != state_principal:
+                turn_stack.enter_context(permission_policy.mode_scope(
+                    mode_principal, session_hdr, local_open=local_open,
+                ))
             self._mode_scope_bound = True
+        else:
+            role_tool_policy.bind_caller_role(role)
+            permission_policy.bind_unauthenticated_caller(local_open)
         return context
 
     def _peer(self):
@@ -4973,9 +5218,12 @@ class Handler(BaseHTTPRequestHandler):
             self._correlation_id = sonder_lifecycle.new_correlation_id()
         return self._correlation_id
 
+    def _record_auth_failure(self, reason="invalid-credentials"):
+        sonder_lifecycle.get().record_auth_failure(self._client_ip(), reason)
+
     def _send_auth_error(self, reason="invalid-credentials"):
         _serve_logger.debug(f"_send_auth_error: peer={self._peer()!r}, reason={reason!r}")
-        sonder_lifecycle.get().record_auth_failure(self._client_ip(), reason)
+        self._record_auth_failure(reason)
         self._send_json_payload({
             "error": {"message": "authentication required", "type": "auth",
                       "code": "UNAUTHENTICATED",
@@ -5248,7 +5496,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Sonder-Artifact-Sha256", digest)
             self.send_header("Cache-Control", "no-store")
             for name, value in (headers or {}).items():
-                self.send_header(name, value)
+                clean_name = str(name).replace("\r", "").replace("\n", "")
+                clean_value = str(value).replace("\r", "").replace("\n", "")
+                if clean_name:
+                    self.send_header(clean_name, clean_value)
             self.end_headers()
             self.wfile.write(body)
             return True
@@ -5472,16 +5723,37 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _handle_agent_lane_request(self, method, path, payload=None):
-        if path != "/v1/background-work" and path != "/v1/agent-lanes" and not path.startswith("/v1/agent-lanes/"):
+        if (
+            path != "/v1/background-work"
+            and path != "/v1/background-work/clear"
+            and path != "/v1/agent-lanes"
+            and not path.startswith("/v1/agent-lanes/")
+        ):
             return False
         from sonder_runtime.bootstrap.app import default_app
         from sonder_runtime.interfaces.http.agent_work_routes import handle_agent_work_request
         from sonder_runtime.interfaces.http.background_work import runtime_background_work
+        from sonder_runtime.adapters.persistence import autopilot_store, fleet_store
         from sonder_runtime.adapters.persistence.background_work import fleet_snapshot, autopilot_snapshot
+
+        def _clear_background(auth, *, project=""):
+            owner = _task_account_scope(auth)
+            cleared_autopilot = autopilot_store.clear_finished(request_owner=owner)
+            cleared_fleets = (
+                fleet_store.clear_finished(project=project)
+                if _admin_authorized(auth)
+                else 0
+            )
+            return {
+                "cleared_autopilot": cleared_autopilot,
+                "cleared_fleets": cleared_fleets,
+            }
+
         return handle_agent_work_request(
             self, method, path, payload, application_of=default_app,
             context_of=_http_debug_context, policy=permission_policy, logger=_serve_logger,
             allow_creation_of=_admin_authorized,
+            clear_background_of=_clear_background,
             query_of=lambda handler: urllib.parse.parse_qs(
                 urllib.parse.urlsplit(handler.path).query, keep_blank_values=True, max_num_fields=16),
             state_home_of=lambda application: getattr(
@@ -5622,6 +5894,37 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._auth_rate_limited():
             return
+        if path.startswith("/v1/generated-models/"):
+            filename = path[len("/v1/generated-models/"):]
+            query_params = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            dl_ticket = (query_params.get("dl") or [""])[0]
+            ticket_ok = _model3d_generation.verify_model_download_ticket(filename, dl_ticket)
+            if not ticket_ok:
+                context = self._request_auth_context()
+                if not context["authorized"]:
+                    self._send_auth_error()
+                    return
+            loaded = _model3d_generation.read_generated_model_bytes(filename)
+            if loaded is None:
+                self._send_not_found()
+                return
+            safe_name, raw_bytes = loaded
+            ext = Path(safe_name).suffix.lower()
+            ctype = {
+                ".glb": "model/gltf-binary",
+                ".obj": "text/plain; charset=utf-8",
+                ".png": "image/png",
+            }.get(ext, "application/octet-stream")
+            self._send_binary_payload(
+                raw_bytes,
+                content_type=ctype,
+                digest=hashlib.sha256(raw_bytes).hexdigest(),
+                headers={
+                    "Content-Disposition": f'attachment; filename="{safe_name}"',
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+            return
         if self._handle_agent_lane_request("GET", path):
             return
         if self._handle_build_request("GET", path):
@@ -5640,6 +5943,13 @@ class Handler(BaseHTTPRequestHandler):
             context = self._request_auth_context()
             if not context["authorized"]:
                 self._send_auth_error()
+                return
+            if not _admin_authorized(context):
+                self._send_json_payload(
+                    {"error": {"message": "administrator authorization is required",
+                               "type": "forbidden", "code": "FORBIDDEN"}},
+                    status=403,
+                )
                 return
             from sonder_runtime.bootstrap.app import default_app
             from sonder_runtime.interfaces.http.facades.compute_fabric import (
@@ -5826,16 +6136,39 @@ class Handler(BaseHTTPRequestHandler):
                     status=503,
                 )
                 return
-            result = dispatch_session_route(
-                facade, path,
-                query=urllib.parse.parse_qs(
-                    urllib.parse.urlsplit(self.path).query,
-                    keep_blank_values=True,
-                ),
+            query_params = urllib.parse.parse_qs(
+                urllib.parse.urlsplit(self.path).query,
+                keep_blank_values=True,
             )
+            result = dispatch_session_route(facade, path, query=query_params)
             if result is None:
                 self._send_not_found()
                 return
+            # Client apps (e.g. Flutter web deep links #/c/chat-...) address a
+            # thread by its un-namespaced client session id, while POST
+            # /v1/chat/completions persists events under the caller's
+            # principal-namespaced storage id. When a literal replay lookup is
+            # empty, resolve the caller's own namespaced id and use it if present.
+            if (
+                result.status_code == 200
+                and path.startswith("/v1/sessions/")
+                and isinstance(result.body, dict)
+                and result.body.get("recovered_sequence") == 0
+            ):
+                _parts = path.split("?", 1)[0].rstrip("/")[len("/v1/sessions/"):].split("/")
+                if len(_parts) == 2 and _parts[1] == "replay":
+                    _scoped_id = _hosted_storage_id(context, _parts[0], "session")
+                    if _scoped_id and _scoped_id != _parts[0]:
+                        _alt = dispatch_session_route(
+                            facade, f"/v1/sessions/{_scoped_id}/replay", query=query_params,
+                        )
+                        if (
+                            _alt is not None
+                            and _alt.status_code == 200
+                            and isinstance(_alt.body, dict)
+                            and int(_alt.body.get("recovered_sequence") or 0) > 0
+                        ):
+                            result = _alt
             self._send_json_payload(result.body, status=result.status_code)
             return
         if path == "/v1/jobs" or path.startswith("/v1/jobs/"):
@@ -6061,7 +6394,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json_payload(payload, status=status)
             return
         if path == "/v1/sonder/capabilities":
-            self._send_json_payload(_capabilities_payload(self._request_auth_context()))
+            context = self._request_auth_context()
+            if (
+                not context.get("authorized")
+                and context.get("mode") != "local-open"
+                and (
+                    str(self.headers.get("Authorization", "") or "").strip()
+                    or str(self.headers.get("X-Sonder-Account-Token", "") or "").strip()
+                )
+            ):
+                self._record_auth_failure("invalid-credentials")
+            self._send_json_payload(_capabilities_payload(context))
             return
         if path == "/v1/sonder/whoami":
             context = self._request_auth_context()
@@ -6073,11 +6416,33 @@ class Handler(BaseHTTPRequestHandler):
                 admin_authorized=_admin_authorized(context),
             ))
             return
+        if path == "/v1/sonder/personas":
+            context = self._request_auth_context()
+            if not context["authorized"]:
+                self._send_auth_error()
+                return
+            descs = _personas.descriptions()
+            self._send_json_payload({
+                "default": _personas.AUTO,
+                "modes": list(_personas.MODES),
+                "personas": [
+                    {"name": name, "description": descs.get(name, "")}
+                    for name in _personas.names()
+                ],
+            })
+            return
         if path == "/v1/sonder/status":
             context = self._request_auth_context()
             if not context["authorized"]:
                 self._send_auth_error()
                 return
+            status_query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            status_session = str(
+                (status_query.get("session") or [""])[0]
+                or self.headers.get("X-Sonder-Session", "")
+                or ""
+            ).strip()
+            status_project = str((status_query.get("project") or [""])[0] or "").strip()
             self._send_json_payload(server._http_chat_tools().sonder_status_payload(
                 server=server, context=context, caps=_capabilities_payload(context),
                 public_hosting=bool(PUBLIC_HOSTING), admin_authorized=_admin_authorized(context),
@@ -6086,6 +6451,7 @@ class Handler(BaseHTTPRequestHandler):
                 app_control_binding=_APP_CONTROL_BINDING, state_home=str(runtime_paths.default_home()),
                 deployment_payload=sonder_lifecycle.get().deployment_payload(),
                 build_operational_capabilities=build_operational_capabilities, narrate=_narrated_status,
+                session=status_session, project=status_project,
             ))
             return
         if path == _CLIENT_SCHEMA_ROUTE:
@@ -6148,7 +6514,8 @@ class Handler(BaseHTTPRequestHandler):
             "/v1/commands", "/v1/commands/complete", "/v1/commands/help",
         ):
             return False
-        if not self._request_auth_context()["authorized"]:
+        context = self._request_auth_context()
+        if not context["authorized"]:
             self._send_auth_error()
             return True
         query = urllib.parse.parse_qs(split.query, keep_blank_values=True)
@@ -6157,7 +6524,6 @@ class Handler(BaseHTTPRequestHandler):
             values = query.get(name) or [""]
             return values[0]
 
-        context = self._request_auth_context()
         if route == "/v1/commands/complete":
             payload = _commands_complete_payload(
                 first("q"), first("limit"), context=context,
@@ -7311,6 +7677,32 @@ class Handler(BaseHTTPRequestHandler):
             record_early_chat_metric("invalid_session_temperature")
             self._send_json_payload({"error": {"message": "session_temperature: %s" % error, "type": "invalid_request"}}, status=400)
             return
+        try:
+            request_reasoning_effort = _chat_effort.check_effort(req.get("reasoning_effort")) if req.get("reasoning_effort") is not None else None
+        except InvalidInput as error:
+            record_early_chat_metric("invalid_reasoning_effort")
+            self._send_json_payload({"error": {"message": "reasoning_effort: %s" % error, "type": "invalid_request"}}, status=400)
+            return
+        try:
+            apply_session_effort, session_reasoning_effort = _chat_effort.session_field(
+                req.get("session_reasoning_effort"), storage_session)
+        except InvalidInput as error:
+            record_early_chat_metric("invalid_session_reasoning_effort")
+            self._send_json_payload({"error": {"message": "session_reasoning_effort: %s" % error, "type": "invalid_request"}}, status=400)
+            return
+        request_persona = None
+        if req.get("persona") is not None:
+            request_persona = _personas.normalize_selection(req.get("persona"))
+            if request_persona is None:
+                record_early_chat_metric("invalid_persona")
+                self._send_json_payload({
+                    "error": {
+                        "message": "persona: expected one of %s"
+                        % ", ".join(list(_personas.MODES) + _personas.names()),
+                        "type": "invalid_request",
+                    }
+                }, status=400)
+                return
         history_source = req.get("history")
         if history_source is not None and history_source not in _CHAT_HISTORY_SOURCES:
             record_early_chat_metric("invalid_history")
@@ -7326,6 +7718,18 @@ class Handler(BaseHTTPRequestHandler):
             # that owns its transcript (``history: "client"``) opts out, so a
             # turn it cancelled or dropped is never re-injected.
             history = _server_side_history(storage_session)
+        if history:
+            history = [
+                {
+                    **item,
+                    "content": _image_generation.strip_inline_data_images(
+                        item.get("content", "")
+                    ),
+                }
+                if isinstance(item, dict) and isinstance(item.get("content"), str)
+                else item
+                for item in history
+            ]
         account_header = self.headers.get("X-Sonder-Account-Token", "")
         auth_header = self.headers.get("Authorization", "")
         state, state_pinned = _acquire_http_conversation_state(
@@ -7402,6 +7806,17 @@ class Handler(BaseHTTPRequestHandler):
             ), state.lock, contextlib.ExitStack() as _early_scope:
                 _chat_temperature.store_session_field(
                     apply_session_temperature, session_temperature, storage_session, context, _state_principal)
+                _chat_effort.store_session_field(
+                    apply_session_effort, session_reasoning_effort, storage_session, context, _state_principal)
+                _resolved_effort = _chat_effort.resolve_turn_effort(
+                    request=request_reasoning_effort, session=storage_session)
+                _early_scope.enter_context(_chat_effort.effort_scope(_resolved_effort.value))
+                _active_persona_choice = (
+                    request_persona
+                    if request_persona is not None
+                    else (state.persona or _personas.AUTO)
+                )
+                _early_scope.enter_context(_personas.persona_scope(_active_persona_choice))
                 _record_chat("user", prompt, state=state)
                 from sonder_runtime.platform.spanda_http import resolve_spanda_policy as _resolve_spanda_policy_early
                 _spanda_early = _resolve_spanda_policy_early(_SPANDA_CONFIG, self.headers if _developer_authorized(context) else None)
@@ -7460,6 +7875,20 @@ class Handler(BaseHTTPRequestHandler):
                         reply = _handle_intent(
                             prompt, messages=messages, state=state, context=context,
                         )
+                    if (structured_schema is None and allow_control_routes and reply is None
+                            and _developer_authorized(context)
+                            and not (natural_model and natural_model["kind"] in ("fanout", "ensemble"))):
+                        reply = _handle_natural_command(
+                            prompt,
+                            messages=_chat_tool_stream.slash_messages(messages, history, _history_from_messages),
+                            state=state,
+                            project=storage_project or server._http_chat_tools().account_default_project(context, _state_principal(context)),
+                            context=context,
+                            idempotency_key=self.headers.get("Idempotency-Key", ""),
+                            workspace_project=project,
+                            lane_session=session,
+                            storage_session=storage_session,
+                        )
                     if structured_schema is None and reply is None and natural_model and natural_model["kind"] == "fanout":
                         # Developer authority was established above from this
                         # request's HTTP auth context.  Do not call the public
@@ -7497,6 +7926,57 @@ class Handler(BaseHTTPRequestHandler):
                             gateway_bound=True,
                         )
                         web_routed = reply is not None
+                    if structured_schema is None and reply is None:
+                        explicit_image_model = _image_generation.is_image_generation_model_name(model)
+                        allow_media_route = (
+                            allow_control_routes
+                            or _model_to_tier(model) in ("general", "code", "fast", "creative")
+                        )
+                        model3d_prompt = (
+                            intents.classify_3d_model_generation(prompt)
+                            if allow_media_route
+                            else None
+                        )
+                        gif_prompt = (
+                            None
+                            if model3d_prompt
+                            else (
+                                intents.classify_gif_generation(prompt)
+                                if (explicit_image_model or allow_media_route)
+                                else None
+                            )
+                        )
+                        if model3d_prompt:
+                            m3d_result = _model3d_generation.generate_chat_3d_model(model3d_prompt)
+                            reply = m3d_result.markdown
+                            response_model = m3d_result.model_id
+                            response_tier = "3d"
+                        elif gif_prompt:
+                            gif_result = _image_generation.generate_chat_gif(
+                                gif_prompt,
+                                model_override=model if explicit_image_model else "",
+                            )
+                            reply = gif_result.markdown
+                            response_model = gif_result.model_id
+                            response_tier = "image"
+                        else:
+                            image_prompt = (
+                                prompt
+                                if explicit_image_model
+                                else (
+                                    intents.classify_image_generation(prompt)
+                                    if allow_media_route
+                                    else None
+                                )
+                            )
+                            if image_prompt:
+                                img_result = _image_generation.generate_chat_image(
+                                    image_prompt,
+                                    model_override=model if explicit_image_model else "",
+                                )
+                                reply = img_result.markdown
+                                response_model = img_result.model_id
+                                response_tier = "image"
                     if structured_schema is None and reply is None and allow_control_routes:
                         work_session_ref = session or self._correlation()
                         reply = _handle_work_intent(
@@ -7510,6 +7990,7 @@ class Handler(BaseHTTPRequestHandler):
                             correlation_id=self._correlation(),
                             with_receipt=True,
                             tool_tier="",
+                            record_transcript=bool(storage_session),
                         )
                         execution_routed = reply is not None
                     if isinstance(reply, ChatWorkResult):
@@ -7517,6 +7998,17 @@ class Handler(BaseHTTPRequestHandler):
                         reply = ("Work outcome is unknown. Inspect the session receipt before retrying."
                                  if reply.status == "unknown" else reply.text or "Work was not started.")
                     if structured_schema is None and reply is not None:
+                        if isinstance(reply, str) and "(/v1/generated-models/" in reply:
+                            req_host = (self.headers.get("Host") or "").strip()
+                            if req_host:
+                                req_scheme = "https" if (
+                                    hasattr(self.connection, "getpeercert")
+                                    or bool(getattr(self.server, "tls_terminated_by_proxy", False))
+                                    or os.environ.get("SONDER_TLS_TERMINATED_BY_PROXY", "").strip().lower() in ("1", "true", "yes")
+                                ) else "http"
+                                reply = _model3d_generation.upgrade_markdown_download_links(
+                                    reply, origin=f"{req_scheme}://{req_host}",
+                                )
                         content = reply
                     elif structured_schema is None:
                         from sonder_runtime.platform.spanda_http import (
@@ -7686,6 +8178,26 @@ class Handler(BaseHTTPRequestHandler):
                         provider_capture=turn.provider_capture,
                         selector=model_selector,
                         resolved_tier=response_tier,
+                    )
+                elif (
+                    storage_session
+                    and reply is not None
+                    and not execution_routed
+                    and not allow_slash_command
+                    and isinstance(content, str)
+                    and content.strip()
+                ):
+                    sync_turn_id = uuid.uuid4().hex
+                    sync_lane = "web" if web_routed else "chat"
+                    _append_session_transcript_event(
+                        storage_session, "user.message", prompt,
+                        turn_id=sync_turn_id, request_id=self._correlation(),
+                        extra={"lane": sync_lane},
+                    )
+                    _append_session_transcript_event(
+                        storage_session, "model.response", content,
+                        turn_id=sync_turn_id, request_id=self._correlation(),
+                        extra={"lane": sync_lane},
                     )
         except sonder_lifecycle.AdmissionRejected as rejection:
             _serve_logger.error(f"request admission rejected: code={rejection.code!r}, retryable={rejection.retryable}, correlation={self._correlation()!r}")
@@ -7911,7 +8423,7 @@ class Handler(BaseHTTPRequestHandler):
                 activity_response, include_detail=False,
             )
             if isinstance(activity_response, dict)
-            else (server.activity_tracker.public_snapshot(include_detail=False) or {}).get("latest")
+            else None
         )
         headers_sent = False
         early = getattr(self, "_early_stream", None)

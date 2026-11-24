@@ -17,6 +17,8 @@ import time
 import uuid
 from copy import deepcopy
 
+from sonder_runtime.domain.security import credential_formats, redaction
+
 
 MAX_EVENTS = 80
 MAX_ACTIVE = 20
@@ -75,6 +77,8 @@ if "_LATEST_REASONING" not in globals():
     _LATEST_REASONING = None
 if "_LATEST_REASONING_OWNER" not in globals():
     _LATEST_REASONING_OWNER = ""
+if "_OWNER_LATEST_REASONING" not in globals():
+    _OWNER_LATEST_REASONING = {}
 # Live execution feed ownership. Owner keys are opaque principal hashes (or ""
 # for the single trusted local operator domain) and, like reasoning owners,
 # they live OUTSIDE the response object so no public projection can carry them.
@@ -148,7 +152,7 @@ def _block(value, limit=MAX_EVENT_BLOCK):
 # need Python 3.11+. _redact_text also caps its input at MAX_REDACT_CHARS.
 _SECRET_KEYWORD = (
     r"(?:password|passwd|pwd|token|secret|api[-_]?key|"
-    r"access[-_]?key|authorization|credential)"
+    r"access[-_]?key|private[-_]?key|authorization|credential)"
 )
 _SECRET_NAME_CHAR = r"(?:[a-z0-9_]|(?<=[a-z0-9_])-(?=key))"
 
@@ -156,15 +160,16 @@ _SECRET_NAME_CHAR = r"(?:[a-z0-9_]|(?<=[a-z0-9_])-(?=key))"
 def _secret_assignment_re(unterminated_quote_tail):
     # Single-line unterminated quoted values also redact to EOL/EOF even on
     # inputs <= MAX_REDACT_CHARS (e.g. pre-sliced head output), while properly
-    # closed multi-line quoted values still match the first possessive branch.
+    # closed multi-line quoted values (including escaped quotes) still match
+    # the first possessive branch.
     del unterminated_quote_tail
     return re.compile(
         r"(?i)(?<![a-z0-9_])(?!(?<=[a-z0-9_]-)key)"
         r"((?:(?!" + _SECRET_KEYWORD + r")" + _SECRET_NAME_CHAR + r")*+"
         + _SECRET_KEYWORD + _SECRET_NAME_CHAR + r"*+)"
         r"(?:[\"']?[ \t]*[:=][ \t]*|[ \t]+)"
-        r"(?:\"[^\"]*+\"|\"[^\"\r\n]*+(?=\r|\n|\Z)"
-        r"|'[^']*+'|'[^'\r\n]*+(?=\r|\n|\Z)|[^\s,;]+)"
+        r"(?:\"(?:[^\"\\]++|\\.)*+\"|\"(?:[^\"\\\r\n]++|\\[^\r\n])*+(?=\r|\n|\Z)"
+        r"|'(?:[^'\\]++|\\.)*+'|'(?:[^'\\\r\n]++|\\[^\r\n])*+(?=\r|\n|\Z)|[^\s,;]+)"
     )
 
 
@@ -194,6 +199,13 @@ _AUTH_HEADER_RE = re.compile(
     r"(?:\"(?:[^\"\\\r\n]|\\.)*\"|'(?:[^'\\\r\n]|\\.)*'|"
     r"(?(q)(?:[^\\\r\n]|\\.)*?(?=(?P=q)|[\r\n]|$)|[^\r\n]+))"
 )
+_COOKIE_HEADER_RE = re.compile(
+    r"(?i)(?:(?P<q>[\"'])|\b)(?P<name>(?:set-)?cookie)"
+    r"(?:(?:\\?[\"'])?[ \t]*[:=]|(?(q)(?P=q)[ \t]*,|(?!)))[ \t]*"
+    r"(?:[\[(][ \t]*)?(?:[bufr]{1,2}(?=[\"']))?"
+    r"(?:\"(?:[^\"\\\r\n]++|\\[^\r\n])*+\"|'(?:[^'\\\r\n]++|\\[^\r\n])*+'|"
+    r"(?(q)(?:[^\\\r\n]|\\.)*?(?=(?P=q)|[\r\n]|$)|[^\r\n]++))"
+)
 _KEY_SHAPE_RE = re.compile(
     r"\b(?:(?:sk|gh[pousr])[-_][A-Za-z0-9_-]{12,}|"
     r"github_pat_[A-Za-z0-9_]{20,}|"
@@ -201,6 +213,41 @@ _KEY_SHAPE_RE = re.compile(
     r"xox[abpr]-[A-Za-z0-9-]{10,}|"
     r"(?:AKIA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[A-Z0-9]{16})\b"
 )
+
+
+def _redact_pem(text, *, truncated=False):
+    """Scrub PEM private-key blocks in linear time (including truncated tails)."""
+    if redaction._PEM_BEGIN_MARK not in text:
+        return text
+    out = []
+    copied = pos = 0
+    while True:
+        begin = text.find(redaction._PEM_BEGIN_MARK, pos)
+        if begin < 0:
+            break
+        header_end = redaction._pem_marker_end(text, begin + len(redaction._PEM_BEGIN_MARK))
+        if header_end < 0:
+            pos = begin + 1
+            continue
+        end = -1
+        probe = header_end
+        while end < 0:
+            marker = text.find(redaction._PEM_END_MARK, probe)
+            if marker < 0:
+                break
+            end = redaction._pem_marker_end(text, marker + len(redaction._PEM_END_MARK))
+            probe = marker + 1
+        if end < 0:
+            if truncated:
+                out.append(text[copied:begin])
+                out.append("<redacted-key>")
+                copied = len(text)
+            break
+        out.append(text[copied:begin])
+        out.append("<redacted-key>")
+        copied = pos = end
+    out.append(text[copied:])
+    return "".join(out)
 # Linear on hostile "-ey" runs: anchored at the start of the base64url run so
 # hyphen boundaries inside "-ey-ey-..." cannot trigger quadratic rescans.
 _JWT_RE = re.compile(
@@ -266,11 +313,15 @@ def _redact_details(value):
         if truncated:
             text = _truncate_for_redaction(text)
         original = text
-        # Authorization headers and Bearer first: the assignment rule matches
+        text = _redact_pem(text, truncated=truncated)
+        # Authorization, Cookie, and Bearer first: the assignment rule matches
         # `Authorization:` too, and it consumes only up to the next space -- so
         # running it first would eat the scheme word ("Bearer", "Basic") and
         # leave the credential itself behind, unmatchable.
         text = _AUTH_HEADER_RE.sub(
+            lambda match: f"{match.group('q') or ''}{match.group('name')}: <redacted>", text,
+        )
+        text = _COOKIE_HEADER_RE.sub(
             lambda match: f"{match.group('q') or ''}{match.group('name')}: <redacted>", text,
         )
         text = _BEARER_RE.sub("Bearer <redacted>", text)
@@ -278,6 +329,8 @@ def _redact_details(value):
         assignment = _SECRET_ASSIGNMENT_TAIL_RE if truncated else _SECRET_ASSIGNMENT_RE
         text = assignment.sub(lambda match: "%s=<redacted>" % match.group(1), text)
         text = _JWT_RE.sub(lambda match: (match.group(1) or "") + "<redacted-token>", text)
+        text = credential_formats.KNOWN_CREDENTIAL.sub("<redacted-key>", text)
+        text = credential_formats.AWS_KEY_RUN.sub("<redacted-key>", text)
         text = _CONTROL_RE.sub("?", _KEY_SHAPE_RE.sub("<redacted-key>", text))
         return (text + _TRUNCATION_MARKER if truncated else text), text != original, truncated
     except Exception:
@@ -346,17 +399,35 @@ _SENSITIVE_NAME_MARKERS = (
     "password", "passwd", "pwd", "token", "secret",
     "api_key", "api-key", "apikey", "access_key", "access-key", "accesskey",
     "authorization", "credential", "approval",
+    "cookie", "private_key", "private-key", "privatekey",
 )
+
+_MAX_COMMAND_JSON_CHARS = 32768
+_MAX_COMMAND_BRACKET_PROBES = 32
+
+
+def _is_sensitive_cli_flag(text, lowered):
+    if lowered in _SENSITIVE_NAME_MARKERS:
+        return True
+    is_flag = (
+        (text.startswith("-") and "/" not in text and "\\" not in text)
+        or (text.startswith("/") and "/" not in text[1:] and "\\" not in text and "." not in text)
+    )
+    return is_flag and any(marker in lowered for marker in _SENSITIVE_NAME_MARKERS)
 
 
 def _safe_command(value):
     if not value:
         return ""
     parsed = value
-    if isinstance(value, str) and value.lstrip().startswith("["):
+    if (
+        isinstance(value, str)
+        and value.lstrip().startswith("[")
+        and len(value) <= _MAX_COMMAND_JSON_CHARS
+    ):
         try:
             parsed = json.loads(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             parsed = value
     # Agent activity renders argv as ``program ["--flag", "value"]`` so
     # humans can distinguish the executable from its arguments.  That shape
@@ -364,17 +435,23 @@ def _safe_command(value):
     # text misses a secret flag whose name and value are separate JSON items.
     # Reuse the list handling below while preserving the safe program prefix.
     prefix = ""
-    if isinstance(parsed, str):
-        # The program/path itself can contain ``[``.  Try every possible JSON
-        # array start and accept only one that parses through the *end* of the
+    if isinstance(parsed, str) and parsed.rstrip().endswith("]"):
+        # The program/path itself can contain ``[``.  Try bounded candidate JSON
+        # array starts and accept only one that parses through the *end* of the
         # command text; the first bracket is not necessarily the argv array.
+        probes = 0
         for bracket, char in enumerate(parsed):
             if char != "[" or bracket == 0:
                 continue
+            if probes >= _MAX_COMMAND_BRACKET_PROBES:
+                break
             candidate = parsed[bracket:].strip()
+            if len(candidate) > _MAX_COMMAND_JSON_CHARS:
+                continue
+            probes += 1
             try:
                 argv = json.loads(candidate)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, RecursionError):
                 continue
             if isinstance(argv, list):
                 prefix = parsed[:bracket].strip()
@@ -391,12 +468,15 @@ def _safe_command(value):
             rendered.append("<redacted>")
             hide_next = False
             continue
-        if lowered in _SENSITIVE_NAME_MARKERS:
+        if "=" in text:
+            flag_name, _ = text.split("=", 1)
+            norm = flag_name.lower().lstrip("-/")
+            if any(marker in norm for marker in _SENSITIVE_NAME_MARKERS):
+                rendered.append(flag_name + "=<redacted>")
+                continue
+        if _is_sensitive_cli_flag(text, lowered):
             rendered.append(text)
             hide_next = True
-            continue
-        if any(lowered.startswith(name + "=") for name in _SENSITIVE_NAME_MARKERS):
-            rendered.append(text.split("=", 1)[0] + "=<redacted>")
             continue
         rendered.append(_redact_text(text))
     command = json.dumps(rendered, ensure_ascii=False)
@@ -480,6 +560,28 @@ ACTION_TITLES = {
     "run_code": "Ran Code",
     "run_project": "Ran Project",
     "image_inspect": "Viewed Image",
+    "document_extract": "Extracted Document",
+    "media_inspect": "Inspected Media Asset",
+    "code_metrics": "Measured Code Metrics",
+    "schema_validate": "Validated Schema",
+    "language_matrix": "Checked Language Matrix",
+    "math_eval": "Evaluated Math",
+    "logic_verify": "Verified Logic",
+    "regex_lab": "Tested Regex",
+    "code_graph": "Analyzed Code Graph",
+    "diff_semantic": "Diffed Structure",
+    "reasoning_board": "Updated Reasoning Board",
+    "symbol_verify": "Verified API Symbols",
+    "citation_audit": "Audited Citations",
+    "fact_cross_check": "Cross-Checked Facts",
+    "consistency_check": "Checked Consistency",
+    "plan_fallback": "Planned Fallback",
+    "runtime_resilience_check": "Checked Resilience",
+    "prompt_shield": "Scanned Prompt Shield",
+    "error_diagnose": "Diagnosed Error",
+    "code_audit": "Audited Code",
+    "data_transform": "Transformed Data",
+    "learn_tool": "Researched External Tool",
     "artifact_generate": "Generated Assets",
     "mesh_generate": "Generated Model",
     "security_eval": "Ran Security Eval",
@@ -518,6 +620,18 @@ def _current():
 def current_response_id():
     """Return the active response ID for propagation into a worker thread."""
     return getattr(_LOCAL, "response_id", None)
+
+
+def current_span_owners():
+    """Return ``(feed_owner, reasoning_owner)`` for the active thread's span."""
+    response_id = getattr(_LOCAL, "response_id", None)
+    if not response_id:
+        return "", ""
+    with _LOCK:
+        return (
+            _FEED_OWNERS.get(response_id, ""),
+            _REASONING_OWNERS.get(response_id, ""),
+        )
 
 
 @contextlib.contextmanager
@@ -613,6 +727,9 @@ def response_span(
             for key in oldest:
                 if key != response_id:
                     _ACTIVE.pop(key, None)
+                    _FEED_OWNERS.pop(key, None)
+                    _REASONING_OWNERS.pop(key, None)
+                    _REASONING.pop(key, None)
     _LOCAL.response_id = response_id
     try:
         from sonder_runtime.application.ports.work_narration import bind_activity
@@ -646,8 +763,17 @@ def response_span(
             _LATEST = deepcopy(response)
             # Promote alongside _LATEST so the pair always describes the same
             # turn, then drop the per-span buffer.
-            _LATEST_REASONING = _collect_reasoning(response_id)
-            _LATEST_REASONING_OWNER = _REASONING_OWNERS.pop(response_id, "")
+            collected = _collect_reasoning(response_id)
+            owner = _REASONING_OWNERS.pop(response_id, "")
+            _LATEST_REASONING = collected
+            _LATEST_REASONING_OWNER = owner
+            if collected is not None:
+                _OWNER_LATEST_REASONING.pop(owner, None)
+                _OWNER_LATEST_REASONING[owner] = deepcopy(collected)
+                while len(_OWNER_LATEST_REASONING) > MAX_FEED_OWNERS:
+                    _OWNER_LATEST_REASONING.pop(next(iter(_OWNER_LATEST_REASONING)), None)
+            else:
+                _OWNER_LATEST_REASONING.pop(owner, None)
             _REASONING.pop(response_id, None)
         _LOCAL.response_id = None
 
@@ -658,6 +784,14 @@ def record_event(kind, **fields):
         return None
     with _LOCK:
         return deepcopy(_event(response, kind, **fields))
+
+
+def _redact_reasoning_text(text):
+    """Scrub credential shapes from model reasoning without mangling prose."""
+    try:
+        return redaction.redact_text(text)
+    except Exception:
+        return redaction.REDACTION_FAILED
 
 
 def record_reasoning(text, *, model=""):
@@ -672,9 +806,10 @@ def record_reasoning(text, *, model=""):
     response_id = getattr(_LOCAL, "response_id", None)
     if not response_id:
         return
+    clean = _redact_reasoning_text(text.strip())
     with _LOCK:
         segments = _REASONING.setdefault(response_id, [])
-        segments.append({"model": _short(model, 80), "text": text.strip()})
+        segments.append({"model": _short(model, 80), "text": clean})
 
 
 def _collect_reasoning(response_id):
@@ -689,6 +824,7 @@ def _collect_reasoning(response_id):
             "[%d/%d] %s" % (i, len(segments), seg["text"])
             for i, seg in enumerate(segments, 1)
         )
+    text = _redact_reasoning_text(text)
     truncated = len(text) > MAX_REASONING_CHARS
     if truncated:
         text = text[:MAX_REASONING_CHARS] + "\n... (reasoning truncated)"
@@ -732,6 +868,9 @@ def reasoning_for_owner(owner=""):
                 return deepcopy(record)
         if _LATEST_REASONING is not None and _LATEST_REASONING_OWNER == wanted:
             return deepcopy(_LATEST_REASONING)
+        owned = _OWNER_LATEST_REASONING.get(wanted)
+        if owned is not None:
+            return deepcopy(owned)
     return None
 
 
@@ -1781,6 +1920,7 @@ def reset_for_tests():
         _REASONING_OWNERS.clear()
         _FEED_OWNERS.clear()
         _OWNER_RECENT.clear()
+        _OWNER_LATEST_REASONING.clear()
         _LATEST_REASONING = None
         _LATEST_REASONING_OWNER = ""
     _LOCAL.response_id = None

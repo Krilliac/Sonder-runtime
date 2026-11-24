@@ -177,6 +177,7 @@ class _Visitor(ast.NodeVisitor):
 
 def production_files(root: Path) -> list[Path]:
     files = list(root.glob("*.py"))
+    files.extend((root / "runtime").rglob("*.py"))
     files.extend((root / "sonder_runtime").rglob("*.py"))
     files.extend((root / "scripts").rglob("*.py"))
     return sorted({

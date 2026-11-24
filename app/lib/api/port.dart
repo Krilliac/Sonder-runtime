@@ -23,7 +23,7 @@ abstract interface class SonderApiPort {
   Future<List<String>> listModels();
   Future<ModelCatalog> modelCatalog();
   Future<EcosystemReading> ecosystemStatus();
-  Future<SystemInfo> systemInfo();
+  Future<SystemInfo> systemInfo({String? sessionId, String? project});
   Future<ServerCapabilities?> fetchCapabilities();
   Future<WhoamiInfo?> fetchWhoami();
   Future<CommandCatalog> fetchCommands();
@@ -57,6 +57,8 @@ abstract interface class SonderApiPort {
     String project,
     bool allowApproximateLocation,
     Object? sessionTemperature,
+    Object? sessionReasoningEffort,
+    String? persona,
     String? history,
     bool clientExec,
     CancelToken? cancel,
@@ -70,6 +72,8 @@ abstract interface class SonderApiPort {
     String project,
     bool allowApproximateLocation,
     Object? sessionTemperature,
+    Object? sessionReasoningEffort,
+    String? persona,
     String? history,
     bool clientExec,
     CancelToken? cancel,

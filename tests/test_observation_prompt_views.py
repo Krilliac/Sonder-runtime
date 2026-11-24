@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _observation_view():
     """Execute the actual host helper without composing services or a live model."""
-    tree = ast.parse((ROOT / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((ROOT / "runtime" / "server.py").read_text(encoding="utf-8"))
     names = {"_AGENT_MODEL_OBSERVATION_CHARS", "_AGENT_SECTIONED_OBSERVATION_PREFIXES"}
     nodes = [node for node in tree.body if (
         isinstance(node, ast.FunctionDef) and node.name == "_agent_model_observation_view"

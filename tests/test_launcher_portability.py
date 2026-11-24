@@ -41,10 +41,10 @@ def test_windows_helpers_accept_explicit_python_before_repo_venv():
 
 def test_shipped_product_sources_contain_no_machine_specific_drive_root():
     product_files = (
-        "code_runner.py",
-        "verifiers.py",
-        "server.py",
-        "master_orchestrator.py",
+        "runtime/code_runner.py",
+        "runtime/verifiers.py",
+        "runtime/server.py",
+        "runtime/master_orchestrator.py",
         "examples/codegen-arena-shooter/build_with_sonder.py",
         "scripts/run-tests.cmd",
     )

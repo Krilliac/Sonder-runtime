@@ -84,13 +84,19 @@ def test_document_matches_contract_section_9_key_for_key():
         "ollama": {"provider": "ollama", "state": "unavailable", "healthy": False},
     })
     document = _build(bindings, gateway)
-    assert set(document) == {"schema", "generated_at", "runtime", "providers", "observatory"}
+    assert set(document) == {
+        "schema", "generated_at", "runtime", "providers", "observatory",
+        "image_generation", "model_tool_policy",
+    }
     assert document["schema"] == ECOSYSTEM_SCHEMA
     assert set(document["runtime"]) == {"version", "instance_id", "node_id", "base_url"}
     providers = document["providers"]
     assert set(providers) == {"default_generation_provider", "tier_providers",
                               "embedding_provider", "fallbacks", "status"}
-    assert set(providers["tier_providers"]) == {"fast", "general", "code", "reasoning", "vision"}
+    assert set(providers["tier_providers"]) == {
+        "fast", "general", "code", "reasoning", "vision",
+        "security", "creative", "draft",
+    }
     assert providers["fallbacks"] == {}
     assert set(providers["status"]) == {"sonder_inference", "ollama"}
     assert set(providers["status"]["sonder_inference"]) == STATUS_KEYS

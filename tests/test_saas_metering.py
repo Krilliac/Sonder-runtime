@@ -189,7 +189,7 @@ def _calls_named(path, name):
 
 
 def test_account_and_saas_modules_have_no_debug_prints():
-    for relative in ("admin_auth.py", "sonder_runtime/application/config/saas_config.py"):
+    for relative in ("runtime/admin_auth.py", "sonder_runtime/application/config/saas_config.py"):
         assert _calls_named(ROOT / relative, "print") == [], relative
 
 

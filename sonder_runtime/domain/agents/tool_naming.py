@@ -20,6 +20,7 @@ AGENT_TOOL_ALIASES = {
     "agent_retry": "master_retry",
     "master": "master_orchestrate",
     "tool_search": "tool_help",
+    "post_status": "report_progress",
 }
 
 

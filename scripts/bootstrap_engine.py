@@ -1,0 +1,472 @@
+"""One-click local engine bootstrap for bundled Sonder Runtime installs.
+
+The lightweight path uses host Python/Ollama and may download missing pieces.
+A sealed platform engine bundle supplies Python, Ollama, and model weights for a
+strictly offline setup. Both paths create the stable ``sonder:latest`` alias.
+"""
+from __future__ import annotations
+
+import sys as _sonder_sys
+from pathlib import Path as _SonderPath
+_SONDER_REPO_ROOT = _SonderPath(__file__).resolve().parents[1]
+for _sonder_p in (str(_SONDER_REPO_ROOT / "scripts"), str(_SONDER_REPO_ROOT / "runtime"), str(_SONDER_REPO_ROOT)):
+    if _sonder_p not in _sonder_sys.path:
+        _sonder_sys.path.insert(0, _sonder_p)
+import argparse
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import engine_bundle
+import adaptive_training
+from sonder_runtime.adapters.inference import ollama_endpoint
+from sonder_runtime.domain import model_sizing
+from sonder_runtime.platform import system_profile
+
+from sonder_runtime.adapters.model_list_consumers import values as _list_values
+
+
+def _list_value(name):
+    value = _list_values()
+    for key in _LIST_KEYS[name].split("."):
+        value = value[key]
+    return value
+
+
+def __getattr__(name):
+    if name not in _LIST_KEYS:
+        raise AttributeError(name)
+    return _list_value(name)
+
+
+_LIST_KEYS = {'MODEL_SMALL': 'bootstrap_models.small', 'MODEL_MEDIUM': 'bootstrap_models.medium', 'MODEL_LARGE': 'bootstrap_models.large'}
+
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_REQUIREMENTS_NAME = "requirements-runtime.txt"
+MCPSERVER_IMPORT_PROBE = (
+    "from mcp.server.mcpserver import MCPServer; "
+    "from mcp.server.mcpserver.tools import ToolManager; "
+    "print(MCPServer.__name__, ToolManager.__name__)"
+)
+
+
+def _planner_size_for(requested: str) -> tuple[str, float | None]:
+    """Map a requested model tag to ``(planner size token, total params)``.
+
+    Uses the domain tag parser, which reads only the tag after ``:`` and
+    understands MoE ``<total>b-a<active>b`` tags, so ``27b`` is never planned
+    as ``7b`` and an MoE's active count is never mistaken for its size.  An
+    alias without a size (``sonder:latest``) plans as ``auto``.
+    """
+    # Keep tagless model-name compatibility without reading repository tokens
+    # when the caller supplied an explicit final tag.
+    parse_target = requested if ":" in requested else ":" + requested
+    params = model_sizing.params_from_model_tag(parse_target)
+    if params is None:
+        return "auto", None
+    total = params[0]
+    return "%gb" % total, total
+
+
+def _run(cmd, check=False, env=None, cwd=None, **kwargs):
+    print("+ " + " ".join(str(item) for item in cmd))
+    return subprocess.run(cmd, check=check, env=env, cwd=cwd, **kwargs)
+
+
+def total_ram_gb():
+    override = os.environ.get("SONDER_RAM_GB", "").strip()
+    if override:
+        try:
+            return float(override)
+        except ValueError:
+            pass
+    if os.name == "nt":
+        try:
+            out = subprocess.check_output(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
+                ],
+                text=True,
+                timeout=10,
+            ).strip()
+            return int(out) / (1024**3)
+        except Exception:
+            return 0.0
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as stream:
+            for line in stream:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / (1024**2)
+    except OSError:
+        pass
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.check_output(
+                ["sysctl", "-n", "hw.memsize"],
+                text=True,
+                timeout=10,
+            ).strip()
+            return int(out) / (1024**3)
+        except Exception:
+            return 0.0
+    return 0.0
+
+
+def choose_model(ram_gb=None):
+    forced = os.environ.get("SONDER_BASE_MODEL", "").strip()
+    if forced:
+        return forced
+    ram = total_ram_gb() if ram_gb is None else float(ram_gb)
+    if ram >= 8:
+        return _list_value('MODEL_LARGE')
+    if ram >= 4:
+        return _list_value('MODEL_MEDIUM')
+    return _list_value('MODEL_SMALL')
+
+
+def _ollama_executable(explicit: str = "") -> str:
+    candidate = explicit.strip() or os.environ.get("SONDER_OLLAMA_EXE", "").strip()
+    if candidate:
+        return candidate
+    return shutil.which("ollama") or ""
+
+
+def ensure_ollama_running(
+    ollama: str = "",
+    *,
+    env: dict[str, str] | None = None,
+) -> tuple[bool, str]:
+    executable = _ollama_executable(ollama)
+    if not executable:
+        return False, "Ollama is not installed, on PATH, or present in an engine bundle."
+    process_env = dict(os.environ if env is None else env)
+    try:
+        client_env = ollama_endpoint.client_environment(process_env)
+    except ValueError as exc:
+        return False, "Ollama endpoint blocked: %s" % exc
+    try:
+        probe = subprocess.run(
+            [executable, "list"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=client_env,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"Could not execute Ollama: {exc}"
+    if probe.returncode == 0:
+        return True, "Ollama is already running."
+    if not ollama_endpoint.is_loopback(client_env["OLLAMA_HOST"]):
+        return False, (
+            "Remote Ollama is unavailable; refusing to start a local daemon "
+            "for a remote endpoint."
+        )
+    print("Starting Ollama...")
+    popen_kwargs = {"env": process_env}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_kwargs.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.Popen([executable, "serve"], **popen_kwargs)
+    except OSError as exc:
+        return False, f"Could not start Ollama: {exc}"
+    for _ in range(30):
+        time.sleep(0.5)
+        try:
+            probe = subprocess.run(
+                [executable, "list"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=client_env,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if probe.returncode == 0:
+            return True, "Ollama started."
+    return False, "Ollama did not become reachable after startup."
+
+
+def ensure_python_deps(
+    python_executable: str | os.PathLike[str] | None = None,
+    *,
+    offline: bool = False,
+    env: dict[str, str] | None = None,
+    contract_mismatch: bool = False,
+) -> tuple[bool, str]:
+    """Make the runtime satisfy the dependency contract, or say why it cannot.
+
+    ``contract_mismatch`` reports that a sealed bundle was built against a
+    different contract than this checkout declares. That must force an install
+    rather than be reported and ignored: the import probe below only proves the
+    two MCP symbols resolve, so a bundle whose only drift is, say, a changed
+    ``cryptography`` pin passes it and the runtime then carries on with a
+    dependency set the checkout explicitly says it does not support.
+    """
+    executable = str(python_executable or sys.executable)
+    process_env = env or os.environ.copy()
+
+    def probe_mcpserver():
+        return subprocess.run(
+            [executable, "-c", MCPSERVER_IMPORT_PROBE],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=process_env,
+        )
+
+    try:
+        probe = probe_mcpserver()
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"Could not execute bundled Python: {exc}"
+    if probe.returncode == 0 and not contract_mismatch:
+        return True, "Python MCP MCPServer compatibility API is already available."
+    if offline:
+        if contract_mismatch:
+            return False, (
+                "The sealed runtime was built against a different %s than this "
+                "checkout declares, and --offline forbids pip. Re-run without "
+                "--offline to repair it, or rebuild the engine bundle."
+                % RUNTIME_REQUIREMENTS_NAME
+            )
+        return False, (
+            "Python MCP MCPServer compatibility API is unavailable and "
+            "--offline forbids pip. Re-run without --offline to repair the "
+            "runtime from %s, or rebuild the engine bundle."
+            % RUNTIME_REQUIREMENTS_NAME
+        )
+    requirements = ROOT / RUNTIME_REQUIREMENTS_NAME
+    if not requirements.is_file():
+        return False, f"Runtime requirements contract is missing: {requirements}"
+    print(f"Installing Python runtime dependencies from {requirements.name}")
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "-m",
+                "pip",
+                "install",
+                "--only-binary=:all:",
+                "-r",
+                str(requirements),
+            ],
+            env=process_env,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"Could not launch pip: {exc}"
+    if result.returncode != 0:
+        return False, f"Could not install {requirements.name} with pip."
+    try:
+        probe = probe_mcpserver()
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"Could not verify the installed Python runtime: {exc}"
+    if probe.returncode != 0:
+        return False, (
+            "Installed runtime requirements, but the MCP MCPServer compatibility "
+            "API is still unavailable."
+        )
+    return True, f"Installed Python runtime dependencies from {requirements.name}."
+
+
+def _load_bundle(args) -> engine_bundle.EngineBundle | None:
+    if args.bundle:
+        return engine_bundle.load_engine_bundle(args.bundle, verify_hashes=True)
+    return engine_bundle.discover_engine_bundle(ROOT, verify_hashes=True)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate and print choices without installing models or starting runtimes",
+    )
+    parser.add_argument("--model", default="", help="override the base model")
+    parser.add_argument(
+        "--allow-cpu-offload",
+        action="store_true",
+        default=os.environ.get("SONDER_ALLOW_CPU_OFFLOAD") == "1",
+    )
+    parser.add_argument(
+        "--max-vram", type=float,
+        default=adaptive_training._env_optional("SONDER_MAX_VRAM_GB"),
+    )
+    parser.add_argument(
+        "--max-system-ram", type=float,
+        default=adaptive_training._env_optional("SONDER_MAX_SYSTEM_RAM_GB"),
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="never use pip or an Ollama model registry",
+    )
+    parser.add_argument(
+        "--bundle",
+        default="",
+        help=f"explicit directory containing {engine_bundle.MANIFEST_NAME}",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        bundle = _load_bundle(args)
+    except ValueError as exc:
+        print(f"  bundle: INVALID - {exc}", file=sys.stderr)
+        return 4
+
+    hardware = system_profile.detect_hardware()
+    offline = args.offline or bundle is not None
+    # Models come from the bundle, so model work stays offline. Dependency
+    # repair is a different question. A source update can carry the checkout
+    # past the runtime pin while the sealed runtime still holds the old
+    # dependency set; the compatibility probe then fails and pip is the only
+    # thing that can fix it. Treating "a bundle is present" as "never use pip"
+    # turned that into a dead end -- the engine failed at startup and this
+    # bootstrap exited 3 with no remedy but rebuilding the payload. Only an
+    # explicit --offline still forbids pip; the probe short-circuits before pip
+    # is reached whenever the sealed runtime is actually fine, so a healthy
+    # bundle never touches the network.
+    dependency_offline = args.offline
+    requested = args.model.strip() or os.environ.get("SONDER_BASE_MODEL", "").strip()
+    if requested.lower() == "auto":
+        requested = ""
+    requested_size, requested_params = _planner_size_for(requested)
+    plan = adaptive_training.build_plan(
+        hardware,
+        adaptive_training.PlanOptions(
+            model=requested_size,
+            requested_model=requested,
+            parameter_billions=requested_params,
+            allow_cpu_offload=args.allow_cpu_offload,
+            max_vram_gb=args.max_vram,
+            max_system_ram_gb=args.max_system_ram,
+            context_length=adaptive_training.parse_length(
+                os.environ.get("SONDER_CONTEXT_SIZE"), 8192
+            ),
+        ),
+    )
+    try:
+        model = (
+            engine_bundle.select_base_model(
+                bundle,
+                plan.usable_system_ram_gb,
+                requested,
+                preferred=plan.inference.model,
+            )
+            if bundle is not None
+            else requested or plan.inference.model
+        )
+    except ValueError as exc:
+        print(f"  model: INVALID - {exc}", file=sys.stderr)
+        return 4
+
+    print("Sonder Runtime engine bootstrap")
+    print("  system: %s %s" % (platform.system(), platform.machine()))
+    print("  detected RAM: %.1f GB total / %.1f GB available" % (
+        hardware.system_ram_total_gb, hardware.system_ram_available_gb,
+    ))
+    print("  detected GPU: %s %s; %.1f/%.1f GB VRAM free/total" % (
+        hardware.gpu_vendor, hardware.gpu_name or "(none)",
+        hardware.vram_free_gb, hardware.vram_total_gb,
+    ))
+    print("  selected model: %s" % model)
+    print("  inference reason: %s" % plan.inference.reason)
+    print("  training recommendation: %s" % (
+        "%s %s" % (plan.training.method, plan.training.model_size)
+        if plan.training.enabled else "disabled"
+    ))
+    print("  network policy: %s" % ("offline" if offline else "online fallback allowed"))
+    if bundle is not None:
+        print("  bundle: %s (%s)" % (bundle.root, bundle.identity))
+        print("  bundle integrity: verified")
+    else:
+        print("  bundle: none; using host runtimes")
+
+    if args.dry_run:
+        print()
+        print(adaptive_training.format_plan(plan))
+        return 0
+
+    process_env = os.environ.copy()
+    python_executable = Path(sys.executable)
+    ollama = _ollama_executable()
+    if bundle is not None:
+        try:
+            model_store, copied, reused = engine_bundle.install_model_store(bundle)
+        except (OSError, ValueError) as exc:
+            print(f"  models: Could not install sealed model store: {exc}", file=sys.stderr)
+            return 4
+        process_env.update(engine_bundle.runtime_environment(bundle, model_store))
+        python_executable = bundle.python_executable
+        ollama = str(bundle.ollama_executable)
+        print(
+            "  models: installed %d sealed file(s), reused %d in %s"
+            % (copied, reused, model_store)
+        )
+
+    try:
+        ollama_endpoint.client_environment(process_env)
+    except ValueError as exc:
+        print("  ollama endpoint: BLOCKED - %s" % exc, file=sys.stderr)
+        return 4
+
+    contract_mismatch = False
+    if bundle is not None:
+        current_contract = engine_bundle.runtime_contract_fingerprint(
+            ROOT / RUNTIME_REQUIREMENTS_NAME
+        )
+        contract_mismatch = bundle.runtime_contract != current_contract
+        if contract_mismatch:
+            print(
+                "  bundle: sealed for a different runtime contract than this "
+                "checkout declares; reinstalling dependencies from %s"
+                % RUNTIME_REQUIREMENTS_NAME
+            )
+
+    ok, msg = ensure_python_deps(
+        python_executable,
+        offline=dependency_offline,
+        contract_mismatch=contract_mismatch,
+        env=process_env,
+    )
+    print("  python: %s" % msg)
+    if not ok:
+        return 3
+
+    ok, msg = ensure_ollama_running(ollama, env=process_env)
+    print("  ollama: %s" % msg)
+    if not ok:
+        return 2
+
+    process_env["SONDER_BASE_MODEL"] = model
+    process_env.setdefault("SONDER_NUM_THREAD", str(os.cpu_count() or 4))
+    process_env.setdefault("SONDER_NUM_GPU", "999")
+    process_env.setdefault("SONDER_NUM_BATCH", "512")
+    process_env.setdefault("OLLAMA_FLASH_ATTENTION", "1")
+    command = [
+        str(python_executable),
+        str(ROOT / "scripts" / "setup_alias.py"),
+        "--model",
+        model,
+        "--embed-model",
+        process_env.get("SONDER_EMBED_MODEL", _list_values()["default_embedding_model"]),
+        "--ollama",
+        ollama,
+    ]
+    if offline:
+        command.append("--offline")
+    setup_env = ollama_endpoint.client_environment(process_env)
+    result = _run(command, env=setup_env, cwd=str(ROOT))
+    return result.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

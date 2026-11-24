@@ -8,5 +8,5 @@ if not defined SONDER_PYTHON (
 )
 if not defined SONDER_LAUNCHER_HOST set "SONDER_LAUNCHER_HOST=127.0.0.1"
 if not defined SONDER_LAUNCHER_PORT set "SONDER_LAUNCHER_PORT=11436"
-"%SONDER_PYTHON%" "%REPO%sonder_launcher.py" %*
+"%SONDER_PYTHON%" "%REPO%runtime\sonder_launcher.py" %*
 exit /b %ERRORLEVEL%

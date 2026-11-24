@@ -27,6 +27,8 @@ def _companion_server(
     workspace: Path,
     *,
     mode: str = "manual",
+    max_mode: str | None = None,
+    allow_bypass: bool = False,
     token: str = "secret-token-1234",
     allowed_origins: tuple[str, ...] = ("https://app.example.com",),
 ):
@@ -35,6 +37,8 @@ def _companion_server(
         port=0,
         workspace_root=workspace,
         mode=mode,
+        max_mode=max_mode,
+        allow_bypass=allow_bypass,
         token=token,
         allowed_origins=allowed_origins,
     )
@@ -173,7 +177,23 @@ def test_mode_enforcement_and_bypass_confirmation(tmp_path: Path):
         assert res["ok"] is True
         assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "hi"
 
-        # Switching to bypass requires confirm_bypass: true
+        # Default companion (allow_bypass=False) rejects remote escalation to bypass with 403
+        st, _, err = _req(
+            port,
+            "POST",
+            "/v1/client-agent/mode",
+            body={"mode": "bypass", "confirm_bypass": True},
+            headers=auth,
+        )
+        assert st == 403
+        assert err["error"]["code"] == "MODE_FORBIDDEN"
+        assert srv.policy.mode == "manual"
+
+    # When started with allow_bypass=True (--confirm-bypass), switching to bypass
+    # still requires confirm_bypass: true in the POST body.
+    with _companion_server(tmp_path, mode="manual", allow_bypass=True) as (port, srv):
+        auth = {"X-Sonder-Client-Agent-Token": "secret-token-1234"}
+
         st, _, err = _req(
             port,
             "POST",
@@ -194,6 +214,7 @@ def test_mode_enforcement_and_bypass_confirmation(tmp_path: Path):
         )
         assert st == 200
         assert ok_mode["mode"] == "bypass"
+        assert ok_mode["can_bypass"] is True
 
 
 def test_workspace_root_containment_vs_bypass(tmp_path: Path):

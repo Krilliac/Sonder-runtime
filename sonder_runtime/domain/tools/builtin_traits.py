@@ -19,7 +19,13 @@ READ_ONLY_TOOLS = frozenset({
     "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "project_detect",
     "data_inspect", "data_query", "archive_list", "artifact_risk_inspect", "verify_artifact",
-    "text_search", "script_search", "program_search", "image_inspect", "command_registry_list",
+    "text_search", "script_search", "program_search", "image_inspect", "document_extract",
+    "media_inspect", "code_metrics", "schema_validate", "language_matrix",
+    "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic",
+    "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check",
+    "plan_fallback", "runtime_resilience_check",
+    "prompt_shield", "error_diagnose", "code_audit", "data_transform", "learn_tool",
+    "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan", "diagnostics",
     "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "evaluation_history_status", "memory_quality_report", "memory_privacy_review",
@@ -49,12 +55,16 @@ _ALIASES = {
 # deliberately absent, even when their existing read-only contract is retained.
 _PARALLEL_READS = frozenset({
     "directory_tree", "file_find", "file_read", "file_read_range", "file_digest",
-    "text_search", "image_inspect", "output_digest",
+    "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics",
+    "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab",
+    "code_graph", "diff_semantic", "symbol_verify", "citation_audit",
+    "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check",
+    "prompt_shield", "error_diagnose", "code_audit", "data_transform", "output_digest",
 })
 _LOCAL_READS = _PARALLEL_READS | frozenset({
     "workspace_inventory", "environment_status", "toolchain_status", "tool_inventory",
     "hardware_profile", "file_policy", "repo_status", "repo_diff", "artifact_risk_inspect",
-    "process_list", "process_memory_risk_inspect", "cloud_models_status",
+    "process_list", "process_memory_risk_inspect", "cloud_models_status", "learn_tool",
 })
 _NETWORK = frozenset({"web_search", "web_fetch", "weather_lookup", "approximate_location_lookup"})
 _DESTRUCTIVE = frozenset({

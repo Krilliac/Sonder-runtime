@@ -657,7 +657,7 @@ def test_provider_status_keys_and_types_when_ready():
         "fallback": None,
         "fallback_count": 0,
         "tier_models": {tier: DEFAULT_MODEL for tier in
-                        ("fast", "general", "code", "reasoning", "vision")},
+                        ("fast", "general", "code", "reasoning", "vision", "security", "creative", "draft")},
         "busy": False,
         "workers": None,
         # Additive: an Inference without /v1/models reports every tier unknown.
@@ -665,7 +665,7 @@ def test_provider_status_keys_and_types_when_ready():
             "state": "absent", "detail": "no /v1/models (HTTP 404)",
             "tiers": {tier: {"model": DEFAULT_MODEL, "profile": None, "context_length": None,
                              "capabilities": None, "source": "unknown"}
-                      for tier in ("fast", "general", "code", "reasoning", "vision")},
+                      for tier in ("fast", "general", "code", "reasoning", "vision", "security", "creative", "draft")},
         },
     }
 
@@ -704,6 +704,7 @@ def test_served_tier_models_resolve_each_tier_without_io():
     assert gateway.served_tier_models() == {"sonder_inference": {
         "fast": "qwen3:14b", "general": "qwen3:14b", "code": "qwen3:14b",
         "reasoning": "deepseek-r1:14b", "vision": "qwen3:14b",
+        "security": "qwen3:14b", "creative": "qwen3:14b", "draft": "qwen3:14b",
     }}
     assert fake.gets == [] and fake.posts == []
 

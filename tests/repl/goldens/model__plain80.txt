@@ -9,6 +9,9 @@ tiers
                                (prompts then leave this machine)
     reasoning                  no model set | SONDER_REASONING
     vision                     no model set | SONDER_VISION
+    security                   no model set | SONDER_SECURITY
+    creative                   no model set | SONDER_CREATIVE
+    draft                      no model set | SONDER_DRAFT
 installed (ollama)
   nomic-embed-text:latest  0.3 GB    sonder:latest            0.8 GB
   qwen2.5:0.5b             0.4 GB

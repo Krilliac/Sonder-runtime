@@ -28,6 +28,7 @@ toy stand-in; the supporting modules resolve from this checkout via
 from __future__ import annotations
 
 import shutil
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -83,12 +84,12 @@ def scratch(monkeypatch, tmp_path):
     # Supporting modules (sonder_paths, sonder_logging, sonder_runtime) resolve
     # from this checkout; selfmod/selfmod_recover resolve from the scratch root,
     # which is what makes the probe test the *deployed* bytes.
-    monkeypatch.setenv("PYTHONPATH", str(REPO_ROOT))
+    monkeypatch.setenv("PYTHONPATH", str(REPO_ROOT / "runtime") + os.pathsep + str(REPO_ROOT))
 
     root = tmp_path / "repo"
     root.mkdir()
-    shutil.copy2(REPO_ROOT / "selfmod.py", root / "selfmod.py")
-    shutil.copy2(REPO_ROOT / "selfmod_recover.py", root / "selfmod_recover.py")
+    shutil.copy2(REPO_ROOT / "runtime" / "selfmod.py", root / "selfmod.py")
+    shutil.copy2(REPO_ROOT / "runtime" / "selfmod_recover.py", root / "selfmod_recover.py")
     (root / "server.py").write_text(SERVER_STUB, encoding="utf-8")
     _git(root, "init", "--initial-branch=main")
     _git(root, "config", "user.email", "selfmod@test.invalid")

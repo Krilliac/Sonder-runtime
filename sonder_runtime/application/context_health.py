@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
+from sonder_runtime.application.image_generation import strip_inline_data_images
+
 
 class ContextIdentityPort(Protocol):
     """Resolve user-facing session/project selectors at the host boundary."""
@@ -88,8 +90,12 @@ class ContextHealthService:
         memory = self._repository.snapshot(
             session_id, project_id, max(0, int(self._settings.max_turns)),
         )
-        summary_tokens = self._metrics.tokens(memory.summary)
-        live_chars = sum(len(task or "") + len(response or "") for task, response in memory.turns)
+        summary_tokens = self._metrics.tokens(strip_inline_data_images(memory.summary))
+        live_chars = sum(
+            len(strip_inline_data_images(task or ""))
+            + len(strip_inline_data_images(response or ""))
+            for task, response in memory.turns
+        )
         live_tokens = self._metrics.tokens_from_chars(live_chars)
         estimated_tokens = summary_tokens + live_tokens
 

@@ -55,7 +55,7 @@ def test_server_uses_packaged_fanout_store_directly():
 
 
 def test_root_fanout_store_contains_no_implementation_functions():
-    root = Path(__file__).resolve().parents[1] / "fanout_store.py"
+    root = Path(__file__).resolve().parents[1] / "runtime" / "fanout_store.py"
     tree = ast.parse(root.read_text(encoding="utf-8"))
     assert not [
         node for node in tree.body

@@ -1,0 +1,729 @@
+"""Headless Ollama + Sonder server supervisor.
+
+This starts/stops/checks the local Ollama daemon and the OpenAI-compatible
+Sonder Runtime API without requiring the Flutter app or a visible console.
+"""
+from __future__ import annotations
+
+import sys as _sonder_sys
+from pathlib import Path as _SonderPath
+_SONDER_REPO_ROOT = _SonderPath(__file__).resolve().parents[1]
+for _sonder_p in (str(_SONDER_REPO_ROOT / "scripts"), str(_SONDER_REPO_ROOT / "runtime"), str(_SONDER_REPO_ROOT)):
+    if _sonder_p not in _sonder_sys.path:
+        _sonder_sys.path.insert(0, _sonder_p)
+import argparse
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import engine_bundle
+from sonder_runtime.adapters.inference import ollama_endpoint
+from sonder_runtime.adapters.security import unsafe_lab
+from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
+from sonder_runtime.domain import launcher_health as sonder_health
+from sonder_runtime.platform import paths as sonder_paths
+from sonder_runtime.interfaces.cli.headless import HeadlessCliOperations, run as _run_headless_cli
+
+
+DEFAULT_HOST = os.environ.get("SONDER_HOST", "127.0.0.1")
+DEFAULT_PORT = int(os.environ.get("SONDER_PORT", "11435"))
+CONTROL_GATE_ENV = "SONDER_LAUNCHER_CONTROL_GATE"
+CONTROL_GATE_ALLOW = b"\x01"
+_MAX_OLLAMA_TAGS_BYTES = 4 * 1024 * 1024
+# Bounded wait for a SIGTERMed process to exit before ``stop`` reports; kept
+# below the launcher's 60 s stop-action budget.
+STOP_WAIT_SECONDS = 30.0
+
+
+def _child_environment() -> dict[str, str]:
+    """Return inherited state without the server-only health proof secret."""
+    env = os.environ.copy()
+    env.pop(sonder_health.TOKEN_ENV, None)
+    env.pop(sonder_health.ROLE_ENV, None)
+    env.pop(CONTROL_GATE_ENV, None)
+    return env
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def run_dir() -> Path:
+    path = Path(sonder_paths.default_home()) / "run"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def python_exe() -> str:
+    configured = os.environ.get("SONDER_PYTHON", "").strip()
+    if configured and _python_works(configured):
+        return configured
+    try:
+        bundle = engine_bundle.discover_engine_bundle(repo_root())
+    except ValueError:
+        bundle = None
+    if bundle is not None and _python_works(str(bundle.python_executable)):
+        return str(bundle.python_executable)
+    # Probe both venv layouts: Windows (Scripts/python.exe) and POSIX
+    # (bin/python). Only the Windows one used to be checked, so running this
+    # module directly on Linux/macOS without SONDER_PYTHON silently used
+    # whatever interpreter launched it instead of the repo venv. The native
+    # layout is tried first.
+    windows = repo_root() / "venv" / "Scripts" / "python.exe"
+    posix = repo_root() / "venv" / "bin" / "python"
+    candidates = (windows, posix) if os.name == "nt" else (posix, windows)
+    for venv in candidates:
+        if venv.exists() and _python_works(str(venv)):
+            return str(venv)
+    return sys.executable or "python"
+
+
+def _python_works(path: str) -> bool:
+    try:
+        proc = subprocess.run(
+            [path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=_child_environment(),
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def pid_file(name: str) -> Path:
+    return run_dir() / ("%s.pid" % name)
+
+
+def log_file(name: str) -> Path:
+    return run_dir() / ("%s.log" % name)
+
+
+def _creationflags() -> int:
+    if os.name == "nt":
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    return 0
+
+
+def _popen(cmd, name: str, env=None):
+    log = log_file(name).open("ab")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(repo_root()),
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        env=env if env is not None else _child_environment(),
+        creationflags=_creationflags(),
+        close_fds=(os.name != "nt"),
+    )
+    pid_file(name).write_text(str(proc.pid), encoding="ascii")
+    return proc.pid
+
+
+def _read_pid(name: str) -> int | None:
+    try:
+        return int(pid_file(name).read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def pid_alive(pid: int | None) -> bool:
+    return _process_pid_alive(pid)
+
+
+def port_open(host=DEFAULT_HOST, port=DEFAULT_PORT, timeout=0.5) -> bool:
+    connect_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    try:
+        with socket.create_connection((connect_host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _listener_pids(host=DEFAULT_HOST, port=DEFAULT_PORT) -> list[int]:
+    """Return Windows PIDs listening on ``port`` without extra packages."""
+    if os.name != "nt":
+        return []
+    try:
+        proc = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            env=_child_environment(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    found = []
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0].upper() != "TCP" or parts[3].upper() != "LISTENING":
+            continue
+        try:
+            local_port = int(parts[1].rsplit(":", 1)[1])
+            pid = int(parts[4])
+        except (IndexError, ValueError):
+            continue
+        if local_port == int(port) and pid not in found:
+            found.append(pid)
+    return found
+
+
+def _listener_pid(host=DEFAULT_HOST, port=DEFAULT_PORT) -> int | None:
+    listeners = _listener_pids(host, port)
+    return listeners[0] if listeners else None
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _proc_cmdline_bytes(pid: int) -> bytes:
+    """Raw NUL-separated ``/proc/<pid>/cmdline`` (POSIX); empty when unreadable."""
+    try:
+        return Path("/proc/%d/cmdline" % int(pid)).read_bytes()
+    except OSError:
+        return b""
+
+
+def _pid_argv(pid: int) -> list[str]:
+    """Exact argv of ``pid`` on POSIX, so paths containing spaces stay intact."""
+    raw = _proc_cmdline_bytes(pid)
+    return [
+        part.decode("utf-8", errors="replace")
+        for part in raw.split(b"\0")
+        if part
+    ]
+
+
+def _pid_command_line(pid: int) -> str:
+    if os.name == "nt":
+        command = (
+            "$p=Get-CimInstance Win32_Process -Filter 'ProcessId = %d'; "
+            "if($p){[Console]::Out.Write($p.CommandLine)}" % int(pid)
+        )
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                env=_child_environment(),
+            )
+            return proc.stdout.strip() if proc.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            return ""
+    try:
+        return Path("/proc/%d/cmdline" % int(pid)).read_bytes().replace(b"\0", b" ").decode(
+            "utf-8", errors="replace"
+        )
+    except OSError:
+        return ""
+
+
+def _is_sonder_server_pid(pid: int) -> bool:
+    command = _pid_command_line(pid).lower().replace("/", os.sep).replace("\\", os.sep)
+    return bool(command and re.search(r"(?:^|\s)-m\s+sonder_runtime\s+serve(?:\s|$)", command))
+
+
+def _is_sonder_server_for_port(pid: int, port: int) -> bool:
+    """Return whether a managed server PID belongs to ``port``.
+
+    ``sonder_serve.pid`` is deliberately a simple, backwards-compatible PID
+    file.  A user can nevertheless run another managed instance with a
+    different port, at which point a stale PID file must never make ``stop
+    --port`` terminate that other instance.  The supervisor always supplies
+    the port as the script's first argument.  Preserve legacy default-port
+    recognition for an older direct launch which omitted it.
+    """
+    command = _pid_command_line(pid)
+    normalized = command.lower().replace("/", os.sep).replace("\\", os.sep)
+    if not command or not re.search(
+        r"(?:^|\s)-m\s+sonder_runtime\s+serve(?:\s|$)", normalized
+    ):
+        return False
+    match = re.search(
+        r"(?:-m\s+sonder_runtime\s+serve)\s+(\d+)(?:\s|$)",
+        command,
+        re.IGNORECASE,
+    )
+    if match:
+        return int(match.group(1)) == int(port)
+    return int(port) == DEFAULT_PORT
+
+
+def _is_ollama_server_pid(pid: int) -> bool:
+    """Return whether ``pid`` is an ``ollama serve`` process like ``start_ollama``'s.
+
+    ``ollama.pid`` can outlive the daemon (crash, reboot) and the OS may later
+    reuse that PID for an unrelated program.  ``stop`` force-kills the whole
+    process tree, so it must prove the identity first, exactly as it already
+    does for ``sonder_serve``.
+    """
+    posix_argv = [] if _is_windows() else _pid_argv(pid)
+    command = "" if posix_argv else _pid_command_line(pid).strip().lower()
+    if not posix_argv and not command:
+        return False
+    names = {"ollama"}
+    configured = ollama_exe()
+    if configured:
+        base = re.split(r"[\\/]", configured.strip().strip('"'))[-1].lower()
+        if base.endswith(".exe"):
+            base = base[:-4]
+        if base:
+            names.add(base)
+    if posix_argv:
+        # POSIX: argv is exact, so a path with spaces needs no quoting heuristics.
+        base = re.split(r"[\/]", posix_argv[0])[-1].lower()
+        if base.endswith(".exe"):
+            base = base[:-4]
+        return base in names and len(posix_argv) > 1 and posix_argv[1] == "serve"
+    alternatives = "|".join(re.escape(name) for name in sorted(names))
+    # Anchor to the executable token so an unrelated process that merely
+    # mentions "ollama serve" in its arguments is not mistaken for the daemon.
+    return bool(re.match(
+        r'\s*(?:"(?:(?:[a-z]:|\\|/)[^"]*[\\/])?(?:%(n)s)(?:\.exe)?"'
+        r'|(?:[^\s"]*[\\/])?(?:%(n)s)(?:\.exe)?)'
+        r'\s+serve(?:\s|$)' % {"n": alternatives},
+        command,
+    ))
+
+
+def _managed_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> int | None:
+    """Resolve a service PID, repairing stale Windows venv-launcher pidfiles."""
+    recorded = _read_pid(name)
+    if recorded and pid_alive(recorded) and (
+        name != "sonder_serve" or _is_sonder_server_for_port(recorded, port)
+    ):
+        return recorded
+    if name != "sonder_serve" or not port_open(host, port):
+        return None
+    listener = _listener_pid(host, port)
+    if listener and pid_alive(listener) and _is_sonder_server_for_port(listener, port):
+        pid_file(name).write_text(str(listener), encoding="ascii")
+        return listener
+    return None
+
+
+def _managed_listener_pid(host=DEFAULT_HOST, port=DEFAULT_PORT) -> int | None:
+    """Return the managed Sonder PID only when it owns the listener.
+
+    A TCP connect only proves that *something* accepted the connection.  In
+    particular, a stale or unrelated local process can bind the port while a
+    newly launched ``sonder_serve`` child is still starting (or has failed
+    before bind).  Windows gives us the listening PID, so use that stronger
+    identity evidence for readiness and status instead of combining a live
+    child PID with an unrelated open port.
+
+    The non-Windows fallback retains the existing managed-PID behaviour: this
+    lightweight launcher deliberately has no platform-specific listener table
+    implementation outside Windows.
+    """
+    if not port_open(host, port):
+        return None
+    listener = _listener_pid(host, port)
+    if listener is not None:
+        # A PID reported as a current TCP listener is already live; do not
+        # perform a second process-table lookup that can race process exit.
+        if _is_sonder_server_pid(listener):
+            # Repair a stale launcher pidfile only after proving that this PID
+            # owns the endpoint we are about to call ready.
+            pid_file("sonder_serve").write_text(str(listener), encoding="ascii")
+            return listener
+        return None
+    if os.name == "nt":
+        # A listener exists but its owner could not be identified.  Do not
+        # convert that weaker evidence into a successful Sonder launch.
+        return None
+    return _managed_pid("sonder_serve", host, port)
+
+
+def ollama_exe() -> str:
+    configured = os.environ.get("SONDER_OLLAMA_EXE", "").strip()
+    if configured:
+        return configured
+    try:
+        bundle = engine_bundle.discover_engine_bundle(repo_root())
+    except ValueError:
+        bundle = None
+    if bundle is not None:
+        return str(bundle.ollama_executable)
+    return shutil.which("ollama") or ""
+
+
+def runtime_environment() -> dict[str, str]:
+    env = _child_environment()
+    try:
+        bundle = engine_bundle.discover_engine_bundle(repo_root())
+    except ValueError:
+        bundle = None
+    if bundle is not None:
+        model_store = engine_bundle.default_sonder_home() / "ollama-models"
+        env.update(engine_bundle.runtime_environment(bundle, model_store))
+    # The launcher proof secret belongs only to sonder_serve.py. Ollama,
+    # bootstrap, model inspection, and conversion children must never inherit it.
+    env.pop(sonder_health.TOKEN_ENV, None)
+    env.pop(sonder_health.ROLE_ENV, None)
+    return env
+
+
+def ollama_client_environment() -> dict[str, str]:
+    return ollama_endpoint.client_environment(runtime_environment())
+
+
+def ollama_models() -> set[str] | None:
+    """Return registered model names, or None when the gated endpoint is unavailable."""
+    try:
+        client_env = ollama_client_environment()
+        request = urllib.request.Request(
+            client_env["OLLAMA_HOST"] + "/api/tags", method="GET",
+        )
+        with ollama_endpoint.open_url(request, timeout=8) as response:
+            raw = response.read(_MAX_OLLAMA_TAGS_BYTES + 1)
+        if len(raw) > _MAX_OLLAMA_TAGS_BYTES:
+            return None
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, TimeoutError, ValueError, urllib.error.URLError):
+        return None
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        return None
+    names = set()
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        name = str(model.get("name") or model.get("model") or "").strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def ollama_ok() -> bool:
+    return ollama_models() is not None
+
+
+def wait_until(fn, seconds: float) -> bool:
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if fn():
+            return True
+        time.sleep(0.25)
+    return fn()
+
+
+def start_ollama() -> str:
+    if ollama_ok():
+        return "ollama: already reachable"
+    executable = ollama_exe()
+    if not executable:
+        return "ollama: not installed or not on PATH"
+    server_env = runtime_environment()
+    try:
+        client_env = ollama_endpoint.client_environment(server_env)
+    except ValueError as exc:
+        return "ollama: endpoint blocked - %s" % exc
+    if not ollama_endpoint.is_loopback(client_env["OLLAMA_HOST"]):
+        return "ollama: remote endpoint is unavailable; local daemon not started"
+    pid = _popen([executable, "serve"], "ollama", env=server_env)
+    if wait_until(ollama_ok, 12):
+        return "ollama: started pid=%s" % pid
+    return "ollama: start requested pid=%s, not reachable yet (see %s)" % (pid, log_file("ollama"))
+
+
+def ensure_sonder_alias() -> tuple[bool, str]:
+    models = ollama_models()
+    if models is None:
+        return False, "engine: Ollama is not reachable; alias setup skipped"
+    if any(name.casefold() == "sonder:latest" for name in models):
+        return True, "engine: sonder alias is ready"
+    executable = ollama_exe()
+    if not executable:
+        return False, (
+            "engine: Ollama is reachable but the sonder alias is missing; "
+            "install the Ollama CLI to create it"
+        )
+    try:
+        env = ollama_client_environment()
+    except ValueError as exc:
+        return False, "engine: Ollama endpoint blocked: %s" % exc
+    command = [python_exe(), str(repo_root() / "bootstrap_engine.py")]
+    try:
+        bundle = engine_bundle.discover_engine_bundle(repo_root())
+    except ValueError as exc:
+        return False, "engine: bundled runtime is invalid: %s" % exc
+    if bundle is not None:
+        command.append("--offline")
+    try:
+        setup = subprocess.run(
+            command,
+            cwd=str(repo_root()),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30 * 60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "engine: bootstrap could not run: %s" % exc
+    if setup.returncode == 0:
+        return True, "engine: bootstrap completed"
+    detail = (setup.stderr or setup.stdout).strip()
+    if len(detail) > 600:
+        detail = detail[-600:]
+    return False, "engine: bootstrap failed (%s)%s" % (
+        setup.returncode,
+        ": " + detail if detail else "",
+    )
+
+
+def _require_safe_unsafe_lab_start(host, overrides=None) -> bool:
+    """Validate the exact environment a managed API child will receive.
+
+    ``sonder_serve`` repeats this gate at bind time, but the headless command
+    used to start/probe Ollama and bootstrap its alias first.  An invalid lab
+    request must not get any sidecar work merely because rejection happens in
+    the later API child.  Explicit launcher arguments win over stale parent
+    variables, matching the child environment below.
+    """
+    effective = dict(os.environ)
+    effective.update(dict(overrides or {}))
+    effective["SONDER_HOST"] = str(host)
+    return unsafe_lab.require_startup(env=effective, host=host)
+
+
+def start_sonder(host=DEFAULT_HOST, port=DEFAULT_PORT, env=None) -> str:
+    _require_safe_unsafe_lab_start(host, env)
+    if port_open(host, port):
+        pid = _managed_pid("sonder_serve", host, port)
+        suffix = " pid=%s" % pid if pid else " (unmanaged listener)"
+        return "sonder: already listening on http://%s:%s%s" % (host, port, suffix)
+    cmd = [python_exe(), "-m", "sonder_runtime", "serve", str(port)]
+    merged_env = runtime_environment()
+    child_overrides = dict(env or {})
+    health_token = child_overrides.pop(
+        sonder_health.TOKEN_ENV,
+        os.environ.get(sonder_health.TOKEN_ENV, ""),
+    )
+    runtime_role = child_overrides.pop(
+        sonder_health.ROLE_ENV,
+        os.environ.get(sonder_health.ROLE_ENV, ""),
+    )
+    merged_env.update(child_overrides)
+    if health_token:
+        # Explicitly restore the proof secret only for the managed API child.
+        merged_env[sonder_health.TOKEN_ENV] = health_token
+    else:
+        merged_env.pop(sonder_health.TOKEN_ENV, None)
+    if runtime_role == sonder_health.MANAGED_ROLE:
+        merged_env[sonder_health.ROLE_ENV] = runtime_role
+    else:
+        merged_env.pop(sonder_health.ROLE_ENV, None)
+    # The explicit launcher arguments are what ``_require_safe_unsafe_lab_start``
+    # validated and what readiness probes below; an inherited parent
+    # SONDER_HOST/SONDER_PORT must never make the child bind elsewhere.
+    merged_env["SONDER_HOST"] = str(host)
+    merged_env["SONDER_PORT"] = str(port)
+    pid = _popen(cmd, "sonder_serve", env=merged_env)
+    # ``wait_until`` can expire at the same instant the child binds the port;
+    # perform one final direct probe before reporting a failed startup.  The
+    # caller prints ``status`` immediately afterward, and without this probe a
+    # healthy server can be labelled "did not start cleanly" one line before
+    # that status says it is listening.
+    if (wait_until(lambda: _managed_listener_pid(host, port) is not None, 12)
+            or _managed_listener_pid(host, port) is not None):
+        pid = _managed_listener_pid(host, port) or pid
+        pid_file("sonder_serve").write_text(str(pid), encoding="ascii")
+        return "sonder: started pid=%s at http://%s:%s" % (pid, host, port)
+    return "sonder: start requested pid=%s, not reachable yet (see %s)" % (
+        pid, log_file("sonder_serve"))
+
+
+def stop_pid(name: str, host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
+    recorded = _read_pid(name)
+    recorded_for_other_port = False
+    if name == "sonder_serve":
+        recorded_alive = bool(recorded and pid_alive(recorded))
+        # A live recorded PID that is not a Sonder server is a reused PID: the
+        # pidfile is stale and the stranger is never killed, but the real
+        # listener on this port must still be found and stopped.
+        recorded_is_stranger = recorded_alive and not _is_sonder_server_pid(recorded)
+        recorded_for_other_port = bool(
+            recorded_alive
+            and not recorded_is_stranger
+            and not _is_sonder_server_for_port(recorded, port)
+        )
+        candidates = ([] if recorded_for_other_port or recorded_is_stranger else [recorded]) + _listener_pids(host, port)
+        pids = [
+            pid for index, pid in enumerate(candidates)
+            if pid and pid not in candidates[:index] and pid_alive(pid)
+            and _is_sonder_server_for_port(pid, port)
+        ]
+    elif name == "ollama":
+        recorded_alive = bool(recorded and pid_alive(recorded))
+        if recorded_alive and not _is_ollama_server_pid(recorded):
+            # A reused PID: the pidfile is stale, but never kill the stranger.
+            try:
+                pid_file(name).unlink()
+            except OSError:
+                pass
+            return (
+                "%s: recorded pid %s is not an Ollama server; not stopped"
+                % (name, recorded)
+            )
+        pids = [recorded] if recorded_alive else []
+    else:
+        pids = [recorded] if recorded and pid_alive(recorded) else []
+    if not pids:
+        if recorded_for_other_port:
+            # The pidfile belongs to the live instance on another port; keep it
+            # so a later ``stop`` for that port can still find the server.
+            return (
+                "%s: recorded pid %s is not for port %s; not stopped"
+                % (name, recorded, port)
+            )
+        try:
+            pid_file(name).unlink()
+        except OSError:
+            pass
+        if name == "sonder_serve" and recorded_is_stranger:
+            return (
+                "%s: recorded pid %s is not a Sonder server; not stopped"
+                % (name, recorded)
+            )
+        if recorded:
+            return "%s: pid %s is not running" % (name, recorded)
+        return "%s: no pid file" % name
+    try:
+        for pid in pids:
+            if os.name == "nt":
+                proc = subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    env=_child_environment(),
+                )
+                if proc.returncode != 0:
+                    detail = (proc.stderr or proc.stdout or "taskkill failed").strip()
+                    raise OSError(detail)
+            else:
+                os.kill(pid, 15)
+        if os.name != "nt" and not wait_until(
+            lambda: not any(pid_alive(pid) for pid in pids), STOP_WAIT_SECONDS
+        ):
+            # SIGTERM only *requests* a graceful shutdown.  Reporting success
+            # while the old server still owns the port made ``restart`` see an
+            # "unmanaged listener" and exit with nothing running, and made the
+            # launcher report every stop as failed.  Never escalate here: a
+            # draining server may legitimately need the time.
+            raise OSError(
+                "still running %ss after SIGTERM" % int(STOP_WAIT_SECONDS)
+            )
+        try:
+            pid_file(name).unlink()
+        except OSError:
+            pass
+        return "%s: stopped pid=%s" % (name, ",".join(str(pid) for pid in pids))
+    except OSError as exc:
+        return "%s: stop failed for pid=%s: %s" % (
+            name, ",".join(str(pid) for pid in pids), exc,
+        )
+
+
+def _stop_succeeded(message: str) -> bool:
+    return ": stop failed for pid=" not in message
+
+
+def _start_succeeded(message: str) -> bool:
+    # A false zero makes direct launchers and the desktop UI report a live
+    # service even when no managed Sonder process owns the listening port.
+    return message.startswith("sonder: started pid=") or (
+        message.startswith("sonder: already listening")
+        and "(unmanaged listener)" not in message
+    )
+
+
+def status(host=DEFAULT_HOST, port=DEFAULT_PORT) -> str:
+    listener_open = port_open(host, port)
+    sonder_pid = _managed_listener_pid(host, port)
+    if sonder_pid:
+        api_status = "listening on http://%s:%s (pid %s)" % (
+            host, port, sonder_pid,
+        )
+    elif listener_open:
+        api_status = "unmanaged listener on http://%s:%s (not Sonder)" % (host, port)
+    else:
+        api_status = "not listening"
+    lines = [
+        "sonder headless status",
+        "  ollama: %s%s" % (
+            "reachable" if ollama_ok() else "not reachable",
+            " (pid %s)" % _read_pid("ollama") if _read_pid("ollama") else "",
+        ),
+        "  sonder api: %s" % api_status,
+        "  run dir: %s" % run_dir(),
+        "  logs: %s, %s" % (log_file("ollama"), log_file("sonder_serve")),
+    ]
+    return "\n".join(lines)
+
+
+def _launcher_control_gate() -> bool:
+    """Block launcher-owned commands until ownership is durably recorded."""
+    if os.environ.get(CONTROL_GATE_ENV) != "1":
+        return True
+    try:
+        supplied = sys.stdin.buffer.read(2)
+    except (AttributeError, OSError):
+        supplied = b""
+    if supplied == CONTROL_GATE_ALLOW:
+        return True
+    print("ERROR: launcher control gate was not released", file=sys.stderr)
+    return False
+
+
+def main(argv=None) -> int:
+    if not _launcher_control_gate():
+        return 2
+    def validate_start(host, env):
+        try:
+            # Validate before touching Ollama or the bootstrap subprocess.  The
+            # API child validates again at bind time, protecting the launcher
+            # sequence itself and including --allow-hosted in the effective env.
+            _require_safe_unsafe_lab_start(host, env)
+        except unsafe_lab.UnsafeLabError as exc:
+            return str(exc)
+        return None
+
+    operations = HeadlessCliOperations(
+        status=status,
+        stop_pid=stop_pid,
+        stop_succeeded=_stop_succeeded,
+        start_succeeded=_start_succeeded,
+        start_ollama=start_ollama,
+        ensure_sonder_alias=ensure_sonder_alias,
+        validate_start=validate_start,
+        start_sonder=lambda host, port, env: start_sonder(host, port, env=env),
+        managed_listener_pid=_managed_listener_pid,
+        wait_until=wait_until,
+    )
+    return _run_headless_cli(
+        argv,
+        operations,
+        default_host=DEFAULT_HOST,
+        default_port=DEFAULT_PORT,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
