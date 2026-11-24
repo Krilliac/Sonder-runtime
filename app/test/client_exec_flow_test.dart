@@ -225,6 +225,72 @@ void main() {
         'POST /v1/client-agent/execute',
       ]);
     });
+
+    test(
+        'H-08: web LocalManager parses and forwards companion approval_token and args_digest',
+        () async {
+      final postedBodies = <Map<String, dynamic>>[];
+      await http.runWithClient(() async {
+        final challenge = await web_mgr.LocalManager.executeClientTool(
+          callId: 'beef1234',
+          tool: 'file_write',
+          args: const {'path': 'a.txt', 'content': 'hi'},
+          risk: 'write',
+          mode: 'manual',
+          approved: true,
+          companionUrl: 'http://127.0.0.1:11439',
+          companionToken: 'tok-local',
+        );
+        expect(challenge.ok, isFalse);
+        expect(challenge.needsApproval, isTrue);
+        expect(challenge.approvalToken, 'chal-tok-1');
+        expect(challenge.argsDigest, 'a' * 64);
+
+        final confirmed = await web_mgr.LocalManager.executeClientTool(
+          callId: 'beef1234',
+          tool: 'file_write',
+          args: const {'path': 'a.txt', 'content': 'hi'},
+          risk: 'write',
+          mode: 'manual',
+          approved: true,
+          approvalToken: challenge.approvalToken,
+          argsDigest: challenge.argsDigest,
+          companionUrl: 'http://127.0.0.1:11439',
+          companionToken: 'tok-local',
+        );
+        expect(confirmed.ok, isTrue);
+        expect(confirmed.output, 'wrote a.txt');
+      }, () {
+        return MockClient((r) async {
+          final body = jsonDecode(r.body) as Map<String, dynamic>;
+          postedBodies.add(body);
+          if (body['approval_token'] == null) {
+            return http.Response(
+              jsonEncode({
+                'ok': false,
+                'needs_approval': true,
+                'approval_token': 'chal-tok-1',
+                'args_digest': 'a' * 64,
+                'error': 'approval required',
+              }),
+              200,
+              headers: {'content-type': 'application/json'},
+            );
+          }
+          expect(body['approval_token'], 'chal-tok-1');
+          expect(body['args_digest'], 'a' * 64);
+          return http.Response(
+            jsonEncode({'ok': true, 'output': 'wrote a.txt'}),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        });
+      });
+      expect(postedBodies, hasLength(2));
+      expect(postedBodies.first.containsKey('approval_token'), isFalse);
+      expect(postedBodies.last['approval_token'], 'chal-tok-1');
+      expect(postedBodies.last['args_digest'], 'a' * 64);
+    });
   });
 
   group('Native desktop client tool execution', () {
@@ -634,6 +700,61 @@ void main() {
       expect(approveOutcome.message, contains('disabled'));
       expect(backend.clientToolExecs, isEmpty);
 
+      c.dispose();
+    });
+
+    testWidgets(
+        'H-08: ChatController stores companion challenge token from auto-mode needsApproval and submits it on Approve',
+        (tester) async {
+      final backend = FakeChatBackend();
+      var callCount = 0;
+      backend.clientExecHandler = (callId, tool, args, risk, mode, approved) async {
+        callCount++;
+        if (callCount == 1) {
+          return ClientToolExecResult(
+            ok: false,
+            needsApproval: true,
+            approvalToken: 'chal-auto-1',
+            argsDigest: 'd' * 64,
+            error: 'companion in manual mode',
+          );
+        }
+        return const ClientToolExecResult(ok: true, output: 'executed once');
+      };
+
+      final c = await _startController(tester, backend);
+      c.clientExecEnabled = true;
+      c.clientPermissionMode = 'auto';
+
+      final sendFuture = c.send('write file');
+      await tester.pump();
+      backend.lastTurn.tool(ChatStreamToolEvent.fromJson({
+        'id': 'cafe0020deadbeef',
+        'call_id': 'cafe0020deadbeef',
+        'execution_target': 'client',
+        'tool': 'file_write',
+        'phase': 'awaiting_client_result',
+        'risk': 'write',
+        'session': 'sess-h08',
+        'args': {'path': 'a.txt', 'content': 'hi'},
+      }));
+      await tester.pumpAndSettle();
+
+      final paused = c.live.value!.toolCalls.single;
+      expect(paused.isAwaitingClientApproval, isTrue);
+      expect(paused.companionApprovalToken, 'chal-auto-1');
+      expect(paused.companionArgsDigest, 'd' * 64);
+      expect(backend.clientToolResults, isEmpty);
+
+      final outcome =
+          await c.approveClientTool('cafe0020deadbeef', 'file_write', '');
+      expect(outcome.status, ApprovalStatus.approved);
+      expect(backend.clientApprovalTokens.last, ('chal-auto-1', 'd' * 64));
+      expect(backend.clientToolResults, hasLength(1));
+      expect(backend.clientToolResults.single.$2, isTrue);
+
+      backend.lastTurn.done('ok');
+      await sendFuture;
       c.dispose();
     });
   });

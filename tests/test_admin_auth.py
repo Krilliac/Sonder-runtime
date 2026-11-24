@@ -307,3 +307,84 @@ def test_registration_and_login_bound_password_work():
         admin_auth.login(
             conn, "bounded-user", "p" * (admin_auth.MAX_PASSWORD_CHARS + 1),
         )
+
+
+def test_l03_new_passwords_use_scrypt_format_and_verify():
+    import hashlib
+
+    conn = memory_store.connect(":memory:")
+    try:
+        admin_auth.register(conn, "scrypt_user", "Correct-Horse-42!")
+        row = conn.execute(
+            "SELECT password_salt, password_hash FROM accounts WHERE username='scrypt_user'"
+        ).fetchone()
+        assert row is not None
+        stored_hash = row["password_hash"]
+        parts = stored_hash.split("$")
+        assert len(parts) == 6
+        assert parts[:4] == ["scrypt", "16384", "8", "1"]
+        salt_hex, hash_hex = parts[4], parts[5]
+        assert salt_hex == row["password_salt"]
+        expected = hashlib.scrypt(
+            b"Correct-Horse-42!",
+            salt=salt_hex.encode("utf-8"),
+            n=16384,
+            r=8,
+            p=1,
+            maxmem=64 * 1024 * 1024,
+            dklen=32,
+        ).hex()
+        assert hash_hex == expected
+
+        token, account = admin_auth.login(conn, "scrypt_user", "Correct-Horse-42!")
+        assert token and account["username"] == "scrypt_user"
+        assert admin_auth.reauthenticate(conn, token, "Correct-Horse-42!")["username"] == "scrypt_user"
+
+        with pytest.raises(ValueError, match="invalid username or password"):
+            admin_auth.login(conn, "scrypt_user", "Wrong-Password-99!")
+        with pytest.raises(PermissionError):
+            admin_auth.reauthenticate(conn, token, "Wrong-Password-99!")
+    finally:
+        conn.close()
+
+
+def test_l03_legacy_pbkdf2_hashes_remain_verifiable():
+    import hashlib
+
+    conn = memory_store.connect(":memory:")
+    try:
+        admin_auth.init(conn)
+        salt = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+        raw_digest = hashlib.pbkdf2_hmac(
+            "sha256", b"LegacyPass#123", salt.encode("utf-8"), 120_000,
+        ).hex()
+        # 1. Explicit pbkdf2_sha256$<iters>$<salt>$<hash> format
+        conn.execute(
+            "INSERT INTO accounts(username, password_salt, password_hash, role, created_ts) "
+            "VALUES(?, ?, ?, 'user', 1)",
+            ("legacy_prefixed", salt, f"pbkdf2_sha256$120000${salt}${raw_digest}"),
+        )
+        # 2. Explicit pbkdf2_sha256$<salt>$<hash> format (default iterations)
+        conn.execute(
+            "INSERT INTO accounts(username, password_salt, password_hash, role, created_ts) "
+            "VALUES(?, ?, ?, 'user', 1)",
+            ("legacy_short", salt, f"pbkdf2_sha256${salt}${raw_digest}"),
+        )
+        # 3. Unprefixed legacy PBKDF2-HMAC-SHA256 hex row
+        conn.execute(
+            "INSERT INTO accounts(username, password_salt, password_hash, role, created_ts) "
+            "VALUES(?, ?, ?, 'user', 1)",
+            ("legacy_raw", salt, raw_digest),
+        )
+        conn.commit()
+
+        for username in ("legacy_prefixed", "legacy_short", "legacy_raw"):
+            token, acc = admin_auth.login(conn, username, "LegacyPass#123")
+            assert token and acc["username"] == username
+            assert admin_auth.reauthenticate(conn, token, "LegacyPass#123")["username"] == username
+            with pytest.raises(ValueError, match="invalid username or password"):
+                admin_auth.login(conn, username, "WrongLegacy#999")
+            with pytest.raises(PermissionError):
+                admin_auth.reauthenticate(conn, token, "WrongLegacy#999")
+    finally:
+        conn.close()

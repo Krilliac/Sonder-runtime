@@ -33,7 +33,25 @@ def _posix(path: Path) -> str:
     return path.as_posix()
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash unavailable")
+def _find_bash() -> str | None:
+    resolved = shutil.which("bash")
+    if os.name == "nt":
+        if resolved and "system32" not in resolved.lower():
+            return resolved
+        for candidate in (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe",
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "usr" / "bin" / "bash.exe",
+        ):
+            if candidate.is_file():
+                return str(candidate)
+        return None
+    return resolved
+
+
+_BASH = _find_bash()
+
+
+@pytest.mark.skipif(_BASH is None, reason="bash unavailable")
 def test_installer_does_not_import_the_package_verifier(tmp_path):
     marker = tmp_path / "package-code-ran-as-root"
     package = tmp_path / "package"
@@ -66,7 +84,7 @@ def test_installer_does_not_import_the_package_verifier(tmp_path):
     proc = subprocess.run(
         # The resolved path, not "bash": CreateProcess searches System32 first
         # and would pick WSL's bash.exe, which cannot see these paths.
-        [shutil.which("bash"), _posix(script_file)], text=True, capture_output=True,
+        [_BASH, _posix(script_file)], text=True, capture_output=True,
         timeout=120, env=env, cwd=str(tmp_path), check=False,
     )
 
@@ -142,7 +160,7 @@ def test_exit_trap_removes_an_uncommitted_release():
     assert text.index("RELEASE_CREATED=1") < text.index("RELEASE_COMMITTED=1")
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash unavailable")
+@pytest.mark.skipif(_BASH is None, reason="bash unavailable")
 def test_cleanup_trap_behaviour(tmp_path):
     text = INSTALLER.read_text(encoding="utf-8")
     match = re.search(r"^cleanup_release\(\) \{.*?^\}$", text, re.DOTALL | re.MULTILINE)
@@ -162,9 +180,72 @@ def test_cleanup_trap_behaviour(tmp_path):
         ])
         f = tmp_path / "t.sh"
         f.write_bytes(script.encode("utf-8"))
-        subprocess.run([shutil.which("bash"), _posix(f)], capture_output=True, timeout=60, check=False)
+        subprocess.run([_BASH, _posix(f)], capture_output=True, timeout=60, check=False)
 
     run(0)
     assert not release.exists()
     run(1)
     assert release.exists()
+
+
+def _dependency_install_block() -> str:
+    text = INSTALLER.read_text(encoding="utf-8")
+    match = re.search(
+        r'^(LOCK_FILE=.*?^fi)$',
+        text, flags=re.DOTALL | re.MULTILINE,
+    )
+    assert match, "dependency install block not found"
+    return match.group(1)
+
+
+def test_h10_installer_never_runs_unpinned_pip_upgrade_and_supports_hash_lock():
+    text = INSTALLER.read_text(encoding="utf-8")
+    assert "--upgrade pip" not in text
+    assert 'LOCK_FILE="$RELEASE_DIR/requirements-runtime.lock"' in text
+    assert '--require-hashes -r "$LOCK_FILE"' in text
+    assert 'SONDER_REQUIRE_HASHES' in text
+
+
+@pytest.mark.skipif(_BASH is None, reason="bash unavailable")
+def test_h10_installer_hash_lock_selection_and_fail_closed_behaviour(tmp_path):
+    block = _dependency_install_block()
+    release = tmp_path / "rel"
+    (release / "venv" / "bin").mkdir(parents=True)
+    log_file = tmp_path / "pip_invocations.log"
+    fake_py = release / "venv" / "bin" / "python"
+    fake_py.write_text(
+        f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "{_posix(log_file)}"\n',
+        encoding="utf-8",
+    )
+    fake_py.chmod(0o755)
+    (release / "requirements-runtime.txt").write_text("mcp==2.2.0\n", encoding="utf-8")
+
+    def run_block(env_extra: dict[str, str]):
+        script = (
+            "set -euo pipefail\n"
+            f'RELEASE_DIR="{_posix(release)}"\n'
+            + block
+            + "\n"
+        )
+        script_file = tmp_path / "deps.sh"
+        script_file.write_bytes(script.encode("utf-8"))
+        env = dict(os.environ)
+        env.update(env_extra)
+        return subprocess.run(
+            [_BASH, _posix(script_file)],
+            text=True, capture_output=True, timeout=60, env=env, check=False,
+        )
+
+    # 1. SONDER_REQUIRE_HASHES=1 fails closed when lockfile is missing.
+    proc_missing = run_block({"SONDER_REQUIRE_HASHES": "1"})
+    assert proc_missing.returncode != 0
+    assert "requirements-runtime.lock" in proc_missing.stderr
+    assert not log_file.exists()
+
+    # 2. When requirements-runtime.lock exists, --require-hashes is used.
+    (release / "requirements-runtime.lock").write_text("mcp==2.2.0 --hash=sha256:00\n", encoding="utf-8")
+    proc_locked = run_block({"SONDER_REQUIRE_HASHES": "1"})
+    assert proc_locked.returncode == 0, proc_locked.stdout + proc_locked.stderr
+    recorded = log_file.read_text(encoding="utf-8")
+    assert "-m pip install --quiet --require-hashes -r" in recorded
+    assert "requirements-runtime.lock" in recorded

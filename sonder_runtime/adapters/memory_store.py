@@ -22,6 +22,17 @@ from sonder_runtime.adapters.persistence.sqlite.memory_replication import (
 from sonder_runtime.adapters.persistence.sqlite.authoritative_indexes import (
     AUTHORITATIVE_INDEX_DDL,
 )
+from sonder_runtime.platform.logging import Redactor
+
+
+def _redact_text_for_storage(value):
+    """Fail-closed secret redaction applied before persisting text to SQLite."""
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else str(value)
+    if not text:
+        return text
+    return Redactor().redact(text)
 
 
 _ABANDONED_SESSION_CLAIMS_LOCK = globals().get(
@@ -707,6 +718,9 @@ def log_interaction(conn, interaction_id, task, retrieved_ctx, response, tier,
                     project_explicit=True,
                     task_embedding_model=None, task_embedding_revision=None,
                     task_embedding_dim=None):
+    safe_task = _redact_text_for_storage(task)
+    safe_retrieved_ctx = _redact_text_for_storage(retrieved_ctx)
+    safe_response = _redact_text_for_storage(response)
     tokens_in = _clean_token_count(tokens_in)
     tokens_out = _clean_token_count(tokens_out)
     if token_source is None and (tokens_in is not None or tokens_out is not None):
@@ -733,7 +747,7 @@ def log_interaction(conn, interaction_id, task, retrieved_ctx, response, tier,
         "task_embedding_revision, task_embedding_dim) "
         "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            interaction_id, task, retrieved_ctx, response, tier, session_id,
+            interaction_id, safe_task, safe_retrieved_ctx, safe_response, tier, session_id,
             task_embedding, tokens_in, tokens_out, token_source,
             project, int(bool(project_explicit)), task_embedding_model,
             task_embedding_revision or None,
@@ -923,6 +937,7 @@ def replace_interaction_response_cas(
     """Replace a captured response only while its learning state is unchanged."""
     if not isinstance(expected, dict) or expected.get("id") != interaction_id:
         return False
+    safe_response = _redact_text_for_storage(response)
     try:
         cur = conn.execute(
             "UPDATE interactions SET response=?, tokens_in=?, tokens_out=?, "
@@ -943,7 +958,7 @@ def replace_interaction_response_cas(
             "AND lesson_usage.outcome_signal IS NOT NULL"
             ")",
             (
-                response, tokens_in, tokens_out, token_source, interaction_id,
+                safe_response, tokens_in, tokens_out, token_source, interaction_id,
                 expected["response"], expected["tokens_in"],
                 expected["tokens_out"], expected["token_source"],
                 expected["task"], expected["retrieved_ctx"], expected["tier"],
@@ -2436,11 +2451,12 @@ def delete_lesson(conn, lesson_id):
 
 
 def log_lesson_usage(conn, lesson_ids, interaction_id, task):
+    safe_task = _redact_text_for_storage(task)
     for lesson_id in lesson_ids or []:
         conn.execute(
             "INSERT OR IGNORE INTO lesson_usage(lesson_id, interaction_id, task) "
             "VALUES(?, ?, ?)",
-            (lesson_id, interaction_id, task),
+            (lesson_id, interaction_id, safe_task),
         )
     conn.commit()
 
@@ -2878,6 +2894,7 @@ def get_session_project_summary(conn, session_id, project):
 def update_session_project_summary(
     conn, session_id, project, summary, summarized_through,
 ):
+    safe_summary = _redact_text_for_storage(summary)
     conn.execute(
         "INSERT INTO session_project_summaries"
         "(session_id, project_key, summary, summarized_through) VALUES(?, ?, ?, ?) "
@@ -2885,7 +2902,7 @@ def update_session_project_summary(
         "summary=excluded.summary, summarized_through=excluded.summarized_through, "
         "updated_ts=CURRENT_TIMESTAMP",
         (
-            session_id, _project_scope_key(project), summary,
+            session_id, _project_scope_key(project), safe_summary,
             summarized_through,
         ),
     )
@@ -3196,8 +3213,9 @@ def get_session(conn, session_id):
 
 
 def set_session_title(conn, session_id, title):
+    safe_title = _redact_text_for_storage(title)
     conn.execute(
-        "UPDATE sessions SET title=? WHERE session_id=?", (title, session_id)
+        "UPDATE sessions SET title=? WHERE session_id=?", (safe_title, session_id)
     )
     conn.commit()
 
@@ -3210,9 +3228,10 @@ def set_session_project(conn, session_id, project):
 
 
 def update_session_summary(conn, session_id, summary, summarized_through):
+    safe_summary = _redact_text_for_storage(summary)
     conn.execute(
         "UPDATE sessions SET summary=?, summarized_through=? WHERE session_id=?",
-        (summary, summarized_through, session_id),
+        (safe_summary, summarized_through, session_id),
     )
     conn.commit()
 
@@ -3759,10 +3778,11 @@ def add_fact(conn, fact_id, project, text, embedding=None, *, validity=None, now
     intervals meet exactly.  Insert and close commit together or not at all.
     """
     _reject_authoritative_fact_bypass(conn, project)
+    safe_text = _redact_text_for_storage(text)
     if validity is None or validity.is_empty:
         conn.execute(
             "INSERT INTO facts(id, project, text, embedding) VALUES(?, ?, ?, ?)",
-            (fact_id, project, text, embedding),
+            (fact_id, project, safe_text, embedding),
         )
         conn.commit()
         return
@@ -3785,7 +3805,7 @@ def add_fact(conn, fact_id, project, text, embedding=None, *, validity=None, now
         conn.execute(
             "INSERT INTO facts(id, project, text, embedding, valid_from, valid_to) "
             "VALUES(?, ?, ?, ?, ?, ?)",
-            (fact_id, project, text, embedding, valid_from, valid_to),
+            (fact_id, project, safe_text, embedding, valid_from, valid_to),
         )
     except BaseException:
         if nested:
@@ -3899,6 +3919,7 @@ def count_facts(conn, project, *, include_history=False, now=None):
 def upsert_preference(conn, pref_id, scope, key, text, source_interaction=None,
                       confidence=0.6):
     scope = (scope or "global").strip() or "global"
+    safe_text = _redact_text_for_storage(text)
     conn.execute(
         "INSERT INTO preferences"
         "(id, scope, key, text, source_interaction, confidence, evidence_count, enabled) "
@@ -3911,7 +3932,7 @@ def upsert_preference(conn, pref_id, scope, key, text, source_interaction=None,
         "enabled=1, "
         "revision=preferences.revision + 1, "
         "updated_ts=CURRENT_TIMESTAMP",
-        (pref_id, scope, key, text, source_interaction, float(confidence)),
+        (pref_id, scope, key, safe_text, source_interaction, float(confidence)),
     )
     conn.commit()
 
