@@ -56,6 +56,87 @@ import sonder_runtime.platform.paths as runtime_paths
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_GENERATED_IMAGES_MAX_BYTES = 1 * 1024 * 1024 * 1024  # 1 GiB rolling quota
+_GENERATED_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse all 3xx HTTP redirects so SSRF/host checks cannot be bypassed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url, code, f"HTTP redirects are disabled ({code})", headers, fp,
+        )
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(
+            req.full_url, code, f"HTTP redirects are disabled ({code})", headers, fp,
+        )
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+def _generated_images_quota_bytes() -> int:
+    raw = os.environ.get("SONDER_GENERATED_IMAGES_MAX_BYTES", "").strip()
+    if raw:
+        try:
+            val = int(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return DEFAULT_GENERATED_IMAGES_MAX_BYTES
+
+
+def _enforce_generated_images_quota(
+    out_dir: Path,
+    *,
+    max_bytes: int | None = None,
+    protect: set[Path] | None = None,
+) -> int:
+    """Evict oldest generated image/GIF files inside *out_dir* above rolling byte quota."""
+    limit = int(max_bytes) if max_bytes is not None else _generated_images_quota_bytes()
+    if limit <= 0 or not out_dir.is_dir():
+        return 0
+    root = out_dir.resolve()
+    protected = {p.resolve() for p in (protect or set())}
+    entries: list[tuple[int, str, Path, int]] = []
+    total = 0
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return 0
+    for child in children:
+        try:
+            if child.is_symlink() or not child.is_file():
+                continue
+            if child.suffix.lower() not in _GENERATED_IMAGE_EXTENSIONS:
+                continue
+            resolved = child.resolve()
+            if resolved.parent != root:
+                continue
+            st = resolved.stat()
+            total += st.st_size
+            entries.append((st.st_mtime_ns, resolved.name, resolved, st.st_size))
+        except OSError:
+            continue
+    if total <= limit:
+        return 0
+    entries.sort(key=lambda item: (item[0], item[1]))
+    evicted = 0
+    for _mtime, _name, path, size in entries:
+        if total <= limit:
+            break
+        if path in protected:
+            continue
+        try:
+            path.unlink()
+            total -= size
+            evicted += 1
+        except OSError:
+            continue
+    return evicted
+
 
 def _candidate_ollama_origins(ollama_endpoints: Sequence[str] | None = None) -> list[str]:
     candidates: list[str] = []
@@ -251,8 +332,10 @@ def _fit_inline_budget(data: bytes, mime: str) -> tuple[bytes, str]:
         return data, mime
     try:
         from PIL import Image  # optional dependency
-    except Exception:
-        return data, mime
+    except Exception as exc:
+        raise ValueError(
+            f"generated image exceeds inline byte budget ({len(data)} > {MAX_INLINE_IMAGE_BYTES} bytes)"
+        ) from exc
     try:
         img = Image.open(io.BytesIO(data))
         if max(img.size) > 1024:
@@ -269,9 +352,13 @@ def _fit_inline_budget(data: bytes, mime: str) -> tuple[bytes, str]:
             out = buf.getvalue()
             if len(out) <= MAX_INLINE_IMAGE_BYTES:
                 return out, "image/jpeg"
-        return out, "image/jpeg"
-    except Exception:
-        return data, mime
+    except Exception as exc:
+        raise ValueError(
+            f"generated image exceeds inline byte budget ({len(data)} > {MAX_INLINE_IMAGE_BYTES} bytes)"
+        ) from exc
+    raise ValueError(
+        f"generated image exceeds inline byte budget ({len(out)} > {MAX_INLINE_IMAGE_BYTES} bytes)"
+    )
 
 
 def _call_ollama_image(backend: ImageBackend, prompt: str, *, timeout: float) -> tuple[bytes, str]:
@@ -320,7 +407,7 @@ def _call_openai_image_api(backend: ImageBackend, prompt: str, *, timeout: float
         "response_format": "b64_json",
     }).encode("utf-8")
     req = urllib.request.Request(backend.endpoint, data=body, headers=headers, method="POST")
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
     with opener.open(req, timeout=timeout) as resp:
         raw = resp.read(_MAX_HTTP_IMAGE_RESPONSE_BYTES + 1)
     if len(raw) > _MAX_HTTP_IMAGE_RESPONSE_BYTES:
@@ -501,6 +588,7 @@ def generate_chat_image(
         with open(saved_fullpath, "wb") as handle:
             handle.write(raw_bytes)
     saved_path = Path(saved_fullpath)
+    _enforce_generated_images_quota(out_dir, protect={saved_path})
 
     width, height = _sniff_dimensions(raw_bytes)
     b64 = base64.b64encode(raw_bytes).decode("ascii")
@@ -1421,6 +1509,7 @@ def generate_chat_gif(
     with open(saved_fullpath, "wb") as handle:
         handle.write(gif_bytes)
     saved_path = Path(saved_fullpath)
+    _enforce_generated_images_quota(out_dir, protect={saved_path})
 
     width, height = _sniff_dimensions(gif_bytes)
     actual_frames = count_gif_frames(gif_bytes)

@@ -30,17 +30,22 @@ class McpTransportLimits:
     max_arguments_bytes: int = 64_000
     max_exchange_bytes: int = 1_024_000
     max_json_depth: int = 256
+    max_discard_bytes: int = 16 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if any(isinstance(v, bool) or v <= 0 for v in (
             self.max_frame_bytes, self.max_tools, self.max_arguments_bytes,
-            self.max_exchange_bytes, self.max_json_depth,
+            self.max_exchange_bytes, self.max_json_depth, self.max_discard_bytes,
         )):
             raise ValueError("MCP transport limits must be positive integers")
 
 
 class McpTransportError(ValueError):
     """A bounded transport or protocol violation."""
+
+
+class McpDiscardLimitExceeded(McpTransportError):
+    """An oversized frame exceeded max_discard_bytes while discarding to newline."""
 
 
 def _reject_json_constant(token: str) -> Any:
@@ -230,6 +235,7 @@ class StdioMcpTransport:
             if raw.strip() == b"" if isinstance(raw, bytes) else raw.strip() == "":
                 continue
             count += 1
+            abort_stream = False
             try:
                 if self._oversized(raw):
                     # readline stopped mid-line: discard the rest of this line
@@ -237,6 +243,13 @@ class StdioMcpTransport:
                     self._discard_rest_of_line()
                     raise McpTransportError("MCP frame exceeds max_frame_bytes")
                 response = self._dispatch(self._decode_frame(raw))
+            except McpDiscardLimitExceeded as exc:
+                logger.error(
+                    f"MCP transport discard limit exceeded connection_id={self._connection_id!r}: {exc}",
+                    exc_info=True,
+                )
+                response = self._error(None, -32700, str(exc))
+                abort_stream = True
             except McpTransportError as exc:
                 logger.error(
                     f"MCP transport protocol error connection_id={self._connection_id!r}: {exc}",
@@ -260,6 +273,8 @@ class StdioMcpTransport:
                         # unbounded strings); answer without it rather than
                         # letting the error escape and end the session.
                         self._write(self._error(None, -32603, str(exc)))
+            if abort_stream:
+                break
         if self._router is not None:
             self._router.unsubscribe(self._connection_id)
         logger.debug(f"serve loop ended connection_id={self._connection_id!r} frames_processed={count}")
@@ -272,10 +287,23 @@ class StdioMcpTransport:
         return len(raw) > self._limits.max_frame_bytes and not raw.endswith(newline)
 
     def _discard_rest_of_line(self) -> None:
+        discarded = 0
+        limit = self._limits.max_discard_bytes
         while True:
             chunk = self._input.readline(self._limits.max_frame_bytes + 1)
-            if chunk in (b"", "") or chunk.endswith(b"\n" if isinstance(chunk, bytes) else "\n"):
+            if chunk in (b"", ""):
                 return
+            discarded += (
+                len(chunk)
+                if isinstance(chunk, bytes)
+                else len(chunk.encode("utf-8", errors="replace"))
+            )
+            if chunk.endswith(b"\n" if isinstance(chunk, bytes) else "\n"):
+                return
+            if discarded > limit:
+                raise McpDiscardLimitExceeded(
+                    "oversized MCP frame exceeded max_discard_bytes; aborting stream"
+                )
 
     def _decode_frame(self, raw: str | bytes) -> dict[str, Any]:
         if isinstance(raw, bytes):

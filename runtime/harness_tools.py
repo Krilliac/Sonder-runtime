@@ -11,6 +11,7 @@ import contextvars
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,7 @@ import time
 from pathlib import Path
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.domain.agents import interpreter_argv as _interpreter_argv
 from sonder_runtime.application.testing.legacy_runs import retired_extra_args
 from sonder_runtime.adapters import git_change_targets
 from sonder_runtime.adapters import live_checkout
@@ -1470,19 +1472,85 @@ def git_cherry_pick(root=".", commits_json="[]", timeout=30, extra_roots=""):
 # Build tools
 # ---------------------------------------------------------------------------
 
+_BUILD_RUN_SHELL_METACHAR_RE = re.compile(r"[&|;<>`$^\r\n()\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_BUILD_RUN_BATCH_SPECIAL_RE = re.compile(r"[%!&|;<>^()]")
+
+
+def _parse_build_run_command(command):
+    """Validate and split a ``build_run`` command string without invoking a shell."""
+    raw = str(command or "").strip()
+    if not raw:
+        return None, "build_run command is empty"
+    if any(ch.isspace() and ch not in (" ", "\t") for ch in raw) or _BUILD_RUN_SHELL_METACHAR_RE.search(raw):
+        return None, "refusing shell metacharacters or control characters in build_run command"
+    plan = _interpreter_argv.analyze_build_command(
+        raw, stdin_present=False, is_windows=(os.name == "nt"),
+    )
+    if plan.opaque_reason:
+        return None, "refusing build_run command: %s" % plan.opaque_reason
+    if plan.launcher:
+        return None, "refusing command-string launcher %r in build_run command" % plan.launcher
+    if plan.inline_violation:
+        return None, "refusing inline interpreter execution in build_run command"
+    if plan.stdin_violation:
+        return None, "refusing stdin interpreter execution in build_run command"
+    try:
+        parts = shlex.split(raw, posix=(os.name != "nt"))
+    except ValueError as exc:
+        return None, "invalid build_run command syntax: %s" % exc
+    if os.name == "nt":
+        cleaned = []
+        for token in parts:
+            if len(token) >= 2 and token[0] == token[-1] and token[0] in ('"', "'"):
+                token = token[1:-1]
+            cleaned.append(token)
+        parts = cleaned
+    if not parts:
+        return None, "build_run command is empty"
+    return parts, ""
+
+
 def build_run(root=".", command="", timeout=120, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
 
     if command:
-        # `echo` and many build wrappers are shell builtins on Windows.  This
-        # tool intentionally accepts a command string, so dispatch it through
-        # cmd there rather than trying to exec a nonexistent echo.exe.
+        parts, err = _parse_build_run_command(command)
+        if err:
+            return {"ok": False, "error": err, "command": []}
         if os.name == "nt":
-            result = _run(["cmd", "/d", "/s", "/c", command], cwd=root, timeout=timeout)
-            result["command"] = command.split()
+            prog = parts[0]
+            if prog.lower() == "echo":
+                resolved_echo = shutil.which("echo")
+                if resolved_echo and Path(resolved_echo).suffix.lower() not in (".cmd", ".bat"):
+                    result = _run([resolved_echo, *parts[1:]], cwd=root, timeout=timeout)
+                    result["command"] = parts
+                    return result
+                return {
+                    "ok": True,
+                    "returncode": 0,
+                    "timed_out": False,
+                    "elapsed_ms": 0,
+                    "stdout": " ".join(parts[1:]) + "\n",
+                    "stderr": "",
+                    "command": parts,
+                }
+            exec_parts = list(parts)
+            if not any(sep in prog for sep in ("/", "\\")):
+                resolved = shutil.which(prog)
+                if resolved:
+                    if Path(resolved).suffix.lower() in (".cmd", ".bat") and any(
+                        _BUILD_RUN_BATCH_SPECIAL_RE.search(tok) for tok in parts
+                    ):
+                        return {
+                            "ok": False,
+                            "error": "refusing shell metacharacters in batch build_run command",
+                            "command": parts,
+                        }
+                    exec_parts[0] = resolved
+            result = _run(exec_parts, cwd=root, timeout=timeout)
+            result["command"] = parts
             return result
-        parts = command.split()
         return _run(parts, cwd=root, timeout=timeout)
 
     if (root / "Makefile").exists():

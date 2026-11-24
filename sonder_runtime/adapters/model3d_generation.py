@@ -28,6 +28,7 @@ import urllib.request
 from typing import Any
 
 from sonder_runtime.adapters.inference import ollama_endpoint
+from sonder_runtime.adapters.meshgen import blender_runner as _blender_runner
 from sonder_runtime.application.model3d_generation import (
     DEFAULT_3D_FACE_COUNT,
     DEFAULT_3D_OCTREE_RESOLUTION,
@@ -47,10 +48,98 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_HUNYUAN3D_URL = "http://127.0.0.1:8081"
 _MAX_GLB_RESPONSE_BYTES = 128 * 1024 * 1024  # 128 MiB cap
+DEFAULT_GENERATED_MODELS_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB rolling quota
+_GENERATED_MODEL_EXTENSIONS = frozenset({".glb", ".obj", ".png"})
 _PROBE_TIMEOUT_SECONDS = 2.0
 _PREVIEW_SCRIPT = Path(__file__).resolve().parent / "meshgen" / "preview_glb.py"
 _DOWNLOAD_TICKET_KEY = secrets.token_bytes(32)
 _DOWNLOAD_TICKET_TTL_SECONDS = 24 * 3600
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse all 3xx HTTP redirects so SSRF/host checks cannot be bypassed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url, code, f"HTTP redirects are disabled ({code})", headers, fp,
+        )
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(
+            req.full_url, code, f"HTTP redirects are disabled ({code})", headers, fp,
+        )
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+def _hunyuan3d_auth_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
+    headers = dict(extra or {})
+    api_key = os.environ.get("SONDER_3D_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _generated_models_quota_bytes() -> int:
+    raw = os.environ.get("SONDER_GENERATED_MODELS_MAX_BYTES", "").strip()
+    if raw:
+        try:
+            val = int(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return DEFAULT_GENERATED_MODELS_MAX_BYTES
+
+
+def _enforce_generated_models_quota(
+    out_dir: Path,
+    *,
+    max_bytes: int | None = None,
+    protect: set[Path] | None = None,
+) -> int:
+    """Evict oldest generated 3D model/preview files inside *out_dir* above rolling byte quota."""
+    limit = int(max_bytes) if max_bytes is not None else _generated_models_quota_bytes()
+    if limit <= 0 or not out_dir.is_dir():
+        return 0
+    root = out_dir.resolve()
+    protected = {p.resolve() for p in (protect or set())}
+    entries: list[tuple[int, str, Path, int]] = []
+    total = 0
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return 0
+    for child in children:
+        try:
+            if child.is_symlink() or not child.is_file():
+                continue
+            if child.suffix.lower() not in _GENERATED_MODEL_EXTENSIONS:
+                continue
+            resolved = child.resolve()
+            if resolved.parent != root:
+                continue
+            st = resolved.stat()
+            total += st.st_size
+            entries.append((st.st_mtime_ns, resolved.name, resolved, st.st_size))
+        except OSError:
+            continue
+    if total <= limit:
+        return 0
+    entries.sort(key=lambda item: (item[0], item[1]))
+    evicted = 0
+    for _mtime, _name, path, size in entries:
+        if total <= limit:
+            break
+        if path in protected:
+            continue
+        try:
+            path.unlink()
+            total -= size
+            evicted += 1
+        except OSError:
+            continue
+    return evicted
 
 
 def mint_model_download_ticket(filename: str, *, ttl_seconds: int = _DOWNLOAD_TICKET_TTL_SECONDS) -> str:
@@ -155,13 +244,14 @@ def _validate_api_url(raw: str, *, label: str = "SONDER_3D_API_URL") -> str:
 
 
 def _loopback_opener() -> urllib.request.OpenerDirector:
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
 
 
 def _probe_hunyuan3d(base_url: str, timeout: float = _PROBE_TIMEOUT_SECONDS) -> dict[str, Any] | None:
     opener = _loopback_opener()
+    headers = _hunyuan3d_auth_headers()
     for path in ("/health", "/docs"):
-        req = urllib.request.Request(f"{base_url}{path}", method="GET")
+        req = urllib.request.Request(f"{base_url}{path}", headers=headers, method="GET")
         try:
             with opener.open(req, timeout=timeout) as resp:
                 if resp.status == 200:
@@ -292,19 +382,29 @@ def _compress_preview_for_inline(png_bytes: bytes) -> tuple[bytes, str]:
         with pil_image.open(io.BytesIO(png_bytes)) as img:
             rgb = img.convert("RGB")
             rgb.thumbnail((768, 768))
-            buf = io.BytesIO()
-            rgb.save(buf, format="JPEG", quality=86, optimize=True)
-            return buf.getvalue(), "image/jpeg"
+            for quality in (86, 74, 60):
+                buf = io.BytesIO()
+                rgb.save(buf, format="JPEG", quality=quality, optimize=True)
+                out = buf.getvalue()
+                if len(out) <= MAX_INLINE_PREVIEW_BYTES:
+                    return out, "image/jpeg"
     except Exception:
-        return png_bytes[:MAX_INLINE_PREVIEW_BYTES], "image/png"
+        pass
+    return b"", "image/png"
 
 
 def _find_blender_executable() -> str:
-    configured = os.environ.get("SONDER_BLENDER", "").strip()
-    if configured and Path(configured).is_file():
-        return configured
+    configured = os.environ.get("SONDER_BLENDER", "").strip().strip('"')
+    if configured:
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in configured):
+            return ""
+        cand = Path(configured)
+        if cand.is_file() and not cand.is_symlink():
+            return os.path.abspath(str(cand))
     found = shutil.which("blender")
-    return found or ""
+    if found and Path(found).is_file():
+        return os.path.abspath(found)
+    return ""
 
 
 def render_glb_preview(model_path: Path, sheet_path: Path, *, tile_px: int = 384, timeout: int = 90) -> dict[str, Any]:
@@ -313,15 +413,19 @@ def render_glb_preview(model_path: Path, sheet_path: Path, *, tile_px: int = 384
     if not blender_exe or not _PREVIEW_SCRIPT.is_file():
         return {"ok": False, "error": "Blender executable not configured (set SONDER_BLENDER)"}
 
+    safe_tile = max(64, min(1024, int(tile_px)))
+    safe_timeout = max(15, min(300, int(timeout)))
+
     with tempfile.TemporaryDirectory(prefix="sonder-3d-preview-") as tmpdir:
-        job_path = Path(tmpdir) / "job.json"
-        result_path = Path(tmpdir) / "result.json"
+        tmp_path = Path(tmpdir)
+        job_path = tmp_path / "job.json"
+        result_path = tmp_path / "result.json"
         job_path.write_text(
             json.dumps({
                 "model_path": str(model_path),
                 "sheet_path": str(sheet_path),
                 "result_path": str(result_path),
-                "tile_px": int(tile_px),
+                "tile_px": safe_tile,
             }),
             encoding="utf-8",
         )
@@ -335,16 +439,25 @@ def render_glb_preview(model_path: Path, sheet_path: Path, *, tile_px: int = 384
             "--",
             str(job_path),
         ]
+        sanitized_env = _blender_runner.build_env(
+            os.environ, tmp_path / _blender_runner.SCRATCH_NAME, blender_exe,
+        )
+        run_kwargs: dict[str, Any] = {
+            "cwd": tmpdir,
+            "env": sanitized_env,
+            "stdin": subprocess.DEVNULL,
+            "capture_output": True,
+            "text": True,
+            "timeout": safe_timeout,
+            "check": False,
+            "shell": False,
+        }
+        if os.name == "nt":
+            run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=max(15, int(timeout)),
-                check=False,
-            )
+            proc = subprocess.run(cmd, **run_kwargs)
         except Exception as exc:
-            return {"ok": False, "error": f"Blender preview failed: {exc}"}
+            return {"ok": False, "error": f"Blender preview failed: {_blender_runner.bound_text(exc, 300)}"}
 
         if result_path.is_file():
             try:
@@ -353,7 +466,7 @@ def render_glb_preview(model_path: Path, sheet_path: Path, *, tile_px: int = 384
                     return data
             except Exception:
                 pass
-        stderr_tail = (proc.stderr or proc.stdout or "").strip()[-400:]
+        stderr_tail = _blender_runner.bound_text((proc.stderr or proc.stdout or "").strip()[-400:], 400)
         return {"ok": False, "error": f"Blender exited {proc.returncode}: {stderr_tail}"}
 
 
@@ -388,20 +501,23 @@ def generate_chat_3d_model(
     effective_image_path = str(image_path or parsed.image_path or "").strip()
     default_tex = os.environ.get("SONDER_3D_DEFAULT_TEXTURE", "1").strip().lower() not in ("0", "false", "no", "off")
     use_texture = texture if texture is not None else (parsed.texture if parsed.texture is not None else default_tex)
-    eff_steps = steps if steps is not None else (parsed.steps if parsed.steps is not None else DEFAULT_3D_STEPS)
-    eff_octree = (
+    raw_steps = steps if steps is not None else (parsed.steps if parsed.steps is not None else DEFAULT_3D_STEPS)
+    raw_octree = (
         octree_resolution
         if octree_resolution is not None
         else (parsed.octree_resolution if parsed.octree_resolution is not None else DEFAULT_3D_OCTREE_RESOLUTION)
     )
-    eff_faces = face_count if face_count is not None else (parsed.face_count if parsed.face_count is not None else DEFAULT_3D_FACE_COUNT)
+    raw_faces = face_count if face_count is not None else (parsed.face_count if parsed.face_count is not None else DEFAULT_3D_FACE_COUNT)
+    eff_steps = max(1, min(50, int(raw_steps)))
+    eff_octree = max(64, min(512, int(raw_octree)))
+    eff_faces = max(1_000, min(200_000, int(raw_faces)))
     eff_format = (file_format or parsed.file_format or "glb").strip().lower().lstrip(".")
     if eff_format not in ("glb", "obj"):
         eff_format = "glb"
     if seed is not None:
-        eff_seed = int(seed)
+        eff_seed = max(0, min(2_147_483_647, int(seed)))
     elif parsed.seed is not None:
-        eff_seed = parsed.seed
+        eff_seed = max(0, min(2_147_483_647, int(parsed.seed)))
     else:
         digest = hashlib.sha256(f"{clean_prompt}:{time.time_ns()}".encode("utf-8")).digest()
         eff_seed = int.from_bytes(digest[:4], "little") & 0x7FFFFFFF
@@ -470,7 +586,9 @@ def generate_chat_3d_model(
     req = urllib.request.Request(
         f"{backend.endpoint}/generate",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Accept": "application/octet-stream"},
+        headers=_hunyuan3d_auth_headers(
+            {"Content-Type": "application/json", "Accept": "application/octet-stream"}
+        ),
         method="POST",
     )
     opener = _loopback_opener()
@@ -478,10 +596,10 @@ def generate_chat_3d_model(
         with opener.open(req, timeout=max(30.0, eff_timeout)) as resp:
             glb_bytes = resp.read(_MAX_GLB_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
-        err_body = exc.read(4096).decode("utf-8", errors="replace")
+        err_body = _blender_runner.bound_text(exc.read(4096).decode("utf-8", errors="replace"), 500)
         raise RuntimeError(f"Hunyuan3D generation failed (HTTP {exc.code}): {err_body}") from exc
     except Exception as exc:
-        raise RuntimeError(f"Hunyuan3D request failed: {exc}") from exc
+        raise RuntimeError(f"Hunyuan3D request failed: {_blender_runner.bound_text(exc, 300)}") from exc
 
     if not glb_bytes:
         raise RuntimeError("Hunyuan3D returned an empty model payload")
@@ -499,7 +617,8 @@ def generate_chat_3d_model(
     render_info = render_glb_preview(model_path, preview_path)
     if render_info.get("ok") and preview_path.is_file():
         raw_preview, preview_mime = _compress_preview_for_inline(preview_path.read_bytes())
-        preview_b64 = base64.b64encode(raw_preview).decode("ascii")
+        if raw_preview:
+            preview_b64 = base64.b64encode(raw_preview).decode("ascii")
         tris = int(render_info.get("tris") or 0)
         verts = int(render_info.get("verts") or 0)
         materials = int(render_info.get("materials") or 0)
@@ -511,7 +630,13 @@ def generate_chat_3d_model(
     concept_b64 = ""
     if not preview_b64 and concept_bytes:
         raw_concept, concept_mime = _compress_preview_for_inline(concept_bytes)
-        concept_b64 = base64.b64encode(raw_concept).decode("ascii")
+        if raw_concept:
+            concept_b64 = base64.b64encode(raw_concept).decode("ascii")
+
+    _enforce_generated_models_quota(
+        out_dir,
+        protect={model_path, preview_path, concept_path},
+    )
 
     elapsed = time.perf_counter() - started
     download_url = f"/v1/generated-models/{model_filename}"

@@ -179,6 +179,46 @@ def test_regex_lab_groups_assertions_substitution_and_redos_detection():
     assert evil["ok"] is True
     assert any(h["kind"] == "nested_quantifier" and h["severity"] == "high" for h in evil["redos_hazards"])
     assert evil["text_result"]["truncated"] is True
+    assert evil["text_result"]["execution_blocked"] is True
+
+
+@pytest.mark.parametrize("pattern", [
+    r"(a+)+$",
+    r"((a|aa)+)+$",
+    r"(a|aa)+$",
+    r"([a-z]+)*$",
+    r"(a+){2,}$",
+    r".*.*.*.*!$",
+])
+def test_regex_lab_and_schema_validate_block_adversarial_redos_quickly(tmp_path: Path, monkeypatch, pattern):
+    import time
+    from sonder_runtime.adapters.inspection import schema_validate as sv_mod
+
+    adversarial = "a" * 40 + "!"
+    t0 = time.perf_counter()
+    res = rl_mod.regex_lab(pattern, text=adversarial)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 1.0, f"regex_lab took too long ({elapsed:.2f}s) on {pattern!r}"
+    assert res["ok"] is True
+    assert any(h["severity"] == "high" for h in res["redos_hazards"])
+    assert res["text_result"]["execution_blocked"] is True
+
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+    data_file = tmp_path / "payload.json"
+    data_file.write_text(json.dumps(adversarial), encoding="utf-8")
+    schema_json = json.dumps({"type": "string", "pattern": pattern})
+
+    t1 = time.perf_counter()
+    with pytest.raises(sv_mod.SchemaValidateError, match="ReDoS"):
+        sv_mod.validate_schema(str(data_file), schema_json=schema_json)
+    assert (time.perf_counter() - t1) < 1.0
+
+
+def test_regex_lab_allows_disjoint_quantified_alternation():
+    res = rl_mod.regex_lab(r"^(?:foo|bar)+$", text="foobarfoo", mode="fullmatch")
+    assert res["ok"] is True
+    assert res["text_result"]["matched"] is True
+    assert not res["text_result"].get("execution_blocked")
 
 
 # --- 4. code_graph ------------------------------------------------------------

@@ -158,3 +158,77 @@ def test_environment_named_source_files_are_not_secrets(workspace):
     (ws / "project" / "env.md").write_bytes(b"docs\n")
     assert not file_ops._is_secret_path(ws / "environment.py")
     assert file_ops.read_file("project/env.md")["text"] == "docs\n"
+
+
+@pytest.mark.parametrize("relative", [
+    "runtime/server.py",
+    "runtime/new.py",
+    "runtime/sub/helper.py",
+    "runtime/x.pth",
+    "runtime/x.dll",
+    "runtime/x.ps1",
+    "runtime/x.sh",
+    "runtime/pytest.ini",
+    "runtime/settings.cfg",
+    "runtime/config.toml",
+    "packaging/install_sonder.sh",
+    "packaging/install.ps1",
+    "packaging/build.py",
+    "packaging/hook.pth",
+    "packaging/native.dll",
+    "packaging/package.toml",
+    "packaging/settings.ini",
+    "packaging/setup.cfg",
+])
+def test_runtime_and_packaging_control_plane_paths_are_refused(workspace, relative):
+    ws, _home = workspace
+    target = ws / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(PermissionError, match="mutate protected Sonder control-plane"):
+        file_ops._require_mutation_access(target, developer_authorized=False)
+    with pytest.raises(PermissionError, match="mutate protected Sonder control-plane"):
+        file_ops.write_file(relative, "payload = 1\n", mode="create")
+    assert not target.exists()
+
+    # Developer token retains explicit control-plane authorization.
+    file_ops._require_mutation_access(target, developer_authorized=True)
+
+
+def test_nested_user_project_runtime_and_packaging_stay_writable(workspace):
+    ws, _home = workspace
+    out = file_ops.write_file("project/runtime/app.py", "x = 1\n")
+    assert out["bytes"] > 0
+    out = file_ops.write_file("project/packaging/install.sh", "#!/bin/sh\n")
+    assert out["bytes"] > 0
+
+
+@pytest.mark.parametrize("relative", [
+    "keystore/root_0.json",
+    "keystore/targets_2.json",
+    "keystore/snapshot_0.json",
+    "keystore/timestamp_0.json",
+    "release/keystore/root_1.json",
+])
+def test_tuf_keystore_private_keys_are_protected_on_read_and_write(workspace, relative):
+    ws, _home = workspace
+    target = ws / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(PermissionError, match="mutate protected Sonder control-plane"):
+        file_ops.write_file(relative, '{"private_pem": "secret"}', mode="create")
+    assert not target.exists()
+
+    target.write_text('{"keyid": "abc", "private_pem": "-----BEGIN PRIVATE KEY-----"}', encoding="utf-8")
+    assert file_ops._is_secret_path(target)
+    with pytest.raises(PermissionError, match="credential store"):
+        file_ops.read_file(relative)
+    # Credential-store guard refuses even with developer_authorized unless root names it.
+    with pytest.raises(PermissionError, match="credential store"):
+        file_ops.read_file(relative, developer_authorized=True)
+
+
+def test_non_tuf_files_in_user_keystore_directory_remain_accessible(workspace):
+    ws, _home = workspace
+    out = file_ops.write_file("project/keystore/README.md", "# keystore docs\n")
+    assert out["bytes"] > 0
+    assert file_ops.read_file("project/keystore/README.md")["text"] == "# keystore docs\n"

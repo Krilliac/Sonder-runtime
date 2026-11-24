@@ -2377,6 +2377,7 @@ def _validate_bind_security(
     auth_mode=None,
     auth_secret=None,
     tls_terminated_by_proxy=None,
+    allow_non_loopback_proxy_backend=None,
 ):
     api_key = API_KEY if api_key is None else api_key
     auth_secret = AUTH_SECRET if auth_secret is None else auth_secret
@@ -2395,6 +2396,10 @@ def _validate_bind_security(
         tls_terminated_by_proxy = _env_flag("SONDER_TLS_TERMINATED_BY_PROXY")
     elif type(tls_terminated_by_proxy) is not bool:
         raise RuntimeError("bind TLS proxy declaration must be a boolean")
+    if allow_non_loopback_proxy_backend is None:
+        allow_non_loopback_proxy_backend = _env_flag("SONDER_ALLOW_NON_LOOPBACK_PROXY_BACKEND")
+    elif type(allow_non_loopback_proxy_backend) is not bool:
+        raise RuntimeError("bind non-loopback proxy backend declaration must be a boolean")
     _serve_logger.debug(
         f"_validate_bind_security: host={host!r}, auth_mode={mode!r}, "
         f"tls_proxy={tls_terminated_by_proxy}"
@@ -2443,6 +2448,55 @@ def _validate_bind_security(
         raise RuntimeError(
             "non-loopback bind requires explicitly configured strong authentication"
         )
+    # M-09: ServeHTTPServer is plaintext HTTP. Even behind a TLS-terminating
+    # reverse proxy, binding a non-loopback interface exposes the plaintext
+    # backend off-host. Require loopback unless explicitly opted in.
+    if allow_non_loopback_proxy_backend is not True:
+        _serve_logger.critical(
+            f"bind security violation: non-loopback host={host!r} with tls_terminated_by_proxy=True "
+            "without SONDER_ALLOW_NON_LOOPBACK_PROXY_BACKEND=1, refusing to start"
+        )
+        raise RuntimeError(
+            "tls_terminated_by_proxy requires a loopback host (127.0.0.1 / ::1) so plaintext HTTP "
+            "is not exposed off-host; set SONDER_ALLOW_NON_LOOPBACK_PROXY_BACKEND=1 only when an "
+            "isolated private network terminates TLS"
+        )
+
+
+def _format_media_generation_error(kind: str, exc: Exception) -> str:
+    """Log media generation failures server-side and return a sanitized chat message."""
+    _serve_logger.warning("Chat %s generation failed (%s)", kind, type(exc).__name__, exc_info=True)
+    lowered = str(exc or "").lower()
+    if kind == "3d":
+        if "unavailable" in lowered or "not responding" in lowered or "connection refused" in lowered:
+            return (
+                "3D model generation is currently unavailable because the local Hunyuan3D "
+                "service is not running. Start the Hunyuan3D server or check "
+                "`SONDER_3D_API_URL`, then try again."
+            )
+        if "budget" in lowered or "cap" in lowered or "exceed" in lowered:
+            return (
+                "3D model generation produced a payload exceeding the configured safety "
+                "size limit. Try a simpler prompt or lower face count."
+            )
+        return (
+            "3D model generation failed before a model could be produced. "
+            "Check the server logs for details and try again."
+        )
+    if kind == "gif":
+        return (
+            "GIF generation failed before an animation could be produced. "
+            "Check the server logs for details and try again."
+        )
+    if "inline byte budget" in lowered or "byte limit" in lowered:
+        return (
+            "Image generation produced an image exceeding the inline size budget. "
+            "Try again or configure a smaller output resolution."
+        )
+    return (
+        "Image generation failed before an image could be produced. "
+        "Check the server logs for details and try again."
+    )
 
 
 DANGEROUS_HTTP_SLASH_COMMANDS = frozenset({
@@ -3311,13 +3365,22 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         )
     if cmd in ("/image", "/img"):
         image_prompt = arg.strip() or "a random image"
-        return _image_generation.generate_chat_image(image_prompt).markdown
+        try:
+            return _image_generation.generate_chat_image(image_prompt).markdown
+        except (RuntimeError, ValueError, OSError) as exc:
+            return _format_media_generation_error("image", exc)
     if cmd == "/gif":
         gif_prompt = arg.strip() or "a random animated gif"
-        return _image_generation.generate_chat_gif(gif_prompt).markdown
+        try:
+            return _image_generation.generate_chat_gif(gif_prompt).markdown
+        except (RuntimeError, ValueError, OSError) as exc:
+            return _format_media_generation_error("gif", exc)
     if cmd in ("/3d", "/model3d"):
         model_prompt = arg.strip() or "a stylized glowing lantern"
-        return _model3d_generation.generate_chat_3d_model(model_prompt).markdown
+        try:
+            return _model3d_generation.generate_chat_3d_model(model_prompt).markdown
+        except (RuntimeError, ValueError, OSError) as exc:
+            return _format_media_generation_error("3d", exc)
     if cmd == "/stats":
         return server.sonder_stats()
     if cmd == "/version":
@@ -7947,18 +8010,28 @@ class Handler(BaseHTTPRequestHandler):
                             )
                         )
                         if model3d_prompt:
-                            m3d_result = _model3d_generation.generate_chat_3d_model(model3d_prompt)
-                            reply = m3d_result.markdown
-                            response_model = m3d_result.model_id
-                            response_tier = "3d"
+                            try:
+                                m3d_result = _model3d_generation.generate_chat_3d_model(model3d_prompt)
+                                reply = m3d_result.markdown
+                                response_model = m3d_result.model_id
+                                response_tier = "3d"
+                            except (RuntimeError, ValueError, OSError) as exc:
+                                reply = _format_media_generation_error("3d", exc)
+                                response_model = model
+                                response_tier = "3d"
                         elif gif_prompt:
-                            gif_result = _image_generation.generate_chat_gif(
-                                gif_prompt,
-                                model_override=model if explicit_image_model else "",
-                            )
-                            reply = gif_result.markdown
-                            response_model = gif_result.model_id
-                            response_tier = "image"
+                            try:
+                                gif_result = _image_generation.generate_chat_gif(
+                                    gif_prompt,
+                                    model_override=model if explicit_image_model else "",
+                                )
+                                reply = gif_result.markdown
+                                response_model = gif_result.model_id
+                                response_tier = "image"
+                            except (RuntimeError, ValueError, OSError) as exc:
+                                reply = _format_media_generation_error("gif", exc)
+                                response_model = model
+                                response_tier = "image"
                         else:
                             image_prompt = (
                                 prompt
@@ -7970,13 +8043,18 @@ class Handler(BaseHTTPRequestHandler):
                                 )
                             )
                             if image_prompt:
-                                img_result = _image_generation.generate_chat_image(
-                                    image_prompt,
-                                    model_override=model if explicit_image_model else "",
-                                )
-                                reply = img_result.markdown
-                                response_model = img_result.model_id
-                                response_tier = "image"
+                                try:
+                                    img_result = _image_generation.generate_chat_image(
+                                        image_prompt,
+                                        model_override=model if explicit_image_model else "",
+                                    )
+                                    reply = img_result.markdown
+                                    response_model = img_result.model_id
+                                    response_tier = "image"
+                                except (RuntimeError, ValueError, OSError) as exc:
+                                    reply = _format_media_generation_error("image", exc)
+                                    response_model = model
+                                    response_tier = "image"
                     if structured_schema is None and reply is None and allow_control_routes:
                         work_session_ref = session or self._correlation()
                         reply = _handle_work_intent(
@@ -8706,7 +8784,7 @@ def main(
         # selects a positional argument or SONDER_PORT.
         CONFIGURED_PORT = port
 
-        _validate_bind_security(HOST)
+        _validate_bind_security(HOST, tls_terminated_by_proxy=TLS_TERMINATED_BY_PROXY)
         lifecycle = sonder_lifecycle.get()
         try:
             # STARTING -> MIGRATING -> READY; no listener opens on failure.
@@ -8729,6 +8807,10 @@ def main(
         try:
             factory = ServeHTTPServer if _server_factory is None else _server_factory
             httpd = factory((HOST, port), Handler)
+            try:
+                httpd.tls_terminated_by_proxy = bool(TLS_TERMINATED_BY_PROXY)
+            except Exception:
+                pass
         except OSError:
             _serve_logger.critical(f"server cannot bind to {HOST}:{port}, port may already be in use", exc_info=True)
             raise

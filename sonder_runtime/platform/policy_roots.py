@@ -49,6 +49,11 @@ from pathlib import Path
 # prefixed spelling that names an ordinary local path.
 EXTENDED_LOCAL_RE = re.compile(r"(?:\\\\\?\\|//\?/)([A-Za-z]:[\\/])")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:$")
+_WINDOWS_RESERVED_DEVICE_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+})
 
 
 class PolicyRootError(ValueError):
@@ -85,6 +90,11 @@ def _check_windows_components(path: Path) -> None:
         if part.endswith((".", " ")) or ":" in part:
             raise PolicyRootError(
                 "a Windows alias or alternate-data-stream component is not allowed"
+            )
+        stem = part.split(".", 1)[0].rstrip(" ").upper()
+        if stem in _WINDOWS_RESERVED_DEVICE_NAMES:
+            raise PolicyRootError(
+                "a Windows reserved device name component is not allowed"
             )
 
 
