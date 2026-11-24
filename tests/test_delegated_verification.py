@@ -712,3 +712,42 @@ def test_two_parent_verifier_admission_race_has_one_workspace_owner(lanes):
         ]
         winners = [call.result() for call in calls]
     assert sum(winner is not None for winner in winners) == 1
+
+
+def test_invalid_verification_approval_pending_cleans_up_state_and_barrier(lanes):
+    import time
+    from sonder_runtime.application.ports.lane_continuation import (
+        PendingApprovalEvidence,
+        VerificationApprovalPending,
+    )
+
+    service, store, model, root, context, parent = lanes
+    service.run_pending(spawn(lanes), context)
+    verifier, gateway, _ = _verifier(lanes)
+    prepared = _prepared(lanes, verifier)
+
+    digest_hex = "a" * 64
+
+    def raise_pending(_prepared, _context):
+        raise VerificationApprovalPending(
+            PendingApprovalEvidence(
+                tool="delegated_verification_execute",
+                call_digest=digest_hex,
+                surface="http",
+                call_id=digest_hex[:16],
+                expires_at=time.time() - 10.0,
+            )
+        )
+
+    # Expired pending evidence raises PermissionError inside `except VerificationApprovalPending`:
+    # durable row must NOT stay stuck in approval_deciding with owner or barrier held.
+    with pytest.raises(PermissionError, match="resumable pending approval unavailable"):
+        verifier.execute_prepared(prepared, context=context, approve=raise_pending)
+
+    with store.transaction() as tx:
+        row = tx.verification_row(prepared.verification_id, context.principal_id)
+        assert row["state"] in ("approval_unknown", "failed")
+        assert row["owner"] == ""
+        assert row["code"] in ("APPROVAL_OUTCOME_UNKNOWN", "VERIFICATION_REFUSED")
+        assert tx.verification_barrier(parent["parent_session_id"], context.principal_id) == ""
+    assert gateway.calls == 0

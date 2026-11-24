@@ -1302,7 +1302,7 @@
       "checked": true,
       "claim": "Guarded selfmod permits a local descriptive commit from a clean starting checkout and never performs an automatic remote push.",
       "requirement_id": "SELFMOD-006",
-      "revision": 3,
+      "revision": 4,
       "status": "verified"
     },
     {
@@ -1567,7 +1567,7 @@
   ],
   "schema": "sonder-requirement-status-v1",
   "source": {
-    "ledger_sha256": "c19eceb94eb754a14089cdb9f7b65a8fd07454f194c3411012b1102a7cb546a3",
+    "ledger_sha256": "0128510a8f2863f7240f7fd0f4c7ab80c0a6c012e639896d1d386865e3a81de1",
     "spec_sha256": "1d7da49c5910bcf0bd5099ef1858312a8491a0429a4df33895d8088942278e33"
   }
 }

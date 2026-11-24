@@ -390,6 +390,7 @@ def workspace_inventory(
         include_ignored=include_ignored,
         max_entries=max_entries,
         timeout_seconds=timeout_seconds,
+        prune_dir=_credential_directory,
     )
     total_bytes = 0
     extension_stats = {}
@@ -398,6 +399,13 @@ def workspace_inventory(
     largest = []
     for item in iterator:
         if item["type"] != "file":
+            continue
+        if file_ops.is_credential_store(Path(item["path"])):
+            state["files_seen"] = max(0, state["files_seen"] - 1)
+            _note_skip(
+                state, Path(item["path"]), "credential_store",
+                expose_path=False,
+            )
             continue
         size = item["bytes"]
         total_bytes += size
@@ -527,6 +535,10 @@ def read_line_range(
     path, *, start_line=1, end_line=200, extra_roots="", bypass=False,
 ):
     target = _resolve(path, extra_roots=extra_roots, bypass=bypass)
+    if target.is_dir():
+        raise ValueError(
+            "%s is a directory; use directory_tree or file_find" % target
+        )
     if not target.is_file():
         raise FileNotFoundError("file not found: %s" % target)
     start = _bounded_int(start_line, 1, 1, 10_000_000)
@@ -1005,7 +1017,11 @@ def _resolve_program(program, *, extra_roots="", bypass=False):
     # Refuse UNC/device/NT-namespace spellings before any os.path.realpath
     # call can open an SMB share (NTLM credential leak).
     value = file_ops._reject_network_path(value)
-    if Path(value).is_absolute() or any(mark in value for mark in ("/", "\\")):
+    if re.match(r"^[A-Za-z]:(?![\\/])", value):
+        raise PermissionError(
+            "drive-relative executable path is not allowed: %s" % value
+        )
+    if ":" in value or Path(value).is_absolute() or any(mark in value for mark in ("/", "\\")):
         if Path(value).is_absolute():
             if os.path.normcase(os.path.realpath(value)) == os.path.normcase(os.path.realpath(sys.executable)):
                 return value
@@ -2071,9 +2087,14 @@ def _powershell_inline_refusal(args, stdin=""):
             pending -= 1
             continue
         switch, has_val, value = _normalize_ps_switch(raw)
+        if has_val:
+            # Windows PowerShell 5.1 does not accept ':' or '=' as host-switch
+            # separators and falls back to -Command mode (executing inline code
+            # after ';'). Fail closed on any attached switch value.
+            return refusal
         if len(switch) >= 2 and "-file".startswith(switch):
-            target = value if has_val else (args[index] if index < len(args) else "")
-            if not has_val and index < len(args):
+            target = args[index] if index < len(args) else ""
+            if index < len(args):
                 index += 1
             if not target or _is_stdin_operand(target):
                 reads_stdin = True
@@ -2081,13 +2102,12 @@ def _powershell_inline_refusal(args, stdin=""):
             file_seen = True
             break
         if switch in _PS_VALUE_FLAGS:
-            if not has_val:
-                pending = 1
+            pending = 1
             continue
         if len(switch) >= 2 and "-version".startswith(switch):
             # Windows PowerShell -Version takes a version operand unless it's
             # the last arg or followed by another switch.
-            if not has_val and index < len(args) and not _normalize_ps_switch(args[index])[0].startswith("-"):
+            if index < len(args) and not _normalize_ps_switch(args[index])[0].startswith("-"):
                 pending = 1
             continue
         if len(switch) >= 4 and "-noexit".startswith(switch):
@@ -2669,7 +2689,7 @@ def _check_program_guards(
                 _allow_cmd_script=False, _depth=_depth + 1, _working=_working,
             )
         return
-    if stem in ("powershell", "powershell_ise", "pwsh"):
+    if stem in ("powershell", "powershell_ise", "pwsh") or re.fullmatch(r"powers~\d+", stem):
         refusal = _powershell_inline_refusal(args, stdin)
         if refusal:
             raise PermissionError(refusal)

@@ -61,6 +61,7 @@ from sonder_runtime.adapters.repl_services import (
     code_improve, consult as consult_flow, tier_router,
 )
 from sonder_runtime.adapters import reference_lookup_multi as _reference_lookup_multi
+from sonder_runtime.adapters import chat_effort as _chat_effort
 from sonder_runtime.adapters import chat_temperature as _chat_temperature
 from sonder_runtime.interfaces.repl import command_router
 from sonder_runtime.application.command_surface.command_text import slash_head as _slash_head
@@ -1783,7 +1784,8 @@ HELP = """commands (slash forms are optional -- plain language works too, e.g.
   /trace [on|off]    toggle trace mode (bare = on); shows retrieval + prompt
   /strict [on|off]   toggle strict mode (bare = on); pins to the sonder alias
   /temp [0-2|auto]   show/set this session's sampling temperature (auto = model preset)
-  /persona [name]    show/set active persona (coder/explainer/reviewer/teacher)
+  /effort [off|minimal|low|medium|high|xhigh|auto]  show/set this session's reasoning effort
+  /persona [name|auto|off]  show/set active persona (auto = route by tier/prompt)
   /model [name|tier] list installed models and tiers; switch either one
   /cloud [status|on|off]  change process-local hosted/cloud consent
   /consult <question> ask 2 local tiers (+cloud when enabled) and compare answers
@@ -3143,10 +3145,131 @@ def _run_train(n):
         len(tasks), passed, len(tasks) - passed, lessons))
 
 
+def _session_log_repo():
+    try:
+        from sonder_runtime.bootstrap.app import default_app
+        return default_app().session_repository()
+    except Exception:
+        return None
+
+
+def _session_log_title(repo, session_id):
+    try:
+        from sonder_runtime.application.session.query_export import SessionQueryEngine
+        query = SessionQueryEngine(repo, max_page_size=64, max_scan=64)
+        for item in query.export_transcript(session_id, max_events=64):
+            if (item.role == "user" and not item.redacted
+                    and isinstance(item.content, str) and item.content.strip()):
+                text = " ".join(item.content.split())
+                return text[:79].rstrip() + "\u2026" if len(text) > 80 else text
+    except Exception:
+        return ""
+    return ""
+
+
+def _mirror_repl_turn_to_session_log(session_id, prompt, reply, *, lane="workbench"):
+    """Mirror a REPL workspace-work turn to sessions.db so HTTP API and GUI stay in sync."""
+    if not session_id or not isinstance(prompt, str) or not prompt.strip():
+        return
+    if not isinstance(reply, str) or not reply.strip():
+        return
+    try:
+        from sonder_runtime.adapters.observability import activity_tracker as _act
+        from sonder_runtime.domain.session_ref import is_valid_session_id
+        if not is_valid_session_id(session_id):
+            return
+        repo = _session_log_repo()
+        if repo is None:
+            return
+        import uuid as _uuid
+        turn_id = _uuid.uuid4().hex
+        repo.append(session_id, "user.message", {
+            "content": _act._redact_text(prompt),
+            "turn_id": turn_id,
+            "lane": lane,
+            "surface": "repl",
+        })
+        repo.append(session_id, "model.response", {
+            "content": _act._redact_text(reply),
+            "turn_id": turn_id,
+            "lane": lane,
+            "surface": "repl",
+        })
+    except Exception:
+        pass
+
+
+def _merged_repl_sessions(conn, limit=20):
+    by_id = {}
+    for row in memory_store.list_sessions(conn, limit):
+        by_id[row["session_id"]] = dict(row)
+    repo = _session_log_repo()
+    lister = getattr(repo, "list_sessions", None) if repo is not None else None
+    if callable(lister):
+        try:
+            for srow in lister(limit=limit):
+                sid = srow.session_id
+                existing = by_id.get(sid)
+                if existing is None:
+                    by_id[sid] = {
+                        "session_id": sid,
+                        "title": _session_log_title(repo, sid) or "(untitled)",
+                        "updated_ts": srow.updated_at_utc,
+                        "project": "",
+                        "turn_count": int(srow.user_turns or 0),
+                    }
+                else:
+                    existing["turn_count"] = max(int(existing.get("turn_count") or 0), int(srow.user_turns or 0))
+                    if srow.updated_at_utc and str(srow.updated_at_utc) > str(existing.get("updated_ts") or ""):
+                        existing["updated_ts"] = srow.updated_at_utc
+                    if not (existing.get("title") or "").strip() or existing.get("title") == "(untitled)":
+                        title = _session_log_title(repo, sid)
+                        if title:
+                            existing["title"] = title
+        except Exception:
+            pass
+    ordered = sorted(
+        by_id.values(),
+        key=lambda item: (str(item.get("updated_ts") or ""), str(item.get("session_id") or "")),
+        reverse=True,
+    )
+    return ordered[:limit]
+
+
+def _find_repl_session(conn, target):
+    found = memory_store.find_session(conn, target)
+    if found:
+        return found
+    needle = (target or "").strip()
+    if not needle:
+        return None
+    repo = _session_log_repo()
+    lister = getattr(repo, "list_sessions", None) if repo is not None else None
+    if not callable(lister):
+        return None
+    try:
+        rows = list(lister(limit=100))
+    except Exception:
+        return None
+    for srow in rows:
+        if srow.session_id == needle:
+            return srow.session_id
+    id_matches = [srow.session_id for srow in rows if srow.session_id.lower().startswith(needle.lower())]
+    if len(id_matches) == 1:
+        return id_matches[0]
+    title_matches = [
+        srow.session_id for srow in rows
+        if _session_log_title(repo, srow.session_id).lower().startswith(needle.lower())
+    ]
+    if len(title_matches) == 1:
+        return title_matches[0]
+    return None
+
+
 def _print_sessions():
     conn = server._open_db()
     try:
-        sessions = memory_store.list_sessions(conn, 20)
+        sessions = _merged_repl_sessions(conn, 20)
     finally:
         conn.close()
     _emit(_format_sessions(sessions))
@@ -3791,10 +3914,11 @@ def main(*, machine_output=False):
         _TURN_MODEL[0] = current_model()
         indicator = _begin_chat_turn("Sonder work")
         try:
-            out = _run_session_work(session_id, host_project=project,
-                prompt=task, tier=active_model or active_tier or "auto",
-                max_steps=12, project=workspace_root,
-            )
+            with _chat_effort.effort_scope(_chat_effort.resolve_turn_effort(session=session_id).value):
+                out = _run_session_work(session_id, host_project=project,
+                    prompt=task, tier=active_model or active_tier or "auto",
+                    max_steps=12, project=workspace_root,
+                )
         except _WORK_REFUSALS as exc:
             if indicator is not None:
                 indicator.stop()
@@ -3804,6 +3928,7 @@ def main(*, machine_output=False):
             if indicator is not None:
                 indicator.stop()
             raise
+        _mirror_repl_turn_to_session_log(session_id, task, out, lane="workbench")
         last_iid = None
         last_response = out
         last_run_source = _answer_only(out)
@@ -3861,12 +3986,12 @@ def main(*, machine_output=False):
     def do_persona(arg):
         nonlocal persona
         arg = (arg or "").strip()
+        available = list(personas.MODES) + personas.names()
         if not arg:
-            print("persona: %s (available: %s)" % (persona, ", ".join(personas.names())))
+            print("persona: %s (available: %s)" % (persona, ", ".join(available)))
             return
-        wanted = arg.lower()
-        available = personas.names()
-        if wanted not in available:
+        wanted = personas.normalize_selection(arg)
+        if wanted is None:
             # ``personas.get`` falls back to the default for an unknown name,
             # so accepting it here would report a persona no turn will use.
             print("unknown persona %r; still %s (available: %s)" % (
@@ -4149,7 +4274,7 @@ def main(*, machine_output=False):
         if target:
             conn = server._open_db()
             try:
-                found = memory_store.find_session(conn, target)
+                found = _find_repl_session(conn, target)
             finally:
                 conn.close()
             if not found:
@@ -4161,6 +4286,8 @@ def main(*, machine_output=False):
             turns = memory_store.session_turns(conn, replay_session)
         finally:
             conn.close()
+        from sonder_runtime.application.session import event_turns as _event_turns
+        turns = _event_turns.fuller_turns(_session_log_repo, replay_session, turns)
         _emit(_format_session_replay(
             turns, session_id=replay_session, limit=count,
         ))
@@ -4424,6 +4551,9 @@ def main(*, machine_output=False):
                     elif cmd == "/temp":
                         # Kept with this session id; the next turn reads it.
                         _emit(_chat_temperature.temp_command(arg, session_id))
+                    elif cmd == "/effort":
+                        # Kept with this session id; the next turn reads it.
+                        _emit(_chat_effort.effort_command(arg, session_id, lane=_chat_effort.lane_default_effort()))
                     elif cmd == "/trace":
                         apply_trace(_on_off(arg, trace))
                     elif cmd == "/strict":
@@ -4478,6 +4608,45 @@ def main(*, machine_output=False):
                             "on" if effective else "off",
                             " (env default)" if location_consent is None else "",
                         ))
+                    elif cmd == "/img":
+                        from sonder_runtime.adapters import image_generation as _image_gen
+
+                        result = _image_gen.generate_chat_image(
+                            arg.strip() or "a random image",
+                        )
+                        _emit(
+                            "generated image via %s (%dx%d, %d bytes): %s"
+                            % (
+                                result.model_id, result.width, result.height,
+                                result.byte_length, result.saved_path,
+                            )
+                        )
+                    elif cmd == "/gif":
+                        from sonder_runtime.adapters import image_generation as _image_gen
+
+                        result = _image_gen.generate_chat_gif(
+                            arg.strip() or "a random animated gif",
+                        )
+                        _emit(
+                            "generated animated GIF via %s (%dx%d, %d frames, %d bytes): %s"
+                            % (
+                                result.model_id, result.width, result.height,
+                                result.frame_count, result.byte_length, result.saved_path,
+                            )
+                        )
+                    elif cmd in ("/3d", "/model3d"):
+                        from sonder_runtime.adapters import model3d_generation as _model3d
+
+                        result = _model3d.generate_chat_3d_model(
+                            arg.strip() or "a stylized glowing lantern",
+                        )
+                        _emit(
+                            "generated 3D model via %s (%d tris, %d bytes): %s (preview: %s)"
+                            % (
+                                result.model_id, result.tris, result.model_bytes,
+                                result.model_path, result.preview_path or result.concept_path or "none",
+                            )
+                        )
                     elif cmd == "/stats":
                         _emit(server.sonder_stats())
                     elif cmd == "/context":
@@ -4672,7 +4841,19 @@ def main(*, machine_output=False):
                         "/inventory", "/workspace",
                         "/tree", "/folders", "/search", "/grep",
                         "/programs", "/programfind", "/scripts", "/scriptfind",
-                        "/image", "/inspectimage", "/vision", "/analyzeimage",
+                        "/image", "/inspectimage", "/doc", "/document_extract",
+                        "/media", "/media_inspect", "/loc", "/code_metrics",
+                        "/schema", "/schema_validate", "/languages", "/language_matrix",
+                        "/calc", "/math_eval", "/logic", "/logic_verify",
+                        "/regex", "/regex_lab", "/graph", "/code_graph",
+                        "/sdiff", "/diff_semantic", "/reason", "/reasoning_board",
+                        "/symcheck", "/symbol_verify", "/citecheck", "/citation_audit",
+                        "/crosscheck", "/fact_cross_check", "/consensus", "/consistency_check",
+                        "/fallback", "/plan_fallback", "/resilience", "/runtime_resilience_check",
+                        "/shield", "/prompt_shield", "/diagnose", "/error_diagnose",
+                        "/audit", "/code_audit", "/transform", "/data_transform",
+                        "/learntool", "/learn_tool", "/discovertool",
+                        "/vision", "/analyzeimage",
                         "/runprogram", "/runscript",
                         "/artifactcheck", "/verifyartifact", "/groundartifact",
                     ):
@@ -4899,7 +5080,9 @@ def main(*, machine_output=False):
                         else:
                             conn = server._open_db()
                             try:
-                                found = memory_store.find_session(conn, target)
+                                found = _find_repl_session(conn, target)
+                                if found:
+                                    memory_store.touch_session(conn, found, project=project)
                             finally:
                                 conn.close()
                             if found:
@@ -5052,10 +5235,11 @@ def main(*, machine_output=False):
                 _TURN_MODEL[0] = current_model()
                 indicator = _begin_chat_turn()
                 try:
-                    out = server.sonder(line, trace=trace, strict=strict, persona=persona,
-                                        session=session_id, project=project,
-                                        tier=active_tier or "", model_override=active_model or "",
-                                        location_consent=location_consent)
+                    with _chat_effort.effort_scope(_chat_effort.resolve_turn_effort(session=session_id).value):
+                        out = server.sonder(line, trace=trace, strict=strict, persona=persona,
+                                            session=session_id, project=project,
+                                            tier=active_tier or "", model_override=active_model or "",
+                                            location_consent=location_consent)
                 except BaseException:
                     if indicator is not None:
                         indicator.stop()

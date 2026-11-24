@@ -181,6 +181,7 @@ class LauncherStatus {
 
 class SonderLauncherApi {
   static const _actions = {'start', 'stop', 'restart'};
+  static const _maxLauncherResponseBytes = 256 * 1024;
   static final Random _secureRandom = Random.secure();
 
   final String baseUrl;
@@ -210,15 +211,17 @@ class SonderLauncherApi {
   }
 
   LauncherStatus _decode(http.Response response) {
-    Map<String, dynamic> body;
-    try {
-      body =
-          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-    } catch (_) {
-      throw SonderException('Could not parse host launcher response.');
+    if (response.statusCode >= 300 && response.statusCode < 400) {
+      throw SonderException(
+        'Host launcher returned an unexpected redirect (HTTP ${response.statusCode}).',
+        httpStatus: response.statusCode,
+      );
     }
     if (response.statusCode == 401) {
-      throw SonderException('Host launcher authentication failed.');
+      throw SonderException(
+        'Host launcher authentication failed.',
+        httpStatus: 401,
+      );
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       // responseException reads only string fields, so an envelope never
@@ -228,6 +231,13 @@ class SonderLauncherApi {
         'Host launcher returned HTTP ${response.statusCode}.',
       );
     }
+    Map<String, dynamic> body;
+    try {
+      body =
+          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+    } catch (_) {
+      throw SonderException('Could not parse host launcher response.');
+    }
     return LauncherStatus.fromJson(body);
   }
 
@@ -236,13 +246,18 @@ class SonderLauncherApi {
       throw SonderException('Host launcher URL is not configured.');
     }
     try {
-      final response = await http
-          .get(_uri('/v1/launcher/status'), headers: _headers())
-          .timeout(const Duration(seconds: 8));
+      final response = await requestGet(
+        _uri('/v1/launcher/status'),
+        headers: _headers(),
+        timeout: const Duration(seconds: 8),
+        maxBodyBytes: _maxLauncherResponseBytes,
+      );
       return _decode(response);
+    } on ResponseTooLargeException {
+      throw SonderException('Host launcher response was too large.');
     } catch (error) {
       if (error is SonderException) rethrow;
-      throw SonderException('Cannot reach host launcher: $error');
+      throw SonderException.transport(error, baseUrl);
     }
   }
 
@@ -266,17 +281,18 @@ class SonderLauncherApi {
       throw SonderException('Invalid host launcher idempotency key.');
     }
     try {
-      final response = await http
-          .post(
-            _uri('/v1/launcher/$action'),
-            headers: {
-              ..._headers(),
-              'Content-Type': 'application/json',
-              'Idempotency-Key': requestKey,
-            },
-            body: jsonEncode({'context_size': contextSize}),
-          )
-          .timeout(const Duration(seconds: 8));
+      final response = await sendRequest(
+        'POST',
+        _uri('/v1/launcher/$action'),
+        headers: {
+          ..._headers(),
+          'Content-Type': 'application/json',
+          'Idempotency-Key': requestKey,
+        },
+        body: jsonEncode({'context_size': contextSize}),
+        timeout: const Duration(seconds: 8),
+        maxBodyBytes: _maxLauncherResponseBytes,
+      );
       final accepted = _decode(response);
       if (response.statusCode != 202) return accepted;
 
@@ -294,6 +310,8 @@ class SonderLauncherApi {
         onProgress: onProgress,
         isCancelled: isCancelled,
       );
+    } on ResponseTooLargeException {
+      throw SonderException('Host launcher response was too large.');
     } catch (error) {
       if (error is SonderException) rethrow;
       if (error is TimeoutException) {
@@ -302,7 +320,7 @@ class SonderLauncherApi {
           'accepted it; refresh Host Launcher status before retrying.',
         );
       }
-      throw SonderException('Host launcher request failed: $error');
+      throw SonderException.transport(error, baseUrl);
     }
   }
 
@@ -354,18 +372,20 @@ class SonderLauncherApi {
         final requestTimeout = remaining < const Duration(seconds: 8)
             ? remaining
             : const Duration(seconds: 8);
-        response = await http
-            .get(
-              _uri(
-                '/v1/launcher/operations/'
-                '${Uri.encodeComponent(operationId)}',
-              ),
-              headers: _headers(),
-            )
-            .timeout(requestTimeout);
+        response = await requestGet(
+          _uri(
+            '/v1/launcher/operations/'
+            '${Uri.encodeComponent(operationId)}',
+          ),
+          headers: _headers(),
+          timeout: requestTimeout,
+          maxBodyBytes: _maxLauncherResponseBytes,
+        );
+      } on ResponseTooLargeException {
+        throw SonderException('Host launcher response was too large.');
       } catch (error) {
         if (error is SonderException) rethrow;
-        final detail = error.toString();
+        final detail = SonderException.transport(error, baseUrl).message;
         lastPollError =
             detail.length > 240 ? '${detail.substring(0, 240)}…' : detail;
         continue;
@@ -792,6 +812,47 @@ class SonderApi implements SonderApiPort {
     );
   }
 
+  /// Removes finished, quiescent agent conversations owned by the caller.
+  /// Active/running lanes are never touched.
+  Future<int> clearFinishedAgentLanes({List<String>? laneIds}) async {
+    final decoded = await _agentRequest(
+      '/clear',
+      body: {
+        if (laneIds != null) 'lane_ids': laneIds,
+      },
+    );
+    final raw = decoded['cleared_lanes'];
+    return raw is num ? raw.toInt() : int.tryParse('$raw') ?? 0;
+  }
+
+  /// Removes terminal background work (finished/failed/cancelled autopilot runs
+  /// and, for admins, finished fleets). Running work is never touched.
+  Future<({int autopilot, int fleets})> clearFinishedBackgroundWork(
+      {String project = ''}) async {
+    final uri = _uri('/v1/background-work/clear');
+    final response = await requestPost(
+      uri,
+      headers: _headers(),
+      body: jsonEncode({
+        if (project.isNotEmpty) 'project': project,
+      }),
+      timeout: const Duration(seconds: 20),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw responseException(
+          response, 'Could not clear finished background work.');
+    }
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    if (decoded is! Map<String, dynamic>) {
+      throw SonderException('Invalid background work response.');
+    }
+    int count(Object? v) => v is num ? v.toInt() : int.tryParse('$v') ?? 0;
+    return (
+      autopilot: count(decoded['cleared_autopilot']),
+      fleets: count(decoded['cleared_fleets']),
+    );
+  }
+
   /// Lists the API keys of the signed-in session's account. The account comes
   /// only from the session token (`X-Sonder-Account-Token`), never from the
   /// request body. An assigned API key cannot use this route: the server
@@ -1211,11 +1272,21 @@ class SonderApi implements SonderApiPort {
   }
 
   @override
-  Future<SystemInfo> systemInfo() async {
+  Future<SystemInfo> systemInfo({String? sessionId, String? project}) async {
     // Status must stay bound to the configured host; otherwise polling can
     // silently replace a remote machine's diagnostics with this laptop's.
-    final resp =
-        await _get(_uri('/v1/sonder/status'), const Duration(seconds: 20));
+    final query = <String, String>{};
+    final sess = sessionId?.trim() ?? '';
+    final proj = project?.trim() ?? '';
+    if (sess.isNotEmpty) query['session'] = sess;
+    if (proj.isNotEmpty) query['project'] = proj;
+    final baseUri = _uri('/v1/sonder/status');
+    final uri =
+        query.isEmpty ? baseUri : baseUri.replace(queryParameters: query);
+    final resp = await _get(
+      uri,
+      const Duration(seconds: 20),
+    );
     if (resp.statusCode != 200) {
       throw _failure(
         resp,
@@ -1667,6 +1738,8 @@ class SonderApi implements SonderApiPort {
     required bool allowApproximateLocation,
     required bool stream,
     Object? sessionTemperature,
+    Object? sessionReasoningEffort,
+    String? persona,
     String? history,
   }) async {
     if (history != null && history != 'client' && history != 'auto') {
@@ -1676,6 +1749,7 @@ class SonderApi implements SonderApiPort {
         allowApproximateLocation && _needsApproximateLocation(messages)
             ? await _discoverApproximateLocation()
             : null;
+    final trimmedPersona = persona?.trim();
     return jsonEncode({
       'model': model,
       'context_size': contextSize,
@@ -1684,6 +1758,10 @@ class SonderApi implements SonderApiPort {
       // A number 0..2 sets the session's temperature, "auto" clears it; an
       // absent field leaves it alone (a typed /temp stays).
       if (sessionTemperature != null) 'session_temperature': sessionTemperature,
+      if (sessionReasoningEffort != null)
+        'session_reasoning_effort': sessionReasoningEffort,
+      if (trimmedPersona != null && trimmedPersona.isNotEmpty)
+        'persona': trimmedPersona,
       'location_consent': allowApproximateLocation,
       if (locationHint != null) 'location_hint': locationHint,
       // Server S5: "client" means use only the messages sent, never inject
@@ -1728,6 +1806,8 @@ class SonderApi implements SonderApiPort {
     String project = '',
     bool allowApproximateLocation = false,
     Object? sessionTemperature,
+    Object? sessionReasoningEffort,
+    String? persona,
     String? history,
     bool clientExec = true,
     CancelToken? cancel,
@@ -1743,6 +1823,8 @@ class SonderApi implements SonderApiPort {
         project: project,
         allowApproximateLocation: allowApproximateLocation,
         sessionTemperature: sessionTemperature,
+        sessionReasoningEffort: sessionReasoningEffort,
+        persona: persona,
         history: history,
         clientExec: clientExec,
         cancel: token,
@@ -1763,6 +1845,8 @@ class SonderApi implements SonderApiPort {
     required CancelToken cancel,
     required bool allowFallback,
     Object? sessionTemperature,
+    Object? sessionReasoningEffort,
+    String? persona,
     String? history,
     bool clientExec = true,
     Duration? timeout,
@@ -1775,6 +1859,8 @@ class SonderApi implements SonderApiPort {
       project: project,
       allowApproximateLocation: allowApproximateLocation,
       sessionTemperature: sessionTemperature,
+      sessionReasoningEffort: sessionReasoningEffort,
+      persona: persona,
       history: history,
       stream: false,
     );
@@ -1867,6 +1953,8 @@ class SonderApi implements SonderApiPort {
     String project = '',
     bool allowApproximateLocation = false,
     Object? sessionTemperature,
+    Object? sessionReasoningEffort,
+    String? persona,
     String? history,
     bool clientExec = true,
     CancelToken? cancel,
@@ -1882,6 +1970,8 @@ class SonderApi implements SonderApiPort {
         project: project,
         allowApproximateLocation: allowApproximateLocation,
         sessionTemperature: sessionTemperature,
+        sessionReasoningEffort: sessionReasoningEffort,
+        persona: persona,
         history: history,
         stream: true,
       );
@@ -2107,6 +2197,34 @@ class SystemInfo {
     this.allowedFeatures,
     this.capabilities,
   });
+
+  SystemInfo withContext(ContextHealth? nextContext) => SystemInfo(
+        status: status,
+        stats: stats,
+        learnTiers: learnTiers,
+        improvements: improvements,
+        dbPath: dbPath,
+        stateHome: stateHome,
+        deployment: deployment,
+        operationalCapabilities: operationalCapabilities,
+        context: nextContext,
+        agents: agents,
+        autopilot: autopilot,
+        runtimePolicy: runtimePolicy,
+        selfmod: selfmod,
+        mcpRuntime: mcpRuntime,
+        learningHealth: learningHealth,
+        activity: activity,
+        execution: execution,
+        executionFeed: executionFeed,
+        models: models,
+        role: role,
+        publicHosting: publicHosting,
+        clientExecSupported: clientExecSupported,
+        hostBypassAllowed: hostBypassAllowed,
+        allowedFeatures: allowedFeatures,
+        capabilities: capabilities,
+      );
 
   factory SystemInfo.fromJson(Map<String, dynamic> json) {
     final models = (json['models'] as List? ?? const [])
@@ -3866,6 +3984,49 @@ class ContextHealth {
     required this.dbPath,
     required this.stateHome,
   });
+
+  ContextHealth copyWithUsage({
+    String? session,
+    String? project,
+    int? estimatedTokens,
+    int? liveTurns,
+    int? totalTurns,
+  }) {
+    final nextTokens = estimatedTokens ?? this.estimatedTokens;
+    final limit = contextLimit > 0 ? contextLimit : nativeContextLimit;
+    final pct = limit > 0 ? (nextTokens * 100.0 / limit) : 0.0;
+    return ContextHealth(
+      session: session ?? this.session,
+      project: project ?? this.project,
+      title: title,
+      status: status,
+      contextLimit: contextLimit,
+      nativeContextLimit: nativeContextLimit,
+      contextMode: contextMode,
+      estimatedTokens: nextTokens,
+      contextPercent: pct,
+      contextBar: contextBar,
+      liveTurns: liveTurns ?? this.liveTurns,
+      maxLiveTurns: maxLiveTurns,
+      totalTurns: totalTurns ?? this.totalTurns,
+      turnPercent: turnPercent,
+      turnBar: turnBar,
+      summaryTokens: summaryTokens,
+      liveTokens: nextTokens,
+      summaryChars: summaryChars,
+      summarizedThrough: summarizedThrough,
+      updatedTs: updatedTs,
+      sessions: sessions,
+      lessons: lessons,
+      facts: facts,
+      interactions: interactions,
+      outcomes: outcomes,
+      memoryPercent: memoryPercent,
+      memoryBar: memoryBar,
+      dbPath: dbPath,
+      stateHome: stateHome,
+    );
+  }
 
   factory ContextHealth.fromJson(Map<String, dynamic> json) {
     return ContextHealth(

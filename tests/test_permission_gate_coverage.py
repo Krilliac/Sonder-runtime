@@ -140,7 +140,14 @@ def _agent_tools():
 
     graded = {}
     for command in command_catalog.catalog():
-        graded[command.name.lstrip("/")] = (command.name.lstrip("/"),)
+        entry = (command.name.lstrip("/"),)
+        graded[command.name.lstrip("/")] = entry
+        if command.tool:
+            graded.setdefault(command.tool, (command.tool,))
+        for cmd_alias in command.aliases:
+            bare = cmd_alias.lstrip("/")
+            if bare:
+                graded.setdefault(bare, entry)
     for alias, target in _server._AGENT_TOOL_ALIASES.items():
         if target in graded:
             graded[alias] = graded[target]
@@ -175,6 +182,7 @@ _DISPLAY_ONLY_BRANCHES = {
     "/trace": "session output toggle (apply_trace)",
     "/strict": "session output toggle (apply_strict)",
     "/temp": "sets this session's sampling temperature in process memory (temperature_settings.STORE); no tool call",
+    "/effort": "sets this session's reasoning effort in process memory (effort_settings.STORE); no tool call",
     "/model": "chooses which model answers; no tool call",
     "/persona": "chooses the persona; reads personas.names()",
     "/prompts": "lists/shows editable prompt files (prompt_store.command); reload only clears a read cache",

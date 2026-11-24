@@ -29,6 +29,9 @@ def test_default_policy_prefers_shared_sonder_alias():
         "general": "sonder:latest",
         "reasoning": "",
         "vision": "",
+        "security": "",
+        "creative": "",
+        "draft": "",
     }
     assert policy["embedding_model"] == "nomic-embed-text"
     assert policy["routing"]["router"] == "fast"
@@ -60,6 +63,9 @@ def test_environment_seeds_first_policy_without_allowing_cloud(policy_file, monk
         "general": "qwen2.5:7b-instruct",
         "reasoning": "",
         "vision": "",
+        "security": "",
+        "creative": "",
+        "draft": "",
     }
     assert policy["embedding_model"] == "nomic-embed-text"
 

@@ -96,13 +96,39 @@ class LocalManager {
     );
   }
 
+  static bool _isStrictLoopbackHost(String host) {
+    final h = host.toLowerCase();
+    if (h == 'localhost' ||
+        h == '::1' ||
+        h == '[::1]' ||
+        h == '0:0:0:0:0:0:0:1') {
+      return true;
+    }
+    final octets = h.split('.');
+    return octets.length == 4 &&
+        octets.first == '127' &&
+        octets.every((part) {
+          final n = int.tryParse(part);
+          return n != null && n >= 0 && n <= 255 && n.toString() == part;
+        });
+  }
+
   static Uri? _companionUri(String companionUrl, String path) {
     final raw = companionUrl.trim().isEmpty
         ? defaultClientAgentUrl
         : companionUrl.trim().replaceAll(RegExp(r'/+$'), '');
-    final uri = Uri.tryParse('$raw$path');
-    if (uri == null || !isLoopbackHost(uri.host)) return null;
-    return uri;
+    final base = Uri.tryParse(raw);
+    if (base == null ||
+        !const {'http', 'https'}.contains(base.scheme.toLowerCase()) ||
+        base.host.isEmpty ||
+        !_isStrictLoopbackHost(base.host) ||
+        base.userInfo.isNotEmpty ||
+        base.hasQuery ||
+        base.hasFragment ||
+        (base.path.isNotEmpty && base.path != '/')) {
+      return null;
+    }
+    return base.replace(path: path, query: null, fragment: null);
   }
 
   /// Probe the loopback client companion (`127.0.0.1:11439`) from the browser.
@@ -174,10 +200,10 @@ class LocalManager {
         message: 'Connected to local client companion.',
       );
     } catch (_) {
-      return const ClientAgentHealth(
+      return ClientAgentHealth(
         reachable: false,
         message:
-            'Local client companion is not running on 127.0.0.1:11439.',
+            'Local client companion is not running on ${healthUri.authority}.',
       );
     }
   }

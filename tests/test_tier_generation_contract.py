@@ -313,7 +313,7 @@ def _generation_host(graph, wire):
     from sonder_runtime.application.chat import provider_bridge
     from sonder_runtime.domain.model_usage import response_metadata
 
-    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
 
     def chat(payload, **_kwargs):
@@ -420,7 +420,7 @@ def test_isolated_planner_json_budget_and_thinking_are_provider_scoped(monkeypat
         # The real tool-lane check, on a default policy: an ordinary model is not refused.
         _tool_lane_guard=tool_lane_guard, _RUNTIME_POLICY=runtime_policy.default_policy({}),
     )
-    source = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    source = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     function = next(n for n in source.body if isinstance(n, ast.FunctionDef) and n.name == "_autopilot_json_model")
     exec(compile(ast.Module(body=[function], type_ignores=[]), "server.py", "exec"), namespace)
     monkeypatch.setenv("SONDER_AUTOPILOT_JSON_NUM_PREDICT", "5000")

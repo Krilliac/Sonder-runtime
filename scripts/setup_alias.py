@@ -1,0 +1,321 @@
+"""Create Sonder Runtime's stable Ollama alias safely online or offline."""
+from __future__ import annotations
+
+import sys as _sonder_sys
+from pathlib import Path as _SonderPath
+_SONDER_REPO_ROOT = _SonderPath(__file__).resolve().parents[1]
+for _sonder_p in (str(_SONDER_REPO_ROOT / "scripts"), str(_SONDER_REPO_ROOT / "runtime"), str(_SONDER_REPO_ROOT)):
+    if _sonder_p not in _sonder_sys.path:
+        _sonder_sys.path.insert(0, _sonder_p)
+import argparse
+import glob
+import os
+import shutil
+import subprocess
+import tempfile
+
+import bootstrap_engine
+from sonder_runtime.adapters.inference import ollama_endpoint
+from sonder_runtime.adapters import prompt_store as _prompts
+
+from sonder_runtime.adapters.model_list_consumers import values as _list_values
+
+
+def _list_value(name):
+    value = _list_values()
+    for key in _LIST_KEYS[name].split("."):
+        value = value[key]
+    return value
+
+
+def __getattr__(name):
+    if name not in _LIST_KEYS:
+        raise AttributeError(name)
+    return _list_value(name)
+
+
+_LIST_KEYS = {'DEFAULT_EMBED_MODEL': 'default_embedding_model', 'STABLE_ALIAS': 'stable_alias'}
+
+
+
+
+def default_base_model() -> str:
+    """Choose a practical model from live RAM unless the operator pins one."""
+    return os.environ.get("SONDER_BASE_MODEL", "").strip() or bootstrap_engine.choose_model()
+
+# Directories a mounted removable drive (e.g. an "Open Source Everything"
+# facts. USB) typically appears under, per platform. Used only when the
+# operator asks to import a GGUF from USB; nothing is scanned automatically.
+_USB_MOUNT_GLOBS = (
+    "/media/*/*",      # Linux (udisks)
+    "/run/media/*/*",  # Linux (systemd)
+    "/mnt/*",          # Linux (manual mounts)
+    "/Volumes/*",      # macOS
+)
+
+
+def model_file(base_model: str) -> str:
+    return (
+        f"FROM {base_model}\n"
+        "PARAMETER temperature 0.2\n"
+        # Editable: prompts/ollama_alias_system.md (or an override). It is
+        # baked into the alias, so an edit applies when the alias is rebuilt.
+        f'SYSTEM """{_prompts.render("ollama_alias_system")}"""\n'
+    )
+
+
+def ollama_executable(explicit: str = "") -> str:
+    candidate = explicit.strip() or os.environ.get("SONDER_OLLAMA_EXE", "").strip()
+    if candidate:
+        return candidate
+    return shutil.which("ollama") or "ollama"
+
+
+def _run(ollama: str, args: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess:
+    print("+ " + " ".join([ollama, *args]))
+    client_env = ollama_endpoint.client_environment(env)
+    return subprocess.run(
+        [ollama, *args],
+        env=client_env,
+        text=True,
+        capture_output=True,
+    )
+
+
+def find_gguf_files(roots) -> list[str]:
+    """Return .gguf paths found (non-recursively deep) under given roots.
+
+    Each root is scanned itself and one directory level down, which covers a
+    USB stick that keeps models at its top level or in a ``models/`` folder
+    without walking an entire filesystem.
+    """
+    found: list[str] = []
+    for root in roots:
+        root = os.path.expanduser(str(root))
+        if os.path.isfile(root) and root.lower().endswith(".gguf"):
+            found.append(root)
+            continue
+        if not os.path.isdir(root):
+            continue
+        patterns = (
+            os.path.join(root, "*.gguf"),
+            os.path.join(root, "*", "*.gguf"),
+        )
+        for pattern in patterns:
+            found.extend(sorted(glob.glob(pattern)))
+    # De-duplicate while preserving order.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for path in found:
+        real = os.path.realpath(path)
+        if real not in seen:
+            seen.add(real)
+            unique.append(path)
+    return unique
+
+
+def discover_usb_gguf(extra_roots=()) -> list[str]:
+    """Enumerate GGUF files on mounted removable media (and any extra roots)."""
+    roots: list[str] = []
+    for pattern in _USB_MOUNT_GLOBS:
+        roots.extend(sorted(glob.glob(pattern)))
+    roots.extend(str(r) for r in extra_roots)
+    return find_gguf_files(roots)
+
+
+def import_gguf(
+    ollama: str,
+    gguf_path: str,
+    model_name: str,
+    *,
+    env: dict[str, str],
+) -> tuple[bool, str]:
+    """Register a local .gguf file with Ollama under ``model_name``.
+
+    Uses an Ollama Modelfile ``FROM <absolute .gguf path>``; Ollama copies
+    the weights into its own store, so the USB can be removed afterward.
+    This is the offline import path for a portable model such as the
+    facts. USB (Qwen 3.x 4B) — no registry contact.
+    """
+    gguf_path = os.path.abspath(os.path.expanduser(gguf_path))
+    if not os.path.isfile(gguf_path):
+        return False, f"GGUF file not found: {gguf_path}"
+    if not gguf_path.lower().endswith(".gguf"):
+        return False, f"not a .gguf file: {gguf_path}"
+    fd, path = tempfile.mkstemp(suffix=".Modelfile")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write("FROM %s\n" % gguf_path)
+        created = _run(ollama, ["create", model_name, "-f", path], env=env)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    if created.returncode == 0:
+        return True, f"Imported {os.path.basename(gguf_path)} as {model_name}."
+    detail = (created.stderr or created.stdout).strip()
+    return False, f"Could not import {gguf_path}: {detail or 'ollama create failed'}"
+
+
+def ensure_model(
+    ollama: str,
+    model: str,
+    *,
+    offline: bool,
+    env: dict[str, str],
+) -> tuple[bool, str]:
+    present = _run(ollama, ["show", model], env=env)
+    if present.returncode == 0:
+        return True, f"{model} is already available."
+    if offline:
+        return False, f"{model} is missing; offline mode will not contact a registry."
+    pulled = _run(ollama, ["pull", model], env=env)
+    if pulled.returncode == 0:
+        return True, f"Downloaded {model}."
+    detail = (pulled.stderr or pulled.stdout).strip()
+    return False, f"Could not download {model}: {detail or 'ollama pull failed'}"
+
+
+def create_alias(
+    ollama: str,
+    base_model: str,
+    *,
+    env: dict[str, str],
+) -> tuple[bool, str]:
+    fd, path = tempfile.mkstemp(suffix=".Modelfile")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(model_file(base_model))
+        created = _run(ollama, ["create", _list_value('STABLE_ALIAS'), "-f", path], env=env)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    if created.returncode == 0:
+        return True, f"Created the {_list_value('STABLE_ALIAS')} alias."
+    detail = (created.stderr or created.stdout).strip()
+    return False, f"Could not create {_list_value('STABLE_ALIAS')}: {detail or 'ollama create failed'}"
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("SONDER_BASE_MODEL", "").strip(),
+        help="Base Ollama model (default: choose from live host memory)",
+    )
+    parser.add_argument(
+        "--embed-model",
+        default=os.environ.get("SONDER_EMBED_MODEL", _list_value('DEFAULT_EMBED_MODEL')),
+    )
+    parser.add_argument(
+        "--no-embedding",
+        action="store_true",
+        help="skip the optional embedding-model check/pull; semantic memory can be enabled later",
+    )
+    parser.add_argument("--ollama", default="")
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="use only models already available to the local Ollama server",
+    )
+    parser.add_argument(
+        "--gguf",
+        default="",
+        help="import a local .gguf file as the base model and alias it "
+             "(e.g. a facts. USB model); implies offline",
+    )
+    parser.add_argument(
+        "--from-usb",
+        action="store_true",
+        help="discover a .gguf on mounted removable media and import it; "
+             "prompts if several are found unless --gguf pins one",
+    )
+    parser.add_argument(
+        "--usb-root",
+        action="append",
+        default=[],
+        help="additional mount path to scan for a .gguf (repeatable)",
+    )
+    args = parser.parse_args(argv)
+    embed_model = "" if args.no_embedding else args.embed_model.strip()
+
+    try:
+        env = ollama_endpoint.client_environment(os.environ)
+    except ValueError as error:
+        print("Ollama endpoint blocked: %s" % error)
+        return 4
+    ollama = ollama_executable(args.ollama)
+
+    # Portable-model path: import a .gguf from a file or USB and alias it.
+    gguf_path = args.gguf.strip()
+    if args.from_usb and not gguf_path:
+        candidates = discover_usb_gguf(args.usb_root)
+        if not candidates:
+            print("  usb: no .gguf found on mounted removable media"
+                  + (" or %s" % ", ".join(args.usb_root) if args.usb_root else ""))
+            return 2
+        if len(candidates) > 1:
+            print("  usb: multiple GGUF files found; re-run with --gguf <path>:")
+            for path in candidates:
+                print("    - %s" % path)
+            return 2
+        gguf_path = candidates[0]
+    if gguf_path:
+        ok, message = import_gguf(ollama, gguf_path, _list_value('STABLE_ALIAS'), env=env)
+        print(f"  import: {message}")
+        if not ok:
+            return 2
+        if embed_model:
+            ok, message = ensure_model(
+                ollama, embed_model, offline=True, env=env,
+            )
+            print(f"  embedding: {message}")
+            if not ok:
+                print("  note: recall/lessons need an embedding model; pull "
+                      "nomic-embed-text when back online, or set SONDER_EMBED_MODEL.")
+        else:
+            print("  embedding: skipped; recall/lessons can be enabled later")
+        print("Done. %s now serves the imported model. Verify: ollama list"
+              % _list_value('STABLE_ALIAS'))
+        return 0
+
+    base_model = args.model.strip() or default_base_model()
+    if not base_model:
+        parser.error("base model name may not be empty")
+
+    ok, message = ensure_model(ollama, base_model, offline=args.offline, env=env)
+    print(f"  base: {message}")
+    if not ok:
+        return 2
+
+    # Core REPL/API chat needs the generative base model only.  Try to make a
+    # fresh setup feature-complete by acquiring the default embedder too, but
+    # do not discard a usable local chat installation when an optional pull is
+    # offline, unavailable, or rejected by the provider.
+    embedding_note = ""
+    if embed_model:
+        ok, message = ensure_model(ollama, embed_model, offline=args.offline, env=env)
+        print(f"  embedding: {message}")
+        if not ok:
+            embedding_note = (
+                "  note: core chat is ready; recall/lessons need an embedding model. Pull %s later, "
+                "or set SONDER_EMBED_MODEL." % embed_model
+            )
+    else:
+        print("  embedding: skipped; semantic memory can be enabled later")
+        embedding_note = "  note: core chat is ready without semantic memory"
+    ok, message = create_alias(ollama, base_model, env=env)
+    print(f"  alias: {message}")
+    if not ok:
+        return 3
+    if embedding_note:
+        print(embedding_note)
+    print("Done. Verify with: ollama list")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

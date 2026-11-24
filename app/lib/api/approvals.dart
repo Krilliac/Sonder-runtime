@@ -127,6 +127,19 @@ class ApprovalsSnapshot {
 
   const ApprovalsSnapshot({this.pending = const [], this.open = const []});
 
+  /// Pending calls still awaiting an operator decision: excludes calls that
+  /// were already denied or already have an open approval issued.
+  List<PendingApproval> get actionablePending {
+    if (pending.isEmpty) return const [];
+    final openIds = {
+      for (final a in open)
+        if (a.callId.isNotEmpty) a.callId,
+    };
+    return pending
+        .where((p) => !p.denied && !openIds.contains(p.callId))
+        .toList(growable: false);
+  }
+
   factory ApprovalsSnapshot.fromJson(Map<String, dynamic> json) {
     List<Map<String, dynamic>> rows(Object? v) => v is List
         ? v.whereType<Map>().map(Map<String, dynamic>.from).toList()

@@ -28,7 +28,7 @@ abstract class ChatBackend {
   /// own request and is never cancelled by Stop.
   Future<void> recordFeedback(String command, TurnRequest context);
 
-  Future<SystemInfo> systemInfo();
+  Future<SystemInfo> systemInfo({String? sessionId, String? project});
   Future<ServerCapabilities?> fetchCapabilities();
   Future<WhoamiInfo?> fetchWhoami();
   Future<List<String>> listModels();
@@ -72,6 +72,14 @@ abstract class ChatBackend {
   Future<WorkRun> cancelWorkRun(String id);
   Future<List<WorkRun>> listWorkRuns();
 
+  /// List durable server sessions (`GET /v1/sessions`), or null when the
+  /// server/role does not expose them.
+  Future<SessionPage?> listServerSessions({int limit = 50}) async => null;
+
+  /// Replay one server session (`GET /v1/sessions/<id>/replay`), or null when
+  /// unavailable.
+  Future<SessionReplay?> replayServerSession(String sessionId) async => null;
+
   /// The server's own record of the pending call [callId]
   /// (`GET /v1/approvals`): its tool, digest and redacted arguments. The
   /// approval sheet is drawn only from this, never from reply text.
@@ -104,6 +112,15 @@ class TurnRequest {
   /// leave the session's value alone (see [SessionTemperatureSync]).
   final Object? sessionTemperature;
 
+  /// The `session_reasoning_effort` to send: `off`..`xhigh`, `'auto'`, or null
+  /// to leave the session's value alone (see [SessionEffortSync]).
+  final Object? sessionReasoningEffort;
+
+  /// The `persona` to send: `'auto'`, `'off'`, one of the 9 persona names, or
+  /// null to leave the server default / session pin alone (see
+  /// [SessionPersonaSync]).
+  final String? persona;
+
   /// `'client'` asks the server not to inject its durable history (server
   /// S5). Set after a session rotation, so a cancelled first turn cannot be
   /// resurrected from the server side.
@@ -120,6 +137,8 @@ class TurnRequest {
     this.project = '',
     this.allowApproximateLocation = false,
     this.sessionTemperature,
+    this.sessionReasoningEffort,
+    this.persona,
     this.historyMode,
     this.clientExec = true,
   });
@@ -267,8 +286,8 @@ class SonderApiChatBackend implements ChatBackend {
       );
 
   @override
-  Future<SystemInfo> systemInfo() async {
-    final info = await api.systemInfo();
+  Future<SystemInfo> systemInfo({String? sessionId, String? project}) async {
+    final info = await api.systemInfo(sessionId: sessionId, project: project);
     final activity = info.activity;
     if (_open.isEmpty) {
       _runningBefore = {
@@ -376,6 +395,24 @@ class SonderApiChatBackend implements ChatBackend {
 
   @override
   Future<List<WorkRun>> listWorkRuns() => _workRuns((r) => r.list());
+
+  @override
+  Future<SessionPage?> listServerSessions({int limit = 50}) async {
+    try {
+      return await api.sessions.list(limit: limit);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Future<SessionReplay?> replayServerSession(String sessionId) async {
+    try {
+      return await api.sessions.replay(sessionId);
+    } catch (_) {
+      return null;
+    }
+  }
 
   @override
   Future<PendingCallLookup> lookupPendingCall(String callId) async {
@@ -513,6 +550,8 @@ class _ApiTurn implements ChatTurn {
         project: r.project,
         allowApproximateLocation: r.allowApproximateLocation,
         sessionTemperature: r.sessionTemperature,
+        sessionReasoningEffort: r.sessionReasoningEffort,
+        persona: r.persona,
         history: r.historyMode,
         clientExec: r.clientExec,
         cancel: _cancel,

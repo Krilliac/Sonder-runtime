@@ -138,7 +138,7 @@ def natural_model_request(text, *, profile_scope, bare_tagged_request):
         # Keep this an imperative whole-turn grammar: it is deliberately not
         # a classifier over retrieved prose.  ``available`` describes the
         # catalog while local/cloud selects its bounded scope.
-        r"^(?:ask|run|try|query)\s+(?:all|every)\s+(?:of\s+)?(?:the\s+|my\s+)?(?:(?:currently\s+)?available\s+)?(?:(?:(local|cloud|local\s+(?:and|\+)\s+cloud|cloud\s+(?:and|\+)\s+local)\s+)?models?|local\s+models?\s+(?:and|\+)\s+cloud\s+models?|cloud\s+models?\s+(?:and|\+)\s+local\s+models?)(?:\s+(?:currently\s+)?available)?\b\s*(?::|to\s+answer\b:?|answer\b:?|to\b|for\s+)\s*(.+)$",
+        r"^(?:ask|run|try|query|fan[- ]?out(?:\s+(?:across|to|over))?)\s+(?:all|every)\s+(?:of\s+)?(?:the\s+|my\s+)?(?:(?:currently\s+)?available\s+)?(?:(?:(local|cloud|local\s+(?:and|\+)\s+cloud|cloud\s+(?:and|\+)\s+local)\s+)?models?|local\s+models?\s+(?:and|\+)\s+cloud\s+models?|cloud\s+models?\s+(?:and|\+)\s+local\s+models?)(?:\s+(?:currently\s+)?available)?\b\s*(?::|to\s+answer\b:?|answer\b:?|to\b|for\s+)\s*(.+)$",
         value, re.IGNORECASE | re.DOTALL,
     )
     if fanout:

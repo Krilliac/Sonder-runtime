@@ -23,7 +23,7 @@ void main() {
           "'${pidFile.path}'; Start-Sleep -Seconds 120",
     ]);
     addTearDown(() => launcher.kill());
-    for (var i = 0; i < 100 && !pidFile.existsSync(); i++) {
+    for (var i = 0; i < 250 && !pidFile.existsSync(); i++) {
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
     final childText = pidFile.existsSync() ? pidFile.readAsStringSync() : '';

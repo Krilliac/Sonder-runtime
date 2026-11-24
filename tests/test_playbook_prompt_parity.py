@@ -77,7 +77,7 @@ def _load(function, parts):
         "_read_system_context": lambda: parts,
         "_SYSTEM_CONTEXT": SimpleNamespace(parts=None),
         "_prompts": SimpleNamespace(render=lambda name: "TRACE"),
-        "personas": SimpleNamespace(get=lambda name: "PERSONA:" + name),
+        "personas": SimpleNamespace(OFF="off", get=lambda name: "PERSONA:" + name),
         "_provider_bridge": SimpleNamespace(is_hosted=lambda provider: provider == "hosted"),
         "playbook_context": SimpleNamespace(frame_owner_notes=frame_owner_notes),
         "_prefix_cache": SimpleNamespace(compose_local_system=compose_local_system),
@@ -88,7 +88,7 @@ def _load(function, parts):
 
 @pytest.fixture(scope="module")
 def sources():
-    return _function(LEGACY_BUILD_SYSTEM), _function((ROOT / "server.py").read_text(encoding="utf-8"))
+    return _function(LEGACY_BUILD_SYSTEM), _function((ROOT / "runtime" / "server.py").read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("system", ["", "Caller system", "Line one\nLine two é"])

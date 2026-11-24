@@ -15,6 +15,9 @@ def test_format_model_readiness_reports_core_memory_and_optional_states():
         "    semantic memory: requires embedding model nomic-embed-text",
         "    reasoning: not configured (optional)",
         "    vision: requires missing-vision:latest",
+        "    security: not configured (optional)",
+        "    creative: not configured (optional)",
+        "    draft: not configured (optional)",
     ]
 
 

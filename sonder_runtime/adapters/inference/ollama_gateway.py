@@ -311,6 +311,9 @@ class OllamaGateway:
             )
 
         num_predict = options.get("num_predict", 1024)
+        raw_effort = options.get("reasoning_effort")
+        from ...domain.reasoning_effort import check_effort as _check_effort
+        reasoning_effort = _check_effort(raw_effort) if raw_effort is not None else None
         think_supplied = "think" in options
         think = options.get("think")
         if think_supplied and not isinstance(think, bool):
@@ -319,6 +322,8 @@ class OllamaGateway:
             raise InvalidInput(
                 "hosted-model thinking is controlled by provider policy"
             )
+        if not think_supplied and not cloud and reasoning_effort is not None:
+            think = reasoning_effort != "off"
         continuation_default = tier_label == "reasoning" and not cloud and think is not False
         reasoning_continuation = options.get(
             "reasoning_continuation", continuation_default,

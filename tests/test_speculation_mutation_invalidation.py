@@ -90,7 +90,7 @@ def test_agent_loop_passes_the_committed_tool_to_resolve():
     """The server dispatch path must tell the engine which tool committed."""
     from pathlib import Path
 
-    source = (Path(__file__).resolve().parents[1] / "server.py").read_text(
+    source = (Path(__file__).resolve().parents[1] / "runtime" / "server.py").read_text(
         encoding="utf-8"
     )
     assert "_spec_engine.resolve(call_signature, tool_name)" in source

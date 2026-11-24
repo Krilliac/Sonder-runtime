@@ -45,12 +45,22 @@ class ChatSession {
     chat = ChatController(_backendFor(settings), model: settings.model)
       ..contextSize = settings.contextSize
       ..temperature = settings.temperature
+      ..reasoningEffort = settings.reasoningEffort
+      ..persona = settings.persona
       ..allowApproximateLocation = settings.allowApproximateLocation
       ..clientExecEnabled = settings.clientExecEnabled
       ..clientPermissionMode = settings.clientPermissionMode
       ..clientWorkspaceRoot = settings.clientWorkspaceRoot
       ..clientAgentUrl = settings.clientAgentUrl
       ..clientAgentToken = settings.clientAgentToken
+      ..onEffortChanged = (effort) {
+        _settings.reasoningEffort = effort;
+        unawaited(_settings.save());
+      }
+      ..onPersonaChanged = (persona) {
+        _settings.persona = persona;
+        unawaited(_settings.save());
+      }
       ..onClientModeChanged = (mode) {
         _settings.clientPermissionMode = mode;
         unawaited(_settings.save());
@@ -125,6 +135,7 @@ class ChatSession {
     chat
       ..contextSize = next.contextSize
       ..temperature = next.temperature
+      ..reasoningEffort = next.reasoningEffort
       ..allowApproximateLocation = next.allowApproximateLocation
       ..clientExecEnabled = next.clientExecEnabled
       ..clientPermissionMode = next.clientPermissionMode
@@ -140,6 +151,7 @@ class ChatSession {
     }
     chat.updateBackend(_backendFor(next), identityChanged: changed);
     chat.syncModel(next.model);
+    chat.syncPersona(next.persona);
   }
 
   /// Settings saved [next]: a different account, origin or key means the

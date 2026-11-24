@@ -20,7 +20,7 @@ def test_agent_decision_paths_do_not_call_root_model_error_wrapper():
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     names = {"_agent_generate_decision", "_agent_turn"}
     functions = {
         node.name: node

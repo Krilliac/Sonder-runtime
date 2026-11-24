@@ -410,8 +410,15 @@ def reply(
         return render_debug(call, status, body)
 
 
+_FENCED_CODE_BLOCK = re.compile(
+    r"^```(?P<lang>[A-Za-z0-9_+.-]*)[ \t]*\r?\n(?P<code>.*?)\r?\n```$",
+    re.DOTALL,
+)
+
+
 def slash_call_arguments(cmd: str, argument: str) -> dict[str, Any] | None:
     """Canonical tool arguments for a slash command so refusals carry a ``call_id``."""
+    cmd = slash_head(cmd)
     text = str(argument or "")
     stripped = text.strip()
     if cmd in ("/write", "/append"):
@@ -429,6 +436,24 @@ def slash_call_arguments(cmd: str, argument: str) -> dict[str, Any] | None:
         return {"path": stripped, "parents": True} if stripped else None
     if cmd == "/delete":
         return {"path": stripped, "recursive": False, "dry_run": True, "confirm": ""} if stripped else None
+    if cmd == "/runprogram":
+        run_parts = [part.strip() for part in text.split("|", 2)]
+        if not run_parts or not run_parts[0]:
+            return None
+        return {
+            "program": run_parts[0],
+            "args_json": run_parts[1] if len(run_parts) > 1 and run_parts[1] else "[]",
+            "cwd": run_parts[2] if len(run_parts) > 2 and run_parts[2] else ".",
+        }
+    if cmd == "/runscript":
+        run_parts = [part.strip() for part in text.split("|", 2)]
+        if not run_parts or not run_parts[0]:
+            return None
+        return {
+            "path": run_parts[0],
+            "args_json": run_parts[1] if len(run_parts) > 1 and run_parts[1] else "[]",
+            "cwd": run_parts[2] if len(run_parts) > 2 else "",
+        }
     if cmd in ("/test", "/build", "/fix-build", "/digest"):
         try:
             args = getattr(parse_chat_command(cmd, text), "arguments", None)
@@ -436,6 +461,10 @@ def slash_call_arguments(cmd: str, argument: str) -> dict[str, Any] | None:
         except Exception:
             return None
     if cmd in ("/run", "/runwindow", "/runnew", "/runconsole") and stripped:
+        fenced = _FENCED_CODE_BLOCK.fullmatch(stripped)
+        if fenced is not None:
+            language = (fenced.group("lang") or "python").strip().lower() or "python"
+            return {"code": fenced.group("code"), "language": language}
         return {"code": stripped, "language": "python"}
     return None
 

@@ -92,7 +92,7 @@ RUNNABLE = (
 
 
 def clear_environment(monkeypatch) -> None:
-    for name in PROVIDER_ENV + TIER_ENV + ("SONDER_MODEL_TOOL_POLICY",):
+    for name in PROVIDER_ENV + TIER_ENV + ("SONDER_MODEL_TOOL_POLICY", "SONDER_ALLOW_SECURITY_MODEL_TOOLS"):
         monkeypatch.delenv(name, raising=False)
 
 

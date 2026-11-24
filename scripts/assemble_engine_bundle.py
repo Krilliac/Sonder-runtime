@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - exercised only by minimal host Python
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+    sys.path[:0] = [str(ROOT), str(ROOT / "runtime"), str(ROOT / "scripts")]
 
 import engine_bundle  # noqa: E402
 

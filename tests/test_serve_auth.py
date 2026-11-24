@@ -2693,7 +2693,11 @@ def test_stream_preserves_long_normal_assistant_content():
         for line in probe.wfile.getvalue().decode("utf-8").splitlines()
         if line.startswith("data: {")
     ]
-    assert payloads[0]["choices"][0]["delta"]["content"] == answer
+    assembled = "".join(
+        payload["choices"][0]["delta"].get("content", "")
+        for payload in payloads
+    )
+    assert assembled == answer
 
 
 def test_chat_forwards_hosted_throttle_delay_and_explanation(monkeypatch):

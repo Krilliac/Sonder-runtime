@@ -17,6 +17,7 @@ from .filesystem.typed import GuardedFileSystemAdapter
 
 _NETWORK_REFUSAL_TOOLS = frozenset({
     "web_fetch", "web_search", "weather_lookup", "approximate_location_lookup",
+    "fetch_artifact",
 })
 
 
@@ -79,6 +80,233 @@ class ToolExecutorAdapter:
                 _require_read(args["path"], args, context)
                 res = workbench.image_inspect(**args)
                 return ToolResult(ok=True, output=json.dumps(res, sort_keys=True), evidence=res)
+            if call.tool == "document_extract":
+                import sonder_runtime.adapters.inspection.document_extract as document_extract
+
+                _require_read(args["path"], args, context)
+                res = document_extract.extract_document(
+                    **args,
+                    developer_authorized=context.auth_level in ("developer", "admin"),
+                )
+                return ToolResult(
+                    ok=True,
+                    output=document_extract.format_result(res),
+                    evidence=res,
+                )
+            if call.tool == "media_inspect":
+                import sonder_runtime.adapters.inspection.media_inspect as media_inspect
+
+                _require_read(args["path"], args, context)
+                res = media_inspect.inspect_media(
+                    **args,
+                    developer_authorized=context.auth_level in ("developer", "admin"),
+                )
+                return ToolResult(
+                    ok=True,
+                    output=media_inspect.format_result(res),
+                    evidence=res,
+                )
+            if call.tool == "code_metrics":
+                import sonder_runtime.adapters.inspection.code_metrics as code_metrics
+
+                _require_read(args.get("path", "."), args, context)
+                res = code_metrics.analyze_code_metrics(
+                    **args,
+                    developer_authorized=context.auth_level in ("developer", "admin"),
+                )
+                return ToolResult(
+                    ok=True,
+                    output=code_metrics.format_result(res),
+                    evidence=res,
+                )
+            if call.tool == "schema_validate":
+                import sonder_runtime.adapters.inspection.schema_validate as schema_validate
+
+                _require_read(args["path"], args, context)
+                if args.get("schema_path"):
+                    _require_read(args["schema_path"], args, context)
+                res = schema_validate.validate_schema(
+                    **args,
+                    developer_authorized=context.auth_level in ("developer", "admin"),
+                )
+                return ToolResult(
+                    ok=True,
+                    output=schema_validate.format_result(res),
+                    evidence=res,
+                )
+            if call.tool == "language_matrix":
+                import sonder_runtime.adapters.inspection.language_matrix as language_matrix
+
+                res = language_matrix.inspect_language_matrix(**args)
+                return ToolResult(
+                    ok=True,
+                    output=language_matrix.format_result(res),
+                    evidence=res,
+                )
+            if call.tool == "math_eval":
+                import sonder_runtime.adapters.inspection.math_eval as math_eval_mod
+
+                res = math_eval_mod.math_eval(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "logic_verify":
+                import sonder_runtime.adapters.inspection.logic_verify as logic_verify_mod
+
+                res = logic_verify_mod.logic_verify(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "regex_lab":
+                import sonder_runtime.adapters.inspection.regex_lab as regex_lab_mod
+
+                res = regex_lab_mod.regex_lab(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "code_graph":
+                import sonder_runtime.adapters.inspection.code_graph as code_graph_mod
+
+                _require_read(args.get("root", "."), args, context)
+                res = code_graph_mod.code_graph(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "diff_semantic":
+                import sonder_runtime.adapters.inspection.diff_semantic as diff_semantic_mod
+
+                if args.get("path_a"):
+                    _require_read(args["path_a"], args, context)
+                if args.get("path_b"):
+                    _require_read(args["path_b"], args, context)
+                res = diff_semantic_mod.diff_semantic(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "reasoning_board":
+                import sonder_runtime.adapters.inspection.reasoning_board as reasoning_board_mod
+
+                owner = str(getattr(context, "owner_id", "") or getattr(context, "principal", "") or "local")
+                clean_args = {k: v for k, v in args.items() if k != "owner"}
+                res = reasoning_board_mod.reasoning_board(owner=owner, **clean_args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "symbol_verify":
+                import sonder_runtime.adapters.inspection.symbol_verify as symbol_verify_mod
+
+                if args.get("root"):
+                    _require_read(args["root"], args, context)
+                res = symbol_verify_mod.symbol_verify(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "citation_audit":
+                import sonder_runtime.adapters.inspection.citation_audit as citation_audit_mod
+
+                if args.get("root"):
+                    _require_read(args["root"], args, context)
+                res = citation_audit_mod.citation_audit(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "fact_cross_check":
+                import sonder_runtime.adapters.inspection.fact_cross_check as fact_cross_check_mod
+
+                res = fact_cross_check_mod.fact_cross_check(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "consistency_check":
+                import sonder_runtime.adapters.inspection.consistency_check as consistency_check_mod
+
+                res = consistency_check_mod.consistency_check(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "plan_fallback":
+                import sonder_runtime.adapters.inspection.plan_fallback as plan_fallback_mod
+
+                res = plan_fallback_mod.plan_fallback(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "runtime_resilience_check":
+                import sonder_runtime.adapters.inspection.runtime_resilience as runtime_resilience_mod
+
+                res = runtime_resilience_mod.runtime_resilience_check()
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "prompt_shield":
+                import sonder_runtime.adapters.inspection.prompt_shield as prompt_shield_mod
+
+                res = prompt_shield_mod.prompt_shield(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "error_diagnose":
+                import sonder_runtime.adapters.inspection.error_diagnose as error_diagnose_mod
+
+                res = error_diagnose_mod.error_diagnose(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "code_audit":
+                import sonder_runtime.adapters.inspection.code_audit as code_audit_mod
+
+                res = code_audit_mod.code_audit(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "data_transform":
+                import sonder_runtime.adapters.inspection.data_transform as data_transform_mod
+
+                res = data_transform_mod.data_transform(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
+            if call.tool == "learn_tool":
+                import sonder_runtime.adapters.inspection.learn_tool as learn_tool_mod
+
+                res = learn_tool_mod.learn_tool(**args)
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, sort_keys=True),
+                    evidence=res,
+                )
             if call.tool in {"process_list", "process_memory_risk_inspect"}:
                 import sonder_runtime.adapters.process_risk as process_risk
 
@@ -189,6 +417,8 @@ class ToolExecutorAdapter:
                 import sonder_runtime.adapters.artifact_fetch as artifact_fetch
 
                 if call.tool == "fetch_artifact":
+                    if not context.cloud_allowed:
+                        raise PermissionError("artifact fetch requires explicit cloud consent")
                     res = artifact_fetch.fetch_artifact(**args)
                     output = artifact_fetch.format_fetch_result(res)
                 else:

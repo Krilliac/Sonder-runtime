@@ -27,7 +27,7 @@ def test_packaged_artifact_risk_owns_public_api():
 
 
 def test_server_imports_packaged_artifact_risk_directly():
-    source = (Path(__file__).resolve().parents[1] / "server.py").read_text(
+    source = (Path(__file__).resolve().parents[1] / "runtime" / "server.py").read_text(
         encoding="utf-8"
     )
     assert "import sonder_runtime.adapters.artifact_risk as artifact_risk_module" in source

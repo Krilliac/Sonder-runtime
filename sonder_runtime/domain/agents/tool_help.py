@@ -153,7 +153,24 @@ def render_tool_help(help_lines, *, allowlist=None, task_kind=None, catalog=None
         lines.append(f"- {name}: {body}")
     other = sorted(admitted - set(core))
     if other:
-        lines.append('other tools (same JSON shape; ask tool_help {"name": ...}): ' + ", ".join(other))
+        prefix = 'other tools (same JSON shape; ask tool_help {"name": ...}): '
+        full_other = prefix + ", ".join(other)
+        base_len = sum(len(line) + 1 for line in lines) + len(_FOOTER) + 1
+        budget = 2000 - base_len
+        if len(full_other) <= budget or budget <= len(prefix):
+            lines.append(full_other)
+        else:
+            shown: list[str] = []
+            for count in range(len(other) - 1, 0, -1):
+                omitted = len(other) - count
+                trimmed_prefix = f'other tools (+{omitted} more; same JSON shape; ask tool_help {{"name": ...}}): '
+                candidate = trimmed_prefix + ", ".join(other[:count])
+                if len(candidate) <= budget:
+                    shown = other[:count]
+                    lines.append(candidate)
+                    break
+            if not shown:
+                lines.append(prefix + other[0])
     lines.append(_FOOTER)
     return "\n".join(lines)
 

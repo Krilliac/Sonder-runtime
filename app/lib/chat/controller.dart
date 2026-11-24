@@ -9,10 +9,14 @@ import '../local_manager.dart';
 import '../models.dart';
 import '../runtime/model_routing.dart';
 import '../settings.dart';
+import '../settings/persona_choice.dart' show normalizePersona;
+import '../settings/reasoning_effort.dart' show normalizeEffort;
 import 'backend.dart';
 import 'commands.dart';
 import 'connection.dart';
 import 'permission_rules.dart';
+import 'session_effort.dart';
+import 'session_persona.dart';
 import 'session_temperature.dart';
 
 /// One transcript row: a stored [message] plus client-only facts that are
@@ -236,7 +240,13 @@ class ChatController extends ChangeNotifier {
   WhoamiInfo? _whoami;
   WhoamiInfo? get whoami => _whoami;
 
-  bool clientExecEnabled = true;
+  /// Test-only override for browser detection in [isClientExecActive].
+  @visibleForTesting
+  static bool? debugIsWeb;
+
+  static bool get _isWebClient => debugIsWeb ?? kIsWeb;
+
+  bool clientExecEnabled = Settings.defaultClientExecEnabled;
   String clientPermissionMode = 'manual';
   String clientWorkspaceRoot = '';
   String clientAgentUrl = Settings.defaultClientAgentUrl;
@@ -285,7 +295,16 @@ class ChatController extends ChangeNotifier {
       status.value?.clientExecSupported ??
       true;
 
-  bool get isClientExecActive => clientExecEnabled && clientExecSupported;
+  bool get isClientExecActive {
+    if (!clientExecEnabled || !clientExecSupported) return false;
+    // On Web, non-restricted users (e.g. an admin on a phone) without a
+    // configured local companion token must not advertise X-Sonder-Client-Exec: 1
+    // or server tools get hijacked to a nonexistent 127.0.0.1:11439 companion.
+    if (_isWebClient && clientAgentToken.trim().isEmpty && !isRestrictedUser) {
+      return false;
+    }
+    return true;
+  }
 
   PermissionMode get clientModeState => PermissionMode(
         mode: clientPermissionMode,
@@ -317,9 +336,9 @@ class ChatController extends ChangeNotifier {
     unawaited(refreshWhoami());
     unawaited(refreshModels());
     unawaited(refreshCommands());
-    unawaited(pollStatus());
     unawaited(refreshPermissionMode());
     await loadThreads();
+    unawaited(pollStatus());
   }
 
   /// Cancel and discard any in-flight streamed turn so switching servers or
@@ -341,9 +360,14 @@ class ChatController extends ChangeNotifier {
     _backend = next;
     if (identityChanged) {
       _temperatureSync.reset();
+      _effortSync.reset();
+      _personaSync.reset();
       // A turn still running against the old server must not confirm its
       // value into the new server's record.
       _tempInFlight = null;
+      _effortInFlight = null;
+      _personaInFlight = null;
+      _lastSessionSync = null;
       _discardActiveTurn();
       _backendGeneration++;
       _pollInFlight = false;
@@ -364,6 +388,9 @@ class ChatController extends ChangeNotifier {
       unawaited(refreshPermissionMode());
       unawaited(refreshModels());
       unawaited(refreshCommands());
+      if (!_loadingThreads) {
+        unawaited(syncServerSessions(force: true));
+      }
     }
   }
 
@@ -383,6 +410,9 @@ class ChatController extends ChangeNotifier {
       _paused = false;
       unawaited(pollStatus());
       unawaited(refreshPermissionMode());
+      if (!_loadingThreads) {
+        unawaited(syncServerSessions(force: true));
+      }
     }
   }
 
@@ -390,15 +420,72 @@ class ChatController extends ChangeNotifier {
 
   void _schedulePoll() {
     _pollTimer?.cancel();
-    if (_paused || _disposed || !_started) return;
+    if (_paused ||
+        _disposed ||
+        !_started ||
+        connection.value.state == ConnState.unauthorized) {
+      return;
+    }
     _pollTimer = Timer(
         sending ? turnPollInterval : idlePollInterval, () => pollStatus());
   }
 
   void _scheduleModePoll() {
     _modeTimer?.cancel();
-    if (_paused || _disposed || !_started) return;
+    if (_paused ||
+        _disposed ||
+        !_started ||
+        connection.value.state == ConnState.unauthorized) {
+      return;
+    }
     _modeTimer = Timer(modePollInterval, () => refreshPermissionMode());
+  }
+
+  /// Estimate tokens for the active thread locally (approx 1 token per 4 chars)
+  /// so the context ring updates immediately on new threads, switches, and turns.
+  int _localThreadTokens(List<ChatMessage> messages) {
+    if (messages.isEmpty) return 0;
+    var chars = 0;
+    for (final m in messages) {
+      chars += ChatMessage.stripInlineDataImages(m.content).length + 16;
+    }
+    return (chars + 3) ~/ 4;
+  }
+
+  SystemInfo _withThreadContext(SystemInfo info) {
+    final serverCtx = info.context;
+    if (serverCtx == null) return info;
+    final currentSession = sessionFor(_currentThreadId);
+    final localMsgs = currentThread.messages;
+    final localTokens = _localThreadTokens(localMsgs);
+    final sameSession =
+        serverCtx.session.isEmpty || serverCtx.session == currentSession;
+    // Never show another session's stale usage (e.g. "default" at 27%) on a
+    // brand-new or switched thread. When on the same session, take the higher
+    // of the server's tracked count and the live local message estimate.
+    final effectiveTokens = sameSession
+        ? (serverCtx.estimatedTokens > localTokens
+            ? serverCtx.estimatedTokens
+            : localTokens)
+        : localTokens;
+    final turns = (localMsgs.length + 1) ~/ 2;
+    return info.withContext(serverCtx.copyWithUsage(
+      session: currentSession,
+      project: _project,
+      estimatedTokens: effectiveTokens,
+      liveTurns: sameSession
+          ? (serverCtx.liveTurns > turns ? serverCtx.liveTurns : turns)
+          : turns,
+      totalTurns: sameSession
+          ? (serverCtx.totalTurns > turns ? serverCtx.totalTurns : turns)
+          : turns,
+    ));
+  }
+
+  void _refreshLocalContextMeter() {
+    final current = status.value;
+    if (current == null) return;
+    status.value = _withThreadContext(current);
   }
 
   /// One status read. Never overlaps another; only notifies when something
@@ -410,12 +497,23 @@ class ChatController extends ChangeNotifier {
     statusRequests++;
     final generation = _backendGeneration;
     final backend = _backend;
+    final requestedSession = sessionFor(_currentThreadId);
+    final requestedProject = _project;
     try {
-      final info = await backend.systemInfo();
+      final info = await backend.systemInfo(
+        sessionId: requestedSession,
+        project: requestedProject,
+      );
       if (_disposed || generation != _backendGeneration) return;
-      status.value = info;
+      status.value = _withThreadContext(info);
       _setConnection(ConnectionStatus(
           ConnState.connected, ConnectionStatus.hostOf(backend.serverUrl)));
+      if (!_loadingThreads &&
+          (_lastSessionSync == null ||
+              DateTime.now().difference(_lastSessionSync!) >=
+                  const Duration(seconds: 15))) {
+        unawaited(syncServerSessions());
+      }
     } catch (e) {
       if (_disposed || generation != _backendGeneration) return;
       status.value = null;
@@ -434,7 +532,11 @@ class ChatController extends ChangeNotifier {
     final wasOffline = connection.value.isOffline;
     connection.value = next;
     // Back from offline: the server may have restarted and lost sessions.
-    if (wasOffline && !next.isOffline) _temperatureSync.reset();
+    if (wasOffline && !next.isOffline) {
+      _temperatureSync.reset();
+      _effortSync.reset();
+      _personaSync.reset();
+    }
     // The chip's enabled state depends on reachability.
     if (wasOffline != next.isOffline) _notify();
   }
@@ -736,6 +838,156 @@ class ChatController extends ChangeNotifier {
     _setEntries(current.messages);
     _loadingThreads = false;
     _notify();
+    unawaited(syncServerSessions(force: true));
+  }
+
+  bool _syncingSessions = false;
+  Future<void>? _syncSessionsFuture;
+  DateTime? _lastSessionSync;
+
+  /// Pull durable sessions from `GET /v1/sessions` (API, TUI/REPL, other GUIs)
+  /// and merge them into the sidebar thread list without discarding local chats.
+  Future<void> syncServerSessions({bool force = false}) {
+    if (_disposed) return Future<void>.value();
+    if (_syncingSessions) return _syncSessionsFuture ?? Future<void>.value();
+    if (!force &&
+        _lastSessionSync != null &&
+        DateTime.now().difference(_lastSessionSync!) <
+            const Duration(seconds: 10)) {
+      return Future<void>.value();
+    }
+    final future = _runSyncServerSessions();
+    _syncSessionsFuture = future;
+    return future;
+  }
+
+  Future<void> _runSyncServerSessions() async {
+    _syncingSessions = true;
+    final generation = _backendGeneration;
+    try {
+      final page = await _backend.listServerSessions(limit: 50);
+      if (_disposed || generation != _backendGeneration) return;
+      _lastSessionSync = DateTime.now();
+      if (page == null || page.sessions.isEmpty) return;
+
+      final updatedThreads = List<ChatThread>.of(_threads);
+      var changed = false;
+      var shouldReplayCurrent = false;
+
+      for (final summary in page.sessions) {
+        if (summary.id.isEmpty) continue;
+        final existingIdx = updatedThreads.indexWhere(
+          (t) => t.id == summary.id || sessionFor(t.id) == summary.id,
+        );
+        final serverTitle = summary.title.trim();
+        final serverUpdated = summary.updatedAt ?? DateTime.now();
+        if (existingIdx >= 0) {
+          final existing = updatedThreads[existingIdx];
+          final localUserTurns =
+              existing.messages.where((m) => m.role == Role.user).length;
+          final needsTitle = serverTitle.isNotEmpty &&
+              (existing.title.trim().isEmpty ||
+                  existing.title == 'New chat' ||
+                  existing.title == existing.id);
+          final newerOnServer = serverUpdated.isAfter(existing.updatedAt);
+          if (needsTitle || newerOnServer) {
+            updatedThreads[existingIdx] = existing.copyWith(
+              title: needsTitle ? serverTitle : existing.title,
+              updatedAt: newerOnServer ? serverUpdated : existing.updatedAt,
+            );
+            changed = true;
+          }
+          final endedInError =
+              existing.messages.isNotEmpty && existing.messages.last.error;
+          final serverAhead = summary.turns > localUserTurns ||
+              (endedInError && summary.turns >= localUserTurns);
+          if (existing.id == _currentThreadId &&
+              !(sending && _turnThreadId == existing.id) &&
+              serverAhead) {
+            shouldReplayCurrent = true;
+          }
+        } else {
+          updatedThreads.add(ChatThread(
+            id: summary.id,
+            title: serverTitle.isNotEmpty ? serverTitle : summary.id,
+            project: '',
+            messages: const [],
+            createdAt: serverUpdated,
+            updatedAt: serverUpdated,
+          ));
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        updatedThreads.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+        _threads = updatedThreads;
+        _notify();
+        unawaited(ChatStore.save(_threads));
+      }
+      if (shouldReplayCurrent) {
+        await syncThreadFromServer(_currentThreadId);
+      }
+    } catch (_) {
+      // Offline, 403 for non-admin, or older server: leave local threads intact.
+    } finally {
+      _syncingSessions = false;
+      _syncSessionsFuture = null;
+    }
+  }
+
+  /// Fetch durable transcript messages for [threadId] via
+  /// `GET /v1/sessions/<id>/replay` and merge when newer/fuller than local state.
+  Future<void> syncThreadFromServer(String threadId) async {
+    if (_disposed || threadId.isEmpty) return;
+    if (sending && _turnThreadId == threadId) return;
+    final generation = _backendGeneration;
+    try {
+      final replay = await _backend.replayServerSession(sessionFor(threadId));
+      if (_disposed || generation != _backendGeneration || replay == null) {
+        return;
+      }
+      final replayed = replay.chatMessages;
+      if (replayed.isEmpty) return;
+      final idx = _threads.indexWhere((t) => t.id == threadId);
+      if (idx < 0) return;
+      final existing = _threads[idx];
+      if (sending && _turnThreadId == threadId) return;
+
+      final localKept = existing.messages.where((m) => !m.pending).toList();
+      final differs = replayed.length > localKept.length ||
+          (replayed.length == localKept.length &&
+              localKept.isNotEmpty &&
+              (replayed.last.content != localKept.last.content ||
+                  (localKept.last.error && !replayed.last.error)));
+      if (!differs) return;
+
+      var title = existing.title;
+      if (title.trim().isEmpty || title == 'New chat' || title == existing.id) {
+        final firstUser = replayed.where((m) => m.role == Role.user).firstOrNull;
+        if (firstUser != null) {
+          final text =
+              firstUser.content.replaceAll(RegExp(r'\s+'), ' ').trim();
+          if (text.isNotEmpty) {
+            title = text.length <= 42 ? text : '${text.substring(0, 42)}...';
+          }
+        }
+      }
+      final nextThreads = List<ChatThread>.of(_threads);
+      nextThreads[idx] = existing.copyWith(
+        title: title,
+        messages: replayed,
+      );
+      _threads = nextThreads;
+      if (threadId == _currentThreadId) {
+        _setEntries(replayed);
+        _refreshLocalContextMeter();
+      }
+      _notify();
+      unawaited(ChatStore.save(_threads));
+    } catch (_) {
+      // Offline or session not on server yet: keep local messages.
+    }
   }
 
   void _setEntries(List<ChatMessage> messages) {
@@ -796,6 +1048,7 @@ class ChatController extends ChangeNotifier {
     if (isCurrent && nextProject != null && nextProject.isNotEmpty) {
       _project = nextProject;
     }
+    if (isCurrent) _refreshLocalContextMeter();
     _notify();
     await ChatStore.save(_threads);
   }
@@ -806,8 +1059,10 @@ class ChatController extends ChangeNotifier {
     _currentThreadId = fresh.id;
     _project = fresh.project;
     _entries.clear();
+    _refreshLocalContextMeter();
     _notify();
     unawaited(ChatStore.save(_threads));
+    unawaited(pollStatus());
   }
 
   void switchThread(ChatThread thread) {
@@ -818,7 +1073,10 @@ class ChatController extends ChangeNotifier {
         _threads.firstWhere((t) => t.id == thread.id, orElse: () => thread);
     _setEntries(latest.messages);
     if (sending && _turnThreadId == thread.id) _restorePendingRow();
+    _refreshLocalContextMeter();
     _notify();
+    unawaited(syncThreadFromServer(thread.id));
+    unawaited(pollStatus());
   }
 
   /// Delete [thread]. The result is what [restoreThread] needs to undo it.
@@ -1004,6 +1262,10 @@ class ChatController extends ChangeNotifier {
     final tempSession = sessionFor(_currentThreadId);
     final tempSent = _temperatureSync.pending(tempSession, temperature);
     _tempInFlight = tempSent == null ? null : (tempSession, tempSent);
+    final effortSent = _effortSync.pending(tempSession, reasoningEffort);
+    _effortInFlight = effortSent == null ? null : (tempSession, effortSent);
+    final personaSent = _personaSync.pending(tempSession, persona);
+    _personaInFlight = personaSent == null ? null : (tempSession, personaSent);
     final request = TurnRequest(
       history: history,
       model: requestModel,
@@ -1012,6 +1274,8 @@ class ChatController extends ChangeNotifier {
       project: _project,
       allowApproximateLocation: allowApproximateLocation,
       sessionTemperature: tempSent,
+      sessionReasoningEffort: effortSent,
+      persona: personaSent,
       historyMode: _rotated(_currentThreadId) ? 'client' : null,
       clientExec: isClientExecActive,
     );
@@ -1024,6 +1288,7 @@ class ChatController extends ChangeNotifier {
     _notify();
     // The user's words are durable before the reply exists.
     unawaited(_saveThread(_turnThreadId, history));
+    _refreshLocalContextMeter();
     // The status poll runs at 1 Hz while a turn is live.
     _schedulePoll();
 
@@ -1105,8 +1370,15 @@ class ChatController extends ChangeNotifier {
     }
     final isWaiting = awaiting ??
         (tool.isAwaitingApproval || tool.isAwaitingClientApproval);
+    final stillWaiting = updated
+        .any((t) => t.isAwaitingApproval || t.isAwaitingClientApproval);
+    final nextPhase = isWaiting
+        ? 'awaiting approval'
+        : (current.phase == 'awaiting approval' && !stillWaiting
+            ? 'running'
+            : null);
     live.value = current.copyWith(
-      phase: isWaiting ? 'awaiting approval' : null,
+      phase: nextPhase,
       toolCalls: List.unmodifiable(updated),
       clearWaitStatus: isWaiting,
     );
@@ -1213,15 +1485,42 @@ class ChatController extends ChangeNotifier {
     final session = tool.session.isNotEmpty
         ? tool.session
         : sessionFor(_turnThreadId.isNotEmpty ? _turnThreadId : _currentThreadId);
-    await backend.submitClientToolResult(
-      tool.callId,
-      ok: execRes.ok,
-      output: execRes.output,
-      error: execRes.error,
-      denied: execRes.denied,
-      session: session,
-    );
-    return execRes;
+    try {
+      await backend.submitClientToolResult(
+        tool.callId,
+        ok: execRes.ok,
+        output: execRes.output,
+        error: execRes.error,
+        denied: execRes.denied,
+        session: session,
+      );
+      if (_disposed || expectedGeneration != _backendGeneration) {
+        return execRes;
+      }
+      final settled = tool.copyWith(
+        state: execRes.ok ? 'done' : 'error',
+        phase: execRes.ok ? 'finished' : 'error',
+        ok: execRes.ok,
+        error: execRes.error.isEmpty ? null : execRes.error,
+        clearError: execRes.error.isEmpty,
+        result: ToolRunResult(ok: execRes.ok, output: execRes.output),
+      );
+      _upsertLiveTool(settled, awaiting: false);
+      _updateEntryTool(tool.callId, (_) => settled);
+      return execRes;
+    } catch (e) {
+      if (!_disposed && expectedGeneration == _backendGeneration) {
+        final failed = tool.copyWith(
+          state: 'error',
+          phase: 'error',
+          ok: false,
+          error: '$e',
+        );
+        _upsertLiveTool(failed, awaiting: false);
+        _updateEntryTool(tool.callId, (_) => failed);
+      }
+      return ClientToolExecResult(ok: false, error: '$e');
+    }
   }
 
   ChatStreamToolEvent? _findClientToolEvent(String callId) {
@@ -1323,17 +1622,16 @@ class ChatController extends ChangeNotifier {
       return const ApprovalOutcome(ApprovalStatus.failed,
           message: 'Server or account changed.');
     }
-    _updateEntryTool(
-      callId,
-      (t) => t.copyWith(
-        state: execRes.ok ? 'done' : 'error',
-        phase: execRes.ok ? 'finished' : 'error',
-        ok: execRes.ok,
-        error: execRes.error.isEmpty ? null : execRes.error,
-        clearError: execRes.error.isEmpty,
-        result: ToolRunResult(ok: execRes.ok, output: execRes.output),
-      ),
+    final settled = ev.copyWith(
+      state: execRes.ok ? 'done' : 'error',
+      phase: execRes.ok ? 'finished' : 'error',
+      ok: execRes.ok,
+      error: execRes.error.isEmpty ? null : execRes.error,
+      clearError: execRes.error.isEmpty,
+      result: ToolRunResult(ok: execRes.ok, output: execRes.output),
     );
+    _upsertLiveTool(settled, awaiting: false);
+    _updateEntryTool(callId, (_) => settled);
     return const ApprovalOutcome(ApprovalStatus.approved);
   }
 
@@ -1367,16 +1665,23 @@ class ChatController extends ChangeNotifier {
       return const ApprovalOutcome(ApprovalStatus.failed,
           message: 'Server or account changed.');
     }
-    _updateEntryTool(
-      callId,
-      (t) => t.copyWith(
-        state: 'denied',
-        phase: 'denied',
-        ok: false,
-        denied: true,
-        error: 'Denied by user on client PC.',
-      ),
+    final deniedEv = (ev ??
+            ChatStreamToolEvent(
+              id: callId,
+              callId: callId,
+              tool: toolName,
+              phase: 'denied',
+              state: 'denied',
+            ))
+        .copyWith(
+      state: 'denied',
+      phase: 'denied',
+      ok: false,
+      denied: true,
+      error: 'Denied by user on client PC.',
     );
+    _upsertLiveTool(deniedEv, awaiting: false);
+    _updateEntryTool(callId, (_) => deniedEv);
     return const ApprovalOutcome(ApprovalStatus.approved);
   }
 
@@ -1396,6 +1701,51 @@ class ChatController extends ChangeNotifier {
   /// The session and `session_temperature` value the live turn carries,
   /// confirmed when the turn succeeds and forgotten when it does not.
   (String, Object)? _tempInFlight;
+
+  /// Reasoning effort (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`),
+  /// or null for Auto (server/model default).
+  String? reasoningEffort;
+  void Function(String? effort)? onEffortChanged;
+  final SessionEffortSync _effortSync = SessionEffortSync();
+  (String, Object)? _effortInFlight;
+
+  void selectReasoningEffort(String? effort) {
+    final normalized = normalizeEffort(effort);
+    if (normalized == reasoningEffort) return;
+    reasoningEffort = normalized;
+    onEffortChanged?.call(normalized);
+    _notify();
+  }
+
+  /// Persona (`off`, or one of the 9 canonical personas), or null for Auto
+  /// (auto-route by tier and prompt).
+  String? persona;
+  void Function(String? persona)? onPersonaChanged;
+  final SessionPersonaSync _personaSync = SessionPersonaSync();
+  (String, String)? _personaInFlight;
+
+  void selectPersona(String? value) {
+    final normalized = normalizePersona(value);
+    final changed = normalized != persona;
+    if (normalized == null) {
+      _personaSync.requestAuto(sessionFor(_currentThreadId));
+    }
+    if (!changed) return;
+    persona = normalized;
+    onPersonaChanged?.call(normalized);
+    _notify();
+  }
+
+  /// Settings changed the persona underneath us.
+  void syncPersona(String? value) {
+    final normalized = normalizePersona(value);
+    if (normalized == persona) return;
+    if (normalized == null) {
+      _personaSync.requestAuto(sessionFor(_currentThreadId));
+    }
+    persona = normalized;
+    _notify();
+  }
 
   void _updatePending(String partial) {
     if (_turnThreadId != _currentThreadId) return;
@@ -1438,6 +1788,14 @@ class ChatController extends ChangeNotifier {
     final unconfirmed = _tempInFlight;
     _tempInFlight = null;
     if (unconfirmed != null) _temperatureSync.forget(unconfirmed.$1);
+    final unconfirmedEffort = _effortInFlight;
+    _effortInFlight = null;
+    if (unconfirmedEffort != null) _effortSync.forget(unconfirmedEffort.$1);
+    final unconfirmedPersona = _personaInFlight;
+    _personaInFlight = null;
+    if (unconfirmedPersona != null) {
+      _personaSync.forget(unconfirmedPersona.$1, sent: unconfirmedPersona.$2);
+    }
     _liveTimer?.cancel();
     _liveTimer = null;
     _turn = null;
@@ -1485,6 +1843,14 @@ class ChatController extends ChangeNotifier {
     final sent = _tempInFlight;
     if (sent != null) _temperatureSync.confirm(sent.$1, sent.$2);
     _tempInFlight = null;
+    final sentEffort = _effortInFlight;
+    if (sentEffort != null) _effortSync.confirm(sentEffort.$1, sentEffort.$2);
+    _effortInFlight = null;
+    final sentPersona = _personaInFlight;
+    if (sentPersona != null) {
+      _personaSync.confirm(sentPersona.$1, sentPersona.$2);
+    }
+    _personaInFlight = null;
     final elapsed = _liveElapsedMs();
     final liveTools = live.value?.toolCalls ?? const <ChatStreamToolEvent>[];
     final handoffTools = <ChatStreamToolEvent>[...liveTools];
@@ -1615,6 +1981,8 @@ class ChatController extends ChangeNotifier {
     // A transport failure says nothing about what the server kept.
     if (e is! SonderException || e.httpStatus == null) {
       _temperatureSync.reset();
+      _effortSync.reset();
+      _personaSync.reset();
     }
     final elapsed = _liveElapsedMs();
     final toolCalls = live.value?.toolCalls ?? const <ChatStreamToolEvent>[];

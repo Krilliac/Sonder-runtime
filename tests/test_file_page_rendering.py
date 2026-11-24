@@ -189,7 +189,7 @@ def test_streaming_long_line_and_binary_detection_beyond_requested_page(monkeypa
 
 def _dispatch_file_read_branch():
     """Execute the real dispatch hunk without importing the live server bootstrap."""
-    source = (Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8")
     dispatch = next(node for node in ast.parse(source).body
                     if isinstance(node, ast.FunctionDef) and node.name == "_agent_dispatch")
     branch = next(node for node in dispatch.body if isinstance(node, ast.If)
@@ -287,7 +287,7 @@ def test_dispatch_policies_and_project_scoping_receive_canonical_alias_path(monk
     from sonder_runtime.adapters.filesystem import file_ops
     from sonder_runtime.bootstrap import prepared_workbench
 
-    source = (Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8")
     functions = [node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)
                  and node.name in {"_agent_dispatch", "_project_scope_args",
                                    "_scope_arg_is_rooted", "_is_network_spelling_raw"}]

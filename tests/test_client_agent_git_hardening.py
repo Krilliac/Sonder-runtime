@@ -111,7 +111,7 @@ def test_edit_delete_and_mkdir_under_git_dir_are_refused(tmp_path: Path, mode: s
     ws = tmp_path / "repo"
     _init_repo(ws)
     kwargs = {"confirm_bypass": True} if mode == "bypass" else {}
-    policy = ClientAgentPolicy(workspace_root=ws, mode="manual")
+    policy = ClientAgentPolicy(workspace_root=ws, mode="manual", can_bypass=(mode == "bypass"))
     policy.set_mode(mode, **kwargs)
     config_before = (ws / ".git" / "config").read_text(encoding="utf-8")
 

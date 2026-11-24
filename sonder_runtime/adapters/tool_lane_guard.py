@@ -365,8 +365,11 @@ def _provider_model(provider: str, key: str, explicit: str, env: Mapping[str, st
     if provider == anthropic_gateway.PROVIDER_ID:
         return str(anthropic_gateway.config_from_env(env).model_for_tier(key) or "").strip()
     if provider == PROVIDER_LABEL_IDS["openai-compatible"]:
+        from sonder_runtime.adapters.inference import openai_compat_gateway
         source = os.environ if env is None else env
-        configured = str(source.get("SONDER_OPENAI_MODEL", "") or "").strip()
+        tier_map = openai_compat_gateway.parse_tier_models(source.get("SONDER_OPENAI_TIER_MODELS", ""))
+        mapped = tier_map.get(key.lower(), "")
+        configured = mapped or str(source.get("SONDER_OPENAI_MODEL", "") or "").strip()
         named = key not in PROVIDER_TIERS and key.lower() not in _DEFAULT_ROUTE
         return configured or (key if named else "")
     return ""

@@ -122,6 +122,7 @@ class ShellSidebar extends StatelessWidget {
 
   final VoidCallback onNewChat;
   final VoidCallback onSearch;
+  final VoidCallback? onRefreshThreads;
   final VoidCallback? onToggleCollapsed;
   final VoidCallback? onShowShortcuts;
   final ValueChanged<WorkspaceDestination> onDestination;
@@ -146,6 +147,7 @@ class ShellSidebar extends StatelessWidget {
     required this.onProjectFilter,
     required this.onNewChat,
     required this.onSearch,
+    this.onRefreshThreads,
     required this.onDestination,
     required this.onOpenThread,
     required this.onDeleteThread,
@@ -248,6 +250,7 @@ class ShellSidebar extends StatelessWidget {
                   projects: _projectsOf(state.threads),
                   projectFilter: projectFilter,
                   onProjectFilter: onProjectFilter,
+                  onRefresh: onRefreshThreads,
                 ),
               ),
             ),
@@ -772,6 +775,7 @@ class _ChatsRow extends StatelessWidget {
   final List<String> projects;
   final String? projectFilter;
   final ValueChanged<String?> onProjectFilter;
+  final VoidCallback? onRefresh;
 
   const _ChatsRow({
     required this.selected,
@@ -781,6 +785,7 @@ class _ChatsRow extends StatelessWidget {
     required this.projects,
     required this.projectFilter,
     required this.onProjectFilter,
+    this.onRefresh,
   });
 
   @override
@@ -822,6 +827,20 @@ class _ChatsRow extends StatelessWidget {
               projects: projects,
               selected: filter,
               onSelected: onProjectFilter,
+            ),
+          ),
+        if (onRefresh != null && e.t > 0.5)
+          _Fade(
+            child: IconButton(
+              key: const Key('shell-refresh-chats'),
+              tooltip: 'Sync server chats',
+              icon: Icon(Icons.sync_rounded, size: 16, color: tokens.muted),
+              constraints: const BoxConstraints(
+                minWidth: _itemSize,
+                minHeight: _itemSize,
+              ),
+              padding: EdgeInsets.zero,
+              onPressed: onRefresh,
             ),
           ),
       ]),
@@ -881,7 +900,7 @@ class _ProjectFilter extends StatelessWidget {
               color: selected == null ? tokens.muted : tokens.accentText),
           const SizedBox(width: SonderSpace.xs),
           ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 104),
+            constraints: const BoxConstraints(maxWidth: 84),
             child: Text(selected ?? 'All projects',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,

@@ -96,7 +96,7 @@ def test_live_grant_and_payload_changes_refuse_before_any_launch_effect(tmp_path
             owner.execute(launch)
         assert owner._launch_id is None and not effects
         roots.clear()
-        target = owner._payload.path / "server.py"
+        target = owner._payload.path / "runtime" / "server.py"
         target.write_bytes(target.read_bytes() + b"\n# injected payload change\n")
         with pytest.raises(OwnerRefused, match="artifact content"):
             owner.execute(launch)

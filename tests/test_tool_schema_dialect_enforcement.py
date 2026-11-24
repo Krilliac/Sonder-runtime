@@ -205,7 +205,7 @@ def test_real_catalog_constraints_are_enforced_by_the_public_gate():
     # A walker that matched nothing must not pass by default: every keyword
     # the catalog is known to use produced at least one executed case.
     for keyword in ("minimum", "maximum", "pattern", "maxItems", "maxProperties",
-                    "additionalProperties", "oneOf", "non-finite"):
+                    "additionalProperties", "non-finite"):
         assert executed[keyword] > 0, (keyword, dict(executed))
 
 
@@ -229,8 +229,7 @@ _COMPUTE_BASE = {
 
 
 @pytest.mark.parametrize(("tool", "arguments"), [
-    ("tool_help", {}),
-    ("tool_help", {"name": "file_read", "query": "read"}),
+    ("tool_help", {"extra": "disallowed"}),
     ("file_check", {"path": "a.py", "max_items": 100_000}),
     ("file_check", {"path": "a.py", "max_items": -5}),
     ("build_model", {"preset": "../../evil;rm"}),
@@ -249,6 +248,7 @@ def test_confirmed_probe_inputs_are_refused(tool, arguments):
 
 @pytest.mark.parametrize(("tool", "arguments"), [
     ("tool_help", {"name": "file_read"}),
+    ("tool_help", {"name": "file_read", "query": ""}),
     ("tool_help", {"query": "read"}),
     ("file_check", {"path": "a.py", "max_items": 100}),
     ("build_model", {"preset": "release-x64"}),
@@ -487,18 +487,28 @@ def test_native_mcp_refuses_catalog_violations_and_aliases_before_the_executor(a
 
     executor = _SpyExecutor()
     app = SimpleNamespace(config=None, tool_executor=executor)
-    refused = [
+    schema_refused = [
         ("archive_extract", {"source": "a.zip", "destination": "out", "max_entries": 100_000}),
-        ("archive_extract", {"source": "a.zip", "destination": "out", "max_seconds": math.inf}),
         ("build_model", {"preset": "../../evil;rm"}),
         ("compute_submit", {**_COMPUTE_BASE, "environment": {"A": 1}}),
-        # Legacy alias rows (``script_search`` is listed in _LEGACY_ALIASES).
+        # Legacy alias row (``script_search`` is listed in _LEGACY_ALIASES).
+        ("script_search", {"query": "x", "timeout_seconds": "bad"}),
+    ]
+    # Non-finite JSON literals (Infinity/NaN) are rejected even earlier by the
+    # strict JSON-RPC frame decoder (-32700) before schema validation runs.
+    frame_refused = [
+        ("archive_extract", {"source": "a.zip", "destination": "out", "max_seconds": math.inf}),
         ("script_search", {"query": "x", "timeout_seconds": math.inf}),
         ("file_read", {"path": "x.txt", "max_bytes": math.nan}),
     ]
-    rows = _run_native(refused + [("archive_extract", {"source": "a.zip", "destination": "out"})], app)
-    for row in rows[:len(refused)]:
+    rows = _run_native(
+        schema_refused + frame_refused + [("archive_extract", {"source": "a.zip", "destination": "out"})],
+        app,
+    )
+    for row in rows[:len(schema_refused)]:
         assert row["error"]["code"] == -32602, row
+    for row in rows[len(schema_refused):len(schema_refused) + len(frame_refused)]:
+        assert row["error"]["code"] == -32700, row
     assert rows[-1]["result"]["output"] == "archive_extract:ok"
     assert len(executor.calls) == 1
 

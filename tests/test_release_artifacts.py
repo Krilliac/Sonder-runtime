@@ -16,7 +16,7 @@ REVISION = "b" * 40
 def _system_files(*, license_file: bool = True,
                   build_stamp_padding: int = 0) -> dict[str, bytes]:
     files = {
-        "server.py": b"print('ready')\n",
+        "runtime/server.py": b"print('ready')\n",
         "bootstrap-engine.sh": b"#!/bin/sh\n",
         "bootstrap-engine.cmd": b"@echo off\r\n",
         "requirements-runtime.txt": b"# stdlib\n",
@@ -92,7 +92,7 @@ def _artifacts(root: Path) -> None:
         payload = _system_files()
         payload.update({"sonder": b"app", "lib/libapp.so": b"flutter", "data/flutter_assets/assets/local-system.zip": _nested_system(_system_files())})
         for name, data in payload.items():
-            name = name if not name.startswith(("server.py", "LICENSE", "bootstrap-engine", "requirements-runtime", "sonder_build.json", "PACKAGE-MANIFEST.json")) else "local-system/" + name
+            name = name if not name.startswith(("runtime/server.py", "LICENSE", "bootstrap-engine", "requirements-runtime", "sonder_build.json", "PACKAGE-MANIFEST.json")) else "local-system/" + name
             info = tarfile.TarInfo("./" + name)
             info.size = len(data)
             archive.addfile(info, io.BytesIO(data))
@@ -227,9 +227,9 @@ def test_rejects_local_system_manifest_mismatch(tmp_path):
         archive.writestr("classes.dex", b"dex")
         archive.writestr("lib/arm64-v8a/libapp.so", b"app")
         files = _system_files()
-        files["server.py"] = b"tampered"
+        files["runtime/server.py"] = b"tampered"
         archive.writestr("assets/flutter_assets/assets/local-system.zip", _nested_system(files))
-    with pytest.raises(ValueError, match="server.py"):
+    with pytest.raises(ValueError, match="runtime/server.py"):
         release.discover_artifacts(tmp_path)
 
 

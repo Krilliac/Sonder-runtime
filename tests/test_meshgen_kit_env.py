@@ -9,7 +9,7 @@ _KIT_TEST_FILES = ("test_meshgen_integration.py", "test_meshgen_ported_scripts.p
 
 
 def test_the_meshgen_kit_variable_survives_the_ambient_scrub():
-    conftest = sys.modules["conftest"]
+    conftest = sys.modules["tests._hermetic_plugin"]
     assert "SONDER_TEST_MESHGEN_KIT" in conftest._HARNESS_VARIABLES
 
 

@@ -18,6 +18,22 @@ const ecosystemSchema = 'sonder.runtime.ecosystem/1';
 /// The canonical provider id of Sonder Inference.
 const sonderInferenceProvider = 'sonder_inference';
 
+/// The canonical provider id of an OpenAI-compatible inference gateway.
+const openaiCompatibleProvider = 'openai_compatible';
+
+/// The eight local policy tiers the runtime reports in provider bindings
+/// (`PROVIDER_TIER_NAMES` in `ecosystem_status.py`).
+const ecosystemTierNames = <String>[
+  'fast',
+  'general',
+  'code',
+  'reasoning',
+  'vision',
+  'security',
+  'creative',
+  'draft',
+];
+
 /// Provider ids the runtime treats as Sonder Inference (contract 3.1).
 /// `sonder` is deliberately absent: it is a tier/model name.
 const _inferenceAliases = {
@@ -27,11 +43,32 @@ const _inferenceAliases = {
   'inference',
 };
 
-/// The provider id in canonical form, so `sonder-inference` and
-/// `sonder_inference` compare equal.
+/// Provider ids the runtime normalizes to `openai_compatible`.
+const _openaiCompatibleAliases = {
+  'openai_compatible',
+  'openai-compatible',
+  'openai',
+  'llamacpp',
+  'vllm',
+  'distributed-rpc',
+  'rpc-sharded',
+};
+
+const _openRouterAliases = {
+  'openrouter',
+  'open-router',
+  'open_router',
+};
+
+/// The provider id in canonical form, so aliases like `sonder-inference` and
+/// `sonder_inference` (or `openai-compatible` and `openai_compatible`)
+/// compare equal.
 String canonicalProvider(String provider) {
   final id = provider.trim().toLowerCase();
-  return _inferenceAliases.contains(id) ? sonderInferenceProvider : id;
+  if (_inferenceAliases.contains(id)) return sonderInferenceProvider;
+  if (_openaiCompatibleAliases.contains(id)) return openaiCompatibleProvider;
+  if (_openRouterAliases.contains(id)) return 'openrouter';
+  return id;
 }
 
 String? _string(Object? value, [int limit = 400]) {
@@ -197,7 +234,20 @@ class ProviderStatus {
   final String? baseUrl;
   final String? version;
   final int? apiVersion;
+
+  /// Default configured model for providers that report a single default
+  /// (e.g. `openai_compatible`'s `SONDER_OPENAI_MODEL`).
+  final String? model;
+
+  /// Configured embedding model, when reported (e.g. `SONDER_OPENAI_EMBED_MODEL`).
+  final String? embedModel;
   final List<String> models;
+
+  /// Whether the provider is configured (when reported by the runtime).
+  final bool? configured;
+
+  /// Whether the provider's endpoint is loopback (when reported).
+  final bool? loopback;
 
   /// True for mock/synthetic providers; null when the provider cannot say.
   final bool? synthetic;
@@ -206,9 +256,9 @@ class ProviderStatus {
   final String? fallback;
   final int fallbackCount;
 
-  /// Tier name to the model this provider serves it with (Sonder
-  /// Inference's `tier_models`, from `SONDER_INFERENCE_TIER_MODELS` and its
-  /// default model). Empty when the runtime does not report it.
+  /// Tier name to the model this provider serves it with (e.g. Sonder
+  /// Inference's `SONDER_INFERENCE_TIER_MODELS` or OpenAI-compatible's
+  /// `SONDER_OPENAI_TIER_MODELS`). Empty when the runtime does not report it.
   final Map<String, String> tierModels;
 
   const ProviderStatus({
@@ -222,7 +272,11 @@ class ProviderStatus {
     this.baseUrl,
     this.version,
     this.apiVersion,
+    this.model,
+    this.embedModel,
     this.models = const [],
+    this.configured,
+    this.loopback,
     this.synthetic,
     this.identity,
     this.telemetry,
@@ -245,7 +299,11 @@ class ProviderStatus {
       baseUrl: _string(json['base_url'], 512),
       version: _string(json['version'], 64),
       apiVersion: _int(json['api_version']),
+      model: _string(json['model'], 200),
+      embedModel: _string(json['embed_model'], 200),
       models: _strings(json['models'], 200),
+      configured: _bool(json['configured']),
+      loopback: _bool(json['loopback']),
       synthetic: _bool(json['synthetic']),
       identity: identity == null ? null : InferenceIdentity.fromJson(identity),
       telemetry: TelemetryLinks.fromJson(json['telemetry']),
@@ -306,6 +364,100 @@ class ObservatoryExport {
   }
 }
 
+/// Read-only configuration of the runtime's image-generation backend
+/// (`image_generation` in `sonder.runtime.ecosystem/1`).
+class ImageGenerationStatus {
+  /// True when a dedicated image backend or explicit image model is configured.
+  final bool configured;
+
+  /// Backend kind reported by the runtime (`openai_api`, `ollama`, or null).
+  final String? backend;
+
+  /// Configured image API URL (loopback or safe HTTPS, redacted by the runtime).
+  final String? apiUrl;
+
+  /// Configured image model (`SONDER_IMAGE_MODEL`), when set.
+  final String? model;
+
+  /// Whether [apiUrl] is loopback, when reported.
+  final bool? loopback;
+
+  const ImageGenerationStatus({
+    this.configured = false,
+    this.backend,
+    this.apiUrl,
+    this.model,
+    this.loopback,
+  });
+
+  /// Null when [json] is not an object.
+  static ImageGenerationStatus? fromJson(Object? json) {
+    final map = _map(json);
+    if (map == null) return null;
+    final model = _string(map['model'], 200) ?? _string(map['image_model'], 200);
+    final apiUrl = _string(map['api_url'], 512) ??
+        _string(map['base_url'], 512) ??
+        _string(map['endpoint'], 512);
+    final backend = _string(map['backend'], 64)?.toLowerCase();
+    final configured = _bool(map['configured']) ??
+        (apiUrl != null || model != null);
+    return ImageGenerationStatus(
+      configured: configured,
+      backend: backend,
+      apiUrl: apiUrl,
+      model: model,
+      loopback: _bool(map['loopback']),
+    );
+  }
+
+  /// Short host[:port] label for [apiUrl] (e.g. `127.0.0.1:11440`), or the
+  /// raw URL if it cannot be parsed as a URI with a host.
+  String? get endpointDisplay {
+    final raw = apiUrl;
+    if (raw == null) return null;
+    final uri = Uri.tryParse(raw);
+    if (uri == null || uri.host.isEmpty) return raw;
+    final host = uri.host.contains(':') ? '[${uri.host}]' : uri.host;
+    return uri.hasPort ? '$host:${uri.port}' : host;
+  }
+
+  /// Human-readable backend name (`OpenAI-compatible API`, `Ollama`, ...).
+  String? get backendLabel => switch (backend) {
+        'openai_api' => 'OpenAI-compatible image API',
+        'ollama' => 'Ollama',
+        final other => other,
+      };
+
+  /// Concise display summary: e.g. `sdxl-turbo on 127.0.0.1:11440`.
+  String get summary {
+    final host = endpointDisplay;
+    if (model != null && host != null) return '$model on $host';
+    if (model != null && backend == 'ollama') return '$model via Ollama';
+    if (model != null) return model!;
+    if (host != null) return host;
+    if (backendLabel != null) return backendLabel!;
+    return configured ? 'configured' : 'not configured';
+  }
+}
+
+/// Model tool-policy posture reported in `sonder.runtime.ecosystem/1`.
+class ModelToolPolicyStatus {
+  /// True when `SONDER_ALLOW_SECURITY_MODEL_TOOLS` relaxes the shipped
+  /// security-adviser tool floor.
+  final bool securityFloorRelaxed;
+
+  const ModelToolPolicyStatus({this.securityFloorRelaxed = false});
+
+  /// Null when [json] is not an object.
+  static ModelToolPolicyStatus? fromJson(Object? json) {
+    final map = _map(json);
+    if (map == null) return null;
+    return ModelToolPolicyStatus(
+      securityFloorRelaxed: map['security_floor_relaxed'] == true,
+    );
+  }
+}
+
 /// What the panel shows for Sonder Inference: a provider state, or that no
 /// binding uses it.
 enum InferenceState {
@@ -341,6 +493,12 @@ class EcosystemStatus {
   final Map<String, ProviderStatus> providers;
   final ObservatoryExport? observatory;
 
+  /// Optional image-generation backend configuration (additive field).
+  final ImageGenerationStatus? imageGeneration;
+
+  /// Optional model tool-policy flags (additive field).
+  final ModelToolPolicyStatus? modelToolPolicy;
+
   const EcosystemStatus({
     this.schema = ecosystemSchema,
     this.generatedAt,
@@ -354,6 +512,8 @@ class EcosystemStatus {
     this.fallbacks = const {},
     this.providers = const {},
     this.observatory,
+    this.imageGeneration,
+    this.modelToolPolicy,
   });
 
   factory EcosystemStatus.fromJson(Map<String, dynamic> json) {
@@ -395,8 +555,16 @@ class EcosystemStatus {
       },
       observatory:
           observatory == null ? null : ObservatoryExport.fromJson(observatory),
+      imageGeneration:
+          ImageGenerationStatus.fromJson(json['image_generation']),
+      modelToolPolicy:
+          ModelToolPolicyStatus.fromJson(json['model_tool_policy']),
     );
   }
+
+  /// True when the runtime reports `model_tool_policy.security_floor_relaxed`.
+  bool get securityFloorRelaxed =>
+      modelToolPolicy?.securityFloorRelaxed ?? false;
 
   /// Every distinct provider a generation binding names (default and
   /// tiers), without the embedding provider.

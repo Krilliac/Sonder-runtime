@@ -4,7 +4,7 @@ import os
 def test_pytest_harness_clears_deployment_overrides_but_keeps_timing_control(
     monkeypatch,
 ):
-    import conftest
+    import tests._hermetic_plugin as conftest
 
     monkeypatch.setenv("SONDER_CODE", "deployment-model")
     monkeypatch.setenv("SONDER_TEST_TIMINGS", "timings.jsonl")
@@ -32,7 +32,7 @@ def test_pytest_harness_does_not_inherit_deployment_model_overrides():
 
 
 def test_live_isolated_variables_are_captured_before_the_scrub(monkeypatch):
-    import conftest
+    import tests._hermetic_plugin as conftest
 
     assert set(conftest._LIVE_ISOLATED_VARIABLES) == {
         "SONDER_ISOLATED_LIVE", "SONDER_ISOLATED_RUNTIME", "SONDER_ISOLATED_ROOTS",
@@ -54,7 +54,7 @@ def test_live_isolated_variables_are_captured_before_the_scrub(monkeypatch):
 def test_live_isolated_fixture_restores_real_capture_for_this_test_only(
     live_isolated_environment,
 ):
-    import conftest
+    import tests._hermetic_plugin as conftest
 
     assert live_isolated_environment == conftest._CAPTURED_LIVE_ISOLATED_ENV
     for name, value in live_isolated_environment.items():

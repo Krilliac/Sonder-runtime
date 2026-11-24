@@ -236,33 +236,6 @@ def _approval_owner_for_context(context: Any) -> str:
     return "ap-" + hashlib.sha256(principal.encode("utf-8")).hexdigest()
 
 
-def _decoded_segments(raw: str, unquote: Callable[[str], str]) -> list[str] | None:
-    """Split the raw path on '/' first, then percent-decode each segment once.
-
-    A client that encodes the '@' of a call reference (``%40``) names the same
-    row as a raw '@'. A segment that still holds '%' after one decode (a
-    double-encoded or malformed escape) or is not UTF-8 gives ``None``.
-    """
-    segments = []
-    for segment in raw.split("/"):
-        try:
-            decoded = unquote(segment)
-        except ValueError:
-            return None
-        if "%" in decoded:
-            return None
-        segments.append(decoded)
-    return segments
-
-
-def _approval_role(context: Any) -> str:
-    """The account's role here: an account's API key never holds admin
-    (``admin_auth.require``), so an admin account's key counts as a developer."""
-    account = (context or {}).get("account") or {}
-    role = str(account.get("role") or "").strip().lower()
-    return "developer" if role == "admin" and account.get("via_api_key") else role
-
-
 def _approval_include_unowned(context: Any) -> bool:
     return (_approval_role(context) in ("developer", "admin")
             or (context or {}).get("mode") in _SINGLE_OWNER_MODES)

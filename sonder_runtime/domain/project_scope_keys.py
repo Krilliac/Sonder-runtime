@@ -31,6 +31,7 @@ def project_scoped_path_key(tool_name):
         "git_merge", "git_cherry_pick",
         "build_run", "build_clean",
         "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
+        "citation_audit", "code_graph", "error_diagnose", "symbol_verify",
     }:
         return "root"
     return "path"

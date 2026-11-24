@@ -1,0 +1,1799 @@
+"""Sonder developer-workflow tools.
+
+Provides test running, linting, formatting, type checking, dependency
+management, git mutations, refactoring helpers, build tools, and security
+scanning for Sonder's MCP tool surface.
+"""
+from __future__ import annotations
+
+import contextlib
+import contextvars
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.application.testing.legacy_runs import retired_extra_args
+from sonder_runtime.adapters import git_change_targets
+from sonder_runtime.adapters import live_checkout
+from sonder_runtime.adapters import git_program_guard
+from sonder_runtime.adapters import process_tree
+from sonder_runtime.adapters import protected_write_scope
+from sonder_runtime.adapters import secret_scan as _secret_scan_adapter
+from sonder_runtime.adapters.git_mutation_guard import (
+    ConcurrentGitMutation,
+    guard_git_mutation,
+)
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
+import git_tools
+import sonder_logging
+import unsafe_lab
+
+MAX_OUTPUT = 256_000
+MAX_TIMEOUT = 120
+DEFAULT_TIMEOUT = 30
+# The ``guard`` of a ``git_stash`` refusal that would take the runtime recovery stash.
+RECOVERY_STASH_GUARD = "runtime_recovery_stash"
+
+
+def _bounded_int(value, default, minimum, maximum):
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(v, maximum))
+
+
+def _trim(text, limit=MAX_OUTPUT):
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return text[:half] + "\n... [trimmed %d chars] ...\n" % (len(text) - limit) + text[-half:]
+
+
+def _resolve_root(root, extra_roots=""):
+    """Resolve a caller-supplied working root INSIDE an authorized root.
+
+    Every tool in this module hands ``root`` straight to a child process as its
+    working directory, and several of them report what they find there --
+    ``secret_scan`` reports which files hold credentials (it once printed
+    the credentials themselves; its findings are now redacted). Until now this function
+    resolved any absolute path and returned it, so the only thing standing
+    between a caller and an arbitrary directory was whether a caller could
+    reach these functions at all. ``fix/cloud-help-drift`` @ ``b8a15ef`` relied
+    on exactly that, removing the four read-only tools from the agent surface
+    on the stated grounds that "adding a dispatch branch would have handed a
+    read-only agent unconfined filesystem read"; a later lane added the dispatch
+    branches back, and the unreachability that was doing the work went away.
+
+    Reachability is not a control. Confinement is, so it lives here -- one layer
+    below every entry point, which also covers the direct MCP tools that were
+    never confined either. The authorized set is ``file_ops.allowed_roots()``:
+    Sonder's workspace, its home, ``SONDER_FILE_ROOTS`` and ``file_roots.local``
+    -- exactly what the guarded file tools already honor, so this grants nothing
+    the operator has not already granted them. ``extra_roots`` carries the
+    host-selected project root and reaches here only through a host-controlled
+    parameter, never from model-supplied arguments.
+
+    Authorization is checked BEFORE the directory stat, and the unauthorized
+    refusal names no path. The other order answered "does this exist?" before
+    "are you allowed to ask?", and the two refusals were distinguishable::
+
+        unauthorized MISSING  -> ValueError: not a directory: <unapproved-root>
+        unauthorized EXISTING -> PermissionError: root is outside every authorized root: <unapproved-root>
+
+    Every server wrapper does ``return "ERROR: %s" % exc``, so a confined agent
+    could probe the existence of any path on the host and read the resolved
+    location back -- the same class of leak the ``diff_files`` absolute-path
+    fix closed in this module. An authorized root may still report "not a
+    directory" with its path: the caller is entitled to that one.
+    """
+    raw = str(root or ".")
+    raw = file_ops._reject_network_path(raw)
+    if raw.strip().replace("/", "\\") == "\\??":
+        raise PermissionError("refusing a UNC or network path spelling")
+    p = Path(raw).resolve()
+    _require_authorized_root(p, extra_roots)
+    if not p.is_dir():
+        raise ValueError("not a directory: %s" % p)
+    return p
+
+
+def _resolve_target_path(root, path):
+    """Confine the SECOND argument -- the one appended to the child's argv.
+
+    ``_resolve_root`` confines the working directory. It was the only control,
+    and four tools take a second argument that is not a working directory:
+    ``test_run``, ``lint_run``, ``format_code`` and ``typecheck_run`` do
+    ``cmd.append(path)`` and the child resolves it against ``cwd=root``. So
+    ``path`` was checked by nothing.
+
+    ``server.py`` already wrote this fact down at its own layer --
+    *"Containing `root` alone leaves `path` checked by nothing, so
+    lint_run(path='../../x', fix=True) would write outside the project"* -- and
+    closed it only on the project-bound agent path, leaving the direct
+    ``@mcp.tool()`` callers and every unbound run open. Measured, the exposure
+    is not limited to writes: with pytest as the framework,
+    ``test_run(root=<authorized>, path="../OUTSIDE/test_evil.py")`` returned
+    ``ok=True, "1 passed"`` having **executed** a file outside the authorized
+    root, which wrote a marker there.
+
+    Confinement therefore belongs here, one layer below all four entry points,
+    for the same reason ``_resolve_root``'s docstring gives: reachability is
+    not a control.
+
+    Returns the path to hand the child -- relative to ``root`` so the argv keeps
+    the same shape (and does not leak the absolute host path, as
+    ``diff_files`` was fixed not to). An empty ``path`` stays empty; callers
+    already branch on that.
+    """
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    if any(ch in text for ch in ("\0", "\r", "\n")):
+        raise ValueError("invalid path control character: %r" % text)
+    if text.startswith("-"):
+        raise ValueError("path must not start with '-': %r" % text)
+    text = file_ops._reject_network_path(text)
+    root = Path(root)
+    candidate = Path(text)
+    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    if resolved != root and not file_ops._is_inside(resolved, root):
+        raise ValueError(
+            "path is outside the root it was given: %s is not inside %s"
+            % (text, root)
+        )
+    try:
+        rel = str(resolved.relative_to(root)) or "."
+    except ValueError:
+        rel = str(resolved)
+    if rel.startswith("-"):
+        raise ValueError("path must not start with '-': %r" % text)
+    return rel
+
+
+_AUTHORIZED_ROOT = contextvars.ContextVar("harness_authorized_root", default="")
+
+
+@contextlib.contextmanager
+def authorized_root_scope(root):
+    """Authorize ONE host-selected root for the duration of a dispatch.
+
+    This is a scope rather than an argument on purpose. A model can put any
+    string in a tool's arguments, so an ``extra_roots`` argument on the agent
+    surface would be a root it grants itself -- the same forgery
+    ``_TRUSTED_REPOSITORY_APPROVAL`` exists to prevent for the guarded file
+    tools. Only ``server._agent_dispatch`` opens this scope, and only with the
+    root the host chose. Every other caller sees the default of "" and is
+    confined to the operator's configured roots.
+    """
+    token = _AUTHORIZED_ROOT.set(str(root or ""))
+    try:
+        yield
+    finally:
+        _AUTHORIZED_ROOT.reset(token)
+
+
+def _require_authorized_root(resolved, extra_roots=""):
+    if unsafe_lab.active() or file_ops.bypass_enabled():
+        # The deliberately unrestricted process, and the operator's explicit
+        # env bypass, already remove every other file-policy control.
+        return
+    extra_roots = extra_roots or _AUTHORIZED_ROOT.get()
+    for root in file_ops.allowed_roots(extra_roots):
+        try:
+            candidate = root.resolve()
+        except OSError:
+            candidate = root
+        if resolved == candidate or file_ops._is_inside(resolved, candidate):
+            return
+    # Deliberately names NO path. The resolved path is the host's real
+    # location -- account name included -- and every server wrapper returns
+    # `"ERROR: %s" % exc` straight to a confined agent, so echoing it here
+    # disclosed both that the path exists and where it actually lives.
+    # `_resolve_root` explains the ordering half of the same leak.
+    raise PermissionError(
+        "root is outside every authorized root. Add it to file_roots.local "
+        "or SONDER_FILE_ROOTS, or pass a project the host has selected."
+    )
+
+
+def _child_env():
+    # Developer workflow commands execute repository-controlled scripts (test
+    # hooks, package managers, formatters, and build tools).  They must not
+    # inherit the runtime's API keys or approval/bypass controls: those scripts
+    # can print or encode their environment into the tool result.  Keep this
+    # in the shared helper used by the other model-directed execution lanes so
+    # future additions cannot silently diverge from the control-plane policy.
+    env = sonder_logging.child_environment()
+    env.pop("CC", None)
+    env.pop("CXX", None)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def _drain_pipe(pipe, sink, state, limit):
+    """Drain *pipe* continuously while bounding retained RAM to *limit* bytes."""
+    head_limit = limit // 2
+    try:
+        while True:
+            block = pipe.read(65536)
+            if not block:
+                break
+            state["bytes"] += len(block)
+            sink.extend(block)
+            if len(sink) > limit:
+                del sink[head_limit:len(sink) - (limit - head_limit)]
+    finally:
+        with contextlib.suppress(OSError):
+            pipe.close()
+
+
+def _write_stdin(pipe, payload):
+    try:
+        if payload:
+            pipe.write(payload)
+            pipe.flush()
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            pipe.close()
+
+
+def _format_captured_stream(sink, total_bytes, limit=MAX_OUTPUT):
+    if total_bytes <= limit:
+        return _trim(bytes(sink).decode("utf-8", errors="replace"), limit=limit)
+    head_limit = limit // 2
+    head = bytes(sink[:head_limit]).decode("utf-8", errors="replace")
+    tail = bytes(sink[head_limit:]).decode("utf-8", errors="replace")
+    return head + "\n... [trimmed %d bytes] ...\n" % (total_bytes - limit) + tail
+
+
+def _run(cmd, *, cwd, timeout=DEFAULT_TIMEOUT, stdin_bytes=b"", env=None):
+    started = time.time()
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            stdin=subprocess.PIPE if stdin_bytes else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            env=env or _child_env(),
+            **process_tree.group_popen_kwargs(creationflags),
+        )
+    except FileNotFoundError:
+        return {
+            "ok": False, "returncode": -1, "timed_out": False,
+            "elapsed_ms": int((time.time() - started) * 1000),
+            "stdout": "", "stderr": "command not found: %s" % cmd[0],
+            "command": [str(c) for c in cmd],
+        }
+    tree = (
+        process_tree.ProcessTree.owning(proc)
+        if process_tree.is_real_popen(proc) else None
+    )
+    stdout_bytes = bytearray()
+    stderr_bytes = bytearray()
+    stdout_state = {"bytes": 0}
+    stderr_state = {"bytes": 0}
+    threads = []
+    timed_out = False
+    try:
+        readers = [
+            owned_runtime_thread(
+                target=_drain_pipe,
+                args=(proc.stdout, stdout_bytes, stdout_state, MAX_OUTPUT),
+                daemon=True,
+            ),
+            owned_runtime_thread(
+                target=_drain_pipe,
+                args=(proc.stderr, stderr_bytes, stderr_state, MAX_OUTPUT),
+                daemon=True,
+            ),
+        ]
+        if stdin_bytes and proc.stdin is not None:
+            readers.append(
+                owned_runtime_thread(
+                    target=_write_stdin,
+                    args=(proc.stdin, stdin_bytes),
+                    daemon=True,
+                )
+            )
+        for thread in readers:
+            thread.start()
+            threads.append(thread)
+        if tree is not None:
+            outcome = tree.wait(timeout=timeout, sweep_on_exit=True, grace_seconds=0.2)
+            timed_out = outcome.state is process_tree.TreeState.TIMED_OUT
+        else:
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                    proc.wait(timeout=5)
+    except BaseException:
+        if tree is not None:
+            with contextlib.suppress(OSError):
+                tree.terminate(grace_seconds=0.2, kill_wait_seconds=5.0)
+        else:
+            with contextlib.suppress(OSError):
+                proc.kill()
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+        raise
+    finally:
+        if tree is not None:
+            with contextlib.suppress(OSError):
+                tree.close()
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    stream.close()
+        for thread in threads:
+            thread.join(timeout=2)
+    stdout = _format_captured_stream(stdout_bytes, stdout_state["bytes"], MAX_OUTPUT)
+    stderr = _format_captured_stream(stderr_bytes, stderr_state["bytes"], MAX_OUTPUT)
+    if timed_out:
+        return {
+            "ok": False, "returncode": -1, "timed_out": True,
+            "elapsed_ms": int((time.time() - started) * 1000),
+            "stdout": stdout,
+            "stderr": stderr,
+            "command": [str(c) for c in cmd],
+        }
+    return {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "timed_out": False,
+        "elapsed_ms": int((time.time() - started) * 1000),
+        "stdout": stdout,
+        "stderr": stderr,
+        "command": [str(c) for c in cmd],
+    }
+
+
+def _format_result(title, data):
+    lines = [
+        title,
+        "  command: %s" % json.dumps(data.get("command", []), ensure_ascii=False),
+        "  ok: %s" % data.get("ok", False),
+        "  returncode: %s" % data.get("returncode"),
+        "  elapsed_ms: %s" % data.get("elapsed_ms", 0),
+    ]
+    if data.get("timed_out"):
+        lines.append("  timed_out: true")
+    if data.get("stdout"):
+        lines.extend(["stdout:", data["stdout"].rstrip()])
+    if data.get("stderr"):
+        lines.extend(["stderr:", data["stderr"].rstrip()])
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Git helpers
+# ---------------------------------------------------------------------------
+
+def _git():
+    return shutil.which("git") or "git"
+
+
+# Variables that make git use another repository, index or object store than
+# the tree that was checked, or inject config entries (``-c`` by environment).
+_GIT_LOCATION_VARIABLES = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+})
+_GIT_LOCATION_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+
+
+def _is_git_location_variable(name):
+    upper = name.upper()  # Windows environment names are case-insensitive
+    return upper in _GIT_LOCATION_VARIABLES or upper.startswith(_GIT_LOCATION_PREFIXES)
+
+
+def _git_env():
+    env = _child_env()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    # Git must work on the tree that was checked, not one the environment names.
+    for name in [key for key in env if _is_git_location_variable(key)]:
+        del env[name]
+    return env
+
+
+def _neutralized_git_arguments(root, *, timeout, env):
+    """``-c`` overrides that keep repository config from launching programs.
+
+    ``acceptEdits`` lets these mutation-class git tools run unattended while
+    running host programs still asks. Hooks, ``core.fsmonitor``, filter,
+    merge and textconv drivers and signing programs are replaced by the
+    shared :mod:`git_program_guard` list (also used by the read-only
+    ``git_tools``). Raises ``ValueError`` when the driver configuration cannot
+    be read, so the caller refuses rather than running git with a driver left
+    in place.
+    """
+    overrides = git_program_guard.neutralized_git_arguments(
+        lambda arguments: _run([_git()] + arguments, cwd=root, timeout=timeout, env=env),
+    )
+    # ``git add`` (git_commit) inspects populated submodules with a child git
+    # that reads each submodule's own config; neutralize those drivers too.
+    return overrides + git_program_guard.submodule_driver_overrides(
+        lambda relative, arguments: _git_probe_at(
+            root, relative, arguments, timeout=timeout, env=env,
+        ),
+    )
+
+
+def _git_probe_at(root, relative, arguments, *, timeout, env):
+    """Run one guard probe in the repository checked out at ``relative``.
+
+    Unlike ``_run`` the output is not trimmed: the submodule listing is
+    parsed, not displayed.  ``None`` means no repository is checked out there.
+    """
+    directory = Path(root) / relative if relative else Path(root)
+    if relative and not (directory / ".git").exists():
+        return None
+    try:
+        proc = subprocess.run(
+            [_git(), *arguments], cwd=str(directory), timeout=timeout,
+            capture_output=True, stdin=subprocess.DEVNULL, env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return {"timed_out": True, "returncode": -1, "stdout": "", "stderr": ""}
+    except FileNotFoundError:
+        return {"returncode": -1, "stdout": "", "stderr": "git was not found"}
+    return {
+        "returncode": proc.returncode,
+        "stdout": proc.stdout.decode("utf-8", errors="surrogateescape"),
+        "stderr": proc.stderr.decode("utf-8", errors="replace"),
+    }
+
+
+def _git_change_runner(root, *, timeout, hardened):
+    """A runner for ``git_change_targets``: git in ``root``, output untrimmed.
+
+    ``hardened`` adds the same driver/hook overrides as ``_run_git`` (raising
+    ``ValueError`` when they cannot be read); ``apply_patch`` runs a bare
+    ``git apply`` and lists its paths the same way.
+    """
+    env = _git_env()
+    overrides = _neutralized_git_arguments(root, timeout=timeout, env=env) if hardened else []
+
+    def run(arguments, stdin_bytes=b""):
+        proc = subprocess.run(
+            [_git(), *overrides, *arguments], cwd=str(root), timeout=timeout,
+            capture_output=True, input=stdin_bytes, env=env,
+        )
+        return proc.returncode, proc.stdout
+
+    return run
+
+
+def _live_refusal(operation, root):
+    """``{"ok": False, "error": ...}`` when ``operation`` may not change the live runtime checkout at ``root``, else None.
+
+    Decided from paths, git's ``rev-parse`` answer when they find nothing, and
+    the operator-attendance signal (``live_checkout.refusal``).
+    """
+    refused = live_checkout.refusal(operation, Path(root))
+    return refused.as_result() if refused is not None else None
+
+
+def _patch_refusal(operation, root, patch_text, *, timeout):
+    """``{"ok": False, "error": ...}`` when the patch would write a protected control-plane path, else None.
+
+    ``git apply --numstat`` lists every path the patch writes; each gets the
+    file tools' guard, in any repository (``git_change_targets.patch_refusal``).
+    """
+    timeout = _bounded_int(timeout, 10, 1, MAX_TIMEOUT)
+    run = _git_change_runner(root, timeout=timeout, hardened=False)
+    top = git_change_targets.toplevel(run)
+    try:
+        paths = git_change_targets.patch_targets(run, patch_text)
+    except git_change_targets.TargetsUnknown as exc:
+        return {"ok": False, "error": git_change_targets.unlisted_refusal(operation, exc)}
+    reason = git_change_targets.patch_refusal(operation, root, top, paths)
+    return {"ok": False, "error": reason} if reason else None
+
+
+def _run_git(root, args, *, timeout=10):
+    env = _git_env()
+    try:
+        overrides = _neutralized_git_arguments(root, timeout=timeout, env=env)
+    except ValueError as exc:
+        return {
+            "ok": False, "returncode": -1, "timed_out": False, "elapsed_ms": 0,
+            "stdout": "", "stderr": "refusing to run git: %s" % exc,
+            "command": [_git()] + list(args),
+        }
+    return _run([_git()] + overrides + list(args), cwd=root, timeout=timeout, env=env)
+
+
+# ---------------------------------------------------------------------------
+# Test runner
+# ---------------------------------------------------------------------------
+
+_TEST_FRAMEWORKS = {
+    # The runtime venv is intentionally minimal on some installations.  The
+    # command is selected at call time by _pytest_cmd(), which falls back to
+    # the venv's base interpreter when the embedded pytest package is only a
+    # namespace directory (no pytest.__main__).
+    "pytest": {"cmd": [], "marker_files": ["pytest.ini", "pyproject.toml", "setup.cfg", "conftest.py"]},
+    "unittest": {"cmd": [sys.executable, "-m", "unittest", "discover"], "marker_files": []},
+    "jest": {"cmd": ["npx", "jest"], "marker_files": ["jest.config.js", "jest.config.ts", "jest.config.mjs"]},
+    "vitest": {"cmd": ["npx", "vitest", "run"], "marker_files": ["vitest.config.ts", "vitest.config.js", "vitest.config.mts"]},
+    "mocha": {"cmd": ["npx", "mocha"], "marker_files": [".mocharc.yml", ".mocharc.json", ".mocharc.js"]},
+    "bun": {"cmd": ["bun", "test"], "marker_files": ["bunfig.toml", "bun.lock", "bun.lockb"]},
+    "node-test": {"cmd": ["node", "--test"], "marker_files": []},
+    "cargo": {"cmd": ["cargo", "test"], "marker_files": ["Cargo.toml"]},
+    "go": {"cmd": ["go", "test", "./..."], "marker_files": ["go.mod"]},
+    "dotnet": {"cmd": ["dotnet", "test"], "marker_files": ["*.csproj", "*.fsproj", "*.vbproj", "*.sln"]},
+    "dart": {"cmd": ["dart", "test"], "marker_files": ["pubspec.yaml"]},
+    "flutter": {"cmd": ["flutter", "test"], "marker_files": []},
+    "ctest": {"cmd": ["ctest", "--test-dir", "build", "--output-on-failure"], "marker_files": ["CMakeLists.txt"]},
+    "zig": {"cmd": ["zig", "build", "test"], "marker_files": ["build.zig"]},
+    "swift": {"cmd": ["swift", "test"], "marker_files": ["Package.swift"]},
+    "maven": {"cmd": ["mvn", "test", "-q"], "marker_files": ["pom.xml"]},
+    "gradle": {"cmd": ["./gradlew" if os.name != "nt" else "gradlew.bat", "test"], "marker_files": ["build.gradle", "build.gradle.kts"]},
+    "elixir": {"cmd": ["mix", "test"], "marker_files": ["mix.exs"]},
+    "phpunit": {"cmd": ["phpunit"], "marker_files": ["phpunit.xml", "phpunit.xml.dist", "composer.json"]},
+    "rspec": {"cmd": ["bundle", "exec", "rspec"], "marker_files": [".rspec", "Gemfile"]},
+}
+
+
+def _pytest_cmd():
+    """Return a Python interpreter that can actually launch pytest.
+
+    Sonder's embedded ``.runtime`` may be present without a complete pytest
+    installation.  ``import pytest`` then succeeds as a namespace package,
+    but ``python -m pytest`` fails with ``pytest.__main__`` missing.  Prefer
+    the runtime interpreter when healthy and use its base interpreter as a
+    local, deterministic fallback; never install packages or invoke a shell.
+    """
+    candidates = [sys.executable]
+    base = Path(sys.base_prefix)
+    base_python = base / ("python.exe" if os.name == "nt" else "bin/python")
+    if str(base_python) not in candidates and base_python.exists():
+        candidates.append(str(base_python))
+    for executable in candidates:
+        result = _run(
+            [executable, "-c", "import pytest.__main__"],
+            cwd=Path.cwd(), timeout=5,
+        )
+        if result.get("ok"):
+            return executable
+    return sys.executable
+
+
+def _detect_test_framework(root):
+    root = Path(root)
+    if (root / "pubspec.yaml").exists():
+        try:
+            pub_text = (root / "pubspec.yaml").read_text(encoding="utf-8", errors="replace")
+            if re.search(r"(?m)^\s{0,4}flutter\s*:", pub_text):
+                return "flutter"
+        except OSError:
+            pass
+        return "dart"
+    for name, info in _TEST_FRAMEWORKS.items():
+        for marker in info["marker_files"]:
+            if "*" in marker:
+                if list(root.glob(marker)):
+                    return name
+            elif (root / marker).exists():
+                return name
+    if (root / "package.json").exists():
+        try:
+            pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
+            scripts = pkg.get("scripts", {})
+            if "test" in scripts:
+                test_cmd = scripts["test"]
+                for fw in ("vitest", "jest", "mocha"):
+                    if fw in test_cmd:
+                        return fw
+        except (json.JSONDecodeError, OSError):
+            pass
+    return "pytest"
+
+
+def test_discover(root=".", framework="auto", extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    if framework == "auto":
+        framework = _detect_test_framework(root)
+
+    info = {"framework": framework, "root": str(root), "test_files": [], "test_count": 0}
+
+    if framework == "pytest":
+        result = _run(
+            [_pytest_cmd(), "-m", "pytest", "--collect-only", "-q", "--no-header"],
+            cwd=root, timeout=30,
+        )
+        if result["ok"]:
+            lines = result["stdout"].strip().splitlines()
+            tests = [l for l in lines if "::" in l]
+            info["test_files"] = sorted(set(t.split("::")[0] for t in tests))
+            info["test_count"] = len(tests)
+        elif result.get("returncode") == 5:
+            # pytest reserves exit code 5 for a completed collection that
+            # found no tests. That is a valid zero-test inventory, not a
+            # broken collector; callers need to distinguish it from syntax,
+            # import, and configuration errors without guessing from text.
+            info["no_tests"] = True
+        else:
+            info["error"] = result["stderr"] or result["stdout"]
+    elif framework in ("jest", "vitest"):
+        result = _run(
+            ["npx", framework, "--listTests"] if framework == "jest"
+            else ["npx", "vitest", "list", "--reporter=json"],
+            cwd=root, timeout=30,
+        )
+        if result["ok"]:
+            files = [l.strip() for l in result["stdout"].splitlines() if l.strip()]
+            info["test_files"] = files
+            info["test_count"] = len(files)
+        else:
+            info["error"] = result["stderr"] or result["stdout"]
+    elif framework == "cargo":
+        result = _run(["cargo", "test", "--", "--list"], cwd=root, timeout=30)
+        if result["ok"]:
+            tests = [l.split(":")[0] for l in result["stdout"].splitlines() if ": test" in l]
+            info["test_count"] = len(tests)
+        else:
+            info["error"] = result["stderr"] or result["stdout"]
+    elif framework == "go":
+        result = _run(["go", "test", "./...", "-list", ".*"], cwd=root, timeout=30)
+        if result["ok"]:
+            tests = [l for l in result["stdout"].splitlines() if l.startswith("Test") or l.startswith("Benchmark")]
+            info["test_count"] = len(tests)
+        else:
+            info["error"] = result["stderr"] or result["stdout"]
+
+    return info
+
+
+def test_run(
+    root=".", framework="auto", path="", pattern="", verbose=False,
+    coverage=False, timeout=120, extra_args_json="",
+    extra_roots="",
+):
+    """Run a project's tests with a host-built command line.
+
+    ``extra_args_json`` is retired: raw argv let a caller hand pytest ``-p``,
+    ``-c`` or ``--rootdir`` and step around every host-owned template. It is
+    kept in the signature only so a caller that still passes it gets a clear
+    refusal instead of a silently dropped argument. Omitted, ``""`` and
+    ``"[]"`` keep working.
+    """
+    refusal = retired_extra_args(extra_args_json)
+    if refusal is not None:
+        refusal["framework"] = framework
+        return refusal
+    root = _resolve_root(root, extra_roots)
+    # Confine the argv-appended path too; see _resolve_target_path.
+    path = _resolve_target_path(root, path)
+    timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
+    if framework == "auto":
+        framework = _detect_test_framework(root)
+
+    base = list(_TEST_FRAMEWORKS.get(framework, {}).get("cmd", []))
+    if framework == "pytest":
+        base = [_pytest_cmd(), "-m", "pytest"]
+    if not base:
+        return {"ok": False, "error": "unknown framework: %s" % framework, "framework": framework}
+
+    cmd = list(base)
+
+    if framework == "pytest":
+        if verbose:
+            cmd.append("-v")
+        if coverage:
+            cmd.extend(["--cov", "--cov-report=term-missing"])
+        if pattern:
+            cmd.extend(["-k", pattern])
+        if path:
+            cmd.append(path)
+        cmd.extend(["--tb=short", "--no-header", "-q"])
+    elif framework in ("jest", "vitest"):
+        if verbose:
+            cmd.append("--verbose")
+        if coverage:
+            cmd.append("--coverage")
+        if pattern:
+            cmd.extend(["-t", pattern])
+        if path:
+            cmd.append(path)
+    elif framework == "cargo":
+        if path:
+            cmd.extend(["--test", path])
+        if pattern:
+            cmd.extend(["--", pattern])
+    elif framework == "go":
+        if path:
+            cmd[-1] = path
+        if pattern:
+            cmd.extend(["-run", pattern])
+        if verbose:
+            cmd.append("-v")
+        if coverage:
+            cmd.append("-cover")
+
+    result = _run(cmd, cwd=root, timeout=timeout)
+    result["framework"] = framework
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Lint / Format / Type check
+# ---------------------------------------------------------------------------
+
+_LINT_TOOLS = {
+    "ruff": {"check": ["ruff", "check"], "fix": ["ruff", "check", "--fix"]},
+    "flake8": {"check": ["flake8"], "fix": None},
+    # Runtime-local fallbacks.  Do not resolve these through another venv or
+    # assume a global executable: the interpreter running the harness owns the
+    # import/module lookup.
+    "pyflakes": {"check": [sys.executable, "-m", "pyflakes"], "fix": None},
+    "py_compile": {"check": [sys.executable, "-I", "-m", "compileall", "-q"], "fix": None},
+    "pylint": {"check": ["pylint"], "fix": None},
+    "eslint": {"check": ["npx", "eslint"], "fix": ["npx", "eslint", "--fix"]},
+    "biome": {"check": ["npx", "@biomejs/biome", "lint"], "fix": ["npx", "@biomejs/biome", "lint", "--write"]},
+    "clippy": {"check": ["cargo", "clippy"], "fix": ["cargo", "clippy", "--fix", "--allow-dirty"]},
+    "go-vet": {"check": ["go", "vet", "./..."], "fix": None},
+    "golangci-lint": {"check": ["golangci-lint", "run"], "fix": ["golangci-lint", "run", "--fix"]},
+    "dart": {"check": ["dart", "analyze"], "fix": ["dart", "fix", "--apply"]},
+    "dotnet": {"check": ["dotnet", "format", "--verify-no-changes"], "fix": ["dotnet", "format"]},
+    "shellcheck": {"check": ["shellcheck"], "fix": None},
+    "phpcs": {"check": ["phpcs"], "fix": ["phpcbf"]},
+    "phpstan": {"check": ["phpstan", "analyse"], "fix": None},
+    "rubocop": {"check": ["rubocop"], "fix": ["rubocop", "-A"]},
+    "ktlint": {"check": ["ktlint"], "fix": ["ktlint", "-F"]},
+    "swiftlint": {"check": ["swiftlint", "lint"], "fix": ["swiftlint", "--fix"]},
+    "credo": {"check": ["mix", "credo"], "fix": None},
+    "luacheck": {"check": ["luacheck"], "fix": None},
+    "clang-tidy": {"check": ["clang-tidy"], "fix": None},
+}
+
+_FORMATTERS = {
+    "ruff": ["ruff", "format"],
+    "black": ["black"],
+    "prettier": ["npx", "prettier", "--write"],
+    "biome": ["npx", "@biomejs/biome", "format", "--write"],
+    "rustfmt": ["cargo", "fmt"],
+    "gofmt": ["gofmt", "-w"],
+    "clang-format": ["clang-format", "-i"],
+    "dart": ["dart", "format"],
+    "dotnet": ["dotnet", "format"],
+    "zig": ["zig", "fmt"],
+    "swift-format": ["swift-format", "format", "-i"],
+    "mix": ["mix", "format"],
+    "shfmt": ["shfmt", "-w"],
+    "stylua": ["stylua"],
+    "ktlint": ["ktlint", "-F"],
+    "rubocop": ["rubocop", "-A"],
+}
+
+_TYPECHECKERS = {
+    "mypy": [sys.executable, "-m", "mypy"],
+    "pyright": ["npx", "pyright"],
+    "tsc": ["npx", "tsc", "--noEmit"],
+    "dart": ["dart", "analyze"],
+    "go-vet": ["go", "vet", "./..."],
+    "cargo-check": ["cargo", "check"],
+    "dotnet": ["dotnet", "build", "--no-incremental", "-v", "q"],
+    "zig": ["zig", "ast-check"],
+    "phpstan": ["phpstan", "analyse"],
+    "sorbet": ["bundle", "exec", "srb", "tc"],
+    "dialyzer": ["mix", "dialyzer"],
+}
+
+
+def _has_glob(root: Path, pattern: str) -> bool:
+    return any(root.glob(pattern))
+
+
+def _detect_linter(root):
+    import importlib.util
+    root = Path(root)
+    ruff_available = bool(shutil.which("ruff") or importlib.util.find_spec("ruff"))
+    if ruff_available and (root / "pyproject.toml").exists():
+        return "ruff"
+    if (root / "pubspec.yaml").exists() and shutil.which("dart"):
+        return "dart"
+    if (_has_glob(root, "*.sln") or _has_glob(root, "*.csproj")) and shutil.which("dotnet"):
+        return "dotnet"
+    if (root / "biome.json").exists():
+        return "biome"
+    if (root / ".eslintrc.js").exists() or (root / ".eslintrc.json").exists() or (root / "eslint.config.js").exists():
+        return "eslint"
+    if (root / "Cargo.toml").exists():
+        return "clippy"
+    if (root / "go.mod").exists():
+        return "golangci-lint" if shutil.which("golangci-lint") else "go-vet"
+    if (root / "mix.exs").exists():
+        return "credo"
+    if (root / "Package.swift").exists() and shutil.which("swiftlint"):
+        return "swiftlint"
+    if (root / "Gemfile").exists() and shutil.which("rubocop"):
+        return "rubocop"
+    if (root / "composer.json").exists():
+        if shutil.which("phpstan"):
+            return "phpstan"
+        if shutil.which("phpcs"):
+            return "phpcs"
+    if ruff_available:
+        return "ruff"
+    if shutil.which("flake8"):
+        return "flake8"
+    try:
+        import pyflakes  # noqa: F401
+    except ImportError:
+        return "py_compile"
+    return "pyflakes"
+
+
+def _detect_formatter(root):
+    root = Path(root)
+    if shutil.which("ruff") and (root / "pyproject.toml").exists():
+        return "ruff"
+    if (root / "pubspec.yaml").exists() and shutil.which("dart"):
+        return "dart"
+    if (_has_glob(root, "*.sln") or _has_glob(root, "*.csproj")) and shutil.which("dotnet"):
+        return "dotnet"
+    if (root / "build.zig").exists() and shutil.which("zig"):
+        return "zig"
+    if (root / "mix.exs").exists():
+        return "mix"
+    if (root / "Package.swift").exists() and shutil.which("swift-format"):
+        return "swift-format"
+    if (root / "biome.json").exists():
+        return "biome"
+    if ((root / ".clang-format").exists() or (root / "CMakeLists.txt").exists()) and shutil.which("clang-format"):
+        return "clang-format"
+    if shutil.which("black"):
+        return "black"
+    if (root / "package.json").exists():
+        return "prettier"
+    if (root / "Cargo.toml").exists():
+        return "rustfmt"
+    if (root / "go.mod").exists():
+        return "gofmt"
+    return "ruff"
+
+
+def _detect_typechecker(root):
+    root = Path(root)
+    if (root / "tsconfig.json").exists():
+        return "tsc"
+    if (root / "pubspec.yaml").exists() and shutil.which("dart"):
+        return "dart"
+    if (root / "Cargo.toml").exists():
+        return "cargo-check"
+    if (root / "go.mod").exists():
+        return "go-vet"
+    if (_has_glob(root, "*.sln") or _has_glob(root, "*.csproj")) and shutil.which("dotnet"):
+        return "dotnet"
+    if (root / "composer.json").exists() and shutil.which("phpstan"):
+        return "phpstan"
+    if (root / "mix.exs").exists():
+        return "dialyzer"
+    if (root / "pyrightconfig.json").exists():
+        return "pyright"
+    if shutil.which("mypy"):
+        return "mypy"
+    return "mypy"
+
+
+def lint_run(root=".", tool="auto", path="", fix=False, timeout=60, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    # Confine the argv-appended path too; see _resolve_target_path.
+    path = _resolve_target_path(root, path)
+    timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
+    if tool == "auto":
+        tool = _detect_linter(root)
+    info = _LINT_TOOLS.get(tool)
+    if not info:
+        return {"ok": False, "error": "unknown linter: %s" % tool, "tool": tool}
+    if fix and info.get("fix"):
+        live = _live_refusal("lint_run", root / path if path else root)
+        if live:
+            return {**live, "tool": tool, "mode": "fix"}
+        refused = protected_write_scope.scope_refusal("lint_run fix", root, root / path if path else root)
+        if refused:
+            return {"ok": False, "error": refused, "tool": tool, "mode": "fix"}
+        cmd = list(info["fix"])
+    else:
+        cmd = list(info["check"])
+    if tool == "ruff" and not shutil.which("ruff"):
+        cmd = [sys.executable, "-I", "-m", "ruff", *cmd[1:]]
+    if path:
+        cmd.append(path)
+    elif tool in ("ruff", "flake8", "pylint", "pyflakes", "py_compile"):
+        cmd.append(".")
+    result = _run(cmd, cwd=root, timeout=timeout)
+    result["tool"] = tool
+    result["mode"] = "fix" if fix else "check"
+    return result
+
+
+def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    # Confine the argv-appended path too; see _resolve_target_path.
+    path = _resolve_target_path(root, path)
+    timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
+    if tool == "auto":
+        tool = _detect_formatter(root)
+    cmd_template = _FORMATTERS.get(tool)
+    if not cmd_template:
+        return {"ok": False, "error": "unknown formatter: %s" % tool, "tool": tool}
+    if not check_only:
+        live = _live_refusal("format_code", root / path if path else root)
+        if live:
+            return {**live, "tool": tool, "mode": "format"}
+        refused = protected_write_scope.scope_refusal("format_code", root, root / path if path else root)
+        if refused:
+            return {"ok": False, "error": refused, "tool": tool, "mode": "format"}
+    cmd = list(cmd_template)
+    if check_only:
+        if tool in ("ruff", "black"):
+            cmd.append("--check")
+        elif tool == "prettier":
+            cmd[-1] = "--check"
+        elif tool == "rustfmt":
+            cmd.append("--check")
+        elif tool == "dart":
+            cmd.extend(["--output=none", "--set-exit-if-changed"])
+        elif tool == "dotnet":
+            cmd.append("--verify-no-changes")
+    if path:
+        cmd.append(path)
+    elif tool in ("ruff", "black", "dart"):
+        cmd.append(".")
+    result = _run(cmd, cwd=root, timeout=timeout)
+    result["tool"] = tool
+    result["mode"] = "check" if check_only else "format"
+    return result
+
+
+def typecheck_run(root=".", tool="auto", path="", timeout=120, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    # Confine the argv-appended path too; see _resolve_target_path.
+    path = _resolve_target_path(root, path)
+    timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
+    if tool == "auto":
+        tool = _detect_typechecker(root)
+    cmd_template = _TYPECHECKERS.get(tool)
+    if not cmd_template:
+        return {"ok": False, "error": "unknown type checker: %s" % tool, "tool": tool}
+    cmd = list(cmd_template)
+    if path:
+        cmd.append(path)
+    elif tool == "mypy":
+        cmd.append(".")
+    result = _run(cmd, cwd=root, timeout=timeout)
+    result["tool"] = tool
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Dependency management
+# ---------------------------------------------------------------------------
+
+def _detect_package_manager(root):
+    root = Path(root)
+    if (root / "Cargo.toml").exists():
+        return "cargo"
+    if (root / "go.mod").exists():
+        return "go"
+    if (root / "uv.lock").exists() and shutil.which("uv"):
+        return "uv"
+    if (root / "requirements.txt").exists() or (root / "pyproject.toml").exists():
+        return "pip"
+    if (root / "pubspec.yaml").exists():
+        try:
+            if re.search(r"(?m)^\s{0,4}flutter\s*:", (root / "pubspec.yaml").read_text(encoding="utf-8", errors="replace")):
+                return "flutter"
+        except OSError:
+            pass
+        return "dart"
+    if _has_glob(root, "*.csproj") or _has_glob(root, "*.fsproj") or _has_glob(root, "*.sln"):
+        return "dotnet"
+    if (root / "bun.lock").exists() or (root / "bun.lockb").exists():
+        return "bun"
+    if (root / "pnpm-lock.yaml").exists():
+        return "pnpm"
+    if (root / "yarn.lock").exists():
+        return "yarn"
+    if (root / "package.json").exists():
+        return "npm"
+    if (root / "composer.json").exists():
+        return "composer"
+    if (root / "Gemfile").exists():
+        return "bundler"
+    if (root / "mix.exs").exists():
+        return "mix"
+    if (root / "Package.swift").exists():
+        return "swift"
+    return "pip"
+
+
+_SAFE_PACKAGE_SPEC_RE = re.compile(r"^[A-Za-z0-9@][A-Za-z0-9._/@:^~<>=!,+\-\[\]*]*$")
+_DISALLOWED_PACKAGE_PREFIXES = ("file:", "git+", "hg+", "svn+", "bzr+", "http:", "https:", "ssh:")
+
+
+def _parse_and_validate_packages(packages_json, *, allow_empty=False):
+    """Parse and validate a JSON list of safe package specifiers (no flag/URL/path injection)."""
+    if allow_empty and (packages_json is None or str(packages_json).strip() == ""):
+        return [], None
+    try:
+        packages = json.loads(packages_json)
+    except (json.JSONDecodeError, TypeError):
+        return None, "invalid JSON in packages_json"
+    if not isinstance(packages, list) or (not allow_empty and not packages):
+        return None, "packages_json must be a non-empty JSON array of package names"
+    cleaned = []
+    for item in packages:
+        if not isinstance(item, str):
+            return None, "each package in packages_json must be a non-empty string"
+        spec = item.strip()
+        if not spec or spec != item:
+            return None, "invalid package specifier: %r" % item
+        if spec.startswith("-"):
+            return None, "package specifier must not start with '-': %r" % spec
+        lowered = spec.lower()
+        if (
+            "://" in spec
+            or lowered.startswith(_DISALLOWED_PACKAGE_PREFIXES)
+            or ".." in spec
+            or "\\" in spec
+            or spec.startswith("/")
+            or any(ch in spec for ch in ("\0", "\r", "\n"))
+            or re.search(r"\s", spec)
+            or not _SAFE_PACKAGE_SPEC_RE.fullmatch(spec)
+        ):
+            return None, "unsafe package specifier: %r" % spec
+        cleaned.append(spec)
+    return cleaned, None
+
+
+def dependency_add(root=".", packages_json="[]", dev=False, timeout=60, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
+    packages, err = _parse_and_validate_packages(packages_json, allow_empty=False)
+    if err:
+        return {"ok": False, "error": err}
+    live = _live_refusal("dependency_add", root)
+    if live:
+        return live
+    refused = protected_write_scope.scope_refusal("dependency_add", root, root)
+    if refused:
+        return {"ok": False, "error": refused}
+
+    mgr = _detect_package_manager(root)
+    if mgr == "pip":
+        cmd = [sys.executable, "-m", "pip", "install", "--"] + packages
+    elif mgr == "uv":
+        cmd = ["uv", "add"] + (["--dev"] if dev else []) + ["--"] + packages
+    elif mgr == "npm":
+        cmd = ["npm", "install"] + (["--save-dev"] if dev else []) + packages
+    elif mgr == "pnpm":
+        cmd = ["pnpm", "add"] + (["-D"] if dev else []) + packages
+    elif mgr == "yarn":
+        cmd = ["yarn", "add"] + (["--dev"] if dev else []) + packages
+    elif mgr == "bun":
+        cmd = ["bun", "add"] + (["-d"] if dev else []) + packages
+    elif mgr == "cargo":
+        cmd = ["cargo", "add"] + (["--dev"] if dev else []) + ["--"] + packages
+    elif mgr == "go":
+        cmd = ["go", "get"] + packages
+    elif mgr == "dotnet":
+        cmd = ["dotnet", "add", "package", packages[0]]
+    elif mgr in ("dart", "flutter"):
+        cmd = [mgr, "pub", "add"] + ([f"dev:{p}" for p in packages] if dev else packages)
+    elif mgr == "composer":
+        cmd = ["composer", "require"] + (["--dev"] if dev else []) + ["--"] + packages
+    elif mgr == "bundler":
+        cmd = ["bundle", "add"] + packages
+    else:
+        return {"ok": False, "error": "unsupported package manager: %s" % mgr}
+
+    result = _run(cmd, cwd=root, timeout=timeout)
+    result["manager"] = mgr
+    result["packages"] = packages
+    return result
+
+
+def dependency_remove(root=".", packages_json="[]", timeout=60, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
+    packages, err = _parse_and_validate_packages(packages_json, allow_empty=False)
+    if err:
+        return {"ok": False, "error": err}
+    live = _live_refusal("dependency_remove", root)
+    if live:
+        return live
+    refused = protected_write_scope.scope_refusal("dependency_remove", root, root)
+    if refused:
+        return {"ok": False, "error": refused}
+
+    mgr = _detect_package_manager(root)
+    if mgr == "pip":
+        cmd = [sys.executable, "-m", "pip", "uninstall", "-y", "--"] + packages
+    elif mgr == "uv":
+        cmd = ["uv", "remove", "--"] + packages
+    elif mgr == "npm":
+        cmd = ["npm", "uninstall"] + packages
+    elif mgr == "pnpm":
+        cmd = ["pnpm", "remove"] + packages
+    elif mgr == "yarn":
+        cmd = ["yarn", "remove"] + packages
+    elif mgr == "bun":
+        cmd = ["bun", "remove"] + packages
+    elif mgr == "cargo":
+        cmd = ["cargo", "remove", "--"] + packages
+    elif mgr == "dotnet":
+        cmd = ["dotnet", "remove", "package", packages[0]]
+    elif mgr in ("dart", "flutter"):
+        cmd = [mgr, "pub", "remove"] + packages
+    elif mgr == "composer":
+        cmd = ["composer", "remove", "--"] + packages
+    elif mgr == "bundler":
+        cmd = ["bundle", "remove"] + packages
+    else:
+        return {"ok": False, "error": "unsupported for remove: %s" % mgr}
+
+    result = _run(cmd, cwd=root, timeout=timeout)
+    result["manager"] = mgr
+    result["packages"] = packages
+    return result
+
+
+def dependency_update(root=".", packages_json="[]", timeout=120, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
+    packages, err = _parse_and_validate_packages(packages_json, allow_empty=True)
+    if err:
+        return {"ok": False, "error": err}
+    live = _live_refusal("dependency_update", root)
+    if live:
+        return live
+    refused = protected_write_scope.scope_refusal("dependency_update", root, root)
+    if refused:
+        return {"ok": False, "error": refused}
+
+    mgr = _detect_package_manager(root)
+    if mgr == "pip":
+        if packages:
+            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "--"] + packages
+        else:
+            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "-r", "requirements.txt"]
+    elif mgr == "uv":
+        cmd = ["uv", "lock", "--upgrade"]
+    elif mgr == "npm":
+        cmd = ["npm", "update"] + packages
+    elif mgr == "pnpm":
+        cmd = ["pnpm", "update"] + packages
+    elif mgr == "yarn":
+        cmd = ["yarn", "upgrade"] + packages
+    elif mgr == "bun":
+        cmd = ["bun", "update"] + packages
+    elif mgr == "cargo":
+        cmd = ["cargo", "update"] + (["--package"] + packages if packages else [])
+    elif mgr == "go":
+        cmd = ["go", "get", "-u"] + (packages or ["./..."])
+    elif mgr in ("dart", "flutter"):
+        cmd = [mgr, "pub", "upgrade"] + packages
+    elif mgr == "composer":
+        cmd = ["composer", "update"] + (["--"] + packages if packages else [])
+    elif mgr == "bundler":
+        cmd = ["bundle", "update"] + packages
+    elif mgr == "mix":
+        cmd = ["mix", "deps.update"] + (packages if packages else ["--all"])
+    elif mgr == "swift":
+        cmd = ["swift", "package", "update"]
+    else:
+        return {"ok": False, "error": "unsupported for update: %s" % mgr}
+
+    result = _run(cmd, cwd=root, timeout=timeout)
+    result["manager"] = mgr
+    return result
+
+
+def dependency_audit(root=".", timeout=60, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
+    mgr = _detect_package_manager(root)
+    if mgr == "pip":
+        cmd = [sys.executable, "-m", "pip", "audit"] if shutil.which("pip-audit") else [sys.executable, "-m", "pip", "check"]
+        result = _run(cmd, cwd=root, timeout=timeout)
+    elif mgr in ("npm", "pnpm", "yarn"):
+        cmd = ["npm", "audit", "--json"] if mgr == "npm" else [mgr, "audit"]
+        result = _run(cmd, cwd=root, timeout=timeout)
+    elif mgr == "cargo":
+        if shutil.which("cargo-audit"):
+            result = _run(["cargo", "audit"], cwd=root, timeout=timeout)
+        else:
+            result = {"ok": False, "error": "cargo-audit not installed; run: cargo install cargo-audit"}
+    elif mgr == "dotnet":
+        result = _run(["dotnet", "list", "package", "--vulnerable"], cwd=root, timeout=timeout)
+    elif mgr in ("dart", "flutter"):
+        result = _run([mgr, "pub", "outdated"], cwd=root, timeout=timeout)
+    elif mgr == "composer":
+        result = _run(["composer", "audit"], cwd=root, timeout=timeout)
+    elif mgr == "go":
+        if shutil.which("govulncheck"):
+            result = _run(["govulncheck", "./..."], cwd=root, timeout=timeout)
+        else:
+            result = _run(["go", "vet", "./..."], cwd=root, timeout=timeout)
+    else:
+        result = {"ok": False, "error": "no audit support for %s" % mgr}
+    result["manager"] = mgr
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Git mutations
+# ---------------------------------------------------------------------------
+
+def _guarded_git_mutation(operation):
+    """Serialize host-driven Git mutations per working tree (Issue #510).
+
+    A refused mutation returns the same ``{"ok": False, "error": ...}`` shape
+    as any other Git failure, plus guard fields, and never runs Git.
+    """
+    def decorate(function):
+        def guarded(root=".", *args, **kwargs):
+            extra_roots = kwargs.get("extra_roots", "")
+            try:
+                key_root = _resolve_root(root, extra_roots)
+            except Exception:
+                # Let the unguarded function report its own path error.
+                return function(root, *args, **kwargs)
+            try:
+                with guard_git_mutation(key_root, operation):
+                    return function(root, *args, **kwargs)
+            except ConcurrentGitMutation as refusal:
+                return refusal.as_result()
+        guarded.__name__ = function.__name__
+        guarded.__qualname__ = function.__qualname__
+        guarded.__doc__ = function.__doc__
+        guarded.__wrapped__ = function
+        return guarded
+    return decorate
+
+
+@_guarded_git_mutation("git_commit")
+def git_commit(root=".", message="", paths_json="[]", all_tracked=False, timeout=30, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    if not message:
+        return {"ok": False, "error": "commit message is required"}
+    try:
+        paths = json.loads(paths_json)
+        if not isinstance(paths, list):
+            paths = []
+    except json.JSONDecodeError:
+        paths = []
+    refused = _live_refusal("git_commit", root)
+    if refused:
+        return refused
+    if paths:
+        add_result = _run_git(root, ["add", "--"] + paths, timeout=timeout)
+        if not add_result["ok"]:
+            return add_result
+    elif all_tracked:
+        add_result = _run_git(root, ["add", "-u"], timeout=timeout)
+        if not add_result["ok"]:
+            return add_result
+
+    result = _run_git(root, ["commit", "-m", message], timeout=timeout)
+    return result
+
+
+def _invalid_git_ref_error(value, label):
+    if not isinstance(value, str):
+        return "invalid git %s: must be a string" % label
+    text = value.strip()
+    if text.startswith("-") or any(ch in text for ch in ("\0", "\r", "\n")):
+        return "invalid git %s: %r (must not start with '-')" % (label, text)
+    return None
+
+
+@_guarded_git_mutation("git_branch")
+def git_branch(root=".", name="", checkout=True, base="", timeout=10, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    if not name:
+        return {"ok": False, "error": "branch name is required"}
+    err = _invalid_git_ref_error(name, "branch name")
+    if err:
+        return {"ok": False, "error": err}
+    if base:
+        err = _invalid_git_ref_error(base, "base ref")
+        if err:
+            return {"ok": False, "error": err}
+    refused = _live_refusal("git_branch", root)
+    if refused:
+        return refused
+    if checkout:
+        cmd = ["checkout", "-b", name]
+    else:
+        cmd = ["branch", "--", name]
+    if base:
+        cmd.append(base)
+    return _run_git(root, cmd, timeout=timeout)
+
+
+@_guarded_git_mutation("git_checkout")
+def git_checkout(root=".", ref="", timeout=10, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    if not ref:
+        return {"ok": False, "error": "ref is required (branch name, tag, or commit)"}
+    err = _invalid_git_ref_error(ref, "ref")
+    if err:
+        return {"ok": False, "error": err}
+    refused = _live_refusal("git_checkout", root)
+    if refused:
+        return refused
+    return _run_git(root, ["checkout", ref], timeout=timeout)
+
+
+@_guarded_git_mutation("git_stash")
+def git_stash(root=".", action="push", message="", include_untracked=True, timeout=10, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    if action == "push":
+        cmd = ["stash", "push"]
+        if include_untracked:
+            cmd.append("-u")
+        if message:
+            cmd.extend(["-m", message])
+    elif action == "pop":
+        cmd = ["stash", "pop"]
+    elif action == "list":
+        cmd = ["stash", "list"]
+    elif action == "drop":
+        cmd = ["stash", "drop"]
+    else:
+        return {"ok": False, "error": "unknown stash action: %s (use push/pop/list/drop)" % action}
+    if action in ("push", "pop", "drop"):
+        refused = _live_refusal("git_stash", root)
+        if refused:
+            return refused
+    if action in ("pop", "drop"):
+        refused = _recovery_stash_refusal(action, root, timeout=timeout)
+        if refused:
+            return refused
+    return _run_git(root, cmd, timeout=timeout)
+
+
+def _recovery_stash_refusal(action, root, *, timeout):
+    """``{"ok": False, ...}`` when ``git stash <action>`` would take the runtime recovery stash, else None.
+
+    ``pop`` and ``drop`` act on ``stash@{0}``.  When that is a stash
+    ``runtime_source_stash save`` recorded (in any worktree, since the stash
+    list is shared), only ``runtime_source_stash pop`` may take it: it applies
+    by commit id, needs the operator at the console and keeps its ledger in
+    step.  Refused whoever is at the console, and refused when git cannot
+    answer (a timeout, or configuration it cannot read).  The check and the
+    git run are two steps.
+    """
+    probe_timeout = _bounded_int(timeout, 10, 1, git_tools.MAX_TIMEOUT)
+    try:
+        commit = git_tools.recorded_recovery_stash_at(root, timeout=probe_timeout)
+    except (OSError, ValueError, PermissionError, TimeoutError) as exc:
+        return {
+            "ok": False,
+            "error": "refusing git stash %s: could not check for the runtime recovery stash: %s" % (action, exc),
+            "guard": RECOVERY_STASH_GUARD,
+        }
+    if not commit:
+        return None
+    return {
+        "ok": False,
+        "error": "refusing git stash %s: stash@{0} (%s) is the runtime recovery stash; restore it with "
+                 "runtime_source_stash action=pop at the console" % (action, commit),
+        "guard": RECOVERY_STASH_GUARD,
+    }
+
+
+@_guarded_git_mutation("git_tag")
+def git_tag(root=".", name="", message="", delete=False, timeout=10, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    if not name:
+        return {"ok": False, "error": "tag name is required"}
+    err = _invalid_git_ref_error(name, "tag name")
+    if err:
+        return {"ok": False, "error": err}
+    refused = _live_refusal("git_tag", root)
+    if refused:
+        return refused
+    if delete:
+        cmd = ["tag", "-d", "--", name]
+    elif message:
+        cmd = ["tag", "-a", "-m", message, "--", name]
+    else:
+        cmd = ["tag", "--", name]
+    return _run_git(root, cmd, timeout=timeout)
+
+
+@_guarded_git_mutation("git_merge")
+def git_merge(root=".", branch="", no_ff=True, message="", timeout=30, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    if not branch:
+        return {"ok": False, "error": "branch name is required"}
+    err = _invalid_git_ref_error(branch, "branch name")
+    if err:
+        return {"ok": False, "error": err}
+    cmd = ["merge"]
+    if no_ff:
+        cmd.append("--no-ff")
+    if message:
+        cmd.extend(["-m", message])
+    cmd.append(branch)
+    refused = _live_refusal("git_merge", root)
+    if refused:
+        return refused
+    return _run_git(root, cmd, timeout=timeout)
+
+
+@_guarded_git_mutation("git_cherry_pick")
+def git_cherry_pick(root=".", commits_json="[]", timeout=30, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    try:
+        commits = json.loads(commits_json)
+        if not isinstance(commits, list) or not commits:
+            return {"ok": False, "error": "commits_json must be a non-empty JSON array of commit SHAs"}
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "invalid JSON"}
+    for commit in commits:
+        if not isinstance(commit, str) or not commit.strip():
+            return {"ok": False, "error": "each commit in commits_json must be a non-empty string"}
+        err = _invalid_git_ref_error(commit, "commit")
+        if err:
+            return {"ok": False, "error": err}
+    refused = _live_refusal("git_cherry_pick", root)
+    if refused:
+        return refused
+    return _run_git(root, ["cherry-pick"] + commits, timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# Build tools
+# ---------------------------------------------------------------------------
+
+def build_run(root=".", command="", timeout=120, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    timeout = _bounded_int(timeout, 120, 5, MAX_TIMEOUT)
+
+    if command:
+        # `echo` and many build wrappers are shell builtins on Windows.  This
+        # tool intentionally accepts a command string, so dispatch it through
+        # cmd there rather than trying to exec a nonexistent echo.exe.
+        if os.name == "nt":
+            result = _run(["cmd", "/d", "/s", "/c", command], cwd=root, timeout=timeout)
+            result["command"] = command.split()
+            return result
+        parts = command.split()
+        return _run(parts, cwd=root, timeout=timeout)
+
+    if (root / "Makefile").exists():
+        return _run(["make"], cwd=root, timeout=timeout)
+    if (root / "Cargo.toml").exists():
+        return _run(["cargo", "build"], cwd=root, timeout=timeout)
+    if (root / "CMakeLists.txt").exists():
+        return _run(["cmake", "--build", "build"], cwd=root, timeout=timeout)
+    if (root / "meson.build").exists():
+        return _run(["meson", "compile", "-C", "build"], cwd=root, timeout=timeout)
+    if (root / "build.zig").exists():
+        return _run(["zig", "build"], cwd=root, timeout=timeout)
+    if (root / "Package.swift").exists():
+        return _run(["swift", "build"], cwd=root, timeout=timeout)
+    if (root / "mix.exs").exists():
+        return _run(["mix", "compile"], cwd=root, timeout=timeout)
+    if (root / "WORKSPACE").exists() or (root / "MODULE.bazel").exists():
+        return _run(["bazel", "build", "//..."], cwd=root, timeout=timeout)
+    if (root / "SConstruct").exists():
+        return _run(["scons"], cwd=root, timeout=timeout)
+    dotnet_targets = sorted(root.glob("*.sln")) or sorted(root.glob("*.csproj")) or sorted(root.glob("*.fsproj"))
+    if dotnet_targets:
+        return _run(["dotnet", "build", dotnet_targets[0].name], cwd=root, timeout=timeout)
+    if (root / "pubspec.yaml").exists():
+        if shutil.which("flutter"):
+            return _run(["flutter", "analyze"], cwd=root, timeout=timeout)
+        return _run(["dart", "analyze"], cwd=root, timeout=timeout)
+    if (root / "go.mod").exists():
+        return _run(["go", "build", "./..."], cwd=root, timeout=timeout)
+    if (root / "package.json").exists():
+        return _run(["npm", "run", "build"], cwd=root, timeout=timeout)
+    if (root / "build.gradle").exists() or (root / "build.gradle.kts").exists():
+        return _run(["./gradlew" if os.name != "nt" else "gradlew.bat", "build"], cwd=root, timeout=timeout)
+    if (root / "pom.xml").exists():
+        return _run(["mvn", "package", "-q"], cwd=root, timeout=timeout)
+    if (root / "pyproject.toml").exists():
+        return _run([sys.executable, "-I", "-m", "compileall", "-q", "."], cwd=root, timeout=timeout)
+
+    return {"ok": False, "error": "no recognized build system found at %s" % root}
+
+
+def build_clean(root=".", timeout=30, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    timeout = _bounded_int(timeout, 30, 5, MAX_TIMEOUT)
+
+    if (root / "Makefile").exists():
+        return _run(["make", "clean"], cwd=root, timeout=timeout)
+    if (root / "Cargo.toml").exists():
+        return _run(["cargo", "clean"], cwd=root, timeout=timeout)
+    if (root / "Package.swift").exists():
+        return _run(["swift", "package", "clean"], cwd=root, timeout=timeout)
+    if (root / "mix.exs").exists():
+        return _run(["mix", "clean"], cwd=root, timeout=timeout)
+    if (root / "WORKSPACE").exists() or (root / "MODULE.bazel").exists():
+        return _run(["bazel", "clean"], cwd=root, timeout=timeout)
+    if (root / "pubspec.yaml").exists() and shutil.which("flutter"):
+        return _run(["flutter", "clean"], cwd=root, timeout=timeout)
+    dotnet_targets = sorted(root.glob("*.sln")) or sorted(root.glob("*.csproj")) or sorted(root.glob("*.fsproj"))
+    if dotnet_targets:
+        return _run(["dotnet", "clean", dotnet_targets[0].name], cwd=root, timeout=timeout)
+    if (root / "go.mod").exists():
+        return _run(["go", "clean", "./..."], cwd=root, timeout=timeout)
+    return {"ok": False, "error": "no recognized build system for clean"}
+
+
+# ---------------------------------------------------------------------------
+# Refactoring helpers
+# ---------------------------------------------------------------------------
+
+def _refactor_source_files(root, glob):
+    """Yield ``(path, rel)`` for regular files the refactoring helpers read.
+
+    Dot-directories are skipped only BELOW the root.  Testing the absolute
+    path skipped every file whenever the root itself had a dot-prefixed
+    ancestor (``~/.claude/worktrees/...``), so both helpers matched nothing.
+    """
+    for path in root.glob(glob):
+        try:
+            rel_path = path.relative_to(root)
+        except ValueError:
+            continue
+        if any(part.startswith(".") for part in rel_path.parts):
+            continue
+        if not path.is_file() or path.stat().st_size > 2_000_000:
+            continue
+        yield path, str(rel_path)
+
+
+def _read_source(path):
+    # newline="" keeps each file's own line endings through a rewrite.
+    with open(path, encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
+def _apply_staged_rewrites(staged):
+    """Write every staged rewrite, or none of them.
+
+    Each new content is first written to a temporary file beside its target;
+    only when all are staged are they swapped in with ``os.replace``.  If any
+    step fails, staged files are removed and already-swapped targets are
+    restored to their original content, so a failure never leaves a
+    half-renamed tree.
+    """
+    import tempfile
+
+    temps = []
+    applied = []
+    try:
+        for path, _original, new_content in staged:
+            fd, temp = tempfile.mkstemp(dir=path.parent, prefix="." + path.name + ".", suffix=".rename")
+            temps.append(temp)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                handle.write(new_content)
+            shutil.copymode(path, temp)
+        for (path, original, _new), temp in zip(staged, temps, strict=True):
+            os.replace(temp, path)
+            applied.append((path, original))
+    except BaseException as error:
+        for temp in temps:
+            with contextlib.suppress(OSError):
+                os.unlink(temp)
+        unrestored = []
+        for path, original in reversed(applied):
+            try:
+                with open(path, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(original)
+            except OSError:
+                unrestored.append(path)
+        if unrestored:
+            raise OSError(
+                "rename rollback could not restore %d file(s)" % len(unrestored)
+            ) from error
+        raise
+
+
+def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=True, timeout=30, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    if not old_name or not new_name:
+        return {"ok": False, "error": "both old_name and new_name are required"}
+
+    files_changed = []
+    preview = []
+    staged = []
+    pattern = re.compile(r'\b' + re.escape(old_name) + r'\b')
+
+    for path, rel in _refactor_source_files(root, glob):
+        try:
+            content = _read_source(path)
+        except (UnicodeDecodeError, OSError):
+            continue
+        matches = list(pattern.finditer(content))
+        if not matches:
+            continue
+        new_content = pattern.sub(new_name, content)
+        count = len(matches)
+        files_changed.append({"file": rel, "replacements": count})
+        for m in matches[:3]:
+            line_no = content[:m.start()].count("\n") + 1
+            line = content.splitlines()[line_no - 1].strip()
+            preview.append({"file": rel, "line": line_no, "text": line})
+        staged.append((path, content, new_content))
+
+    if not dry_run and staged:
+        refused = protected_write_scope.files_refusal("rename_symbol", root, [path for path, _old, _new in staged])
+        if refused:
+            return {"ok": False, "error": refused, "dry_run": dry_run, "old_name": old_name,
+                    "new_name": new_name, "files_changed": 0}
+        try:
+            _apply_staged_rewrites(staged)
+        except OSError as exc:
+            return {
+                "ok": False,
+                "error": "rename failed and was rolled back: %s" % exc,
+                "dry_run": dry_run,
+                "old_name": old_name,
+                "new_name": new_name,
+                "files_changed": 0,
+            }
+
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "old_name": old_name,
+        "new_name": new_name,
+        "files_changed": len(files_changed),
+        "total_replacements": sum(f["replacements"] for f in files_changed),
+        "details": files_changed,
+        "preview": preview[:20],
+    }
+
+
+def extract_references(root=".", symbol="", glob="**/*.py", timeout=30, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    if not symbol:
+        return {"ok": False, "error": "symbol name is required"}
+
+    pattern = re.compile(r'\b' + re.escape(symbol) + r'\b')
+    refs = []
+    for path, rel in _refactor_source_files(root, glob):
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        lines = content.splitlines()
+        for i, line in enumerate(lines, 1):
+            if pattern.search(line):
+                refs.append({"file": rel, "line": i, "text": line.strip()})
+                if len(refs) >= 200:
+                    return {"ok": True, "symbol": symbol, "references": refs, "truncated": True}
+
+    return {"ok": True, "symbol": symbol, "references": refs, "truncated": False}
+
+
+# ---------------------------------------------------------------------------
+# Diff / patch helpers
+# ---------------------------------------------------------------------------
+
+def diff_files(root=".", left="", right="", context=3, timeout=10, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    if not left or not right:
+        return {"ok": False, "error": "both left and right paths are required"}
+    left_path = (root / left).resolve()
+    right_path = (root / right).resolve()
+    if not left_path.is_file():
+        return {"ok": False, "error": "left file not found: %s" % left}
+    if not right_path.is_file():
+        return {"ok": False, "error": "right file not found: %s" % right}
+    # Pass the paths RELATIVE to root. `git diff --no-index` echoes whatever it
+    # is given into the `diff --git a/... b/...` header, so absolute arguments
+    # printed the operator's full host path -- where the project lives on disk,
+    # and the account name in it -- into every diff a confined agent read back.
+    # Resolving relative to the root also closes the hole this exposed: `left`
+    # and `right` were joined to the root and never checked, so `../..` walked
+    # straight out of it on any caller that does not go through the agent
+    # surface's own scope check.
+    try:
+        left_rel = left_path.relative_to(root)
+        right_rel = right_path.relative_to(root)
+    except ValueError:
+        return {
+            "ok": False,
+            "error": "left and right must resolve inside the root directory",
+        }
+
+    result = _run(
+        [_git(), "diff", "--no-index", "-U%d" % context, "--", str(left_rel), str(right_rel)],
+        cwd=root, timeout=timeout,
+    )
+    result["ok"] = True
+    return result
+
+
+def apply_patch(root=".", patch_text="", check_only=False, timeout=10, extra_roots=""):
+    root = _resolve_root(root, extra_roots)
+    if not patch_text:
+        return {"ok": False, "error": "patch_text is required"}
+    if not check_only:
+        refused = _live_refusal("apply_patch", root)
+        if refused:
+            return refused
+        # Every path the patch writes, in any repository, gets the file tools' guard.
+        refused = _patch_refusal("apply_patch", root, patch_text, timeout=timeout)
+        if refused:
+            return refused
+    cmd = [_git(), "apply"]
+    if check_only:
+        cmd.append("--check")
+    cmd.append("-")
+    return _run(cmd, cwd=root, timeout=timeout, stdin_bytes=patch_text.encode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# Security scanning
+# ---------------------------------------------------------------------------
+
+_REDACTED_CREDENTIAL = "[REDACTED CREDENTIAL]"
+_HARNESS_FINDING_LABELS = {
+    "private_key": "Private key",
+    "aws_access_key": "AWS credential",
+    "github_token": "GitHub PAT",
+    "api_token": "API key",
+    "bearer_token": "Bearer token",
+    "url_credential": "URL credential",
+    "jwt": "JWT",
+    "credential_assignment": "Secret/password",
+}
+
+
+def secret_scan(root=".", timeout=30, extra_roots=""):
+    resolved = _resolve_root(root, extra_roots)
+    timeout = _bounded_int(timeout, 30, 5, MAX_TIMEOUT)
+    # Delegate the walk, symlink/junction confinement, credential-store skip
+    # and CredentialScanner matching to the canonical adapter so the live MCP
+    # tool shares the exact same security guarantees.
+    result = _secret_scan_adapter._scan_resolved(resolved, timeout=timeout)
+    findings = [
+        {
+            "file": item["file"],
+            "line": item["line"],
+            "type": _HARNESS_FINDING_LABELS.get(item["type"], item["type"]),
+            "match": _REDACTED_CREDENTIAL,
+        }
+        for item in result["findings"]
+    ]
+    return {
+        "ok": True,
+        "findings": findings,
+        "files_scanned": result["files_scanned"],
+        "truncated": result["truncated"],
+        "timed_out": result["timed_out"],
+        "timeout": timeout,
+        "credential_files_skipped": result["credential_files_skipped"],
+        "links_skipped": result["links_skipped"],
+    }

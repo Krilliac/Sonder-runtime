@@ -164,7 +164,9 @@ def test_reopened_selfmod_deploy_refuses_tampered_candidate_before_copy(tmp_path
     child_env = dict(os.environ)
     child_env["SONDER_SELFMOD_HOME"] = str(state)
     child_env["SONDER_SELFMOD_DB"] = str(database)
-    child_env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1]) + os.pathsep + child_env.get("PYTHONPATH", "")
+    repo_root = Path(__file__).resolve().parents[1]
+    extra_py = os.pathsep.join([str(repo_root), str(repo_root / "runtime"), str(repo_root / "scripts")])
+    child_env["PYTHONPATH"] = extra_py + os.pathsep + child_env.get("PYTHONPATH", "")
     child = subprocess.run(
         [sys.executable, "-c", f"import selfmod; selfmod.deploy({run['id']!r}, commit=False)"],
         cwd=str(root), env=child_env, capture_output=True, text=True, timeout=20, check=False,

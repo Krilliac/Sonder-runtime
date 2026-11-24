@@ -6,13 +6,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-PROVIDER_TIERS = ("fast", "general", "code", "reasoning", "vision")
+CORE_PROVIDER_TIERS = ("fast", "general", "code", "reasoning", "vision")
+EXTENDED_PROVIDER_TIERS = ("security", "creative", "draft")
+PROVIDER_TIERS = CORE_PROVIDER_TIERS + EXTENDED_PROVIDER_TIERS
 TIER_PROVIDER_ENV = {
     "fast": "SONDER_FAST_PROVIDER",
     "general": "SONDER_GENERAL_PROVIDER",
     "code": "SONDER_CODE_PROVIDER",
     "reasoning": "SONDER_REASONING_PROVIDER",
     "vision": "SONDER_VISION_PROVIDER",
+    "security": "SONDER_SECURITY_PROVIDER",
+    "creative": "SONDER_CREATIVE_PROVIDER",
+    "draft": "SONDER_DRAFT_PROVIDER",
 }
 INFERENCE_FALLBACK_ENV = "SONDER_INFERENCE_FALLBACK"
 _ALIASES = {
@@ -91,8 +96,12 @@ class ProviderBindings:
         default = normalize_provider(self.default_generation_provider)
         embedding = normalize_provider(self.embedding_provider)
         tiers = {str(k): normalize_provider(v) for k, v in self.tier_providers.items()}
-        if set(tiers) != set(PROVIDER_TIERS):
-            raise ValueError("provider bindings must define exactly %r" % (PROVIDER_TIERS,))
+        unknown = set(tiers) - set(PROVIDER_TIERS)
+        missing_core = set(CORE_PROVIDER_TIERS) - set(tiers)
+        if unknown or missing_core:
+            raise ValueError("provider bindings must define %r" % (PROVIDER_TIERS,))
+        for ext_tier in EXTENDED_PROVIDER_TIERS:
+            tiers.setdefault(ext_tier, default)
         generation = {default, *tiers.values()}
         fallbacks: dict[str, str] = {}
         for primary, target in dict(self.fallbacks or {}).items():

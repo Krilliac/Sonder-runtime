@@ -110,7 +110,7 @@ class PermissionPolicyProvider:
         return tuple(_engine().MODES)
 
     def is_durable_authority_tool(self, name: str) -> bool:
-        return str(name or "").lstrip("/") in _engine().DURABLE_AUTHORITY_TOOLS
+        return str(name or "").strip().lstrip("/") in _engine().DURABLE_AUTHORITY_TOOLS
 
     def mode_label(self, mode: str) -> str:
         return _engine().MODE_LABELS.get(mode, mode)

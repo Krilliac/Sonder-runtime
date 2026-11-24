@@ -15,12 +15,18 @@ def test_initial_shadow_registry_is_immutable_and_has_no_drift():
         "environment_status", "toolchain_status", "hardware_profile", "file_policy",
         "workspace_inventory", "directory_tree", "file_find", "file_read",
         "file_read_range", "file_digest", "text_search", "repo_status",
-        "repo_diff", "image_inspect", "artifact_risk_inspect", "process_list",
+        "repo_diff", "image_inspect", "document_extract", "media_inspect",
+        "code_metrics", "schema_validate", "language_matrix",
+        "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic",
+        "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check",
+        "plan_fallback", "runtime_resilience_check",
+        "prompt_shield", "error_diagnose", "code_audit", "data_transform", "learn_tool",
+        "artifact_risk_inspect", "process_list",
         "process_memory_risk_inspect", "tool_inventory", "output_digest",
     }
     with pytest.raises(TypeError):
         capabilities.CAPABILITIES["new"] = capabilities.CAPABILITIES["file_read"]
-    assert "tool_capabilities.py" in package.REQUIRED_FILES
+    assert "runtime/tool_capabilities.py" in package.REQUIRED_FILES
     issues = capabilities.validate_shadow(server._tool_capability_shadow_surfaces())
     assert issues == ()
 
@@ -210,7 +216,9 @@ def test_local_read_only_project_dedup_and_autopilot_sets_are_unchanged():
     repository_names = names - process_tools
     rootless = {
         "environment_status", "toolchain_status", "hardware_profile", "file_policy",
-        "tool_inventory", *process_tools,
+        "tool_inventory", "language_matrix", "math_eval", "logic_verify", "regex_lab",
+        "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "learn_tool",
+        *process_tools,
     }
     non_work = {"environment_status", "hardware_profile"}
     assert repository_names <= server.REPOSITORY_READ_ONLY_TOOLS
@@ -283,7 +291,7 @@ def test_diagnostics_exposes_shadow_result_without_startup_enforcement():
     # "ok" is exactly what this validator must never be able to say while it
     # inspects 16 of ~184 advertised tools.  The verdict names the coverage.
     assert report.startswith("partial: ")
-    assert "21 of " in report
+    assert "42 of " in report
     assert "unvalidated" in report
     # Prove diagnostics consumes the shadow report without running its unrelated
     # model, database, NPU, and filesystem checks in this focused unit test.
@@ -407,4 +415,4 @@ def test_diagnostics_reports_shadow_coverage_per_surface():
     assert "tool_capability_coverage_report()" in source
     assert "tool capability coverage" in source
     line = server.tool_capability_coverage_report()
-    assert "direct-mcp 21/" in line
+    assert "direct-mcp 42/" in line

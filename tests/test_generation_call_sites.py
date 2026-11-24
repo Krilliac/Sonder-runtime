@@ -48,7 +48,7 @@ def test_every_root_is_scanned_and_parses(scan):
 
 
 def test_choke_points_and_text_entry_points_exist_and_are_seen(scan):
-    defined = scan.definitions["server.py"]
+    defined = scan.definitions["runtime/server.py"]
     missing = [name for name in calls.CHOKE_POINTS + calls.TEXT_ENTRY_POINTS if name not in defined]
     assert not missing, "renamed or removed (update the scanner and registry): %s" % missing
     seen = {callee for _path, _qualname, callee in scan.sites}

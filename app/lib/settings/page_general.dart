@@ -81,6 +81,30 @@ extension _GeneralPage on _SettingsScreenState {
                 onChanged: _setTemperature,
               ),
             ),
+            SettingRow(
+              label: 'Reasoning effort',
+              description:
+                  'Controls thinking depth per session (also via /effort or the '
+                  'chat bar). Off is fastest for tool loops; Auto follows the '
+                  'server default.',
+              modified: _effortChanged,
+              below: EffortSelector(
+                value: _reasoningEffort,
+                onChanged: _setReasoningEffort,
+              ),
+            ),
+            SettingRow(
+              label: 'Persona',
+              description:
+                  'Shapes response voice and focus (also via /persona or the '
+                  'chat bar). Auto routes by tier and prompt; Off uses no '
+                  'persona prompt.',
+              modified: _personaChanged,
+              below: PersonaSelector(
+                value: _persona,
+                onChanged: _setPersona,
+              ),
+            ),
           ]),
         _clientExecSection(context),
       ],

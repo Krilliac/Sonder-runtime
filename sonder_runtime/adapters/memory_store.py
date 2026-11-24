@@ -293,19 +293,23 @@ _SCHEMA += AUTHORITATIVE_INDEX_DDL
 
 def connect(path=":memory:", check_same_thread=True):
     conn = owned_sqlite_connect(path, check_same_thread=check_same_thread)
-    conn.row_factory = sqlite3.Row
-    # busy_timeout must be the FIRST statement executed. Setting journal_mode
-    # takes a brief exclusive lock, and init_db opens with BEGIN IMMEDIATE --
-    # both contend whenever a second Sonder process is live, which is an
-    # ordinary setup: the MCP server and sonder_serve.py share one memory.db
-    # exactly as the README describes. Ordered the other way round, those two
-    # statements ran under SQLite's default of not waiting at all, so the
-    # loser failed instantly with "database is locked" instead of waiting its
-    # turn. It surfaced in the desktop app as "Connection closed before full
-    # header was received", with the OperationalError only in the server log.
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA journal_mode=WAL")
-    init_db(conn)
+    try:
+        conn.row_factory = sqlite3.Row
+        # busy_timeout must be the FIRST statement executed. Setting journal_mode
+        # takes a brief exclusive lock, and init_db opens with BEGIN IMMEDIATE --
+        # both contend whenever a second Sonder process is live, which is an
+        # ordinary setup: the MCP server and sonder_serve.py share one memory.db
+        # exactly as the README describes. Ordered the other way round, those two
+        # statements ran under SQLite's default of not waiting at all, so the
+        # loser failed instantly with "database is locked" instead of waiting its
+        # turn. It surfaced in the desktop app as "Connection closed before full
+        # header was received", with the OperationalError only in the server log.
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        init_db(conn)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -322,9 +326,13 @@ def connect_read_only(path):
 
     uri = Path(os.fspath(path)).expanduser().resolve().as_uri() + "?mode=ro"
     conn = owned_sqlite_connect(uri, uri=True)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA query_only=ON")
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA query_only=ON")
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -681,10 +689,15 @@ def _estimate_tokens_from_chars(chars):
 
 
 def estimate_interaction_tokens(task, retrieved_ctx, response):
+    from sonder_runtime.application.image_generation import strip_inline_data_images
+
+    clean_task = strip_inline_data_images(task or "")
+    clean_ctx = strip_inline_data_images(retrieved_ctx or "")
+    clean_resp = strip_inline_data_images(response or "")
     tokens_in = _estimate_tokens_from_chars(
-        len(task or "") + len(retrieved_ctx or "")
+        len(clean_task) + len(clean_ctx)
     )
-    tokens_out = _estimate_tokens_from_chars(len(response or ""))
+    tokens_out = _estimate_tokens_from_chars(len(clean_resp))
     return tokens_in, tokens_out
 
 
@@ -3158,6 +3171,8 @@ def task_events(conn, task_id, limit=20, account_scope=None):
 
 def touch_session(conn, session_id, project=None):
     """Ensure a sessions row exists and bump its updated_ts. Preserves title/summary."""
+    if not hasattr(conn, "execute"):
+        return
     conn.execute(
         "INSERT INTO sessions(session_id, project) VALUES(?, ?) "
         "ON CONFLICT(session_id) DO UPDATE SET updated_ts=CURRENT_TIMESTAMP",
@@ -4115,8 +4130,8 @@ def set_preference_enabled(conn, pref_id_or_key, enabled, scope="global"):
     cur = conn.execute(
         "UPDATE preferences SET enabled=?, revision=revision + 1, "
         "updated_ts=CURRENT_TIMESTAMP "
-        "WHERE id=? OR (scope=? AND key=?)",
-        (1 if enabled else 0, pref_id_or_key, scope, pref_id_or_key),
+        "WHERE scope=? AND (id=? OR key=?)",
+        (1 if enabled else 0, scope, pref_id_or_key, pref_id_or_key),
     )
     conn.commit()
     return cur.rowcount

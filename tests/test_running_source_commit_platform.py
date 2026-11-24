@@ -39,4 +39,4 @@ def test_server_helper_is_compatibility_delegate(monkeypatch, tmp_path):
     )
 
     assert server._running_source_commit_at_import() == "b" * 40
-    assert seen == [server.Path(server.__file__).resolve().parent]
+    assert seen == [server.Path(server.__file__).resolve().parents[1]]

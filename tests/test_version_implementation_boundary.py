@@ -9,7 +9,7 @@ def test_root_version_keeps_literal_release_contract():
     import ast
     from pathlib import Path
 
-    tree = ast.parse(Path("sonder_version.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("runtime/sonder_version.py").read_text(encoding="utf-8"))
     assignments = [
         node.value.value
         for node in tree.body

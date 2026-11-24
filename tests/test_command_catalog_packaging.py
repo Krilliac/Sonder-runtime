@@ -22,7 +22,7 @@ def test_root_import_is_an_identity_redirect_to_packaged_implementation():
 
 def test_root_compatibility_module_contains_no_catalog_implementation():
     tree = ast.parse(
-        (_ROOT / "command_catalog.py").read_text(encoding="utf-8"),
+        (_ROOT / "runtime" / "command_catalog.py").read_text(encoding="utf-8"),
         filename="command_catalog.py",
     )
     assert not [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]

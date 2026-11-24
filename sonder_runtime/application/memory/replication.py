@@ -25,6 +25,31 @@ _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_REPLICAS = 64
 _MAX_BATCH_RECORDS = 1024
+_MAX_JSON_DEPTH = 128
+
+
+def _check_json_depth(text: str, limit: int = _MAX_JSON_DEPTH) -> None:
+    """Reject JSON nested deeper than ``limit`` before ``json.loads`` recurses."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+            if depth > limit:
+                raise MemoryReplicationError("memory replication request JSON exceeds nesting depth limit")
+        elif ch in "}]":
+            depth = max(0, depth - 1)
 
 
 def _identity(value: object, field: str) -> str:
@@ -319,7 +344,7 @@ class MemoryReplicationReceiver:
         self.accepted_source_ids = normalized
         self.max_body_bytes = max_body_bytes
 
-    def receive(self, authorization: str, payload: object) -> MemoryReplicaReceipt:
+    def authenticate(self, authorization: str) -> None:
         expected = "Bearer " + self._api_key
         if (
             not isinstance(authorization, str)
@@ -327,6 +352,9 @@ class MemoryReplicationReceiver:
             or not hmac.compare_digest(authorization, expected)
         ):
             raise PermissionError("memory replication authentication is required")
+
+    def receive(self, authorization: str, payload: object) -> MemoryReplicaReceipt:
+        self.authenticate(authorization)
         if not isinstance(payload, dict) or set(payload) != {"object", "batch"}:
             raise MemoryReplicationError("memory replication request envelope is invalid")
         if payload.get("object") != "memory_replication_batch":
@@ -360,11 +388,14 @@ class MemoryReplicationReceiver:
         return receipt
 
     def receive_bytes(self, authorization: str, body: bytes) -> MemoryReplicaReceipt:
+        self.authenticate(authorization)
         if not isinstance(body, bytes) or len(body) > self.max_body_bytes:
             raise MemoryReplicationError("memory replication request exceeds the body bound")
         try:
-            payload = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            decoded = body.decode("utf-8")
+            _check_json_depth(decoded)
+            payload = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
             raise MemoryReplicationError("memory replication request is not valid JSON") from exc
         return self.receive(authorization, payload)
 

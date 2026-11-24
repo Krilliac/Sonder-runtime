@@ -61,6 +61,16 @@ EXACT_MANIFESTS = {
     "gemfile": "ruby-bundle",
     "rakefile": "rake",
     "package.swift": "swift-package",
+    "build.zig": "zig-package",
+    "build.zig.zon": "zig-package",
+    "mix.exs": "elixir-mix",
+    "stack.yaml": "haskell-stack",
+    "build.sbt": "scala-sbt",
+    "project.toml": "julia-project",
+    "dune-project": "ocaml-dune",
+    "workspace": "bazel",
+    "module.bazel": "bazel",
+    "project.godot": "godot",
     "dockerfile": "dockerfile",
     "compose.yaml": "docker-compose",
     "compose.yml": "docker-compose",
@@ -73,6 +83,10 @@ SUFFIX_MANIFESTS = {
     ".fsproj": "dotnet-fsharp",
     ".vbproj": "dotnet-vb",
     ".vcxproj": "msbuild-cpp",
+    ".cabal": "haskell-cabal",
+    ".nimble": "nim-nimble",
+    ".uproject": "unreal-project",
+    ".rockspec": "lua-rockspec",
 }
 MANIFEST_ROLES = {
     "python-project": ("build", "test", "runtime"),
@@ -93,6 +107,17 @@ MANIFEST_ROLES = {
     "dart-package": ("test", "runtime"), "composer": ("test", "runtime"),
     "ruby-bundle": ("runtime",), "rake": ("build", "test"),
     "swift-package": ("build", "test", "runtime"),
+    "zig-package": ("build", "test", "runtime"),
+    "elixir-mix": ("build", "test", "runtime"),
+    "haskell-stack": ("build", "test"), "haskell-cabal": ("build", "test"),
+    "scala-sbt": ("build", "test", "runtime"),
+    "julia-project": ("test", "runtime"),
+    "ocaml-dune": ("build", "test"),
+    "nim-nimble": ("build", "test"),
+    "bazel": ("build", "test"),
+    "unreal-project": ("build",),
+    "godot": ("runtime",),
+    "lua-rockspec": ("build",),
     "dockerfile": ("build", "runtime"), "docker-compose": ("runtime",),
 }
 
@@ -565,6 +590,46 @@ def _parse_manifest(kind, text, path, absolute, collector):
         collector.command("test", cwd, ["swift", "test"], path, "Package.swift")
         if re.search(r"\.executableTarget\s*\(", text):
             collector.command("runtime", cwd, ["swift", "run"], path, "declared executableTarget")
+    elif kind == "zig-package":
+        collector.language("Zig", path)
+        collector.command("build", cwd, ["zig", "build"], path, Path(path).name)
+        collector.command("test", cwd, ["zig", "build", "test"], path, Path(path).name)
+    elif kind == "elixir-mix":
+        collector.language("Elixir", path)
+        collector.command("build", cwd, ["mix", "compile"], path, "mix.exs")
+        collector.command("test", cwd, ["mix", "test"], path, "mix.exs")
+    elif kind in {"haskell-stack", "haskell-cabal"}:
+        collector.language("Haskell", path)
+        tool = "stack" if kind == "haskell-stack" else "cabal"
+        collector.command("build", cwd, [tool, "build"], path, Path(path).name)
+        collector.command("test", cwd, [tool, "test"], path, Path(path).name)
+    elif kind == "scala-sbt":
+        collector.language("Scala", path)
+        collector.command("build", cwd, ["sbt", "compile"], path, "build.sbt")
+        collector.command("test", cwd, ["sbt", "test"], path, "build.sbt")
+    elif kind == "julia-project":
+        collector.language("Julia", path)
+        collector.command("test", cwd, ["julia", "--project=.", "-e", "using Pkg; Pkg.test()"], path, "Project.toml")
+    elif kind == "ocaml-dune":
+        collector.language("OCaml", path)
+        collector.command("build", cwd, ["dune", "build"], path, "dune-project")
+        collector.command("test", cwd, ["dune", "runtest"], path, "dune-project")
+    elif kind == "nim-nimble":
+        collector.language("Nim", path)
+        collector.command("build", cwd, ["nimble", "build"], path, Path(path).name)
+        collector.command("test", cwd, ["nimble", "test"], path, Path(path).name)
+    elif kind == "bazel":
+        collector.framework("Bazel", "Build", path, Path(path).name)
+        collector.command("build", cwd, ["bazel", "build", "//..."], path, Path(path).name)
+        collector.command("test", cwd, ["bazel", "test", "//..."], path, Path(path).name)
+    elif kind == "unreal-project":
+        collector.language("C++", path)
+        collector.framework("Unreal Engine", "C++", path, Path(path).name)
+    elif kind == "godot":
+        collector.framework("Godot", "GDScript", path, "project.godot")
+    elif kind == "lua-rockspec":
+        collector.language("Lua", path)
+        collector.command("build", cwd, ["luarocks", "make"], path, Path(path).name)
     elif kind == "dockerfile":
         collector.framework("Docker", "Container", path, "Dockerfile")
         collector.command("build", cwd, ["docker", "build", "."], path, "Dockerfile")

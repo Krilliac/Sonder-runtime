@@ -1,5 +1,5 @@
 {
-  "digest": "23ea46bbc32c28718374399892b6c0bbff3164742c334774b7cd5201b0cb3f62",
+  "digest": "ed83104b9f639ce4d76c5cbc4e6a825945d9e30123be2fb2ffbd3918b7b574ec",
   "events": [
     {
       "name": "approval.denied",
@@ -1178,21 +1178,31 @@
       "build_job",
       "build_job_result",
       "build_model",
+      "citation_audit",
       "claim_check",
+      "code_audit",
+      "code_graph",
+      "code_metrics",
       "compute_artifact_fetch",
       "compute_cancel",
       "compute_status",
       "compute_submit",
+      "consistency_check",
       "crash_digest",
       "crash_triage",
       "data_inspect",
       "data_query",
+      "data_transform",
       "debug_run_result",
       "dependency_inventory",
+      "diff_semantic",
       "directory_create",
       "directory_digest",
       "directory_tree",
+      "document_extract",
       "edit_file",
+      "error_diagnose",
+      "fact_cross_check",
       "fetch_artifact",
       "file_batch_write",
       "file_check",
@@ -1207,20 +1217,32 @@
       "file_write",
       "image_inspect",
       "json_patch",
+      "language_matrix",
+      "learn_tool",
       "log_inspect",
+      "logic_verify",
       "make_directory",
+      "math_eval",
+      "media_inspect",
       "output_digest",
+      "plan_fallback",
       "process_list",
       "process_memory_risk_inspect",
       "profile_capture_digest",
       "profile_digest",
       "program_search",
       "project_detect",
+      "prompt_shield",
       "read_file",
+      "reasoning_board",
+      "regex_lab",
       "run_program",
       "run_script",
+      "runtime_resilience_check",
+      "schema_validate",
       "script_search",
       "secret_scan",
+      "symbol_verify",
       "test_run",
       "test_run_result",
       "text_patch",
@@ -1304,9 +1326,29 @@
         "summary": "Describe a C/C++ project's build without running anything: build system, generator, configs, platforms, targets (utility and build-time-tool flags), toolchains, compile units, PCH and presets, read from the CMake File API reply, compile_commands.json or .sln/.vcxproj. Labels only, no host paths."
       },
       {
+        "name": "citation_audit",
+        "schema_available": true,
+        "summary": "Guarded file:line citation, verbatim quote, and source-grounding verifier"
+      },
+      {
         "name": "claim_check",
         "schema_available": true,
         "summary": "Check a model's code claim against the repository, read-only"
+      },
+      {
+        "name": "code_audit",
+        "schema_available": true,
+        "summary": "Zero-dependency static security vulnerability and Python AST bug-footgun auditor for inline code or guarded files"
+      },
+      {
+        "name": "code_graph",
+        "schema_available": true,
+        "summary": "Guarded bounded repository dependency graph, circular-import detector, blast-radius impact analyzer, and Python AST call/inheritance graph"
+      },
+      {
+        "name": "code_metrics",
+        "schema_available": true,
+        "summary": "Compute bounded language LOC, TODO/FIXME markers, largest files, and complexity hotspots for a guarded file or directory"
       },
       {
         "name": "compute_artifact_fetch",
@@ -1329,6 +1371,11 @@
         "summary": "Place one bounded catalog job locally or on an explicitly authorized private node"
       },
       {
+        "name": "consistency_check",
+        "schema_available": true,
+        "summary": "Pure multi-candidate self-consistency reconciler and tool-receipt auditor catching fabricated pass or write claims"
+      },
+      {
         "name": "crash_digest",
         "schema_available": true,
         "summary": "Symbolize and walk a crash capture with a host debugger (cdb, gdb, lldb, eu-stack, minidump-stackwalk or llvm-symbolizer on verified PE+PDB/ELF pairs) as a background job over the pure reader's result; returns the merged crash report or a run id to poll with debug_run_result. symbol_dirs must be local directories inside the allowed roots. symbol_server=true is refused from a tool call: the operator runs /crash <dump> --symbols-online at the console."
@@ -1349,6 +1396,11 @@
         "summary": "Run a bounded read-only data query"
       },
       {
+        "name": "data_transform",
+        "schema_available": true,
+        "summary": "Deterministic JSON/CSV/TSV/TOML/INI/Markdown converter, profiler, query/aggregate engine, encoder, timestamp & cron tool"
+      },
+      {
         "name": "debug_run_result",
         "schema_available": true,
         "summary": "Wait (bounded) for a crash_digest or profile_capture_digest run you started and return its result, or its status while it is still running."
@@ -1357,6 +1409,11 @@
         "name": "dependency_inventory",
         "schema_available": true,
         "summary": "Inventory bounded project dependencies"
+      },
+      {
+        "name": "diff_semantic",
+        "schema_available": true,
+        "summary": "Guarded bounded AST-aware Python diff, deep JSON/TOML/INI structural diff, or symbol-signature diff between two files or inline strings"
       },
       {
         "name": "directory_create",
@@ -1374,9 +1431,24 @@
         "summary": "List a bounded guarded directory tree"
       },
       {
+        "name": "document_extract",
+        "schema_available": true,
+        "summary": "Extract structured text, tables, slides, metadata, or subtitle cues from guarded DOCX, XLSX, PPTX, HTML, SVG, SRT, or VTT files"
+      },
+      {
         "name": "edit_file",
         "schema_available": true,
         "summary": "Apply a bounded text edit"
+      },
+      {
+        "name": "error_diagnose",
+        "schema_available": true,
+        "summary": "Parse multi-language stacktraces and compiler errors, resolve guarded repo source context, and classify root cause"
+      },
+      {
+        "name": "fact_cross_check",
+        "schema_available": true,
+        "summary": "Pure linear-time prose cross-checker catching arithmetic mistakes, table total mismatches, bad dates/weekdays, list counts, and polarity contradictions"
       },
       {
         "name": "fetch_artifact",
@@ -1449,9 +1521,24 @@
         "summary": "Preview or atomically apply a bounded JSON patch"
       },
       {
+        "name": "language_matrix",
+        "schema_available": true,
+        "summary": "Report Sonder's full multi-language capability matrix (run_code, scaffolds, symbol index, build/test/lint/format/typecheck/pkg) and live host binary readiness"
+      },
+      {
+        "name": "learn_tool",
+        "schema_available": true,
+        "summary": "Discover and figure out an unfamiliar/external tool or CLI (e.g. blender, ffmpeg, inkscape) via safe --help/metadata introspection"
+      },
+      {
         "name": "log_inspect",
         "schema_available": true,
         "summary": "Inspect a bounded log file"
+      },
+      {
+        "name": "logic_verify",
+        "schema_available": true,
+        "summary": "Pure bounded propositional SAT solver, truth table, equivalence/implication prover with counterexamples, CNF simplifier, and finite-domain CSP solver"
       },
       {
         "name": "make_directory",
@@ -1459,9 +1546,24 @@
         "summary": "Create a directory under an allowed root"
       },
       {
+        "name": "math_eval",
+        "schema_available": true,
+        "summary": "Pure bounded exact/high-precision math, equation & linear-system solver, matrix/vector algebra, number theory, statistics/regression, unit conversion, and date arithmetic"
+      },
+      {
+        "name": "media_inspect",
+        "schema_available": true,
+        "summary": "Inspect bounded metadata, loudness, geometry, and hash for guarded WAV, MIDI, AVI, GLB/glTF, OBJ, or STL assets"
+      },
+      {
         "name": "output_digest",
         "schema_available": true,
         "summary": "Summarize a test-run job's output or a guarded log file: final summary line, counts, FAILED/ERROR lines, first unique errors (file:line), grouped diagnostics and the tail. Give exactly one of job_id or path."
+      },
+      {
+        "name": "plan_fallback",
+        "schema_available": true,
+        "summary": "Pure failure classifier and alternative-method planner recommending ranked, policy-safe fallback tools and steps"
       },
       {
         "name": "process_list",
@@ -1494,9 +1596,24 @@
         "summary": "Detect project manifests and commands"
       },
       {
+        "name": "prompt_shield",
+        "schema_available": true,
+        "summary": "Scan untrusted text or a guarded file for prompt injection, Trojan-Source Unicode bidi/tags, and secret leaks"
+      },
+      {
         "name": "read_file",
         "schema_available": true,
         "summary": "Read a bounded file"
+      },
+      {
+        "name": "reasoning_board",
+        "schema_available": true,
+        "summary": "Session-scoped structured cognitive scratchpad for tracking grounded facts, hypotheses, decisions, and contradiction audits"
+      },
+      {
+        "name": "regex_lab",
+        "schema_available": true,
+        "summary": "Pure bounded regex tester, match/group/span inspector, substitution previewer, and static ReDoS hazard analyzer"
       },
       {
         "name": "run_program",
@@ -1509,6 +1626,16 @@
         "summary": "Run a bounded script"
       },
       {
+        "name": "runtime_resilience_check",
+        "schema_available": true,
+        "summary": "Inspect live model-call retries, context compactions, arg repairs, loop breaks, and circuit-breaker state"
+      },
+      {
+        "name": "schema_validate",
+        "schema_available": true,
+        "summary": "Validate a guarded JSON, JSONL, or TOML file against a guarded JSON Schema file or inline schema_json"
+      },
+      {
         "name": "script_search",
         "schema_available": true,
         "summary": "Find scripts under allowed roots"
@@ -1517,6 +1644,11 @@
         "name": "secret_scan",
         "schema_available": true,
         "summary": "Scan an authorized tree for redacted credential findings"
+      },
+      {
+        "name": "symbol_verify",
+        "schema_available": true,
+        "summary": "Guarded static verifier for Python stdlib, installed package, and repository modules/attributes/kwargs plus full code-snippet API auditing"
       },
       {
         "name": "test_run",
@@ -2180,6 +2312,39 @@
       "name": "build_model"
     },
     {
+      "description": "Guarded file:line citation, verbatim quote, and source-grounding verifier",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "claims": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "citation_audit"
+    },
+    {
       "description": "Check a model's code claim against the repository, read-only",
       "effects": [
         "read_files"
@@ -2234,6 +2399,107 @@
       "name": "claim_check"
     },
     {
+      "description": "Zero-dependency static security vulnerability and Python AST bug-footgun auditor for inline code or guarded files",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "max_findings": {
+            "type": "integer"
+          },
+          "min_severity": {
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "code_audit"
+    },
+    {
+      "description": "Guarded bounded repository dependency graph, circular-import detector, blast-radius impact analyzer, and Python AST call/inheritance graph",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "summary",
+              "impact",
+              "cycles",
+              "calls"
+            ],
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_depth": {
+            "type": "integer"
+          },
+          "max_files": {
+            "type": "integer"
+          },
+          "root": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "top_n": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "code_graph"
+    },
+    {
+      "description": "Compute bounded language LOC, TODO/FIXME markers, largest files, and complexity hotspots for a guarded file or directory",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_files": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "top_n": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "code_metrics"
+    },
+    {
       "description": "Fetch one small digest-verified compute artifact through the authenticated transport",
       "effects": [],
       "execution_class": "pure",
@@ -2246,7 +2512,7 @@
             "type": "string"
           },
           "max_bytes": {
-            "maximum": 98304,
+            "maximum": 80000,
             "minimum": 1,
             "type": "integer"
           },
@@ -2438,6 +2704,40 @@
       "name": "compute_submit"
     },
     {
+      "description": "Pure multi-candidate self-consistency reconciler and tool-receipt auditor catching fabricated pass or write claims",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "compare_candidates",
+              "audit_against_receipts"
+            ],
+            "type": "string"
+          },
+          "candidates": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "receipts": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "reply": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "consistency_check"
+    },
+    {
       "description": "Symbolize and walk a crash capture with a host debugger (cdb, gdb, lldb, eu-stack, minidump-stackwalk or llvm-symbolizer on verified PE+PDB/ELF pairs) as a background job over the pure reader's result; returns the merged crash report or a run id to poll with debug_run_result. symbol_dirs must be local directories inside the allowed roots. symbol_server=true is refused from a tool call: the operator runs /crash <dump> --symbols-online at the console.",
       "effects": [
         "execute",
@@ -2567,6 +2867,55 @@
       "name": "data_query"
     },
     {
+      "description": "Deterministic JSON/CSV/TSV/TOML/INI/Markdown converter, profiler, query/aggregate engine, encoder, timestamp & cron tool",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "convert",
+              "profile",
+              "query",
+              "encode",
+              "decode",
+              "timestamp",
+              "cron"
+            ],
+            "type": "string"
+          },
+          "data": {
+            "type": "string"
+          },
+          "encoding": {
+            "type": "string"
+          },
+          "expression": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "input_format": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "output_format": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "data_transform"
+    },
+    {
       "description": "Wait (bounded) for a crash_digest or profile_capture_digest run you started and return its result, or its status while it is still running.",
       "effects": [],
       "execution_class": "pure",
@@ -2604,6 +2953,44 @@
         "type": "object"
       },
       "name": "dependency_inventory"
+    },
+    {
+      "description": "Guarded bounded AST-aware Python diff, deep JSON/TOML/INI structural diff, or symbol-signature diff between two files or inline strings",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "auto",
+              "python",
+              "json",
+              "toml",
+              "ini",
+              "generic"
+            ],
+            "type": "string"
+          },
+          "path_a": {
+            "type": "string"
+          },
+          "path_b": {
+            "type": "string"
+          },
+          "text_a": {
+            "type": "string"
+          },
+          "text_b": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "diff_semantic"
     },
     {
       "description": "Create a guarded directory and optional parents",
@@ -2678,6 +3065,34 @@
       "name": "directory_tree"
     },
     {
+      "description": "Extract structured text, tables, slides, metadata, or subtitle cues from guarded DOCX, XLSX, PPTX, HTML, SVG, SRT, or VTT files",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_chars": {
+            "type": "integer"
+          },
+          "max_items": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "document_extract"
+    },
+    {
       "description": "Apply a bounded text edit",
       "effects": [
         "write_files"
@@ -2711,6 +3126,55 @@
         "type": "object"
       },
       "name": "edit_file"
+    },
+    {
+      "description": "Parse multi-language stacktraces and compiler errors, resolve guarded repo source context, and classify root cause",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "context_lines": {
+            "type": "integer"
+          },
+          "error_text": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "max_frames": {
+            "type": "integer"
+          },
+          "root": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "error_text"
+        ],
+        "type": "object"
+      },
+      "name": "error_diagnose"
+    },
+    {
+      "description": "Pure linear-time prose cross-checker catching arithmetic mistakes, table total mismatches, bad dates/weekdays, list counts, and polarity contradictions",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "name": "fact_cross_check"
     },
     {
       "description": "Fetch and atomically verify a binary artifact",
@@ -3139,6 +3603,51 @@
       "name": "json_patch"
     },
     {
+      "description": "Report Sonder's full multi-language capability matrix (run_code, scaffolds, symbol index, build/test/lint/format/typecheck/pkg) and live host binary readiness",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "language": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "language_matrix"
+    },
+    {
+      "description": "Discover and figure out an unfamiliar/external tool or CLI (e.g. blender, ffmpeg, inkscape) via safe --help/metadata introspection",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "goal": {
+            "type": "string"
+          },
+          "probe_cli": {
+            "type": "boolean"
+          },
+          "subcommand": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "number"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool"
+        ],
+        "type": "object"
+      },
+      "name": "learn_tool"
+    },
+    {
       "description": "Inspect a bounded log file",
       "effects": [],
       "execution_class": "pure",
@@ -3156,6 +3665,53 @@
         "type": "object"
       },
       "name": "log_inspect"
+    },
+    {
+      "description": "Pure bounded propositional SAT solver, truth table, equivalence/implication prover with counterexamples, CNF simplifier, and finite-domain CSP solver",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "satisfiable",
+              "truth_table",
+              "equivalent",
+              "implies",
+              "cnf",
+              "csp"
+            ],
+            "type": "string"
+          },
+          "conclusion": {
+            "type": "string"
+          },
+          "constraints": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "domains": {
+            "type": "object"
+          },
+          "formula": {
+            "type": "string"
+          },
+          "formula_b": {
+            "type": "string"
+          },
+          "premises": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "name": "logic_verify"
     },
     {
       "description": "Create a directory under an allowed root",
@@ -3183,6 +3739,115 @@
         "type": "object"
       },
       "name": "make_directory"
+    },
+    {
+      "description": "Pure bounded exact/high-precision math, equation & linear-system solver, matrix/vector algebra, number theory, statistics/regression, unit conversion, and date arithmetic",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "eval",
+              "solve",
+              "matrix",
+              "convert",
+              "date",
+              "derivative",
+              "integrate"
+            ],
+            "type": "string"
+          },
+          "add_days": {
+            "type": "integer"
+          },
+          "at": {
+            "type": "number"
+          },
+          "bracket": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "date_a": {
+            "type": "string"
+          },
+          "date_b": {
+            "type": "string"
+          },
+          "equations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "exact": {
+            "type": "boolean"
+          },
+          "expression": {
+            "type": "string"
+          },
+          "from_unit": {
+            "type": "string"
+          },
+          "high": {
+            "type": "number"
+          },
+          "low": {
+            "type": "number"
+          },
+          "matrix_a": {
+            "type": "array"
+          },
+          "matrix_b": {
+            "type": "array"
+          },
+          "matrix_op": {
+            "type": "string"
+          },
+          "precision": {
+            "type": "integer"
+          },
+          "to_unit": {
+            "type": "string"
+          },
+          "value": {
+            "type": "number"
+          },
+          "variable": {
+            "type": "string"
+          },
+          "variables": {
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "name": "math_eval"
+    },
+    {
+      "description": "Inspect bounded metadata, loudness, geometry, and hash for guarded WAV, MIDI, AVI, GLB/glTF, OBJ, or STL assets",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "media_inspect"
     },
     {
       "description": "Summarize a test-run job's output or a guarded log file: final summary line, counts, FAILED/ERROR lines, first unique errors (file:line), grouped diagnostics and the tail. Give exactly one of job_id or path.",
@@ -3213,6 +3878,42 @@
         "type": "object"
       },
       "name": "output_digest"
+    },
+    {
+      "description": "Pure failure classifier and alternative-method planner recommending ranked, policy-safe fallback tools and steps",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "available_tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "error": {
+            "type": "string"
+          },
+          "failed_tool": {
+            "type": "string"
+          },
+          "goal": {
+            "type": "string"
+          },
+          "tried_tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "failed_tool"
+        ],
+        "type": "object"
+      },
+      "name": "plan_fallback"
     },
     {
       "description": "List bounded process metadata after explicit opt-in",
@@ -3406,6 +4107,37 @@
       "name": "project_detect"
     },
     {
+      "description": "Scan untrusted text or a guarded file for prompt injection, Trojan-Source Unicode bidi/tags, and secret leaks",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "include_sanitized": {
+            "type": "boolean"
+          },
+          "max_findings": {
+            "type": "integer"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "redact_secrets": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "prompt_shield"
+    },
+    {
       "description": "Read a bounded file",
       "effects": [],
       "execution_class": "pure",
@@ -3429,6 +4161,127 @@
         "type": "object"
       },
       "name": "read_file"
+    },
+    {
+      "description": "Session-scoped structured cognitive scratchpad for tracking grounded facts, hypotheses, decisions, and contradiction audits",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "init",
+              "add_fact",
+              "add_hypothesis",
+              "update_hypothesis",
+              "add_decision",
+              "audit",
+              "summary",
+              "clear"
+            ],
+            "type": "string"
+          },
+          "alternatives": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "board_id": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number"
+          },
+          "evidence_against": {
+            "type": "string"
+          },
+          "evidence_for": {
+            "type": "string"
+          },
+          "fact_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "goal": {
+            "type": "string"
+          },
+          "hypothesis_id": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "reasoning_board"
+    },
+    {
+      "description": "Pure bounded regex tester, match/group/span inspector, substitution previewer, and static ReDoS hazard analyzer",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "flags": {
+            "type": "string"
+          },
+          "max_matches": {
+            "type": "integer"
+          },
+          "mode": {
+            "enum": [
+              "search",
+              "match",
+              "fullmatch",
+              "findall"
+            ],
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "replacement": {
+            "type": "string"
+          },
+          "samples": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "should_match": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "should_not_match": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "name": "regex_lab"
     },
     {
       "description": "Run an argv-based program",
@@ -3505,6 +4358,46 @@
       "name": "run_script"
     },
     {
+      "description": "Inspect live model-call retries, context compactions, arg repairs, loop breaks, and circuit-breaker state",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "runtime_resilience_check"
+    },
+    {
+      "description": "Validate a guarded JSON, JSONL, or TOML file against a guarded JSON Schema file or inline schema_json",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "extra_roots": {
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "schema_json": {
+            "type": "string"
+          },
+          "schema_path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "schema_validate"
+    },
+    {
       "description": "Find scripts under allowed roots",
       "effects": [],
       "execution_class": "pure",
@@ -3560,6 +4453,46 @@
         "type": "object"
       },
       "name": "secret_scan"
+    },
+    {
+      "description": "Guarded static verifier for Python stdlib, installed package, and repository modules/attributes/kwargs plus full code-snippet API auditing",
+      "effects": [],
+      "execution_class": "pure",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "verify_symbol",
+              "audit_code"
+            ],
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "extra_roots": {
+            "type": "string"
+          },
+          "kwargs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "module": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "symbol_verify"
     },
     {
       "description": "Run a project's test suite with a host-owned command for the detected runner (or the one named), optionally narrowed by a selector (pytest node id or k:<expr>, ctest name, cargo filter, ./go/pkg or run:TestName, dotnet filter, js path, jvm pattern), as a background job; returns a structured report (totals, failures with file:line) or a job id to poll with test_run_result.",
@@ -3732,18 +4665,6 @@
       "execution_class": "pure",
       "input_schema": {
         "additionalProperties": false,
-        "oneOf": [
-          {
-            "required": [
-              "name"
-            ]
-          },
-          {
-            "required": [
-              "query"
-            ]
-          }
-        ],
         "properties": {
           "name": {
             "type": "string"

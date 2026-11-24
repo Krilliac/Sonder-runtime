@@ -22,6 +22,7 @@ proxy for remote access) unless it says otherwise.
 - [release-version-policy.md](release-version-policy.md) — version/tag compatibility gate
 - [ollama-outage.md](ollama-outage.md)
 - [sonder-inference.md](sonder-inference.md) — run tiers on `sonder-infer serve`, doctor, fallback
+- [local-server-stack.md](local-server-stack.md) — full local & multi-server stack (Ollama, Sonder Runtime, `sonder-infer`, fast `llama-server`, Client Companion, local image server, private workers) and how they wire together
 - [database-lock-or-corruption.md](database-lock-or-corruption.md)
 - [fault-injection-testing.md](fault-injection-testing.md) — deterministic offline reliability fixtures and contracts
 - [autopilot-interruption.md](autopilot-interruption.md)

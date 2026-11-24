@@ -559,6 +559,54 @@ void main() {
     expect(await ChatStore.loadSessions(), {thread.id: 1});
     c.dispose();
   });
+
+  testWidgets(
+      'context meter tracks active thread session instead of stale default',
+      (tester) async {
+    final backend = FakeChatBackend();
+    backend.statusBuilder = (sessionId, project) => SystemInfo.fromJson({
+          'context': {
+            'session': 'default',
+            'estimated_tokens': 8732,
+            'context_limit': 32768,
+            'context_percent': 26.6,
+            'status': 'healthy',
+          },
+        });
+    final c = await _start(tester, backend);
+    final threadA = c.currentThread;
+
+    // Fresh thread ignores stale 'default' session usage and passes its own session id.
+    expect(backend.statusSessionIds, contains(threadA.id));
+    expect(c.status.value?.context?.estimatedTokens, 0);
+    expect(c.status.value?.context?.contextPercent, 0.0);
+
+    // Sending a turn advances the context meter immediately.
+    final replyText = List.filled(40, 'context measurement token').join(' ');
+    final turn = c.send('Measure the active thread context usage please.');
+    await tester.pump();
+    backend.lastTurn.done(replyText);
+    await tester.pump();
+    await turn;
+    final tokensAfterTurn = c.status.value?.context?.estimatedTokens ?? 0;
+    expect(tokensAfterTurn, greaterThan(0));
+    expect(c.status.value?.context?.contextPercent ?? 0, greaterThan(0));
+
+    // Starting a new chat resets the meter to 0% and polls with the new session id.
+    c.newChat();
+    await tester.pump();
+    final threadB = c.currentThread;
+    expect(threadB.id, isNot(threadA.id));
+    expect(c.status.value?.context?.estimatedTokens, 0);
+    expect(c.status.value?.context?.contextPercent, 0.0);
+    expect(backend.statusSessionIds.last, threadB.id);
+
+    // Switching back restores thread A's context usage.
+    c.switchThread(threadA);
+    await tester.pump();
+    expect(c.status.value?.context?.estimatedTokens, tokensAfterTurn);
+    c.dispose();
+  });
 }
 
 class _DelayedModeWriteBackend extends FakeChatBackend {
@@ -582,7 +630,7 @@ class _GatedBackend extends FakeChatBackend {
   final modelsGate = Completer<List<String>>();
 
   @override
-  Future<SystemInfo> systemInfo() => status.future;
+  Future<SystemInfo> systemInfo({String? sessionId, String? project}) => status.future;
 
   @override
   Future<PermissionMode?> fetchPermissionMode() => modeGate.future;

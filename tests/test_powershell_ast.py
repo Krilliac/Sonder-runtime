@@ -648,21 +648,23 @@ def test_code_without_engine_or_reflection_access_stays_inspectable(source):
     assert result.inspectable, result.reason
 
 
-def test_helper_is_passed_compacted_within_the_windows_command_line_limit(monkeypatch):
+def test_helper_is_passed_via_file_within_the_windows_command_line_limit(monkeypatch):
     # CreateProcess rejects command lines over 32767 characters, which would
-    # make every inspection fail closed.  Compaction keeps the tokens only
-    # while the helper has no here-strings, continuations or block comments.
+    # make every inspection fail closed.  Loading the static .ps1 helper via
+    # -File keeps the command line tiny with huge headroom.
+    assert powershell_ast._HELPER_PATH.is_file()
     assert not any(marker in powershell_ast._HELPER for marker in ("@'", '@"', "`", "<#"))
     command_line = subprocess.list2cmdline([
         r"C:\Program Files\PowerShell\7\pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
-        "-Command", powershell_ast._HELPER_COMMAND,
+        "-File", str(powershell_ast._HELPER_PATH),
     ])
-    assert len(command_line) < 32767
+    assert len(command_line) < 1024
     monkeypatch.setattr(powershell_ast, "_powershell_executable", lambda: sys.executable)
     completed = subprocess.CompletedProcess([], 0, stdout='{"inspectable":false,"reason":"x"}', stderr="")
     with patch("sonder_runtime.adapters.security.powershell_ast.subprocess.run", return_value=completed) as run:
-        inspect_powershell("Get-Date # compacted helper")
-    assert run.call_args.args[0][-1] == powershell_ast._HELPER_COMMAND
+        inspect_powershell("Get-Date # helper via file")
+    assert run.call_args.args[0][-2:] == ["-File", str(powershell_ast._HELPER_PATH)]
+    assert run.call_args.kwargs.get("errors") == "replace"
 
 
 _HOME_REPROS = [
@@ -756,10 +758,12 @@ def turkish_culture_prefix():
     "IEX $code", "INVOKE-EXPRESSION $code", "SET-ITEM FUNCTION:ZZ 'IEX $X'; ZZ",
     "${FUNCTION:ZZ} = 'IEX $X'; ZZ", "$EXECUTIONCONTEXT.SESSIONSTATE",
 ])
-def test_checks_hold_under_a_turkish_host_culture(monkeypatch, turkish_culture_prefix, source):
+def test_checks_hold_under_a_turkish_host_culture(monkeypatch, tmp_path, turkish_culture_prefix, source):
     # PowerShell resolves command, variable, member and drive names without
     # regard to culture, so each of these runs as written on a tr-TR host.
-    monkeypatch.setattr(powershell_ast, "_HELPER_COMMAND", turkish_culture_prefix + powershell_ast._HELPER_COMMAND)
+    helper_copy = tmp_path / "turkish_helper.ps1"
+    helper_copy.write_text(turkish_culture_prefix + powershell_ast._HELPER, encoding="utf-8")
+    monkeypatch.setattr(powershell_ast, "_HELPER_PATH", helper_copy)
     monkeypatch.setattr(powershell_ast, "_positive_cache", OrderedDict())
     result = inspect_powershell(source)
     assert not result.inspectable, source

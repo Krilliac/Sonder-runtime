@@ -802,6 +802,71 @@ class LaneTransaction:
         )
         return lane
 
+    def clear_finished(self, principal, lane_ids=None):
+        """Delete terminal, quiescent lane history rows owned by *principal*.
+
+        Active, queued, or in-flight lanes are never touched.
+        """
+        terminal = ("completed", "failed", "cancelled", "interrupted", "archived")
+        rows = self.conn.execute(
+            "SELECT id, data FROM agent_lanes WHERE principal=?",
+            (principal,),
+        ).fetchall()
+        requested = (
+            {str(item).strip() for item in lane_ids if str(item).strip()}
+            if lane_ids is not None
+            else None
+        )
+        ids = []
+        for row in rows:
+            lane_id = row[0]
+            if requested is not None and lane_id not in requested:
+                continue
+            try:
+                lane = json.loads(row[1])
+            except (TypeError, ValueError):
+                continue
+            if str(lane.get("status") or "").lower() not in terminal:
+                continue
+            if lane.get("owner") or lane.get("pending_effect") or lane.get("pending_response"):
+                continue
+            ids.append(lane_id)
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        msg_rows = self.conn.execute(
+            f"SELECT message_id FROM agent_lane_messages WHERE lane_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        msg_ids = [r[0] for r in msg_rows]
+        self.conn.execute(
+            f"DELETE FROM agent_lane_messages WHERE lane_id IN ({placeholders})",
+            ids,
+        )
+        if msg_ids:
+            msg_placeholders = ",".join("?" for _ in msg_ids)
+            self.conn.execute(
+                f"DELETE FROM fleet_messages WHERE message_id IN ({msg_placeholders})",
+                msg_ids,
+            )
+        self.conn.execute(
+            f"DELETE FROM agent_lane_events WHERE lane_id IN ({placeholders})",
+            ids,
+        )
+        self.conn.execute(
+            f"DELETE FROM agent_lane_artifacts WHERE lane_id IN ({placeholders}) AND principal=?",
+            (*ids, principal),
+        )
+        self.conn.execute(
+            f"DELETE FROM fleet_agents WHERE id IN ({placeholders}) AND role='agent_lane'",
+            ids,
+        )
+        self.conn.execute(
+            f"DELETE FROM agent_lanes WHERE id IN ({placeholders}) AND principal=?",
+            (*ids, principal),
+        )
+        return len(ids)
+
 
 class SQLiteAgentLaneStore:
     def __init__(self, path, sessions):

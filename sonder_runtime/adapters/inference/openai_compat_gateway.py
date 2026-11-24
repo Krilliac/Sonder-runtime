@@ -63,7 +63,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from email.utils import format_datetime, parsedate_to_datetime
 from types import SimpleNamespace
@@ -130,7 +130,7 @@ from ..model_request_admission import (
 )
 from ..model_transport import ModelCallError
 from ..tls_contexts import default_https_context
-from ..provider_bindings import provider_id_for_label
+from ..provider_bindings import PROVIDER_TIERS, provider_id_for_label
 from .anthropic_spend import SpendLedger
 from .sse_stream import StreamTimeout, post_streaming, stall_limits
 from .telemetry import from_openai_compatible
@@ -328,14 +328,49 @@ class _DefaultLedger:
 
 
 _DEFAULT_LEDGER = _DefaultLedger()
+_UNSAFE_HEADER_VALUE_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _validate_api_key(api_key: object) -> None:
+    if not isinstance(api_key, str):
+        raise InvalidInput("OpenAI-compatible API key must be a string")
+    if _UNSAFE_HEADER_VALUE_RE.search(api_key):
+        raise InvalidInput(
+            "OpenAI-compatible API key must not contain control or newline characters"
+        )
+    try:
+        api_key.encode("latin-1")
+    except UnicodeEncodeError:
+        raise InvalidInput(
+            "OpenAI-compatible API key must contain only HTTP header-safe characters"
+        ) from None
+
+
+ENV_TIER_MODELS = "SONDER_OPENAI_TIER_MODELS"
+
+
+def parse_tier_models(raw: str | None) -> dict[str, str]:
+    """Parse ``tier=model,tier=model`` pairs from ``SONDER_OPENAI_TIER_MODELS``."""
+    result: dict[str, str] = {}
+    for entry in str(raw or "").split(","):
+        text = entry.strip()
+        if not text or "=" not in text:
+            continue
+        tier, _, model_id = text.partition("=")
+        tier_key = tier.strip().lower()
+        model_val = model_id.strip()
+        if tier_key and model_val:
+            result[tier_key] = model_val
+    return result
 
 
 @dataclass(frozen=True)
 class OpenAICompatibleConfig:
     base_url: str
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)
     model: str = ""
     embed_model: str = ""
+    tier_models: Mapping[str, str] = field(default_factory=dict)
     # CIDRs whose private IP-literal hosts may be reached over plain http.
     plaintext_networks: tuple[str, ...] = ()
     # Streaming stall limits in seconds (0 disables); inside the call budget.
@@ -348,7 +383,16 @@ class OpenAICompatibleConfig:
     daily_usd: Decimal = DEFAULT_DAILY_USD
     max_tokens_ceiling: int = DEFAULT_MAX_TOKENS_CEILING
 
+    def model_for_tier(self, tier: str | None) -> str:
+        key = str(tier or "").strip().lower()
+        if key and self.tier_models:
+            mapped = str(self.tier_models.get(key, "") or "").strip()
+            if mapped:
+                return mapped
+        return self.model
+
     def __post_init__(self) -> None:
+        _validate_api_key(self.api_key)
         for value, name in ((self.stream_idle_seconds, ENV_STREAM_IDLE),
                             (self.stream_first_content_seconds, ENV_STREAM_FIRST_CONTENT)):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not (
@@ -471,6 +515,7 @@ def _config_from_env(*, metered: bool = True) -> OpenAICompatibleConfig:
         api_key=os.environ.get("SONDER_OPENAI_API_KEY", "").strip(),
         model=os.environ.get("SONDER_OPENAI_MODEL", "").strip(),
         embed_model=os.environ.get("SONDER_OPENAI_EMBED_MODEL", "").strip(),
+        tier_models=parse_tier_models(os.environ.get(ENV_TIER_MODELS, "")),
         plaintext_networks=_split_networks(os.environ.get(ENV_ALLOW_HTTP_NETWORKS, "")),
         stream_idle_seconds=_env_seconds(ENV_STREAM_IDLE),
         stream_first_content_seconds=_env_seconds(ENV_STREAM_FIRST_CONTENT),
@@ -628,6 +673,103 @@ class OpenAICompatibleGateway:
     def request_admission(self) -> HostModelRequestAdmission:
         return self._request_admission
 
+    # -- status ------------------------------------------------------------
+
+    @staticmethod
+    def _resolved_tier_models(cfg: OpenAICompatibleConfig) -> dict[str, str]:
+        """Resolve per-tier models from ``tier_models`` with ``model`` fallback."""
+        resolved: dict[str, str] = {}
+        for tier in PROVIDER_TIERS:
+            model_id = cfg.model_for_tier(tier)
+            if model_id:
+                resolved[tier] = model_id
+        for raw_tier, raw_model in (cfg.tier_models or {}).items():
+            key = str(raw_tier or "").strip().lower()
+            val = str(raw_model or "").strip()
+            if key and val and key not in resolved:
+                resolved[key] = val
+        return resolved
+
+    @staticmethod
+    def _bounded_status_detail(value: object, limit: int = 240) -> str:
+        text = " ".join(str(value or "").split())
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    def served_tier_models(self) -> Mapping[str, Mapping[str, str]]:
+        """``{provider: {tier: model}}`` from configuration alone (no I/O)."""
+        try:
+            cfg = self._config or _config_from_env(metered=self._spend_ledger is not None)
+        except Exception:  # noqa: BLE001 - display metadata never fails a caller
+            return {}
+        if not cfg.base_url:
+            return {}
+        resolved = self._resolved_tier_models(cfg)
+        return {self._provider_id: resolved} if resolved else {}
+
+    def provider_status(self) -> Mapping[str, Mapping[str, object]]:
+        """Content-free, key-free status from configuration alone (no network probe)."""
+        entry: dict[str, object] = {
+            "provider": self._provider_id,
+            "state": "unavailable",
+            "healthy": False,
+            "configured": False,
+            "capabilities": sorted(CAPABILITIES),
+            "base_url": None,
+            "loopback": None,
+            "model": None,
+            "embed_model": None,
+            "tier_models": {},
+            "models": [],
+            "api_key_configured": False,
+            "detail": "",
+        }
+        try:
+            cfg = self._config or _config_from_env(metered=self._spend_ledger is not None)
+        except Exception as exc:  # noqa: BLE001 - status reports, never raises
+            entry["detail"] = self._bounded_status_detail(
+                exc if isinstance(exc, SonderError) else type(exc).__name__
+            )
+            return {self._provider_id: entry}
+        tier_models = self._resolved_tier_models(cfg)
+        models: list[str] = []
+        for candidate in (cfg.model, *tier_models.values()):
+            if candidate and candidate not in models:
+                models.append(candidate)
+        entry.update(
+            model=cfg.model or None,
+            embed_model=cfg.embed_model or None,
+            tier_models=tier_models,
+            models=models,
+            api_key_configured=bool(cfg.api_key),
+        )
+        if not cfg.base_url:
+            entry["detail"] = "no OpenAI-compatible endpoint configured (set SONDER_OPENAI_BASE_URL)"
+            return {self._provider_id: entry}
+        safe_base = redact_url(cfg.base_url)
+        has_userinfo = "@" in cfg.base_url.split("?", 1)[0].split("#", 1)[0]
+        if (
+            not has_userinfo
+            and safe_base != "<invalid url>"
+            and not safe_base.endswith("://<redacted>")
+        ):
+            entry["base_url"] = safe_base
+        loopback = self._is_loopback(cfg.base_url)
+        entry["loopback"] = loopback
+        try:
+            self._require_secure_transport(cfg)
+        except Exception as exc:  # noqa: BLE001 - status reports, never raises
+            entry["detail"] = self._bounded_status_detail(
+                exc if isinstance(exc, SonderError) else type(exc).__name__
+            )
+            return {self._provider_id: entry}
+        entry.update(
+            configured=True,
+            state="unknown",
+            healthy=None,
+            detail="configured (%s; not probed)" % ("loopback" if loopback else "remote"),
+        )
+        return {self._provider_id: entry}
+
     # -- configuration & consent ------------------------------------------
 
     def _resolved_config(self) -> OpenAICompatibleConfig:
@@ -713,6 +855,10 @@ class OpenAICompatibleGateway:
             raise InvalidInput("OpenAI-compatible endpoint must use http or https")
         if not parts.hostname or _UNSENDABLE_URL_CHARS.search(cfg.base_url):
             raise InvalidInput(_MALFORMED_BASE_URL)
+        if parts.query or parts.fragment:
+            raise InvalidInput(
+                "OpenAI-compatible base URL must not contain a query string or fragment"
+            )
         if scheme == "https" or self._is_loopback(cfg.base_url):
             return
         if self._trusted_plaintext_host(parts.hostname or "", cfg.plaintext_networks):
@@ -894,7 +1040,7 @@ class OpenAICompatibleGateway:
 
         options = dict(request.options or {})
         live = stream_sink.call_stream()
-        model = str(options.get("model") or cfg.model or request.tier or "default")
+        model = str(options.get("model") or cfg.model_for_tier(request.tier) or request.tier or "default")
         logger.debug(f"OpenAICompatibleGateway.generate: model={model!r}, base_url={redact_url(cfg.base_url)!r}, timeout={timeout}")
         payload = {
             "model": model,
@@ -914,6 +1060,10 @@ class OpenAICompatibleGateway:
         except ChatTemplateOptionsError as exc:
             raise InvalidInput(str(exc)) from exc
         if template_kwargs:
+            effort = template_kwargs.get("reasoning_effort")
+            if effort is not None and "enable_thinking" not in template_kwargs:
+                template_kwargs = dict(template_kwargs)
+                template_kwargs["enable_thinking"] = effort != "off"
             payload["chat_template_kwargs"] = template_kwargs
         price = self._meter_chat_payload(cfg, payload, options.get("num_predict"))
 
@@ -1123,6 +1273,7 @@ class OpenAICompatibleGateway:
                     headers[str(name)] = str(value)
         headers["Content-Type"] = "application/json"
         if cfg.api_key:
+            _validate_api_key(cfg.api_key)
             headers["Authorization"] = "Bearer %s" % cfg.api_key
         return headers
 
@@ -1242,39 +1393,43 @@ class OpenAICompatibleGateway:
                     % (refusal.reason.value, refusal.detail),
                     reason=refusal.reason.value, retry_after=exc.retry_after_seconds)
         except urllib.error.HTTPError as exc:
-            if trace is not None:
-                trace.answered = True  # the provider answered with an error status: not billed
-            code = getattr(exc, "code", 0)
-            retry_after = next((value for key, value in (exc.headers or {}).items()
-                                if str(key).lower() == "retry-after"), None)
-            http_cause = self._safe_http_cause(int(code or 0), retry_after)
-            if self._http_error_classifier is not None:
-                failure = self._http_error_classifier(
-                    int(code or 0), self._bounded_error_body(exc),
-                )
-            if failure is None:
-                if code in (401, 403):
-                    logger.error(
-                        f"authentication failed for OpenAI-compatible endpoint, "
-                        f"http_status={code}, url={safe_url!r}"
+            try:
+                if trace is not None:
+                    trace.answered = True  # the provider answered with an error status: not billed
+                code = getattr(exc, "code", 0)
+                retry_after = next((value for key, value in (exc.headers or {}).items()
+                                    if str(key).lower() == "retry-after"), None)
+                http_cause = self._safe_http_cause(int(code or 0), retry_after)
+                if self._http_error_classifier is not None:
+                    failure = self._http_error_classifier(
+                        int(code or 0), self._bounded_error_body(exc),
                     )
-                    failure = Forbidden("endpoint rejected credentials (HTTP %d)" % code)
-                elif code in (400, 404, 422):
-                    failure = InvalidInput("endpoint rejected request (HTTP %d)" % code)
-                elif code == 429:
-                    logger.warning(
-                        f"rate limited by OpenAI-compatible endpoint (HTTP 429), "
-                        f"url={safe_url!r}"
-                    )
-                    failure = CapacityExceeded(
-                        "endpoint is rate limiting requests (HTTP 429)"
-                    )
-                else:
-                    logger.error(
-                        f"OpenAI-compatible endpoint returned server error, "
-                        f"http_status={code}, url={safe_url!r}"
-                    )
-                    failure = DependencyUnavailable("endpoint returned HTTP %d" % code)
+                if failure is None:
+                    if code in (401, 403):
+                        logger.error(
+                            f"authentication failed for OpenAI-compatible endpoint, "
+                            f"http_status={code}, url={safe_url!r}"
+                        )
+                        failure = Forbidden("endpoint rejected credentials (HTTP %d)" % code)
+                    elif code in (400, 404, 422):
+                        failure = InvalidInput("endpoint rejected request (HTTP %d)" % code)
+                    elif code == 429:
+                        logger.warning(
+                            f"rate limited by OpenAI-compatible endpoint (HTTP 429), "
+                            f"url={safe_url!r}"
+                        )
+                        failure = CapacityExceeded(
+                            "endpoint is rate limiting requests (HTTP 429)"
+                        )
+                    else:
+                        logger.error(
+                            f"OpenAI-compatible endpoint returned server error, "
+                            f"http_status={code}, url={safe_url!r}"
+                        )
+                        failure = DependencyUnavailable("endpoint returned HTTP %d" % code)
+            finally:
+                with contextlib.suppress(Exception):
+                    exc.close()
         except StreamTimeout as exc:
             logger.warning(
                 f"OpenAI-compatible endpoint {exc.kind} timeout: url={safe_url!r}, "
@@ -1395,10 +1550,14 @@ class OpenAICompatibleGateway:
                 return int(resp.status), resp.read(GET_BODY_LIMIT + 1)
         except urllib.error.HTTPError as exc:
             try:
-                body = exc.read(GET_BODY_LIMIT + 1)
-            except Exception:  # noqa: BLE001 - the status alone still answers
-                body = b""
-            return int(exc.code), body if isinstance(body, bytes) else b""
+                try:
+                    body = exc.read(GET_BODY_LIMIT + 1)
+                except Exception:  # noqa: BLE001 - the status alone still answers
+                    body = b""
+                return int(exc.code), body if isinstance(body, bytes) else b""
+            finally:
+                with contextlib.suppress(Exception):
+                    exc.close()
 
     @staticmethod
     def _default_transport(url: str, payload: dict, headers: dict, timeout) -> dict:
@@ -1416,5 +1575,5 @@ class OpenAICompatibleGateway:
             raise DependencyUnavailable("endpoint response exceeds %d bytes" % limit)
         try:
             return json.loads(raw)
-        except ValueError as exc:
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
             raise DependencyUnavailable("endpoint returned non-JSON") from exc

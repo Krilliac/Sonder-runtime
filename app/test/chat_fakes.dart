@@ -97,6 +97,7 @@ class FakeChatBackend implements ChatBackend {
   PendingCallLookup? lookupOverride;
   final List<String> lookups = [];
   int statusCalls = 0;
+  final List<String?> statusSessionIds = [];
   int activeStatusCalls = 0;
   int maxConcurrentStatus = 0;
 
@@ -107,6 +108,7 @@ class FakeChatBackend implements ChatBackend {
   Object? statusError;
   Duration statusDelay = Duration.zero;
   SystemInfo statusInfo = SystemInfo.fromJson(const {});
+  SystemInfo Function(String? sessionId, String? project)? statusBuilder;
   PermissionMode? mode;
   Object? modeReadError;
   Object? modeWriteError;
@@ -119,6 +121,10 @@ class FakeChatBackend implements ChatBackend {
 
   WorkRun Function(String id)? workRun;
   WorkRun Function(String id)? cancelWorkRunResult;
+  SessionPage? serverSessions;
+  Map<String, SessionReplay> serverReplays = <String, SessionReplay>{};
+  int listServerSessionsCalls = 0;
+  final List<String> replayServerSessionCalls = <String>[];
   ApprovalOutcome approvalOutcome =
       const ApprovalOutcome(ApprovalStatus.approved, nonce: 'n_c41a');
   ApprovalOutcome denialOutcome =
@@ -143,8 +149,21 @@ class FakeChatBackend implements ChatBackend {
   }
 
   @override
-  Future<SystemInfo> systemInfo() async {
+  Future<SessionPage?> listServerSessions({int limit = 50}) async {
+    listServerSessionsCalls++;
+    return serverSessions;
+  }
+
+  @override
+  Future<SessionReplay?> replayServerSession(String sessionId) async {
+    replayServerSessionCalls.add(sessionId);
+    return serverReplays[sessionId];
+  }
+
+  @override
+  Future<SystemInfo> systemInfo({String? sessionId, String? project}) async {
     statusCalls++;
+    statusSessionIds.add(sessionId);
     activeStatusCalls++;
     if (activeStatusCalls > maxConcurrentStatus) {
       maxConcurrentStatus = activeStatusCalls;
@@ -153,7 +172,8 @@ class FakeChatBackend implements ChatBackend {
       if (statusDelay > Duration.zero) await Future.delayed(statusDelay);
       final err = statusError;
       if (err != null) throw err;
-      return statusInfo;
+      final builder = statusBuilder;
+      return builder != null ? builder(sessionId, project) : statusInfo;
     } finally {
       activeStatusCalls--;
     }

@@ -133,6 +133,8 @@ class FakeRuntimeData implements RuntimeDataSource {
 
   /// When set, approvals wait on it (a slow server).
   Future<void>? approveGate;
+  final List<(String, String, String)> denied = [];
+  Object? denyError;
   final List<String> revoked = [];
   Object? revokeError;
 
@@ -191,6 +193,13 @@ class FakeRuntimeData implements RuntimeDataSource {
             callId: callId,
             tool: tool,
             ttlSeconds: ttl.inSeconds);
+  }
+
+  @override
+  Future<void> denyCall(String callId,
+      {String tool = '', String digest = ''}) async {
+    denied.add((callId, tool, digest));
+    if (denyError != null) throw denyError!;
   }
 
   @override

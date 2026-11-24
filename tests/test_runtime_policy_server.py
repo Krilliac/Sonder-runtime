@@ -308,6 +308,9 @@ def test_runtime_model_readiness_distinguishes_core_memory_and_optional_models()
         "    semantic memory: requires embedding model nomic-embed-text",
         "    reasoning: not configured (optional)",
         "    vision: requires missing-vision:latest",
+        "    security: not configured (optional)",
+        "    creative: not configured (optional)",
+        "    draft: not configured (optional)",
     ]
 
 
@@ -334,6 +337,9 @@ def test_runtime_model_readiness_requires_capability_compatible_models():
         "    semantic memory: requires embedding model sonder:latest (does not declare embedding capability)",
         "    reasoning: not configured (optional)",
         "    vision: not configured (optional)",
+        "    security: not configured (optional)",
+        "    creative: not configured (optional)",
+        "    draft: not configured (optional)",
     ]
 
 

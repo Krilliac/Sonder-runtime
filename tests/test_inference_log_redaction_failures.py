@@ -30,7 +30,8 @@ from sonder_runtime.domain.common.errors import (
 
 pytestmark = pytest.mark.unit
 MARKER = "syntheticcredentialmarker761"
-BASE = "http://127.0.0.1:8080/v1?api_key=" + MARKER
+BASE = "http://127.0.0.1:8080/v1"
+QUERY_SECRET_BASE = "http://127.0.0.1:8080/v1?api_key=" + MARKER
 
 
 def _assert_private_diagnostics(caplog, error=None):
@@ -64,8 +65,9 @@ class _CountingAdmission(HostModelRequestAdmission):
 
 def _failure(kind, url):
     if kind.startswith("http-"):
+        secret_url = url + "?api_key=" + MARKER
         return urllib.error.HTTPError(
-            url, int(kind.removeprefix("http-")), "request failed for " + url, {},
+            secret_url, int(kind.removeprefix("http-")), "request failed for " + secret_url, {},
             io.BytesIO(b'{"error":"unavailable"}'),
         )
     if kind == "timeout":
@@ -93,7 +95,7 @@ def test_post_failure_classification_does_not_expose_credentials(caplog, kind, e
     caplog.set_level(logging.DEBUG)
     calls = []
     admission = _CountingAdmission()
-    cfg = OpenAICompatibleConfig(base_url=BASE, model="synthetic-model")
+    cfg = OpenAICompatibleConfig(base_url=BASE, model="synthetic-model", api_key=MARKER)
 
     def transport(url, payload, headers, timeout):
         calls.append((url, timeout))
@@ -120,7 +122,7 @@ def test_get_failure_classification_does_not_expose_credentials(caplog, kind, ex
     caplog.set_level(logging.DEBUG)
     calls = []
     admission = _CountingAdmission()
-    cfg = OpenAICompatibleConfig(base_url=BASE, model="synthetic-model")
+    cfg = OpenAICompatibleConfig(base_url=BASE, model="synthetic-model", api_key=MARKER)
 
     def transport(url, headers, timeout):
         calls.append((url, timeout))
@@ -140,7 +142,7 @@ def test_get_failure_classification_does_not_expose_credentials(caplog, kind, ex
 def test_connect_classifier_result_is_preserved_without_raw_exception_chain(caplog, method):
     caplog.set_level(logging.DEBUG)
     calls, classified = [], []
-    cfg = OpenAICompatibleConfig(base_url=BASE, model="synthetic-model")
+    cfg = OpenAICompatibleConfig(base_url=BASE, model="synthetic-model", api_key=MARKER)
     reason = OSError("request " + MARKER)
 
     def transport(*args):
@@ -169,7 +171,7 @@ def test_connect_classifier_result_is_preserved_without_raw_exception_chain(capl
 def test_http_classifier_receives_status_and_bounded_body_without_leaking_its_cause(caplog):
     caplog.set_level(logging.DEBUG)
     classified, calls = [], []
-    cfg = OpenAICompatibleConfig(base_url=BASE, model="synthetic-model")
+    cfg = OpenAICompatibleConfig(base_url=BASE, model="synthetic-model", api_key=MARKER)
 
     def transport(url, payload, headers, timeout):
         calls.append(url)
@@ -193,7 +195,7 @@ def test_http_classifier_receives_status_and_bounded_body_without_leaking_its_ca
 
 def test_get_non_success_http_status_is_still_returned_to_the_caller(caplog):
     caplog.set_level(logging.DEBUG)
-    cfg = OpenAICompatibleConfig(base_url=BASE, model="synthetic-model")
+    cfg = OpenAICompatibleConfig(base_url=BASE, model="synthetic-model", api_key=MARKER)
     calls = []
 
     def transport(url, headers, timeout):
@@ -248,3 +250,12 @@ def test_endpoint_configuration_info_drops_ambiguous_authority_credentials(caplo
         ollama_endpoint.reset_typed_endpoint()
     assert any("Ollama endpoint configured:" in record.getMessage() for record in caplog.records)
     _assert_private_diagnostics(caplog)
+
+
+def test_base_url_query_secret_is_rejected_without_exposing_credentials(caplog):
+    caplog.set_level(logging.DEBUG)
+    cfg = OpenAICompatibleConfig(base_url=QUERY_SECRET_BASE, model="synthetic-model")
+    gateway = OpenAICompatibleGateway(cfg, request_admission=_CountingAdmission())
+    with pytest.raises(InvalidInput) as caught:
+        gateway._post("/embeddings", {}, cfg, 2.0)
+    _assert_private_diagnostics(caplog, caught.value)

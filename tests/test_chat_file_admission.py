@@ -67,7 +67,7 @@ def test_production_router_reaches_read_only_agent_and_renders_route(monkeypatch
         "_capability_refined_tier": lambda _p, tier, reason: (tier, reason),
         "_execution_route_header": execution_route_header,
     }
-    route = _function("server.py", "_route_work_request", scope)
+    route = _function("runtime/server.py", "_route_work_request", scope)
     assert route("Hello", project="project") is None
     output = route("How many files are in this folder?", project="project", _tool_tier=pinned_tier)
     assert "read-only workspace inspection" in output
@@ -105,7 +105,7 @@ def test_production_compound_router_preserves_bounded_legacy_dispatch():
         "_execution_route_model": choose, "_workbench_agent_escalating": workbench,
         "_narration_reason": lambda _reason: None,
     }
-    route = _function("server.py", "_route_work_request", scope)
+    route = _function("runtime/server.py", "_route_work_request", scope)
     output = route(prompt, project="demo")
     assert choices == [(prompt, {"project": "demo"})]
     assert calls == [(prompt, "general", {

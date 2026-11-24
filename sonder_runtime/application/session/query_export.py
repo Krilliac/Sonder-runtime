@@ -43,15 +43,9 @@ def _positive(name: str, value: int, maximum: int) -> int:
 
 
 def _redact(value: Any, redactor: TelemetryRedactor) -> Any:
-    if isinstance(value, str):
-        return redactor.redact(value)
-    if isinstance(value, Mapping):
-        return {str(key): _redact(item, redactor) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redact(item, redactor) for item in value]
-    if isinstance(value, tuple):
-        return [_redact(item, redactor) for item in value]
-    return value
+    if isinstance(value, Mapping) and not isinstance(value, dict):
+        value = dict(value)
+    return _redaction.redact_structure(value, redactor.redact, sensitive_keys=True)
 
 
 _RETENTION_ENVELOPE_KEYS = frozenset({"privacy_class", "redacted"})

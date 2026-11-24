@@ -455,32 +455,143 @@ _NO_VERIFICATION_GUIDANCE = (
 
 
 _EXECUTION_TOOLS = frozenset({"run_code", "test_run", "build_run", "lint_run", "workspace_run"})
+_WEB_TOOLS = frozenset({"web_search", "web_fetch", "weather_lookup"})
+_READ_TOOLS = frozenset({
+    "file_read", "file_read_range", "text_search", "directory_tree", "file_find",
+    "repository_symbol_index", "workspace_inventory", "code_metrics", "code_graph",
+    "diff_semantic", "claim_check", "citation_audit", "document_extract", "log_inspect",
+    "data_inspect", "data_query", "repo_diff", "repo_show", "repo_log", "repo_blame",
+})
 _RUN_CLAIM_RE = re.compile(
     r"(?:\b(?:i\s+(?:just\s+)?(?:ran|executed|tested|compiled|verified)|"
     r"tests?\s+passed|all\s+\d+\s+tests?\s+pass|execution\s+output|"
     r"output\s+was|exit\s+code\s*(?:is|=|:)?\s*0)\b|[\u2705\u2713])",
     re.IGNORECASE,
 )
+_PASS_ONLY_CLAIM_RE = re.compile(
+    r"(?:\b(?:tests?\s+passed|all\s+\d*\s*tests?\s+pass(?:ed)?|"
+    r"ran\s+cleanly|verified\s+cleanly|exit\s+code\s*(?:is|=|:)?\s*0)\b|[\u2705\u2713])",
+    re.IGNORECASE,
+)
+_WEB_CLAIM_RE = re.compile(
+    r"\b(?:i\s+(?:just\s+)?(?:searched\s+the\s+web|browsed|fetched\s+the\s+(?:page|url|site))|"
+    r"according\s+to\s+(?:my\s+)?live\s+(?:web\s+)?search)\b",
+    re.IGNORECASE,
+)
+_READ_CLAIM_RE = re.compile(
+    r"\bi\s+(?:just\s+)?(?:read|opened|inspected)\s+(?:the\s+(?:file|codebase)|"
+    r"[A-Za-z0-9_./\\-]+\.(?:py|js|ts|dart|rs|go|c|cpp|h|cs|java|json|toml|md|ps1|sh))\b",
+    re.IGNORECASE,
+)
 _UNVERIFIED_RUN_NOTE = (
     "\n\n(Note: no code or test tool executed in this turn, so no runtime output was verified.)"
 )
+_CONTRADICTED_RUN_NOTE = (
+    "\n\n(Note: execution/test tool(s) in this turn failed; do not treat pass claims above as verified.)"
+)
+_UNVERIFIED_WEB_NOTE = (
+    "\n\n(Note: no web search or fetch tool succeeded in this turn, so no live web lookup was verified.)"
+)
+_UNVERIFIED_READ_NOTE = (
+    "\n\n(Note: no file-reading tool succeeded in this turn, so no local file contents were verified.)"
+)
+
+
+def _tool_succeeded(item: object) -> bool:
+    status = str(getattr(item, "status", "ok") or "").strip().lower()
+    exit_code = getattr(item, "exit_code", None)
+    if status not in {"ok", "completed", "ran"}:
+        return False
+    if isinstance(exit_code, int) and exit_code != 0:
+        return False
+    return True
+
+
+def _tool_failed(item: object) -> bool:
+    status = str(getattr(item, "status", "") or "").strip().lower()
+    exit_code = getattr(item, "exit_code", None)
+    return status in {"error", "failed", "timeout", "timed_out"} or (isinstance(exit_code, int) and exit_code != 0)
 
 
 def guard_unverified_run_claim(
     reply: str,
     executed_tools: Iterable[object] = (),
 ) -> str:
-    """Append a factual note if a reply claims execution/pass without a matching tool run."""
+    """Append a factual note if a reply claims execution/pass without a matching passing tool run."""
+    if not isinstance(reply, str) or not reply.strip():
+        return reply
+    had_pass = False
+    had_fail = False
+    for item in executed_tools:
+        name = str(getattr(item, "tool", item) or "").strip()
+        if name not in _EXECUTION_TOOLS:
+            continue
+        if _tool_succeeded(item):
+            had_pass = True
+        elif _tool_failed(item):
+            had_fail = True
+    if had_pass:
+        return reply
+    if had_fail:
+        if _PASS_ONLY_CLAIM_RE.search(reply) and _CONTRADICTED_RUN_NOTE.strip() not in reply:
+            return reply.rstrip() + _CONTRADICTED_RUN_NOTE
+        return reply
+    if _RUN_CLAIM_RE.search(reply) and _UNVERIFIED_RUN_NOTE.strip() not in reply:
+        return reply.rstrip() + _UNVERIFIED_RUN_NOTE
+    return reply
+
+
+def _is_negated_at(text: str, pos: int) -> bool:
+    prefix = text[max(0, pos - 40) : pos].casefold()
+    return bool(_NEGATED_PREFIX_RE.search(prefix))
+
+
+def guard_unverified_web_claim(
+    reply: str,
+    executed_tools: Iterable[object] = (),
+) -> str:
+    """Append a factual note if a reply claims a live web lookup when no web tool succeeded."""
     if not isinstance(reply, str) or not reply.strip():
         return reply
     for item in executed_tools:
         name = str(getattr(item, "tool", item) or "").strip()
-        status = str(getattr(item, "status", "ok") or "").strip()
-        if name in _EXECUTION_TOOLS and status in {"ok", "completed", "ran"}:
+        if name in _WEB_TOOLS and _tool_succeeded(item):
             return reply
-    if _RUN_CLAIM_RE.search(reply) and _UNVERIFIED_RUN_NOTE.strip() not in reply:
-        return reply.rstrip() + _UNVERIFIED_RUN_NOTE
+    visible = _without_code_fences(reply)
+    m = _WEB_CLAIM_RE.search(visible)
+    if m and not _is_negated_at(visible, m.start()) and _UNVERIFIED_WEB_NOTE.strip() not in reply:
+        return reply.rstrip() + _UNVERIFIED_WEB_NOTE
     return reply
+
+
+def guard_unverified_read_claim(
+    reply: str,
+    executed_tools: Iterable[object] = (),
+) -> str:
+    """Append a factual note if a reply claims to have read local files when no read tool succeeded."""
+    if not isinstance(reply, str) or not reply.strip():
+        return reply
+    for item in executed_tools:
+        name = str(getattr(item, "tool", item) or "").strip()
+        if name in _READ_TOOLS and _tool_succeeded(item):
+            return reply
+    visible = _without_code_fences(reply).replace("`", "")
+    m = _READ_CLAIM_RE.search(visible)
+    if m and not _is_negated_at(visible, m.start()) and _UNVERIFIED_READ_NOTE.strip() not in reply:
+        return reply.rstrip() + _UNVERIFIED_READ_NOTE
+    return reply
+
+
+def guard_chat_turn_hallucinations(
+    reply: str,
+    executed_tools: Iterable[object] = (),
+) -> str:
+    """Run all side-effect-free honesty guards against a turn's executed tool receipts."""
+    tools_tuple = tuple(executed_tools)
+    out = guard_unverified_run_claim(reply, tools_tuple)
+    out = guard_unverified_web_claim(out, tools_tuple)
+    out = guard_unverified_read_claim(out, tools_tuple)
+    return out
 
 
 def no_verification_claims_system(system: str) -> str:
@@ -499,8 +610,11 @@ def no_verification_claims_system(system: str) -> str:
 
 
 __all__ = [
+    "guard_chat_turn_hallucinations",
     "guard_unsaved_file_claim",
+    "guard_unverified_read_claim",
     "guard_unverified_run_claim",
+    "guard_unverified_web_claim",
     "no_tools_system",
     "no_verification_claims_system",
 ]

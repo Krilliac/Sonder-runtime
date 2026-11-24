@@ -1,0 +1,789 @@
+"""intents — conservative natural-language classifier for sonder's control commands.
+
+Lets short, control-like chat turns like "strict on, show your reasoning" or
+"run it" work the same as their slash-command equivalents (/strict on, /trace
+on, /run), without hijacking real coding questions or requests. Stdlib only.
+"""
+import re
+
+from sonder_runtime.application.chat.tool_intent import classify_file_intent, suppresses_file_tools
+from sonder_runtime.application.command_surface.command_text import ascii_lower
+
+# Messages that open with one of these are almost always a real question or
+# task ("how do I...", "explain strict mode in javascript"), not a control
+# command — even if they happen to contain a control-ish word later on. The
+# one deliberate exception is "show me your reasoning", handled below.
+_GUARD_RE = re.compile(r"^(how|what|why|explain|write|create|show me how)\b")
+
+_POLITE = r"(?:(?:please|kindly)\s+)?"
+_TAIL = r"(?:\s+(?:please|now))?"
+
+_SHOW_REASONING_RE = re.compile(
+    r"^" + _POLITE + r"show(?:\s+me)?(?:\s+your)?\s+(?:reasoning|thinking)" + _TAIL + r"$"
+)
+
+# Every control phrasing is anchored to a whole clause of the message
+# ("strict on", "run it"), so ordinary chat that merely contains a control
+# word ("this is not strict", "run this by the team first", "practice makes
+# perfect") is never read as a command.
+_TRACE_RE = re.compile(
+    r"^" + _POLITE + r"(?:turn\s+|switch\s+)?(?:trace|debug)(?:\s+(?P<state>on|off))" + _TAIL + r"$"
+)
+
+_STRICT_RE = re.compile(
+    r"^" + _POLITE + r"(?:(?:be|turn|switch)\s+)?strict(?:\s+mode)?(?:\s+(?P<state>on|off))?" + _TAIL + r"$"
+)
+
+_RUN_REF = r"(?:it|that|this|(?:the|my|this|that)\s+(?:code|script|program|snippet))"
+_RUN_PREFIX = r"^(?:(?:please|kindly|can\s+you|could\s+you|would\s+you)\s+)*"
+
+_RUN_RE = re.compile(
+    _RUN_PREFIX
+    + r"(?:run|execute)"
+    + r"(?:\s+" + _RUN_REF + r")?"
+    + r"(?:\s+(?:again|for\s+me))?"
+    + r"(?:\s+(?:so\s+(?:i|we)\s+can\s+see(?:\s+(?:it|that|this|the\s+(?:output|result)))?"
+    + r"|to\s+see(?:\s+(?:it|that|this|what\s+happens|the\s+(?:output|result)))?))?"
+    + _TAIL + r"$"
+)
+
+# Whole-turn run phrasings that legitimately include "and" or a relative clause
+# ("run it and show me the output", "try running the code you just wrote").
+# Checked before `_CLAUSE_SPLIT_RE` splits on "and", while keeping compound
+# non-control turns ("run it and delete the database") firmly rejected.
+_RUN_WHOLE_RE = re.compile(
+    _RUN_PREFIX + r"(?:"
+    + r"(?:run|execute)\s+" + _RUN_REF
+    + r"(?:\s+(?:again|for\s+me))?"
+    + r"\s+and\s+show(?:\s+me)?\s+(?:it|that|this|the\s+(?:output|result)|what\s+happens)"
+    + r"|(?:try\s+running|run|execute)\s+" + _RUN_REF
+    + r"\s+(?:that\s+)?you\s+(?:just\s+)?(?:wrote|gave\s+me|generated|made)"
+    + r"|try\s+running\s+" + _RUN_REF + r"(?:\s+(?:again|for\s+me))?"
+    + r")" + _TAIL + r"$"
+)
+
+_RUN_WINDOW_RE = re.compile(
+    _RUN_PREFIX
+    + r"(?:run|execute)(?:\s+" + _RUN_REF + r")?"
+    + r"\s+in\s+(?:a\s+)?(?:new\s+)?(?:window|console)"
+    + _TAIL + r"$"
+)
+
+_TRAIN_N_RE = re.compile(
+    r"^" + _POLITE + r"(?:train|practice)(?:\s+on)?\s+(?P<n>\d+)(?:\s+(?:tasks?|problems?|rounds?|times?))?" + _TAIL + r"$"
+)
+_TRAIN_DEFAULT_RE = re.compile(
+    r"^" + _POLITE + r"(?:self.?train|train\s+yourself|practice(?:\s+tasks)?|improve\s+yourself|learn\s+something|teach\s+yourself)" + _TAIL + r"$"
+)
+
+# Clauses are split on the bare delimiters and stripped afterwards: a leading
+# `\s*` in the pattern would rescan every whitespace run (quadratic).
+_CLAUSE_SPLIT_RE = re.compile(r"[,;&]|\band\b")
+
+# Longest legitimate control turn is about ten short words ("please turn strict
+# mode on and show me your reasoning now"); anything longer than this is never
+# a control command, so it is rejected before any regex touches it.
+_MAX_CONTROL_CHARS = 200
+
+TRAIN_DEFAULT_N = 3
+
+# Natural-language forms of the /consult, /route and /refactor commands, so the
+# system reaches those capabilities whether the user types the slash or just
+# asks for the thing. Each captures the payload the command needs.
+
+# consult: "get a second opinion on X", "do the models agree about X",
+# "ask another model whether X", "consult the models on X".
+_CONSULT_RE = re.compile(
+    r"^(?:can you\s+|please\s+|could you\s+)?"
+    r"(?:get|give me|i want|i'd like)?\s*"
+    r"(?:a\s+)?(?:second|another)\s+opinion\s+(?:on|about|for)\s+(?P<arg>.+)$",
+    re.I,
+)
+_CONSULT_ALT_RE = re.compile(
+    r"^(?:can you\s+|please\s+|could you\s+)?"
+    r"(?:consult\s+(?:the\s+)?(?:models?|tiers?)|"
+    r"ask\s+(?:another|a\s+second|other)\s+model|"
+    r"do\s+the\s+models?\s+agree|"
+    r"have\s+the\s+models?\s+weigh\s+in)"
+    r"\s*(?:on|about|whether|that|if)?\s*(?P<arg>.+)$",
+    re.I,
+)
+
+# route: "which tier/model should handle X", "which model is best for X",
+# "what tier for X", "route this: X".
+_ROUTE_RE = re.compile(
+    r"^(?:which|what)\s+(?:tier|model)\s+"
+    r"(?:should\s+(?:i\s+use\s+for|handle|do)|is\s+best\s+for|for|fits)\s+"
+    r"(?P<arg>.+)$",
+    re.I,
+)
+_ROUTE_ALT_RE = re.compile(
+    r"^route\s+(?:this|it|the\s+request)?\s*[:\-]?\s*(?P<arg>.+)$",
+    re.I,
+)
+
+# refactor one named function in a named .py file: "improve the parse function
+# in foo.py", "refactor handle in a/b.py to drop the retry". Captures file,
+# function and an optional trailing objective.
+_REFACTOR_RE = re.compile(
+    r"^(?:can you\s+|please\s+|could you\s+)?"
+    r"(?:improve|refactor|clean\s*up|harden|tighten|fix)\s+"
+    r"(?:the\s+)?(?:function\s+)?(?P<fn>[A-Za-z_]\w*)\s+"
+    r"(?:function\s+)?in\s+(?P<file>\S+\.py)"
+    r"(?:\s+(?:to|so\s+that|by|and)?\s*(?P<obj>.+))?$",
+    re.I,
+)
+
+
+_WORK_QUESTION_RE = re.compile(
+    r"^(how|what|why|who|when|where|which|explain|tell me about|show me how)\b"
+)
+_WORK_POLITE_RE = re.compile(
+    r"^(please\s+|can you\s+|could you\s+|would you\s+|will you\s+)+"
+)
+_WORK_ACTION_RE = re.compile(
+    r"\b(add|analyze|analyse|audit|benchmark|build|clean|compile|configure|continue|"
+    r"create|debug|delete|deploy|design|develop|diagnose|"
+    r"document|edit|execute|find|fix|format|"
+    r"generate|implement|inspect|install|integrate|lint|list|make|merge|migrate|"
+    r"modify|move|open|optimize|patch|profile|publish|read|refactor|"
+    r"remove|rename|repair|restructure|review|rewrite|run|scan|scaffold|search|"
+    r"setup|ship|spawn|start|stop|sync|test|troubleshoot|update|upgrade|validate|"
+    r"verify|view|write)\b"
+)
+_WORK_TARGET_RE = re.compile(
+    r"\b(adapter|adapters|agent|agents|animation|api|app|application|asset|audio|backend|binary|build|chart|"
+    r"class|cli|code|component|config|controller|database|dashboard|data|"
+    r"dependency|dependencies|diagram|directory|doc|docs|dockerfile|document|"
+    r"endpoint|enum|extension|feature|file|files|fixture|folder|folders|form|"
+    r"frontend|function|game|graphic|handler|hook|icon|image|interface|"
+    r"library|logger|logo|makefile|manifest|method|middleware|migration|model|"
+    r"module|music|package|parser|path|pipeline|plugin|presentation|program|"
+    r"project|query|readme|renderer|report|repo|repository|route|scene|schema|"
+    r"script|scripts|serializer|server|service|shader|sound|spec|spreadsheet|"
+    r"sprite|struct|style|styles|subagent|subagents|system|table|task|template|test|tests|texture|"
+    r"tool|tools|type|types|sonder|ui|validator|variable|vector|view|web|"
+    r"webpage|website|workflow|workspace)\b"
+)
+_WORK_DIRECT_RE = re.compile(
+    r"\b(use (the )?tools|work on|continue working|take care of|make the change|"
+    r"implement it|fix it|edit it|run it|test it|build it|create it|debug it|"
+    r"deploy it|refactor it|update it|ship it|clean it up|set it up|start it|"
+    r"finish it|get it working|get it done|make it work)\b"
+)
+# A creative text form as the direct object of the action is a content request
+# even when its topic names a workspace noun: "write a poem about a database"
+# is conversation, not a workbench run.  The exemption does not apply when the
+# turn names a file or chains a second action ("... and fix the parser").
+_CONTENT_ONLY_RE = re.compile(
+    r"^(?:write|compose|create|generate|make|draft)\s+(?:me\s+|us\s+)?"
+    r"(?:(?:a|an|another|some|one|two|three|few|short|long|funny|little|quick|"
+    r"brief|silly)\s+)*"
+    r"(?:poem|poems|haiku|haikus|limerick|limericks|sonnet|sonnets|song|songs|"
+    r"lyrics|story|stories|joke|jokes|riddle|riddles|rap|verse|verses|ode)"
+    # The form must head the object: "a story generator module" or "a joke
+    # api endpoint" is software, not a creative text request.
+    r"(?:\s+(?:about|on|regarding|concerning|of|for|that|which|where|with|to)\b"
+    r"|\s*[.!?,;:]|\s*$)"
+)
+_CONTENT_ONLY_FOLLOWUP_RE = re.compile(
+    r"(?:\b(?:and|then|also)\b|[,;:])\s+(?:then\s+|also\s+)?" + _WORK_ACTION_RE.pattern
+)
+# Persisting the text into the workspace is workspace work even for a poem.
+_CONTENT_ONLY_PERSIST_RE = re.compile(
+    r"\b(?:save|saves|saving|saved|commit|commits|push|append|insert)\b"
+    # "store"/"put"/"place" are also ordinary topic nouns ("a poem about a
+    # store"); as verbs they need a destination, which the clause below names.
+    r"|\b(?:in|into|to|under|inside)\s+(?:the\s+|our\s+|my\s+|this\s+|a\s+)?"
+    r"(?:new\s+)?(?:repo|repository|project|workspace|codebase|folder|directory|"
+    r"file|docs|readme)\b"
+)
+_PATH_LIKE_RE = re.compile(
+    r"(?:[a-zA-Z]:[\\/]|[./~][\\/]|[\\/][\w.-]+|\.[a-zA-Z0-9]{1,8}\b)"
+)
+# Summarising or describing a *named file* needs the file, so it is workspace
+# work even though the same verbs on a topic ("summarize this conversation")
+# stay chat.  Measured 2026-09-03: "Summarize README.md in one sentence."
+# reached the plain chat route and the model could only answer that it cannot
+# read files.  The target must look like a file (a path, or a name with a
+# letter extension of two or more characters, so "e.g." and "3.14" stay chat).
+_WORK_FILE_READ_RE = re.compile(r"\b(summarize|summarise|describe|outline)\b")
+_FILE_LIKE_RE = re.compile(
+    r"(?:[a-zA-Z]:[\\/]|[./~][\\/]|[\\/][\w.-]+|\b[\w-]+\.[a-zA-Z]{2,8}\b)"
+)
+
+# This is deliberately narrower than a generic "security" or "sandbox"
+# classifier.  Security reviews and tests remain legitimate workspace work.
+# The host must, however, never turn a request to evade containment *and*
+# contact something beyond the runtime into an autonomous tool run.  Such a
+# request receives a deterministic refusal before a planner/model can decide
+# which tools to try.
+_CONTAINMENT_EVASION_RE = re.compile(
+    r"\b(?:breach|escape|break\s+out\s+of|bypass|circumvent|evade)\s+"
+    r"(?:the\s+)?(?:containment|sandbox|environment|isolation|guardrails?)\b",
+    re.I,
+)
+_EXTERNAL_CONTACT_RE = re.compile(
+    r"\b(?:email|sms|webhook)\b|\b(?:send|message|notify|contact|post|deliver)\b.*\b"
+    r"(?:outside|external(?:ly)?|off[-\s]?host|another\s+(?:app|process)|"
+    r"windows\s+notifications?|email|sms|webhook|slack|discord)\b",
+    re.I | re.S,
+)
+_DEFENSIVE_CONTAINMENT_RE = re.compile(
+    r"^\s*(?:fix|prevent|block|deny|refuse|harden)\b|^\s*add\s+(?:a\s+)?"
+    r"(?:policy|guard|protection|test)\b", re.I,
+)
+
+CONTAINMENT_EGRESS_REFUSAL = (
+    "Refused: autonomous runs cannot attempt containment evasion or send "
+    "messages outside Sonder. I can help review the configured tool policy "
+    "or add a safe, local containment test instead."
+)
+
+_EXECUTION_NO_TOOLS_RE = re.compile(
+    r"\b(?:no tools?|do not use (?:any )?tools?|don't use (?:any )?tools?|"
+    r"just answer|answer only|explain only)\b"
+)
+_EXECUTION_PLAN_ONLY_RE = re.compile(
+    r"\b(?:plan only|planning only|make (?:me )?a plan(?: only)?|"
+    r"plan (?:it|this) but (?:do not|don't) execute|do not execute(?: it)? yet)\b"
+)
+# The optional verb owns the blanks after it.  As `\s+(?:start|run|use)?\s*`,
+# a blank run with no verb could be split between the two quantifiers in every
+# way before `background` failed: quadratic in the run (CodeQL
+# py/polynomial-redos).  It accepts exactly the same text.
+_EXECUTION_NO_BACKGROUND_RE = re.compile(
+    r"\b(?:foreground|one[- ]shot|single pass|quick pass|"
+    r"do not|don't)\s+(?:(?:start|run|use)\s*)?(?:it\s+)?(?:in\s+)?background\b|"
+    r"\b(?:do it now|handle it inline|foreground only)\b"
+)
+_EXECUTION_FLEET_RE = re.compile(
+    r"\b(?:fleet|swarm|fan[- ]?out|paral+el (?:sub)?agents?|paral+el workflow|"
+    r"multiple subagents?|spawn (?:as many|as much|all|the maximum|maximum|max|"
+    r"[2-9]|1[0-2]|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)?\s*"
+    r"(?:sub)?agents?|"
+    r"as many (?:sub)?agents?(?: and tools)? as (?:possible|you can|the hardware allows)|"
+    r"(?<!\bnot )(?<!n't )(?<!never )(?:hand|delegate) (?:this|it|that)?\s*(?:off )?to (?:sub)?agents?)\b"
+)
+_EXECUTION_AUTOPILOT_RE = re.compile(
+    r"\b(?:autonomously|autonomous(?:ly)?|autopilot|in the background|"
+    r"keep working|continue working|do not stop|don't stop|continue until|work until|"
+    r"end[- ]to[- ]end|from start to finish|take ownership|handle everything|"
+    r"implement everything|finish (?:the )?(?:whole|entire)|plan and execute|"
+    r"without (?:asking|waiting for) me)\b"
+)
+_EXECUTION_SEQUENCE_RE = re.compile(
+    r"\b(?:then|after that|afterward|next|finally|and then|all the way through)\b"
+)
+
+# This is a routing cue, not a general-purpose text classifier.  It accepts a
+# complete, imperative user turn with a concrete task after an explicit
+# delimiter.  In particular, it does not scan quoted/retrieved material for a
+# fragment such as "compiler-feedback retries" and it does not turn a request
+# to *explain* the workflow into execution.
+#
+# The task only has to be non-blank, so the pattern ends at its first non-blank
+# character.  The old `(.+?)\s*[.!]?\s*$` tail asked the same question with
+# three quantifiers that could all take the same blanks: cubic on the raw
+# prompt `server.route_work_request` passes in (CodeQL py/polynomial-redos).
+_ENSEMBLE_COMPILER_RETRY_RE = re.compile(
+    r"^\s*(?:(?:please\s+)?(?:use|run|start|enable)\s+)?(?:an?\s+)?"
+    r"ensemble\s*(?:\(\s*)?code\s*(?:and|\+|plus)\s*reasoning\s*(?:\)\s*)?"
+    r"with\s+compiler(?:[-\s]+)feedback\s+retries(?:\s+enabled)?\s+"
+    r"(?:to|for|on)\s+\S",
+    re.IGNORECASE,
+)
+
+
+def requests_ensemble_compiler_retries(text):
+    """Whether a whole user turn explicitly requests the bounded code loop.
+
+    The returned task is deliberately not interpreted here: the host pins the
+    model set, retry count, project root, permission mode, and executable
+    policy later.  This recognizer simply prevents a loose phrase match from
+    upgrading ordinary/retrieved prose into an execution request.
+    """
+    value = str(text or "")
+    return bool(_ENSEMBLE_COMPILER_RETRY_RE.match(value))
+
+
+def classify(text):
+    """Return a dict of detected control intents, or {} for a normal task turn.
+
+    Keys (any subset): 'trace': bool, 'strict': bool, 'run': True,
+    'run_window': True, 'train': int.
+    Conservative: only fires on SHORT messages (<= 12 words) in which EVERY
+    clause is a whole control phrasing ("strict on", "run it", "train on 5"),
+    and never on questions, tasks or negated phrasings.
+    """
+    t = text if isinstance(text, str) else str(text or "")
+    if len(t) > _MAX_CONTROL_CHARS:
+        return {}
+    t = ascii_lower(t.strip()).rstrip(".!? \t\r\n\f\v")
+    if not t or len(t.split()) > 12:
+        return {}
+    if _GUARD_RE.match(t) and not _SHOW_REASONING_RE.match(t):
+        return {}
+    if _RUN_WINDOW_RE.match(t):
+        return {"run_window": True}
+    if _RUN_WHOLE_RE.match(t):
+        return {"run": True}
+
+    out = {}
+    clauses = [c for c in (p.strip() for p in _CLAUSE_SPLIT_RE.split(t)) if c]
+    if not clauses:
+        return {}
+    for clause in clauses:
+        m = _TRACE_RE.match(clause)
+        if m:
+            out["trace"] = m.group("state") == "on"
+            continue
+        if _SHOW_REASONING_RE.match(clause):
+            out["trace"] = True
+            continue
+        m = _STRICT_RE.match(clause)
+        if m:
+            out["strict"] = m.group("state") != "off"
+            continue
+        if _RUN_WINDOW_RE.match(clause):
+            out["run_window"] = True
+            continue
+        if _RUN_RE.match(clause):
+            out["run"] = True
+            continue
+        m = _TRAIN_N_RE.match(clause)
+        if m:
+            out["train"] = int(m.group("n"))
+            continue
+        if _TRAIN_DEFAULT_RE.match(clause):
+            out["train"] = TRAIN_DEFAULT_N
+            continue
+        return {}
+    return out
+
+
+def classify_command(text):
+    """Map a natural-language turn to one of the tier-aware commands, or None.
+
+    Returns {"command": "consult"|"route"|"refactor", "arg": str}. This is what
+    lets "get a second opinion on X" reach /consult, "which model should handle
+    Y" reach /route and "improve foo in bar.py" reach the guarded /refactor,
+    without the user having to remember the slash. Conservative on purpose: each
+    pattern needs an explicit trigger phrase, so a plain coding question is never
+    hijacked. The slash commands remain the exact, unambiguous form.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or value.startswith("/"):
+        return None
+
+    # refactor is checked first: it needs a file AND a function, so a match is a
+    # strong, specific signal that should win over the looser consult/route cues.
+    m = _REFACTOR_RE.match(value)
+    if m:
+        obj = (m.group("obj") or "").strip()
+        arg = "%s %s%s" % (m.group("file"), m.group("fn"), (" " + obj) if obj else "")
+        return {"command": "refactor", "arg": arg}
+
+    for pattern in (_CONSULT_RE, _CONSULT_ALT_RE):
+        m = pattern.match(value)
+        if m and m.group("arg").strip():
+            return {"command": "consult", "arg": m.group("arg").strip()}
+
+    for pattern in (_ROUTE_RE, _ROUTE_ALT_RE):
+        m = pattern.match(value)
+        if m and m.group("arg").strip():
+            return {"command": "route", "arg": m.group("arg").strip()}
+
+    return None
+
+
+def classify_work(text):
+    """Return True for concrete workspace actions that should use real tools.
+
+    This intentionally does not classify explanatory questions or pure content
+    requests. A work request needs an action plus a workspace-like target, a
+    path, or an explicit reference such as "fix it"/"use the tools".
+
+    Bare action/target collisions such as ``test`` or ``build`` alone are not
+    work: the same token can match both `_WORK_ACTION_RE` and `_WORK_TARGET_RE`,
+    which used to trip the REPL workspace gate instead of letting chat ask for
+    clarification.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or value.startswith("/") or len(value) > 12000:
+        return False
+    lowered = value.lower()
+    candidate = _WORK_POLITE_RE.sub("", lowered).strip()
+    if _WORK_QUESTION_RE.match(candidate):
+        return False
+    if _WORK_DIRECT_RE.search(candidate):
+        return True
+    if (_CONTENT_ONLY_RE.match(candidate)
+            and not _CONTENT_ONLY_FOLLOWUP_RE.search(candidate)
+            and not _CONTENT_ONLY_PERSIST_RE.search(candidate)
+            and not _FILE_LIKE_RE.search(value)):
+        return False
+    action = _WORK_ACTION_RE.search(candidate)
+    if not action:
+        return bool(_WORK_FILE_READ_RE.search(candidate) and _FILE_LIKE_RE.search(value))
+    if _PATH_LIKE_RE.search(value):
+        return True
+    # Require a workspace-like target that is not just the same matched action
+    # token (e.g. bare "test" / "build" / "code").
+    for target in _WORK_TARGET_RE.finditer(candidate):
+        if target.span() != action.span():
+            return True
+    return False
+
+
+def containment_egress_refusal(text):
+    """Return the fixed refusal for explicit containment-escape egress asks.
+
+    This is a host routing fence, not a model safety judgment.  It covers the
+    combined dangerous request only, so ordinary security audits and local
+    notification implementation work are still eligible for their normal,
+    separately-gated routes.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value:
+        return None
+    if _DEFENSIVE_CONTAINMENT_RE.search(value):
+        return None
+    if _CONTAINMENT_EVASION_RE.search(value) and _EXTERNAL_CONTACT_RE.search(value):
+        return CONTAINMENT_EGRESS_REFUSAL
+    return None
+
+
+def classify_execution(text):
+    """Choose a bounded execution lane for an eligible natural work request.
+
+    ``decide`` is intentionally not an execution mode. It asks the local router
+    model to choose only between foreground workbench and persistent Autopilot;
+    host code still owns authorization, policies, and the final dispatch.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or _EXECUTION_NO_TOOLS_RE.search(value.lower()) or suppresses_file_tools(value):
+        return None
+    # Keep the legacy execution classifier's ordering intact.  In particular,
+    # compound work must reach the bounded local mode chooser (``decide``)
+    # before the newer file-tool classifier can narrow it to workbench.
+    file_intent = classify_file_intent(value)
+    if value.startswith("/"):
+        # /delegate is the sole natural-language slash form admitted by the
+        # file classifier; all other slash commands remain on their command
+        # path, as they did before file routing was added.
+        return file_intent
+    if requests_ensemble_compiler_retries(value):
+        return {
+            "mode": "workbench",
+            "reason": "explicit bounded local ensemble/compiler-retry request",
+            "plan_only": False,
+            "actions": ["ensemble_codegen_build_loop"],
+        }
+    if not classify_work(value):
+        return file_intent
+    lowered = value.lower()
+    plan_only = bool(_EXECUTION_PLAN_ONLY_RE.search(lowered))
+    actions = sorted(set(_WORK_ACTION_RE.findall(lowered)))
+    if _EXECUTION_FLEET_RE.search(lowered):
+        return {
+            "mode": "fleet",
+            "reason": "explicit fleet or parallel-agent request",
+            "plan_only": False,
+            "actions": actions,
+        }
+    if plan_only:
+        return {
+            "mode": "autopilot",
+            "reason": "explicit persistent plan-only request",
+            "plan_only": True,
+            "actions": actions,
+        }
+    if _EXECUTION_NO_BACKGROUND_RE.search(lowered):
+        return {
+            "mode": "workbench",
+            "reason": "explicit foreground or one-shot request",
+            "plan_only": False,
+            "actions": actions,
+        }
+    if _EXECUTION_AUTOPILOT_RE.search(lowered):
+        return {
+            "mode": "autopilot",
+            "reason": "explicit autonomous or end-to-end request",
+            "plan_only": False,
+            "actions": actions,
+        }
+    compound = len(actions) >= 3 and (
+        bool(_EXECUTION_SEQUENCE_RE.search(lowered))
+        or len(value) >= 180
+        or value.count(",") >= 2
+    )
+    if compound:
+        return {
+            "mode": "decide",
+            "reason": "compound multi-stage work needs a bounded local mode decision",
+            "plan_only": False,
+            "actions": actions,
+        }
+    if file_intent and file_intent["mode"] == "inspection":
+        return file_intent
+    return {
+        "mode": "workbench",
+        "reason": "bounded foreground task",
+        "plan_only": False,
+        "actions": actions,
+    }
+
+
+_IMAGE_GEN_LEAD_RE = re.compile(
+    r"^(?:(?:please|can you|could you|would you|will you)\s+)*"
+    r"(?:generate|create|draw|paint|render|make|illustrate|sketch|produce|design)"
+    r"(?:\s+(?:me|us))?\s+"
+    r"(?:(?:a|an|some|one|the|new|cool|nice|pretty|cute|funny|awesome|detailed|"
+    r"realistic|photorealistic|abstract|minimalist|stylized|retro|cyberpunk|"
+    r"3d|2d|pixel|pixel[\-\s]art|anime|oil|watercolor|digital|hd|4k|random|"
+    r"completely\s+random|totally\s+random)\s+)*"
+    r"(?:image|picture|pic|photo|photograph|illustration|artwork|art\s+piece|"
+    r"painting|drawing|sketch|wallpaper|portrait|landscape|icon|logo|avatar|"
+    r"banner|poster|graphic|scene)\b"
+    r"(?P<rest>.*)$",
+    re.I,
+)
+_IMAGE_DRAW_VERB_RE = re.compile(
+    r"^(?:(?:please|can you|could you|would you|will you)\s+)*"
+    r"(?:draw|paint|sketch|illustrate)"
+    r"(?:\s+(?:me|us))?\s+(?P<rest>\S.*)$",
+    re.I,
+)
+_IMAGE_GEN_EXCLUDE_RE = re.compile(
+    r"\b(?:script|python|javascript|typescript|dart|rust|java|c\+\+|c#|golang|"
+    r"code|function|class|method|module|package|library|api|endpoint|server|"
+    r"client|repo|repository|workspace|directory|folder|file|files|git|commit|"
+    r"pull\s+request|bug|fix|patch|debug|test|tests|unit\s+test|build|compile|"
+    r"shader|glsl|hlsl|html|css|sql|database|schema|migration|dockerfile|"
+    r"pipeline|cli|program|app|application|widget|component|parser|regex|"
+    r"json|yaml|toml|markdown|readme|benchmark|profile|refactor)\b",
+    re.I,
+)
+
+
+def classify_image_generation(text):
+    """Return the image-generation prompt when ``text`` asks directly for an image.
+
+    Returns ``None`` for questions, coding/script/repo tasks, or prompts that
+    name files/paths so image routing never hijacks engineering requests.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or len(value) > 600 or value.startswith("/"):
+        return None
+    lowered = value.lower()
+    if _WORK_QUESTION_RE.match(lowered):
+        return None
+    if _PATH_LIKE_RE.search(value) or _IMAGE_GEN_EXCLUDE_RE.search(lowered):
+        return None
+    match = _IMAGE_GEN_LEAD_RE.match(value) or _IMAGE_DRAW_VERB_RE.match(value)
+    if not match:
+        return None
+    rest = (match.group("rest") or "").strip()
+    if _CONTENT_ONLY_FOLLOWUP_RE.search(rest.lower()) or _CONTENT_ONLY_PERSIST_RE.search(rest.lower()):
+        return None
+    # Preserve the full descriptive request (minus polite lead-in) so the image
+    # model gets style adjectives like "cyberpunk", "watercolor", or "random".
+    cleaned = re.sub(
+        r"^(?:(?:please|can you|could you|would you|will you)\s+)*"
+        r"(?:generate|create|draw|paint|render|make|illustrate|sketch|produce|design)"
+        r"(?:\s+(?:me|us))?\s+",
+        "",
+        value,
+        flags=re.I,
+    ).strip(" .!?")
+    return cleaned or value
+
+
+_GIF_SLASH_RE = re.compile(r"^/gif(?:\s+(?P<arg>.*))?$", re.I)
+_GIF_GEN_LEAD_RE = re.compile(
+    r"^(?:(?:please|can you|could you|would you|will you)\s+)*"
+    r"(?:generate|create|make|render|produce|design|draw|animate|craft|give)"
+    r"(?:\s+(?:me|us))?\s+"
+    r"(?P<pre>(?:[^\s]+\s+){0,8}?)"
+    r"(?:(?:animated|looping|looped|moving)\s+)?gifs?\b"
+    r"(?P<rest>.*)$",
+    re.I,
+)
+_GIF_GEN_EXCLUDE_RE = re.compile(
+    r"\b(?:ffmpeg|imagemagick|pillow|pil|encoder|decoder|converter|transcode|"
+    r"convert|converting|mp4|webm|avi|mov|mkv|png|jpg|jpeg|svg|webp|"
+    r"generator|picker|viewer|player|uploader|compressor|optimizer|"
+    r"tutorial|snippet|url|link|div|button|modal|drawer|navbar|sidebar|"
+    r"element|transition|keyframes?|lottie|framer|gsap|dom|scroll|hover)\b",
+    re.I,
+)
+_GIF_ANIMATE_LEAD_RE = re.compile(
+    r"^(?:(?:please|can you|could you|would you|will you)\s+)*"
+    r"animate(?:\s+(?:me|us))?\s+(?P<subject>(?:a|an|the|this)\s+\S.*)$",
+    re.I,
+)
+_GIF_GENERIC_PRE_TOKENS = frozenset({
+    "a", "an", "the", "some", "one", "new", "cool", "nice", "fun", "pretty",
+    "cute", "funny", "awesome", "quick", "short", "little", "smooth",
+    "looping", "looped", "animated", "moving", "random", "completely",
+    "totally", "custom", "simple", "live", "dynamic",
+})
+_GIF_REST_LEAD_RE = re.compile(
+    r"^(?:[:,\-]+\s*|(?:that\s+(?:shows|depicts|features)|of|about|showing|with|featuring|depicting)\s+)",
+    re.I,
+)
+_GIF_REST_POLITE_TAIL_RE = re.compile(
+    r"(?:,?\s+(?:for\s+(?:me|us)|please|(?:right\s+)?now))+$",
+    re.I,
+)
+_GIF_DEFAULT_PROMPT = "a random animated gif"
+
+
+def classify_gif_generation(text):
+    """Return the animated-GIF prompt when ``text`` asks directly for a GIF.
+
+    Matches both the explicit ``/gif <prompt>`` slash form and direct natural
+    requests such as ``"can you generate a gif?"`` or ``"generate a gif of a
+    cyberpunk cat"``. Returns ``None`` for coding, conversion, file-path, or
+    explanatory questions so engineering tasks are never hijacked.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or len(value) > 600:
+        return None
+
+    slash_match = _GIF_SLASH_RE.match(value)
+    if slash_match:
+        arg = (slash_match.group("arg") or "").strip()
+        return arg or _GIF_DEFAULT_PROMPT
+    if value.startswith("/"):
+        return None
+
+    lowered = value.lower()
+    if _WORK_QUESTION_RE.match(lowered):
+        return None
+    if (
+        _PATH_LIKE_RE.search(value)
+        or _IMAGE_GEN_EXCLUDE_RE.search(lowered)
+        or _GIF_GEN_EXCLUDE_RE.search(lowered)
+    ):
+        return None
+
+    match = _GIF_GEN_LEAD_RE.match(value)
+    if not match:
+        anim_match = _GIF_ANIMATE_LEAD_RE.match(value)
+        if not anim_match:
+            return None
+        subject = (anim_match.group("subject") or "").strip(" ,.!?")
+        if _CONTENT_ONLY_FOLLOWUP_RE.search(subject.lower()) or _CONTENT_ONLY_PERSIST_RE.search(subject.lower()):
+            return None
+        subject = _GIF_REST_POLITE_TAIL_RE.sub("", subject).strip(" ,.!?")
+        return subject or _GIF_DEFAULT_PROMPT
+
+    pre = (match.group("pre") or "").strip()
+    rest = (match.group("rest") or "").strip()
+    if _CONTENT_ONLY_FOLLOWUP_RE.search(rest.lower()) or _CONTENT_ONLY_PERSIST_RE.search(rest.lower()):
+        return None
+
+    pre_tokens = [tok for tok in pre.split() if tok.lower().strip(",;:") not in _GIF_GENERIC_PRE_TOKENS]
+    pre_subject = " ".join(pre_tokens).strip(" ,;:-.!?")
+
+    rest_subject = rest.strip(" ,.!?")
+    rest_subject = _GIF_REST_POLITE_TAIL_RE.sub("", rest_subject).strip(" ,.!?")
+    if re.fullmatch(r"(?:for\s+(?:me|us)|please|(?:right\s+)?now)", rest_subject, re.I):
+        rest_subject = ""
+    else:
+        rest_subject = _GIF_REST_LEAD_RE.sub("", rest_subject).strip(" ,.!?")
+        rest_subject = _GIF_REST_POLITE_TAIL_RE.sub("", rest_subject).strip(" ,.!?")
+
+    if pre_subject and rest_subject:
+        return f"{pre_subject} {rest_subject}"
+    if rest_subject:
+        return rest_subject
+    if pre_subject:
+        return pre_subject
+    return _GIF_DEFAULT_PROMPT
+
+
+_MODEL3D_SLASH_RE = re.compile(r"^/(?:3d|model3d)(?:\s+(?P<arg>.*))?$", re.I)
+_MODEL3D_GEN_LEAD_RE = re.compile(
+    r"^(?:(?:please|can you|could you|would you|will you)\s+)*"
+    r"(?:generate|create|make|render|produce|design|build|sculpt|craft|give|model)"
+    r"(?:\s+(?:me|us))?\s+"
+    r"(?P<pre>(?:[^\s]+\s+){0,8}?)"
+    r"(?:(?:3d|3-d|hunyuan\s*3d)\s+(?:model|mesh|asset|object|figurine|prop|sculpture|glb|character|item)s?"
+    r"|hunyuan\s*3d|glb\s+(?:model|mesh|asset|file))\b"
+    r"(?P<rest>.*)$",
+    re.I,
+)
+_MODEL3D_GEN_EXCLUDE_RE = re.compile(
+    r"\b(?:three\.?js|webgl|webgpu|opengl|vulkan|directx|shader|glsl|hlsl|wgsl|"
+    r"unity\s+script|unreal\s+c\+\+|blender\s+python|bpy\b|raytrac(?:e|ing)|"
+    r"algorithm|pipeline\s+architecture|tutorial|snippet|class|function|library|"
+    r"viewer|loader|parser|serializer|exporter|importer|matrix|quaternion|"
+    r"explain|how\s+does|how\s+to|difference\s+between|compare|vs\.?|benchmark)\b",
+    re.I,
+)
+_MODEL3D_GENERIC_PRE_TOKENS = frozenset({
+    "a", "an", "the", "some", "one", "new", "cool", "nice", "fun", "detailed",
+    "custom", "simple", "quick", "high", "low", "poly", "low-poly", "high-poly",
+    "textured", "untextured", "printable", "realistic", "stylized", "game-ready",
+    "game", "ready", "using", "with", "via", "in",
+})
+_MODEL3D_DEFAULT_PROMPT = "a stylized glowing lantern"
+
+
+def classify_3d_model_generation(text):
+    """Return the 3D-model prompt when ``text`` asks directly for a 3D model / mesh.
+
+    Matches both ``/3d <prompt>`` / ``/model3d <prompt>`` and direct natural
+    requests such as ``"make me a 3d model of a medieval lantern"`` or
+    ``"generate a 3d mesh of a cute robot"``. Returns ``None`` for coding,
+    shader, engine, path, or explanatory questions.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or len(value) > 600:
+        return None
+
+    slash_match = _MODEL3D_SLASH_RE.match(value)
+    if slash_match:
+        arg = (slash_match.group("arg") or "").strip()
+        return arg or _MODEL3D_DEFAULT_PROMPT
+    if value.startswith("/"):
+        return None
+
+    lowered = value.lower()
+    if _WORK_QUESTION_RE.match(lowered):
+        return None
+    if _PATH_LIKE_RE.search(value) or _MODEL3D_GEN_EXCLUDE_RE.search(lowered):
+        return None
+
+    match = _MODEL3D_GEN_LEAD_RE.match(value)
+    if not match:
+        return None
+
+    pre = (match.group("pre") or "").strip()
+    rest = (match.group("rest") or "").strip()
+    if _CONTENT_ONLY_FOLLOWUP_RE.search(rest.lower()) or _CONTENT_ONLY_PERSIST_RE.search(rest.lower()):
+        return None
+
+    pre_tokens = [tok for tok in pre.split() if tok.lower().strip(",;:") not in _MODEL3D_GENERIC_PRE_TOKENS]
+    pre_subject = " ".join(pre_tokens).strip(" ,;:-.!?")
+
+    rest_subject = rest.strip(" ,.!?")
+    rest_subject = _GIF_REST_POLITE_TAIL_RE.sub("", rest_subject).strip(" ,.!?")
+    if re.fullmatch(r"(?:for\s+(?:me|us)|please|(?:right\s+)?now)", rest_subject, re.I):
+        rest_subject = ""
+    else:
+        rest_subject = _GIF_REST_LEAD_RE.sub("", rest_subject).strip(" ,.!?")
+        rest_subject = _GIF_REST_POLITE_TAIL_RE.sub("", rest_subject).strip(" ,.!?")
+
+    if pre_subject and rest_subject:
+        return f"{pre_subject} {rest_subject}"
+    if rest_subject:
+        return rest_subject
+    if pre_subject:
+        return pre_subject
+    return _MODEL3D_DEFAULT_PROMPT
+
+

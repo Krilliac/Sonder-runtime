@@ -13,9 +13,11 @@ from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 from wsgiref.types import StartResponse, WSGIEnvironment
 
 from .executor import (
+    CLIENT_AGENT_MODE_RANK,
     CLIENT_AGENT_MODES,
     CLIENT_DELEGATABLE_TOOLS,
     ClientAgentPolicy,
+    ModeCeilingRefused,
     execute_client_tool,
 )
 
@@ -31,8 +33,16 @@ def is_loopback_host(host: str) -> bool:
         return True
     if clean.startswith("127."):
         parts = clean.split(".")
-        return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+        return len(parts) == 4 and all(p.isascii() and p.isdigit() and 0 <= int(p) <= 255 for p in parts)
     return False
+
+
+def _format_origin(scheme: str, host: str, port: int | None) -> str:
+    if port is None:
+        return f"{scheme}://{host}"
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
 
 
 def normalize_origin(raw: str) -> str | None:
@@ -64,22 +74,22 @@ def normalize_origin(raw: str) -> str | None:
         host = rest[: end_bracket + 1].lower()
         after = rest[end_bracket + 1 :]
         if after:
-            if not after.startswith(":") or not after[1:].isdigit():
+            if not after.startswith(":") or not (after[1:].isascii() and after[1:].isdigit()):
                 return None
             port = int(after[1:])
             if not 1 <= port <= 65535:
                 return None
-            return f"{scheme}://{host}:{port}"
-        return f"{scheme}://{host}"
+            return _format_origin(scheme, host, port)
+        return _format_origin(scheme, host, None)
     if ":" in rest:
         host_part, port_part = rest.rsplit(":", 1)
-        if not host_part or not port_part.isdigit():
+        if not host_part or ":" in host_part or not (port_part.isascii() and port_part.isdigit()):
             return None
         port = int(port_part)
         if not 1 <= port <= 65535:
             return None
-        return f"{scheme}://{host_part.lower()}:{port}"
-    return f"{scheme}://{rest.lower()}"
+        return _format_origin(scheme, host_part.lower(), port)
+    return _format_origin(scheme, rest.lower(), None)
 
 
 def _origin_host(normalized_origin: str) -> str:
@@ -113,6 +123,10 @@ class ClientAgentServer(socketserver.ThreadingMixIn, WSGIServer):
     allowed_origins: frozenset[str] = frozenset()
 
 
+class _ClientAgentIPv6Server(ClientAgentServer):
+    address_family = vars(socketserver)["socket"].AF_INET6
+
+
 def _extract_token(environ: Mapping[str, Any]) -> str:
     direct = str(environ.get("HTTP_X_SONDER_CLIENT_AGENT_TOKEN") or "").strip()
     if direct:
@@ -124,13 +138,17 @@ def _extract_token(environ: Mapping[str, Any]) -> str:
 
 
 def _read_json_body(environ: Mapping[str, Any]) -> tuple[dict[str, Any] | None, int]:
+    transfer_encoding = str(environ.get("HTTP_TRANSFER_ENCODING") or "").strip()
     raw_len = str(environ.get("CONTENT_LENGTH") or "").strip()
+    if transfer_encoding:
+        if not raw_len:
+            return None, 411
+        return None, 400
     if not raw_len:
         return {}, 200
-    try:
-        length = int(raw_len)
-    except ValueError:
+    if not (raw_len.isascii() and raw_len.isdigit()):
         return None, 400
+    length = int(raw_len)
     if length < 0:
         return None, 400
     if length > _MAX_REQUEST_BODY_BYTES:
@@ -152,13 +170,27 @@ def _read_json_body(environ: Mapping[str, Any]) -> tuple[dict[str, Any] | None, 
     return decoded, 200
 
 
-_MODE_RANK: dict[str, int] = {
-    "plan": 0,
-    "manual": 1,
-    "acceptEdits": 2,
-    "auto": 3,
-    "bypass": 4,
-}
+_MODE_RANK: dict[str, int] = CLIENT_AGENT_MODE_RANK
+
+
+def _body_error_payload(status: int) -> dict[str, Any]:
+    if status == 413:
+        return {
+            "ok": False,
+            "error": {
+                "code": "PAYLOAD_TOO_LARGE",
+                "message": f"Request body exceeds {_MAX_REQUEST_BODY_BYTES} bytes",
+            },
+        }
+    if status == 411:
+        return {
+            "ok": False,
+            "error": {
+                "code": "LENGTH_REQUIRED",
+                "message": "Content-Length header is required",
+            },
+        }
+    return {"ok": False, "error": {"code": "INVALID_REQUEST", "message": "Invalid JSON body"}}
 
 
 def build_wsgi_app(
@@ -180,7 +212,7 @@ def build_wsgi_app(
         if normalized is None:
             return []
         headers = [
-            ("Access-Control-Allow-Origin", origin_header.strip()),
+            ("Access-Control-Allow-Origin", normalized),
             ("Vary", "Origin"),
             (
                 "Access-Control-Allow-Headers",
@@ -205,6 +237,7 @@ def build_wsgi_app(
             403: "403 Forbidden",
             404: "404 Not Found",
             405: "405 Method Not Allowed",
+            411: "411 Length Required",
             413: "413 Payload Too Large",
         }.get(status, f"{status} Error")
         headers: list[tuple[str, str]] = [
@@ -252,7 +285,10 @@ def build_wsgi_app(
             )
 
         supplied_token = _extract_token(environ)
-        if not supplied_token or not hmac.compare_digest(supplied_token, token):
+        if not supplied_token or not hmac.compare_digest(
+            supplied_token.encode("utf-8"),
+            token.encode("utf-8"),
+        ):
             return _respond(
                 start_response,
                 401,
@@ -269,6 +305,8 @@ def build_wsgi_app(
         if method == "GET" and path == "/v1/client-agent/status":
             with lock:
                 mode = policy.mode
+                max_mode = policy.max_mode
+                can_bypass = policy.can_bypass
                 workspace = str(policy.workspace_root)
             return _respond(
                 start_response,
@@ -277,9 +315,10 @@ def build_wsgi_app(
                     "ok": True,
                     "service": "sonder-client-agent",
                     "mode": mode,
+                    "max_mode": max_mode,
                     "modes": list(CLIENT_AGENT_MODES),
                     "workspace": workspace,
-                    "can_bypass": True,
+                    "can_bypass": can_bypass,
                     "tools": sorted(CLIENT_DELEGATABLE_TOOLS),
                 },
                 origin_header,
@@ -291,7 +330,7 @@ def build_wsgi_app(
                 return _respond(
                     start_response,
                     body_status,
-                    {"ok": False, "error": {"code": "INVALID_REQUEST", "message": "Invalid JSON body"}},
+                    _body_error_payload(body_status),
                     origin_header,
                 )
             wanted = str(body.get("mode") or "").strip()
@@ -299,7 +338,19 @@ def build_wsgi_app(
             try:
                 with lock:
                     updated = policy.set_mode(wanted, confirm_bypass=confirm_bypass)
+                    max_mode = policy.max_mode
+                    can_bypass = policy.can_bypass
                     workspace = str(policy.workspace_root)
+            except ModeCeilingRefused as exc:
+                return _respond(
+                    start_response,
+                    403,
+                    {
+                        "ok": False,
+                        "error": {"code": "MODE_FORBIDDEN", "message": str(exc)},
+                    },
+                    origin_header,
+                )
             except PermissionError as exc:
                 return _respond(
                     start_response,
@@ -320,7 +371,13 @@ def build_wsgi_app(
             return _respond(
                 start_response,
                 200,
-                {"ok": True, "mode": updated, "workspace": workspace, "can_bypass": True},
+                {
+                    "ok": True,
+                    "mode": updated,
+                    "max_mode": max_mode,
+                    "workspace": workspace,
+                    "can_bypass": can_bypass,
+                },
                 origin_header,
             )
 
@@ -330,7 +387,7 @@ def build_wsgi_app(
                 return _respond(
                     start_response,
                     body_status,
-                    {"ok": False, "error": {"code": "INVALID_REQUEST", "message": "Invalid JSON body"}},
+                    _body_error_payload(body_status),
                     origin_header,
                 )
             tool = str(body.get("tool") or "").strip()
@@ -355,6 +412,8 @@ def build_wsgi_app(
                 effective_policy = ClientAgentPolicy(
                     workspace_root=policy.workspace_root,
                     mode=policy.mode,
+                    max_mode=policy.max_mode,
+                    can_bypass=policy.can_bypass,
                 )
                 # Caller may request a stricter mode per call, never a looser one.
                 if (
@@ -397,6 +456,8 @@ def create_client_agent_server(
     port: int = DEFAULT_CLIENT_AGENT_PORT,
     workspace_root: Path | str | None = None,
     mode: str = "manual",
+    max_mode: str | None = None,
+    allow_bypass: bool = False,
     token: str | None = None,
     allowed_origins: Iterable[str] = (),
 ) -> ClientAgentServer:
@@ -404,17 +465,28 @@ def create_client_agent_server(
     clean_host = host.strip() or DEFAULT_CLIENT_AGENT_HOST
     if not is_loopback_host(clean_host):
         raise ValueError(f"client_agent must bind to a loopback address, not {clean_host!r}")
+    bind_host = (
+        clean_host[1:-1]
+        if clean_host.startswith("[") and clean_host.endswith("]")
+        else clean_host
+    )
+    server_cls = _ClientAgentIPv6Server if ":" in bind_host else ClientAgentServer
     effective_token = (token or "").strip() or secrets.token_urlsafe(32)
-    policy = ClientAgentPolicy(workspace_root=workspace_root, mode=mode)
+    policy = ClientAgentPolicy(
+        workspace_root=workspace_root,
+        mode=mode,
+        max_mode=max_mode,
+        can_bypass=allow_bypass,
+    )
     normalized_origins = frozenset(
         norm for raw in allowed_origins if (norm := normalize_origin(raw)) is not None
     )
     app = build_wsgi_app(policy=policy, token=effective_token, allowed_origins=normalized_origins)
     srv = make_server(
-        clean_host,
+        bind_host,
         int(port),
         app,
-        server_class=ClientAgentServer,
+        server_class=server_cls,
         handler_class=_QuietWSGIHandler,
     )
     # Attach metadata directly on the server instance for callers/tests.

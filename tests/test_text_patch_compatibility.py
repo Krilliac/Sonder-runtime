@@ -13,7 +13,7 @@ def test_root_text_patch_module_is_retired():
 
 
 def test_server_uses_packaged_text_patch_adapter_directly():
-    tree = ast.parse((_REPO_ROOT / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((_REPO_ROOT / "runtime" / "server.py").read_text(encoding="utf-8"))
     imports = {
         node.module
         for node in ast.walk(tree)

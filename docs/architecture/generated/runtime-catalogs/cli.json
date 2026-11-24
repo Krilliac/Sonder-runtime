@@ -1,6 +1,12 @@
 {
   "commands": [
     {
+      "category": "creative",
+      "name": "/3d",
+      "risk": "execution",
+      "summary": "Generate a 3D model (.glb) via local Hunyuan3D-2 with an inline Blender studio preview."
+    },
+    {
       "category": "diagnostics",
       "name": "/about",
       "risk": "safe",
@@ -199,6 +205,12 @@
       "summary": "Generate icons, media, textured morphing multi-clip GLB models, scenes, and packs from a brief."
     },
     {
+      "category": "dev",
+      "name": "/audit",
+      "risk": "safe",
+      "summary": "Audit inline source code or a guarded file for security vulnerabilities and Python AST bug footguns."
+    },
+    {
       "category": "agents",
       "name": "/autopilot",
       "risk": "ask",
@@ -301,6 +313,12 @@
       "summary": "Run the project build system (auto-detects Make, Cargo, CMake, Go, npm, Gradle, Maven)."
     },
     {
+      "category": "data",
+      "name": "/calc",
+      "risk": "safe",
+      "summary": "Evaluate exact/high-precision math, equations, linear systems, matrices, statistics, units, or dates."
+    },
+    {
       "category": "diagnostics",
       "name": "/calibration_status",
       "risk": "safe",
@@ -347,6 +365,12 @@
       "name": "/checklist_update",
       "risk": "ask",
       "summary": "Update one checklist item by 1-based index or id prefix."
+    },
+    {
+      "category": "dev",
+      "name": "/citecheck",
+      "risk": "safe",
+      "summary": "Audit file:line citations, quoted snippets, and source grounding against guarded files or supplied sources."
     },
     {
       "category": "dev",
@@ -439,6 +463,12 @@
       "summary": "End the driving session now and close its indicator."
     },
     {
+      "category": "data",
+      "name": "/consensus",
+      "risk": "safe",
+      "summary": "Compare 2-8 candidate answers for consensus vs contested claims, or audit a reply against tool receipts."
+    },
+    {
       "category": "chat",
       "name": "/consult",
       "risk": "ask",
@@ -491,6 +521,12 @@
       "name": "/crash",
       "risk": "execution",
       "summary": "digest a crash (minidump, core, sanitizer/valgrind log)"
+    },
+    {
+      "category": "data",
+      "name": "/crosscheck",
+      "risk": "safe",
+      "summary": "Cross-check prose for inline arithmetic mistakes, table total mismatches, bad dates/weekdays, list counts, and contradictions."
     },
     {
       "category": "data",
@@ -571,6 +607,12 @@
       "summary": "Update packages (or all if empty array) with auto-detected package manager."
     },
     {
+      "category": "dev",
+      "name": "/diagnose",
+      "risk": "safe",
+      "summary": "Parse multi-language tracebacks/compiler errors, resolve guarded repo source context, and classify root cause."
+    },
+    {
       "category": "diagnostics",
       "name": "/diagnostics",
       "risk": "safe",
@@ -607,6 +649,12 @@
       "summary": "List a bounded guarded tree; ignored paths require developer authentication."
     },
     {
+      "category": "data",
+      "name": "/doc",
+      "risk": "safe",
+      "summary": "Extract structured text, tables, slides, metadata, or subtitle cues from guarded DOCX/XLSX/PPTX/HTML/SVG/SRT/VTT files."
+    },
+    {
       "category": "diagnostics",
       "name": "/dump",
       "risk": "safe",
@@ -617,6 +665,12 @@
       "name": "/edit",
       "risk": "mutation",
       "summary": "Replace text in a guarded file."
+    },
+    {
+      "category": "diagnostics",
+      "name": "/effort",
+      "risk": "safe",
+      "summary": "show/set this session's reasoning effort"
     },
     {
       "category": "security",
@@ -657,7 +711,7 @@
     {
       "category": "runtime",
       "name": "/ensemble_codegen_build_loop",
-      "risk": "mutation",
+      "risk": "execution",
       "summary": "Use local code + reasoning candidates and compiler-feedback retries."
     },
     {
@@ -707,6 +761,12 @@
       "name": "/fail",
       "risk": "ask",
       "summary": "record the last answer as failed"
+    },
+    {
+      "category": "dev",
+      "name": "/fallback",
+      "risk": "safe",
+      "summary": "Classify a tool or command failure and return ranked, policy-safe alternative tools and recovery strategies."
     },
     {
       "category": "agents",
@@ -859,6 +919,18 @@
       "summary": "Run a bounded parallel game campaign with optional language/dimension targets."
     },
     {
+      "category": "creative",
+      "name": "/generate_3d_model",
+      "risk": "execution",
+      "summary": "Generate a 3D model (.glb/.obj) from a text prompt or guarded local image using local Hunyuan3D-2, render a 2x2 studio preview in headless Blender, and return the model path, download URL, and inline preview markdown."
+    },
+    {
+      "category": "creative",
+      "name": "/gif",
+      "risk": "ask",
+      "summary": "Generate an animated GIF inline via the local image model or procedural GIF89a studio."
+    },
+    {
       "category": "repo",
       "name": "/git_branch",
       "risk": "mutation",
@@ -907,6 +979,12 @@
       "summary": "Set, inspect, note, or close the persistent goal; review and adopt self-proposed goals."
     },
     {
+      "category": "dev",
+      "name": "/graph",
+      "risk": "safe",
+      "summary": "Analyze repository module dependencies, circular imports (Tarjan SCC), change blast-radius, and Python call graphs."
+    },
+    {
       "category": "creative",
       "name": "/ground_artifact",
       "risk": "ask",
@@ -941,6 +1019,12 @@
       "name": "/image_inspect",
       "risk": "safe",
       "summary": "Inspect guarded image headers, dimensions, size, and hash."
+    },
+    {
+      "category": "creative",
+      "name": "/img",
+      "risk": "ask",
+      "summary": "Generate an inline image via the local image model or procedural raster fallback."
     },
     {
       "category": "diagnostics",
@@ -979,6 +1063,12 @@
       "summary": "inspect and control durable agent conversations"
     },
     {
+      "category": "dev",
+      "name": "/languages",
+      "risk": "safe",
+      "summary": "Report Sonder's full multi-language capability matrix and live host toolchain readiness."
+    },
+    {
       "category": "memory",
       "name": "/learn_from_example",
       "risk": "ask",
@@ -1009,6 +1099,12 @@
       "summary": "Show outcome coverage, positive signals, lesson provenance, and memory hygiene."
     },
     {
+      "category": "dev",
+      "name": "/learntool",
+      "risk": "safe",
+      "summary": "Discover and figure out an unfamiliar/external tool (e.g."
+    },
+    {
       "category": "memory",
       "name": "/lessons",
       "risk": "safe",
@@ -1027,6 +1123,12 @@
       "summary": "Show helper-module and atomic MCP tool-registry live reload state."
     },
     {
+      "category": "dev",
+      "name": "/loc",
+      "risk": "safe",
+      "summary": "Compute bounded language LOC, TODO/FIXME markers, largest files, and complexity hotspots."
+    },
+    {
       "category": "diagnostics",
       "name": "/local_service_probe",
       "risk": "ask",
@@ -1043,6 +1145,12 @@
       "name": "/log_inspect",
       "risk": "safe",
       "summary": "Inspect one guarded text log without execution or caller expressions."
+    },
+    {
+      "category": "dev",
+      "name": "/logic",
+      "risk": "safe",
+      "summary": "Verify propositional SAT, truth tables, equivalence/implication counterexamples, CNF, or finite-domain CSPs."
     },
     {
       "category": "security",
@@ -1109,6 +1217,12 @@
       "name": "/mcp_runtime_status",
       "risk": "safe",
       "summary": "Show live MCP source/tool convergence and fail-closed refresh state."
+    },
+    {
+      "category": "creative",
+      "name": "/media",
+      "risk": "safe",
+      "summary": "Inspect guarded WAV audio, MIDI tracks, AVI video, or GLB/glTF/OBJ/STL 3D assets."
     },
     {
       "category": "memory",
@@ -1342,7 +1456,7 @@
       "category": "persona",
       "name": "/persona",
       "risk": "safe",
-      "summary": "show/set active persona (coder/explainer/reviewer/teacher)"
+      "summary": "show/set active persona (auto = route by tier/prompt)"
     },
     {
       "category": "memory",
@@ -1471,6 +1585,12 @@
       "summary": "Read recent messages from the shared peer coordination board."
     },
     {
+      "category": "basic",
+      "name": "/reason",
+      "risk": "safe",
+      "summary": "Track grounded facts, hypotheses, decisions, and contradiction audits in a session-scoped scratchpad."
+    },
+    {
       "category": "diagnostics",
       "name": "/reasoning_show",
       "risk": "safe",
@@ -1499,6 +1619,12 @@
       "name": "/reference_search",
       "risk": "safe",
       "summary": "Search the local reference library (security, coding and debugging references, depending on what the index holds) and return up to k (1 to 8) framed passages with their sources."
+    },
+    {
+      "category": "dev",
+      "name": "/regex",
+      "risk": "safe",
+      "summary": "Test a regex against text/cases, inspect capture groups and substitutions, and check ReDoS hazards."
     },
     {
       "category": "security",
@@ -1565,6 +1691,12 @@
       "name": "/repository_symbol_index",
       "risk": "safe",
       "summary": "Build a bounded read-only declaration index inside one guarded repository."
+    },
+    {
+      "category": "runtime",
+      "name": "/resilience",
+      "risk": "safe",
+      "summary": "Inspect live model-call retries, context compactions, arg repairs, loop breaks, and circuit-breaker telemetry."
     },
     {
       "category": "basic",
@@ -1681,6 +1813,12 @@
       "summary": "Emit a complete, deterministic project skeleton for one language."
     },
     {
+      "category": "data",
+      "name": "/schema",
+      "risk": "safe",
+      "summary": "Validate a guarded JSON, JSONL, or TOML file against a JSON Schema file or inline schema_json."
+    },
+    {
       "category": "creative",
       "name": "/screen_capture",
       "risk": "ask",
@@ -1703,6 +1841,12 @@
       "name": "/scripts",
       "risk": "ask",
       "summary": "Find runnable scripts under a guarded root."
+    },
+    {
+      "category": "dev",
+      "name": "/sdiff",
+      "risk": "safe",
+      "summary": "Compute an AST-aware Python diff, deep JSON/TOML/INI structural diff, or symbol-signature diff."
     },
     {
       "category": "filesystem",
@@ -1763,6 +1907,12 @@
       "name": "/setaccount",
       "risk": "dangerous",
       "summary": "admin account edits: user role= tier= dev_flags= banned="
+    },
+    {
+      "category": "dev",
+      "name": "/shield",
+      "risk": "safe",
+      "summary": "Scan untrusted text or a guarded file for prompt injection, Trojan-Source Unicode bidi/tags, and secret leaks."
     },
     {
       "category": "chat",
@@ -1835,6 +1985,12 @@
       "name": "/strict",
       "risk": "safe",
       "summary": "toggle strict mode (bare = on); pins to the sonder alias"
+    },
+    {
+      "category": "dev",
+      "name": "/symcheck",
+      "risk": "safe",
+      "summary": "Verify Python modules/attributes/kwargs against stdlib/environment/repo, or audit a code snippet for hallucinated APIs."
     },
     {
       "category": "diagnostics",
@@ -2005,6 +2161,12 @@
       "summary": "Plan, explicitly start, inspect, deploy, or roll back adaptive weight training."
     },
     {
+      "category": "data",
+      "name": "/transform",
+      "risk": "safe",
+      "summary": "Convert, profile, query, encode/decode structured data, timestamps, or 5-field cron schedules."
+    },
+    {
       "category": "filesystem",
       "name": "/tree",
       "risk": "ask",
@@ -2145,7 +2307,7 @@
     {
       "category": "agents",
       "name": "/workflow_delete",
-      "risk": "ask",
+      "risk": "mutation",
       "summary": "Delete a saved workflow from workflows.json."
     },
     {
@@ -2163,7 +2325,7 @@
     {
       "category": "agents",
       "name": "/workflow_save",
-      "risk": "ask",
+      "risk": "mutation",
       "summary": "Save a named workflow made of loop action objects."
     },
     {
@@ -2247,8 +2409,24 @@
       "summary": "Describe a C/C++ project's build without running anything: build system, generator, configs, platforms, targets (utility and build-time-tool flags), toolchains, compile units, PCH and presets, read from the CMake File API reply, compile_commands.json or .sln/.vcxproj. Labels only, no host paths."
     },
     {
+      "name": "citation_audit",
+      "summary": "Guarded file:line citation, verbatim quote, and source-grounding verifier"
+    },
+    {
       "name": "claim_check",
       "summary": "Check a model's code claim against the repository, read-only"
+    },
+    {
+      "name": "code_audit",
+      "summary": "Zero-dependency static security vulnerability and Python AST bug-footgun auditor for inline code or guarded files"
+    },
+    {
+      "name": "code_graph",
+      "summary": "Guarded bounded repository dependency graph, circular-import detector, blast-radius impact analyzer, and Python AST call/inheritance graph"
+    },
+    {
+      "name": "code_metrics",
+      "summary": "Compute bounded language LOC, TODO/FIXME markers, largest files, and complexity hotspots for a guarded file or directory"
     },
     {
       "name": "compute_artifact_fetch",
@@ -2267,6 +2445,10 @@
       "summary": "Place one bounded catalog job locally or on an explicitly authorized private node"
     },
     {
+      "name": "consistency_check",
+      "summary": "Pure multi-candidate self-consistency reconciler and tool-receipt auditor catching fabricated pass or write claims"
+    },
+    {
       "name": "crash_digest",
       "summary": "Symbolize and walk a crash capture with a host debugger (cdb, gdb, lldb, eu-stack, minidump-stackwalk or llvm-symbolizer on verified PE+PDB/ELF pairs) as a background job over the pure reader's result; returns the merged crash report or a run id to poll with debug_run_result. symbol_dirs must be local directories inside the allowed roots. symbol_server=true is refused from a tool call: the operator runs /crash <dump> --symbols-online at the console."
     },
@@ -2283,12 +2465,20 @@
       "summary": "Run a bounded read-only data query"
     },
     {
+      "name": "data_transform",
+      "summary": "Deterministic JSON/CSV/TSV/TOML/INI/Markdown converter, profiler, query/aggregate engine, encoder, timestamp & cron tool"
+    },
+    {
       "name": "debug_run_result",
       "summary": "Wait (bounded) for a crash_digest or profile_capture_digest run you started and return its result, or its status while it is still running."
     },
     {
       "name": "dependency_inventory",
       "summary": "Inventory bounded project dependencies"
+    },
+    {
+      "name": "diff_semantic",
+      "summary": "Guarded bounded AST-aware Python diff, deep JSON/TOML/INI structural diff, or symbol-signature diff between two files or inline strings"
     },
     {
       "name": "directory_create",
@@ -2303,8 +2493,20 @@
       "summary": "List a bounded guarded directory tree"
     },
     {
+      "name": "document_extract",
+      "summary": "Extract structured text, tables, slides, metadata, or subtitle cues from guarded DOCX, XLSX, PPTX, HTML, SVG, SRT, or VTT files"
+    },
+    {
       "name": "edit_file",
       "summary": "Apply a bounded text edit"
+    },
+    {
+      "name": "error_diagnose",
+      "summary": "Parse multi-language stacktraces and compiler errors, resolve guarded repo source context, and classify root cause"
+    },
+    {
+      "name": "fact_cross_check",
+      "summary": "Pure linear-time prose cross-checker catching arithmetic mistakes, table total mismatches, bad dates/weekdays, list counts, and polarity contradictions"
     },
     {
       "name": "fetch_artifact",
@@ -2363,16 +2565,40 @@
       "summary": "Preview or atomically apply a bounded JSON patch"
     },
     {
+      "name": "language_matrix",
+      "summary": "Report Sonder's full multi-language capability matrix (run_code, scaffolds, symbol index, build/test/lint/format/typecheck/pkg) and live host binary readiness"
+    },
+    {
+      "name": "learn_tool",
+      "summary": "Discover and figure out an unfamiliar/external tool or CLI (e.g. blender, ffmpeg, inkscape) via safe --help/metadata introspection"
+    },
+    {
       "name": "log_inspect",
       "summary": "Inspect a bounded log file"
+    },
+    {
+      "name": "logic_verify",
+      "summary": "Pure bounded propositional SAT solver, truth table, equivalence/implication prover with counterexamples, CNF simplifier, and finite-domain CSP solver"
     },
     {
       "name": "make_directory",
       "summary": "Create a directory under an allowed root"
     },
     {
+      "name": "math_eval",
+      "summary": "Pure bounded exact/high-precision math, equation & linear-system solver, matrix/vector algebra, number theory, statistics/regression, unit conversion, and date arithmetic"
+    },
+    {
+      "name": "media_inspect",
+      "summary": "Inspect bounded metadata, loudness, geometry, and hash for guarded WAV, MIDI, AVI, GLB/glTF, OBJ, or STL assets"
+    },
+    {
       "name": "output_digest",
       "summary": "Summarize a test-run job's output or a guarded log file: final summary line, counts, FAILED/ERROR lines, first unique errors (file:line), grouped diagnostics and the tail. Give exactly one of job_id or path."
+    },
+    {
+      "name": "plan_fallback",
+      "summary": "Pure failure classifier and alternative-method planner recommending ranked, policy-safe fallback tools and steps"
     },
     {
       "name": "process_list",
@@ -2399,8 +2625,20 @@
       "summary": "Detect project manifests and commands"
     },
     {
+      "name": "prompt_shield",
+      "summary": "Scan untrusted text or a guarded file for prompt injection, Trojan-Source Unicode bidi/tags, and secret leaks"
+    },
+    {
       "name": "read_file",
       "summary": "Read a bounded file"
+    },
+    {
+      "name": "reasoning_board",
+      "summary": "Session-scoped structured cognitive scratchpad for tracking grounded facts, hypotheses, decisions, and contradiction audits"
+    },
+    {
+      "name": "regex_lab",
+      "summary": "Pure bounded regex tester, match/group/span inspector, substitution previewer, and static ReDoS hazard analyzer"
     },
     {
       "name": "run_program",
@@ -2411,12 +2649,24 @@
       "summary": "Run a bounded script"
     },
     {
+      "name": "runtime_resilience_check",
+      "summary": "Inspect live model-call retries, context compactions, arg repairs, loop breaks, and circuit-breaker state"
+    },
+    {
+      "name": "schema_validate",
+      "summary": "Validate a guarded JSON, JSONL, or TOML file against a guarded JSON Schema file or inline schema_json"
+    },
+    {
       "name": "script_search",
       "summary": "Find scripts under allowed roots"
     },
     {
       "name": "secret_scan",
       "summary": "Scan an authorized tree for redacted credential findings"
+    },
+    {
+      "name": "symbol_verify",
+      "summary": "Guarded static verifier for Python stdlib, installed package, and repository modules/attributes/kwargs plus full code-snippet API auditing"
     },
     {
       "name": "test_run",

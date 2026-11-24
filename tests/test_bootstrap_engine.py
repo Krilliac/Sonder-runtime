@@ -37,7 +37,7 @@ def test_main_runs_setup_alias_from_script_root(monkeypatch, tmp_path):
 
     monkeypatch.setattr(bootstrap_engine, "_run", fake_run)
     assert bootstrap_engine.main([]) == 0
-    assert Path(seen["cmd"][1]) == bootstrap_engine.ROOT / "setup_alias.py"
+    assert Path(seen["cmd"][1]) == bootstrap_engine.ROOT / "scripts" / "setup_alias.py"
     assert Path(seen["cwd"]) == bootstrap_engine.ROOT
     assert "SONDER_BASE_MODEL" in seen["env"]
 

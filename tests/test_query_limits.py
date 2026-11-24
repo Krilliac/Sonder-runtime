@@ -5,7 +5,7 @@ def test_server_production_paths_do_not_call_query_limit_compatibility_wrapper()
     import ast
     from pathlib import Path
 
-    tree = ast.parse((Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+    tree = ast.parse((Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8"))
     calls = [
         node
         for node in ast.walk(tree)

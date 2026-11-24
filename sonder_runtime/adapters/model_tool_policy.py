@@ -59,10 +59,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -76,6 +78,19 @@ SCHEMA_VERSION = 1
 OVERLAY_ENV = "SONDER_MODEL_TOOL_POLICY"
 OVERLAY_FILE_NAME = "model_tool_policy.json"
 SHIPPED_PATH = Path(__file__).resolve().parent / "data" / "model_tool_policy.json"
+# Explicit host-only opt-in to intentionally relax ONLY the shipped
+# ``security-advisers`` model-name floor so security-tuned models can drive
+# tools under Sonder's normal permission modes, approvals, workspace
+# boundaries, and secret redaction.  Off by default; never settable from
+# runtime_policy.json, HTTP, MCP, or chat.  Casual truthy values ("1", "true",
+# "yes") are rejected so the floor cannot be weakened accidentally.
+ALLOW_SECURITY_MODEL_TOOLS_ENV = "SONDER_ALLOW_SECURITY_MODEL_TOOLS"
+ALLOW_SECURITY_MODEL_TOOLS_ACK = "I_ACCEPT_SECURITY_MODEL_TOOL_RISK"
+SECURITY_ADVISERS_PROFILE_ID = "security-advisers"
+
+_logger = logging.getLogger(__name__)
+_OPT_IN_LOG_LOCK = threading.Lock()
+_OPT_IN_LOGGED: set[str] = set()
 # A policy file is a short list of names; anything larger is not one.
 MAX_FILE_BYTES = 1024 * 1024
 # How long a failed read is reused for the same file identity.  Every model
@@ -180,6 +195,7 @@ class ModelToolConfig:
     secret_path_globs: tuple[Entry, ...] = ()
     shipped_pin: ShippedPin = ShippedPin.UNREAD
     shipped_sha256: str = ""
+    security_floor_relaxed: bool = False
 
     def profile(self, profile_id: str) -> MergedProfile | None:
         return next((item for item in self.profiles if item.id == profile_id), None)
@@ -438,9 +454,55 @@ def _pin_state(path: Path, made: _Pin) -> tuple[ShippedPin, _Pin]:
     return (ShippedPin.PINNED if pinned.sha256 == made.sha256 else ShippedPin.CHANGED), pinned
 
 
-def _floor_of(document: _Document) -> tuple[frozenset[str], tuple[str, ...]]:
-    names = frozenset(name for profile in document.profiles for name in profile.names)
-    prefixes = tuple(dict.fromkeys(item for profile in document.profiles for item in profile.prefixes))
+def security_model_tools_allowed(env: Mapping[str, str] | None = None) -> bool:
+    """True only when the operator explicitly acknowledged relaxing the ``security-advisers`` floor.
+
+    Requires the exact acknowledgement string in ``SONDER_ALLOW_SECURITY_MODEL_TOOLS``
+    (host environment only).  Unset values and casual truthy shorthand (``"1"``,
+    ``"true"``, ``"yes"``) fail closed and return False.
+    """
+    source = os.environ if env is None else env
+    return str(source.get(ALLOW_SECURITY_MODEL_TOOLS_ENV, "")).strip() == ALLOW_SECURITY_MODEL_TOOLS_ACK
+
+
+def _audit_security_opt_in(env: Mapping[str, str] | None = None) -> bool:
+    """Evaluate the opt-in env var and emit a one-time audit warning when set."""
+    source = os.environ if env is None else env
+    raw = str(source.get(ALLOW_SECURITY_MODEL_TOOLS_ENV, "")).strip()
+    if not raw:
+        return False
+    allowed = raw == ALLOW_SECURITY_MODEL_TOOLS_ACK
+    token = "active" if allowed else f"invalid:{raw}"
+    with _OPT_IN_LOG_LOCK:
+        first_time = token not in _OPT_IN_LOGGED
+        if first_time:
+            _OPT_IN_LOGGED.add(token)
+    if first_time:
+        if allowed:
+            _logger.warning(
+                "%s active: shipped '%s' model tool-lane floor intentionally relaxed by operator; "
+                "permission modes, approvals, workspace boundaries, and secret redaction remain in force",
+                ALLOW_SECURITY_MODEL_TOOLS_ENV,
+                SECURITY_ADVISERS_PROFILE_ID,
+            )
+        else:
+            _logger.warning(
+                "%s=%r ignored (requires exact acknowledgement %r); "
+                "shipped '%s' model tool-lane floor remains in force",
+                ALLOW_SECURITY_MODEL_TOOLS_ENV,
+                raw,
+                ALLOW_SECURITY_MODEL_TOOLS_ACK,
+                SECURITY_ADVISERS_PROFILE_ID,
+            )
+    return allowed
+
+
+def _floor_of(
+    document: _Document, *, exclude_ids: frozenset[str] = frozenset(),
+) -> tuple[frozenset[str], tuple[str, ...]]:
+    profiles = [profile for profile in document.profiles if profile.id not in exclude_ids]
+    names = frozenset(name for profile in profiles for name in profile.names)
+    prefixes = tuple(dict.fromkeys(item for profile in profiles for item in profile.prefixes))
     return names, prefixes
 
 
@@ -591,10 +653,17 @@ def _add(existing: tuple[Entry, ...], values: tuple[str, ...], source: ConfigSou
     return existing + tuple(Entry(value, source) for value in values if value not in seen)
 
 
-def _merge_profiles(shipped: _Document | None, overlay: _Document | None) -> tuple[MergedProfile, ...]:
-    """Shipped profiles first, then the overlay's additions; nothing is ever removed."""
+def _merge_profiles(
+    shipped: _Document | None,
+    overlay: _Document | None,
+    *,
+    skip_shipped_ids: frozenset[str] = frozenset(),
+) -> tuple[MergedProfile, ...]:
+    """Shipped profiles first, then the overlay's additions; nothing is ever removed by the overlay."""
     merged: dict[str, MergedProfile] = {}
     for profile in shipped.profiles if shipped is not None else ():
+        if profile.id in skip_shipped_ids:
+            continue
         merged[profile.id] = MergedProfile(
             id=profile.id, floor=profile.floor,
             names=_sourced(profile.names, ConfigSource.SHIPPED),
@@ -622,13 +691,13 @@ _CACHE: tuple[tuple[Any, ...], ModelToolConfig, float | None] | None = None
 
 
 def identity_key() -> tuple[Any, ...] | None:
-    """Identity of both files, for callers that cache what they derived from them."""
+    """Identity of both files and host security-floor opt-in, for cache callers."""
     overlay, _reason = _safe_overlay_path()
     overlay_id = _identity(overlay) if overlay is not None else None
     shipped_id = _identity(SHIPPED_PATH)
     if overlay_id is None or shipped_id is None:
         return None
-    return (shipped_id, overlay_id)
+    return (shipped_id, overlay_id, security_model_tools_allowed())
 
 
 def load_shipped_document() -> tuple[_Document | None, list[ConfigIssue]]:
@@ -640,6 +709,16 @@ def load_shipped_document() -> tuple[_Document | None, list[ConfigIssue]]:
 def _build() -> ModelToolConfig:
     loaded = _load_shipped(SHIPPED_PATH)
     floor, shipped, issues = loaded.floor, loaded.document, list(loaded.issues)
+    opt_in_active = _audit_security_opt_in()
+    relaxed = bool(opt_in_active and shipped is not None and floor.available)
+    skip_shipped_ids = frozenset({SECURITY_ADVISERS_PROFILE_ID}) if relaxed else frozenset()
+    if relaxed and shipped is not None:
+        floor_names, floor_prefixes = _floor_of(shipped, exclude_ids=skip_shipped_ids)
+        floor = ToolLaneFloor(
+            names=floor_names,
+            prefixes=floor_prefixes,
+            undetermined_served=shipped.undetermined,
+        )
     path, reason = _safe_overlay_path()
     overlay = _load_overlay(path, reason, shipped)
     document = overlay.document
@@ -668,11 +747,12 @@ def _build() -> ModelToolConfig:
         shipped_path=str(SHIPPED_PATH),
         overlay_path=str(path) if path is not None else "",
         issues=tuple(issues) + overlay.issues,
-        profiles=_merge_profiles(shipped, document) if shipped is not None else (),
+        profiles=_merge_profiles(shipped, document, skip_shipped_ids=skip_shipped_ids) if shipped is not None else (),
         tool_ceiling=shipped.ceiling if shipped is not None else (),
         secret_path_globs=globs,
         shipped_pin=loaded.pin,
         shipped_sha256=loaded.sha256,
+        security_floor_relaxed=relaxed,
     )
 
 
@@ -719,6 +799,12 @@ def describe(config: ModelToolConfig | None = None) -> list[str]:
     )]
     if config.shipped_sha256:
         lines.append("  shipped sha256 %s (%s)" % (config.shipped_sha256, config.shipped_pin.value))
+    if config.security_floor_relaxed:
+        lines.append(
+            "  WARNING: shipped '%s' model tool-lane floor intentionally relaxed via %s; "
+            "permission modes, approvals, workspace boundaries, and secret redaction remain in force"
+            % (SECURITY_ADVISERS_PROFILE_ID, ALLOW_SECURITY_MODEL_TOOLS_ENV)
+        )
     if not config.overlay_present and config.readable_overlay:
         overlay_state = "(absent: optional operator overlay)"
     elif config.readable_overlay:

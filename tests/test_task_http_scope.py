@@ -194,7 +194,7 @@ def test_account_http_rejects_indirect_global_task_paths(monkeypatch):
     assert calls
 
 
-def test_account_http_rejects_global_saved_workflow_library(monkeypatch):
+def test_account_http_rejects_global_saved_workflow_library(every_tool_allowed_by_rule, monkeypatch):
     """A hosted account must not see or operate the operator's workflow file."""
     # Use a fully authorized administrator: a normal user/developer is already
     # stopped by at least one role gate, while this tier could otherwise read

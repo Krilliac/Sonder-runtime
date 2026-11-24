@@ -147,13 +147,36 @@ def frame_id_and_receipt(handler, interaction_id, iid, receipt):
     return frame_id, receipt
 
 
+# Bound each SSE delta payload so large replies (such as inline base64 PNGs)
+# never exceed client line-length guards (Flutter's defaultMaxStreamLineChars
+# is 1 MiB) while short replies stay a single frame.
+_MAX_STREAM_DELTA_CHARS = 65_536
+
+
+def _write_content_deltas(handler, chunk, iid, model, text, *, include_role: bool):
+    if not text or len(text) <= _MAX_STREAM_DELTA_CHARS:
+        delta = {"role": "assistant", "content": text} if include_role else {"content": text}
+        handler.wfile.write(chunk(iid, model, delta).encode("utf-8"))
+        return
+    for offset in range(0, len(text), _MAX_STREAM_DELTA_CHARS):
+        piece = text[offset:offset + _MAX_STREAM_DELTA_CHARS]
+        delta = (
+            {"role": "assistant", "content": piece}
+            if (include_role and offset == 0)
+            else {"content": piece}
+        )
+        handler.wfile.write(chunk(iid, model, delta).encode("utf-8"))
+
+
 def write_stream_body(handler, chunk, iid, model, content, elapsed_ms, receipt,
                       usage, activity, lock=None):
     """Write the answer and terminal frames of a streamed turn; ``True`` when sent."""
     live = getattr(handler, "_live_stream", None) if lock is not None else None
     with lock if lock is not None else contextlib.nullcontext():
         if live is None or not live.forwarded:
-            handler.wfile.write(chunk(iid, model, {"role": "assistant", "content": content}).encode("utf-8"))
+            _write_content_deltas(
+                handler, chunk, iid, model, content, include_role=True,
+            )
         else:
             # One completion, one id: continue under the id the deltas used.
             iid = response_id(handler, iid)
@@ -161,7 +184,9 @@ def write_stream_body(handler, chunk, iid, model, content, elapsed_ms, receipt,
             if revised:
                 _logger.warning("streamed answer was revised after generation; sent the final version")
             if rest:
-                handler.wfile.write(chunk(iid, model, {"content": rest}).encode("utf-8"))
+                _write_content_deltas(
+                    handler, chunk, iid, model, rest, include_role=False,
+                )
             ttft = live.ttft_ms()
             receipt = dict(receipt or {})
             receipt["live_stream"] = {

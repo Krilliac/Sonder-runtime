@@ -15,11 +15,16 @@ no bootstrap, platform, socket or urllib module.  Wire framing lives in
 """
 from __future__ import annotations
 
+import os
 import re
 import time
 from typing import Any, Callable, Mapping, Sequence
 
-from ....application.observability.ecosystem_status import build_ecosystem_status
+from ....application.observability.ecosystem_status import (
+    build_ecosystem_status,
+    image_generation_status_from_env,
+    model_tool_policy_status_from_env,
+)
 from ....application.observability.runtime_telemetry import bounded_label
 from ....application.ports.telemetry_feed import SubscriberLimitReached
 from .observability_stream import (
@@ -117,9 +122,42 @@ def loopback_base_url(host: object, port: object) -> str:
     return "http://%s:%s" % (host, port)
 
 
-def ecosystem_document(application: Any, feed: Any, *, base: str, version: str,
-                       generated_at: Any, node: str, observatory_origins: Sequence[str],
-                       dedicated_origins: Sequence[str]) -> Mapping[str, Any] | None:
+def _model_tool_policy_status(
+    application: Any,
+    env: Mapping[str, str],
+) -> dict[str, object]:
+    """Read-only status of the host-only security-advisers floor relaxation.
+
+    Checks the shipped-floor availability via ``application.runtime_policy``
+    when present so a tampered/unreadable shipped policy still fails closed.
+    """
+    floor_available = True
+    policy = getattr(application, "runtime_policy", None)
+    floor_provider = getattr(policy, "_floor_provider", None)
+    if callable(floor_provider):
+        try:
+            floor = floor_provider()
+        except Exception:  # noqa: BLE001 - fail closed when floor cannot be verified
+            floor_available = False
+        else:
+            floor_available = bool(getattr(floor, "available", True))
+    return model_tool_policy_status_from_env(env, floor_available=floor_available)
+
+
+def ecosystem_document(
+    application: Any,
+    feed: Any,
+    *,
+    base: str,
+    version: str,
+    generated_at: Any,
+    node: str,
+    observatory_origins: Sequence[str],
+    dedicated_origins: Sequence[str],
+    image_generation: Mapping[str, object] | None = None,
+    model_tool_policy: Mapping[str, object] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Mapping[str, Any] | None:
     """GET /v1/sonder/ecosystem body, or None when there is nothing to report."""
     if application is None:
         return None
@@ -131,6 +169,17 @@ def ecosystem_document(application: Any, feed: Any, *, base: str, version: str,
             "sse_url": base + EVENTS_ROUTE,
             "ndjson_url": base + EVENTS_ROUTE + "?format=ndjson",
         }
+    env_source = os.environ if env is None else env
+    resolved_image = (
+        image_generation
+        if image_generation is not None
+        else image_generation_status_from_env(env_source)
+    )
+    resolved_policy = (
+        model_tool_policy
+        if model_tool_policy is not None
+        else _model_tool_policy_status(application, env_source)
+    )
     return build_ecosystem_status(
         generated_at=generated_at,
         runtime={
@@ -146,6 +195,8 @@ def ecosystem_document(application: Any, feed: Any, *, base: str, version: str,
         observatory_origins=sorted(observatory_origins),
         dedicated_origins=sorted(dedicated_origins),
         runtime_base_url=base,
+        image_generation=resolved_image,
+        model_tool_policy=resolved_policy,
     )
 
 

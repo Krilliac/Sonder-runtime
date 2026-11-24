@@ -324,7 +324,7 @@ jobs:
           path: dist
       - name: Resolve authoritative runtime version
         id: runtime-version
-        run: python -c "import sonder_version; print('version=' + sonder_version.VERSION)" >> "$GITHUB_OUTPUT"
+        run: PYTHONPATH="runtime:." python -c "import sonder_version; print('version=' + sonder_version.VERSION)" >> "$GITHUB_OUTPUT"
       - name: Verify artifacts and generate integrity metadata
         run: |
           python scripts/release_artifacts.py dist \

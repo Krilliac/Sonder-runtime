@@ -219,7 +219,10 @@ drift as files change. Anchor on the named function, not just the integer.
   (`SONDER_ALLOW_PRIVATE_COT`, off by default) **and** `server.py:326`
   `_private_cot_rule_allows`, both required by the single conjunction at
   `server.py:7602`, with the denying rule in
-  `sonder_runtime/domain/execution/policy.py` `DEFAULT_RULES` left in place.
+  `sonder_runtime/domain/execution/policy.py` `DEFAULT_RULES` left in place;
+  security-adviser model tool-lane floor relaxation — `SONDER_ALLOW_SECURITY_MODEL_TOOLS`
+  (off by default; requires exact acknowledgement string in host environment and
+  never weakens permission modes, workspace containment, or shipped policy pinning).
 - **Why it holds:** each capability is default-denied and re-checked at the tool
   boundary, not only at config load; the location gate in particular is checked
   at three independent layers, and the raw IP is explicitly not retained
