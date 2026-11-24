@@ -11,8 +11,9 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from sonder_runtime.adapters.persistence.owned_sqlite import connect as _owned_sqlite_connect
 from sonder_runtime.domain import launcher_health as sonder_health
 
 
@@ -150,7 +151,9 @@ def provision_health_token(path: str | Path, configured: str = "") -> str:
 
 def connect_database(db_path: Path) -> sqlite3.Connection:
     """Open a SQLite connection configured with row factory and busy timeout."""
-    connection = sqlite3.connect(str(db_path), timeout=5, check_same_thread=False)
+    connection = cast("Callable[..., sqlite3.Connection]", _owned_sqlite_connect)(
+        str(db_path), timeout=5, check_same_thread=False,
+    )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout=5000")
     return connection
@@ -738,7 +741,9 @@ def emergency_finish_operation(
     )
     if len(commands_json) > max_operation_output:
         commands_json = "[]"
-    connection = sqlite3.connect(str(db_path), timeout=30)
+    connection = cast("Callable[..., sqlite3.Connection]", _owned_sqlite_connect)(
+        str(db_path), timeout=30,
+    )
     try:
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("BEGIN IMMEDIATE")
