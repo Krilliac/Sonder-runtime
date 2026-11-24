@@ -422,10 +422,34 @@ def compatibility_import_offenders(
     return tuple(offenders)
 
 
+def _iter_statements(root: ast.AST):
+    """Yield statement nodes in ``root`` without descending into expressions."""
+    stack: list[ast.AST] = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        for attr in ("body", "orelse", "finalbody"):
+            children = getattr(node, attr, None)
+            if isinstance(children, list):
+                stack.extend(children)
+        handlers = getattr(node, "handlers", None)
+        if isinstance(handlers, list):
+            for handler in handlers:
+                body = getattr(handler, "body", None)
+                if isinstance(body, list):
+                    stack.extend(body)
+        cases = getattr(node, "cases", None)
+        if isinstance(cases, list):
+            for case in cases:
+                body = getattr(case, "body", None)
+                if isinstance(body, list):
+                    stack.extend(body)
+
+
 def absolute_imports(tree: ast.AST) -> frozenset[str]:
     """Return absolute import targets using the checker's exact old semantics."""
     imported: set[str] = set()
-    for node in ast.walk(tree):
+    for node in _iter_statements(tree):
         if isinstance(node, ast.Import):
             imported.update(alias.name for alias in node.names)
         elif (
@@ -493,13 +517,17 @@ def _is_server_literal(node: ast.AST | None) -> bool:
     return isinstance(node, ast.Constant) and node.value == SERVER_MODULE
 
 
-def _reach_aliases(tree: ast.AST) -> tuple[set[str], set[str], set[str]]:
+def _reach_aliases(tree: ast.AST) -> tuple[set[str], set[str], set[str], bool]:
     """Names this module binds to ``sys``, to ``sys.modules`` and to the import functions."""
     sys_names = {"sys"}
     modules_names: set[str] = set()
     import_names = set(_DYNAMIC_IMPORT_NAMES)
+    has_server_const = False
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
+        if isinstance(node, ast.Constant):
+            if node.value == SERVER_MODULE:
+                has_server_const = True
+        elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == "sys" and alias.asname:
                     sys_names.add(alias.asname)
@@ -510,7 +538,7 @@ def _reach_aliases(tree: ast.AST) -> tuple[set[str], set[str], set[str]]:
                     modules_names.add(bound)
                 elif node.module == "importlib" and alias.name in _DYNAMIC_IMPORT_NAMES:
                     import_names.add(bound)
-    return sys_names, modules_names, import_names
+    return sys_names, modules_names, import_names, has_server_const
 
 
 def dynamic_server_reaches(tree: ast.AST) -> list[str]:
@@ -523,7 +551,9 @@ def dynamic_server_reaches(tree: ast.AST) -> list[str]:
     statically; review has to catch it.  Module-level reaches are reported as
     ``<module>``.
     """
-    sys_names, modules_names, import_names = _reach_aliases(tree)
+    sys_names, modules_names, import_names, has_server_const = _reach_aliases(tree)
+    if not has_server_const:
+        return []
 
     def is_sys_modules(node: ast.AST) -> bool:
         if isinstance(node, ast.Attribute):
@@ -729,23 +759,22 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
         module = module_name(path)
         layer = layer_of(path)
         rel = path.relative_to(REPO_ROOT)
-        reach_trees[rel] = tree
-        if (
-            SERVER_MODULE in absolute_imports(tree)
-            and rel.as_posix() not in STATIC_SERVER_IMPORT_ALLOWLIST
-        ):
-            violations.append(
-                f"{rel.as_posix()}: imports the root '{SERVER_MODULE}' module; "
-                "only bootstrap/legacy_root.py may"
-            )
         imported: set[str] = set()
+        abs_imported: set[str] = set()
+        has_server_const = False
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     imported.add(alias.name)
+                    abs_imported.add(alias.name)
             elif isinstance(node, ast.ImportFrom):
+                if node.level == 0 and node.module:
+                    abs_imported.add(node.module)
                 imported.add(resolve_relative(module, node, path.name == "__init__.py"))
+            elif isinstance(node, ast.Constant):
+                if node.value == SERVER_MODULE:
+                    has_server_const = True
             elif isinstance(node, ast.Attribute):
                 # os.environ reads in domain/application
                 if (
@@ -770,6 +799,17 @@ def check(diagnostics: dict[str, int] | None = None) -> list[str]:
                     violations.append(
                         f"{rel}: sqlite3.connect outside adapters"
                     )
+
+        if has_server_const:
+            reach_trees[rel] = tree
+        if (
+            SERVER_MODULE in abs_imported
+            and rel.as_posix() not in STATIC_SERVER_IMPORT_ALLOWLIST
+        ):
+            violations.append(
+                f"{rel.as_posix()}: imports the root '{SERVER_MODULE}' module; "
+                "only bootstrap/legacy_root.py may"
+            )
 
         imports[module] = {i for i in imported if i.startswith("sonder_runtime")}
         # Absolute imports are also the complete input to every compatibility
@@ -956,6 +996,11 @@ def find_cycles(imports: dict[str, set[str]]) -> list[str]:
     problems: list[str] = []
     visiting: set[str] = set()
     done: set[str] = set()
+    by_prefix: dict[str, list[str]] = {}
+    for mod in imports:
+        parts = mod.split(".")
+        for idx in range(1, len(parts) + 1):
+            by_prefix.setdefault(".".join(parts[:idx]), []).append(mod)
 
     def visit(node: str, path: list[str]) -> None:
         if node in done or node not in imports:
@@ -967,8 +1012,8 @@ def find_cycles(imports: dict[str, set[str]]) -> list[str]:
         visiting.add(node)
         for dep in sorted(imports[node]):
             # Normalize package imports to their module entries.
-            candidates = [d for d in imports if (d == dep or d.startswith(dep + ".")) and d != node]
-            for candidate in candidates or ([dep] if dep in imports and dep != node else []):
+            candidates = [d for d in by_prefix.get(dep, ()) if d != node]
+            for candidate in candidates:
                 visit(candidate, path + [node])
         visiting.discard(node)
         done.add(node)
