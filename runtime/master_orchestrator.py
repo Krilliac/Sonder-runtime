@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
-import contextvars
 import ctypes
-import hashlib
 import itertools
 import json
 import logging
@@ -17,9 +15,7 @@ import threading
 import time
 import urllib.request
 import uuid
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass
-from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor, wait
 
 import sonder_runtime.adapters.execution.effect_fence as effect_fence
 import sonder_runtime.adapters.execution.fleet_reservations as fleet_reservations
@@ -32,7 +28,43 @@ import sonder_runtime.domain.events as events
 import sonder_runtime.domain.fleet_briefing as fleet_briefing
 import sonder_runtime.domain.fleet_pressure as fleet_pressure
 from sonder_runtime.application.artifacts import ArtifactReadiness
-from sonder_runtime.application.artifacts.master_fanin import validate_master_slots_for_run
+from sonder_runtime.application.orchestration import (
+    capacity as _capacity_mod,
+    execution as _execution_mod,
+    scheduler as _scheduler_mod,
+)
+from sonder_runtime.application.orchestration.capacity import (
+    ABORT_MARKERS,
+    ABSOLUTE_MAX_AGENTS,
+    ABSOLUTE_MAX_WORKERS,
+    DEFAULT_MAX_AGENTS,
+    DEFAULT_MAX_WORKERS,
+    EVIDENCE_REQUIRED,
+    GPU_KV_CACHE_PER_WORKER_BYTES,
+    GPU_RESERVE_BYTES,
+    RAM_PER_WORKER_BYTES,
+    RAM_RESERVE_BYTES,
+    REPOSITORY_EVIDENCE_TOOLS,
+    STANDARD_MAX_WORKERS,
+    TRANSIENT_FAILURE_CLASSES,
+    estimate_tokens,
+    evidence_gate,
+    requested_worker_cap,
+    requests_fleet,
+    requires_repository_tools,
+    worker_request_ignored_reason,
+)
+from sonder_runtime.application.orchestration.execution import (
+    ReadyWorkerOutput,
+    RepositoryWorkerResult,
+)
+from sonder_runtime.application.orchestration.scheduler import (
+    AdaptiveLaneScheduler as _BaseAdaptiveLaneScheduler,
+    FleetStalledError,
+    bounded_error_text as _bounded_error_text,
+    delegated_lane_claims,
+    objective_assignments as _objective_assignments,
+)
 import fleet_provenance
 from sonder_runtime.platform.runtime_threads import Thread
 
@@ -56,22 +88,10 @@ if "_WORKER_LOCAL" not in globals():
     _WORKER_LOCAL = threading.local()
 if "_WORKER_FAILED" not in globals():
     _WORKER_FAILED = object()
-
-# --- Optimistic reservation counter -----------------------------------------
-# Bridges the gap between scheduling a new agent and the durable ledger
-# reflecting it.  Without this, capacity() reads stale snapshot counts and
-# over-dispatches, causing a thundering-herd when many agents queue at once.
 if "_RESERVED_SLOTS" not in globals():
     _RESERVED_SLOTS = 0
-
-# --- Convergent snapshot pub-sub --------------------------------------------
-# Callbacks invoked on every fleet state transition (finish, cancel, start).
-# Each receives a full snapshot dict so subscribers see convergent state
-# regardless of event ordering -- eliminates delta-ordering bugs.
 if "_SNAPSHOT_SUBSCRIBERS" not in globals():
     _SNAPSHOT_SUBSCRIBERS: list = []
-
-# --- Fleet pressure tracker -------------------------------------------------
 if "_PRESSURE_TRACKER" not in globals():
     _PRESSURE_TRACKER = fleet_pressure.PressureTracker()
 if "_OWNER_ID" not in globals():
@@ -83,16 +103,53 @@ if "_OWNER_ID" not in globals():
     _STORE_ERROR = ""
     _ATEXIT_REGISTERED = False
 _reservation_state = fleet_reservations.ReservationLedger(globals())
-_RESERVED_AGENT_IDS = globals()["_RESERVED_AGENT_IDS"]  # Same set for legacy reset/tests.
+_RESERVED_AGENT_IDS = globals()["_RESERVED_AGENT_IDS"]
 if "_PRINCIPAL_ID" not in globals():
     _PRINCIPAL_ID = ""
     _PRINCIPAL_SECRET = ""
+
+
+_MAX_EVENTS = 80
+_FLEET_WORKER_CAP: int | None = None
+_GPU_QUERY_CACHE_SECONDS = 15.0
+HEARTBEAT_SECONDS = 5
+_PROC_MEMINFO = "/proc/meminfo"
+
+# Re-export compatibility names imported from orchestration modules.
+ArtifactReadiness = ArtifactReadiness
+RepositoryWorkerResult = RepositoryWorkerResult
+ReadyWorkerOutput = ReadyWorkerOutput
+FleetStalledError = FleetStalledError
+EVIDENCE_REQUIRED = EVIDENCE_REQUIRED
+ABORT_MARKERS = ABORT_MARKERS
+DEFAULT_MAX_AGENTS = DEFAULT_MAX_AGENTS
+ABSOLUTE_MAX_AGENTS = ABSOLUTE_MAX_AGENTS
+DEFAULT_MAX_WORKERS = DEFAULT_MAX_WORKERS
+STANDARD_MAX_WORKERS = STANDARD_MAX_WORKERS
+ABSOLUTE_MAX_WORKERS = ABSOLUTE_MAX_WORKERS
+RAM_RESERVE_BYTES = RAM_RESERVE_BYTES
+RAM_PER_WORKER_BYTES = RAM_PER_WORKER_BYTES
+GPU_RESERVE_BYTES = GPU_RESERVE_BYTES
+GPU_KV_CACHE_PER_WORKER_BYTES = GPU_KV_CACHE_PER_WORKER_BYTES
+REPOSITORY_EVIDENCE_TOOLS = REPOSITORY_EVIDENCE_TOOLS
+TRANSIENT_FAILURE_CLASSES = TRANSIENT_FAILURE_CLASSES
+estimate_tokens = estimate_tokens
+evidence_gate = evidence_gate
+requested_worker_cap = requested_worker_cap
+requests_fleet = requests_fleet
+requires_repository_tools = requires_repository_tools
+worker_request_ignored_reason = worker_request_ignored_reason
+delegated_lane_claims = delegated_lane_claims
+_bounded_error_text = _bounded_error_text
+_objective_assignments = _objective_assignments
 
 
 def get_swarm_status() -> list[dict]:
     """Every local agent row, for the admin-only app-control swarm view."""
     with _LOCK:
         return [{"id": agent_id, **data} for agent_id, data in _AGENTS.items()]
+
+
 def _lane_deadline(row, progress_deadline: float) -> float:
     """Progress deadline for one lane's current fleet row (see fleet_store)."""
     resolve = getattr(fleet_store, "lane_progress_deadline", None)
@@ -103,118 +160,12 @@ def _lane_deadline(row, progress_deadline: float) -> float:
     except Exception:
         return float(progress_deadline)
 
-class FleetStalledError(RuntimeError):
-    """A lane exceeded its progress deadline and remains quarantined alive."""
-
-    def __init__(self, lanes):
-        self.lanes = tuple(str(lane) for lane in lanes)
-        super().__init__("fleet lanes stalled without progress: %s" % ", ".join(self.lanes))
-_MAX_EVENTS = 80
-DEFAULT_MAX_AGENTS = 16
-ABSOLUTE_MAX_AGENTS = 64
-DEFAULT_MAX_WORKERS = 8
-# Ordinary environment overrides retain the historical 16-worker ceiling.
-# A single orchestration run may explicitly request more, but never beyond the
-# compiled ceiling (and an operator may lower that ceiling with
-# SONDER_MAX_WORKER_CAP).  Keeping these separate makes high-width harness/data
-# runs opt-in without changing the conservative hardware-derived default.
-STANDARD_MAX_WORKERS = 16
-ABSOLUTE_MAX_WORKERS = 64
-_FLEET_WORKER_CAP: int | None = None
-_MAX_WORKER_COUNT_DIGITS = 64
-RAM_RESERVE_BYTES = int(1.5 * 1024 ** 3)
-# A "worker" is a Python thread that POSTs to Ollama and waits -- the model
-# weights live in the ollama server process (and in VRAM), NOT once per worker.
-# This budget therefore covers only the thread's own prompt/response buffers.
-# (It was 1.25 GiB, i.e. a whole model per worker, which silently pinned every
-# GPU box to 2-3 slots for a cost that is not actually paid here.)
-RAM_PER_WORKER_BYTES = int(0.25 * 1024 ** 3)
-# VRAM held back for the display/compositor and allocator slack.
-GPU_RESERVE_BYTES = int(0.5 * 1024 ** 3)
-# Ollama loads ONE copy of the model and batches concurrent requests against
-# it, so extra concurrency costs a per-sequence KV cache, not another model.
-# ~0.5 GiB covers a 7B-class model at an 8k context; smaller models/contexts
-# leave more headroom and therefore allow more parallel sequences.
-GPU_KV_CACHE_PER_WORKER_BYTES = int(0.5 * 1024 ** 3)
-_GPU_QUERY_CACHE_SECONDS = 15.0
-HEARTBEAT_SECONDS = 5
-ABORT_MARKERS = ("CANCELLED", "INTERRUPTED")
-
-REPOSITORY_EVIDENCE_TOOLS = frozenset({
-    "workspace_inventory", "directory_tree", "file_find", "file_read",
-    "file_read_range", "text_search", "script_search", "image_inspect",
-    "document_extract", "media_inspect", "code_metrics", "schema_validate",
-    "code_graph", "diff_semantic", "symbol_verify", "citation_audit",
-})
-
 
 def configure_fleet_worker_cap(max_workers: int) -> None:
     global _FLEET_WORKER_CAP
     if max_workers < 1:
         raise ValueError("fleet_workers must be >= 1")
     _FLEET_WORKER_CAP = int(max_workers)
-
-
-@dataclass(frozen=True)
-class RepositoryWorkerResult:
-    """Host-issued repository result with an exact filesystem scope receipt.
-
-    The model can emit arbitrary text (including a forged marker), so repository
-    aggregation accepts only this in-process type.  ``project`` and ``tools``
-    come from the host agent loop after guarded dispatch, never from model text.
-    """
-
-    output: str
-    project: str
-    tools: tuple[str, ...]
-    produced_files: tuple[str, ...] = ()
-    checks_run: bool = False
-    checks_passed: bool | None = None
-
-
-@dataclass(frozen=True)
-class ReadyWorkerOutput:
-    """Producer-owned output plus its finalized readiness evidence."""
-
-    output: object
-    readiness: ArtifactReadiness
-
-EVIDENCE_REQUIRED = (
-    "EVIDENCE_REQUIRED: guarded source evidence was unavailable. Authorize the "
-    "repository in file_roots.local, embed the relevant source excerpts, or use "
-    "the tool-using agent surface to inspect it first. No unsupported answer was produced."
-)
-
-_REPOSITORY_REQUEST = re.compile(
-    r"(?:\brepository\s*:|\brepo\s*:|\bcurrent\s+(?:file|code|diff|uncommitted)|"
-    r"\b(?:inspect|read|review|audit|edit|fix)\b.{0,40}(?:\b(?:repo|repository|codebase|"
-    r"workspace|files?|modules?|packages?|source|src|code)\b|(?<![A-Za-z0-9])[A-Za-z]:[\\/](?=[\w.~-])|(?<![\w:./\\-])/(?=[\w.~-]))|\buse\s+(?:local\s+)?file[- ]reading\s+tools?\b)",
-    re.IGNORECASE | re.DOTALL,
-)
-_EMBEDDED_EVIDENCE = re.compile(
-    r"(?:```|\bsource\s+excerpts?\s*:|\bbegin\s+file\b|\bpatch\s*:|\bdiff\s+--git\b)",
-    re.IGNORECASE,
-)
-# An ABSOLUTE path to a concrete source/text file names existing repository
-# state to inspect, whatever the verb. Without this, "generate a summary of the
-# file C:\repo\X.cpp" missed the repository lane (its verb is not read/inspect/
-# ...) and routed to an ungrounded generation path that fabricated the file's
-# contents. Relative paths (output.txt, models/foo.glb) are NOT matched, so
-# greenfield "write to <relative>" tasks stay creative.
-_REPO_FILE_PATH = re.compile(
-    r"(?:[A-Za-z]:[\\/]|/)[^\s'\"]+\."
-    r"(?:py|js|ts|tsx|jsx|cpp|cc|cxx|c|h|hpp|hxx|cs|java|go|rs|rb|php|swift|kt|"
-    r"md|txt|rst|json|ya?ml|toml|ini|cfg|conf|xml|html?|css|scss|sh|ps1|bat|"
-    r"cmake|gradle|sql|proto|glsl|hlsl)\b",
-    re.IGNORECASE,
-)
-_FLEET_REQUEST = re.compile(
-    r"(?:\bfleet\b|\bswarm\b|\bfan[- ]?out\b|\bparallel\s+agents?\b|"
-    r"\bspawn\s+(?:as\s+much|as\s+many|the\s+maximum|maximum|parallel|subagents?)\b|"
-    r"\bas\s+many\s+(?:subagents?|agents?)\b|\bparallel\s+workflow\b|(?<!\bnot\s)(?<!n't\s)(?<!never\s)\b(?:hand|delegate)\s+(?:this|it|that)?\s*(?:off\s+)?to\s+(?:sub)?agents?\b|"
-    r"\bspawn\s+workflow\b|\bworkflow\b|\bmax(?:imum)?\s+agents?\b)",
-    re.IGNORECASE,
-)
 
 
 def _remember_store_error(exc) -> None:
@@ -250,12 +201,7 @@ def _heartbeat_loop() -> None:
 
 
 def _retained_messaging_available() -> bool:
-    """Return whether the process-stable store has the new messaging API.
-
-    ``fleet_store`` deliberately is not live-reloaded. During a source update,
-    a reloaded orchestrator can therefore coexist with the previously imported
-    store until the operator restarts the runtime.
-    """
+    """Return whether the process-stable store has the new messaging API."""
     return all(
         callable(getattr(fleet_store, name, None))
         for name in (
@@ -273,12 +219,6 @@ def _ensure_owner() -> None:
     global _PRINCIPAL_ID, _PRINCIPAL_SECRET
     with _OWNER_SERVICE_LOCK:
         if not _retained_messaging_available():
-            # The orchestrator can hot-reload while the deliberately stable
-            # fleet store is still the previous version.  Creating a row
-            # through that mixed-version boundary would permanently omit the
-            # principal scope, making it invisible after restart.  Keep
-            # already-running work intact, but fail new orchestration before
-            # any durable row is created.
             raise RuntimeError(
                 "fleet orchestration requires a runtime restart after this update"
             )
@@ -314,18 +254,9 @@ def _close_owner() -> None:
 
 
 def hardware_max_agents() -> int:
-    """Return the local queued-candidate ceiling from logical CPU capacity.
-
-    This controls breadth/diversity, not simultaneous model calls. Concurrent
-    execution is separately constrained by :func:`capacity`. The default queues
-    two candidates per logical CPU, capped by the global safety limit.
-    ``SONDER_MAX_AGENTS`` can lower or raise it up to that safety limit.
-    """
+    """Return the local queued-candidate ceiling from logical CPU capacity."""
     logical = max(1, int(os.cpu_count() or 1))
     return max(DEFAULT_MAX_AGENTS, min(ABSOLUTE_MAX_AGENTS, logical * 2))
-
-
-_PROC_MEMINFO = "/proc/meminfo"
 
 
 def _is_windows() -> bool:
@@ -333,13 +264,7 @@ def _is_windows() -> bool:
 
 
 def _linux_meminfo_bytes() -> tuple[int, int] | None:
-    """``(MemTotal, MemAvailable)`` from ``/proc/meminfo``, or ``None``.
-
-    ``SC_AVPHYS_PAGES`` is MemFree: it excludes reclaimable page cache, so a
-    healthy Linux/WSL host with a warm cache reads as nearly out of memory.
-    MemAvailable is the kernel's own estimate of memory usable without
-    swapping and is the right headroom signal.
-    """
+    """``(MemTotal, MemAvailable)`` from ``/proc/meminfo``, or ``None``."""
     try:
         with open(_PROC_MEMINFO, encoding="ascii", errors="replace") as handle:
             text = handle.read(64 * 1024)
@@ -402,11 +327,7 @@ def physical_memory_bytes() -> tuple[int, int]:
 
 
 def gpu_memory_bytes() -> tuple[int, int]:
-    """Return ``(total, free)`` VRAM of the largest local GPU, or zeros.
-
-    Zeros mean "no GPU detected / unknown" -- callers must treat that as
-    "do not constrain on VRAM" rather than as a zero-capacity GPU.
-    """
+    """Return ``(total, free)`` VRAM of the largest local GPU, or zeros."""
     cached = globals().get("_GPU_MEM_CACHE")
     if cached and (time.time() - cached[0]) < _GPU_QUERY_CACHE_SECONDS:
         return cached[1], cached[2]
@@ -423,7 +344,6 @@ def gpu_memory_bytes() -> tuple[int, int]:
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if out.returncode == 0:
-            # Pick the largest GPU when several are present.
             for line in (out.stdout or "").strip().splitlines():
                 parts = [p.strip() for p in line.split(",")]
                 if len(parts) != 2:
@@ -439,19 +359,15 @@ def gpu_memory_bytes() -> tuple[int, int]:
 
 
 def fleet_model_bytes() -> int:
-    """On-disk size of the model the fleet lane runs, or 0 if unknown.
-
-    Ollama's resident footprint tracks this closely enough to budget VRAM
-    against; an unknown model (0) simply means "don't constrain on VRAM".
-    """
+    """On-disk size of the model the fleet lane runs, or 0 if unknown."""
     cached = globals().get("_FLEET_MODEL_CACHE")
     if cached and (time.time() - cached[0]) < _GPU_QUERY_CACHE_SECONDS:
         return cached[1]
     size = 0
     try:
-        from sonder_runtime.bootstrap import delegation_wiring as _dw  # imports this module
+        from sonder_runtime.bootstrap import delegation_wiring as _dw
         route = _dw.fleet_pool_route(sys.modules.get("server"))
-        wanted = "" if route else _dw.fleet_model_name()  # pool carriers, never the local host
+        wanted = "" if route else _dw.fleet_model_name()
         size = int(route[0].model_size_bytes(route[1]) or 0) if route else 0
         if wanted:
             host = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").strip()
@@ -471,24 +387,7 @@ def fleet_model_bytes() -> int:
 
 
 def ollama_parallel_limit() -> int:
-    """``OLLAMA_NUM_PARALLEL`` as the server would see it, or 0 when unset.
-
-    This is the number of sequences the Ollama server will actually batch
-    against the resident model. It is the hard ceiling on real concurrency:
-    Sonder can hand N requests to Ollama, but if Ollama's parallelism is 1
-    they queue and every extra worker slot buys exactly nothing (measured on
-    the development host, 2026-07-13: with it unset, 2 concurrent requests took 2.07x a
-    single one, and 4 took 4.18x -- perfectly serial).
-
-    0 means "unset": Ollama auto-selects, which on a VRAM-tight box silently
-    collapses to 1. :func:`capacity` reports that as a warning rather than
-    pretending the slots are real.
-
-    Falls back to the persisted Windows user environment when our own process
-    does not carry the variable -- the Ollama server reads that same store at
-    launch, and Sonder is typically started before it is set, so trusting only
-    ``os.environ`` here would report a stale "unset" for the rest of the session.
-    """
+    """``OLLAMA_NUM_PARALLEL`` as the server would see it, or 0 when unset."""
     raw = os.environ.get("OLLAMA_NUM_PARALLEL", "").strip()
     if not raw and os.name == "nt":
         try:
@@ -507,13 +406,7 @@ def ollama_parallel_limit() -> int:
 
 
 def gpu_worker_slots() -> int:
-    """Concurrent sequences the local GPU can batch, or 0 when unconstrained.
-
-    Ollama keeps ONE copy of the model resident and batches concurrent
-    requests against it, so the cost of another parallel worker is one more
-    KV cache, not another set of weights. Returns 0 when there is no GPU or
-    the model is unknown (CPU inference is bounded by ``cpu_slots`` instead).
-    """
+    """Concurrent sequences the local GPU can batch, or 0 when unconstrained."""
     total, _free = gpu_memory_bytes()
     if total <= 0:
         return 0
@@ -522,132 +415,27 @@ def gpu_worker_slots() -> int:
         return 0
     headroom = total - model - GPU_RESERVE_BYTES
     if headroom <= 0:
-        # The model only just fits: serialize rather than thrash/spill to CPU.
         return 1
     return max(1, min(ABSOLUTE_MAX_WORKERS, headroom // GPU_KV_CACHE_PER_WORKER_BYTES))
 
 
 def _positive_int(value) -> tuple[int | None, str]:
-    """Parse a positive decimal integer without accepting bools/floats."""
-    if isinstance(value, bool):
-        return None, "boolean values are not worker counts"
-    if isinstance(value, int):
-        return (value, "") if value > 0 else (None, "worker count must be positive")
-    if isinstance(value, str):
-        raw = value.strip()
-        if raw.isdecimal():
-            if len(raw) > _MAX_WORKER_COUNT_DIGITS:
-                return None, "worker count has too many digits"
-            try:
-                parsed = int(raw)
-            except (ValueError, OverflowError):
-                return None, "worker count must be a positive decimal integer"
-            return (parsed, "") if parsed > 0 else (None, "worker count must be positive")
-        return None, "worker count must be a positive decimal integer"
-    return None, "worker count must be a positive decimal integer"
+    return _capacity_mod.positive_int(value)
 
 
 def operator_worker_ceiling() -> tuple[int, str]:
     """Return the operator ceiling and any fail-safe configuration warning."""
-    raw = os.environ.get("SONDER_MAX_WORKER_CAP", "").strip()
-    if not raw:
-        return ABSOLUTE_MAX_WORKERS, ""
-    value, error = _positive_int(raw)
-    if error:
-        return STANDARD_MAX_WORKERS, "invalid SONDER_MAX_WORKER_CAP: %s" % error
-    return min(int(value), ABSOLUTE_MAX_WORKERS), ""
+    return _capacity_mod.parse_operator_worker_ceiling(
+        os.environ.get("SONDER_MAX_WORKER_CAP", "")
+    )
 
 
 def explicit_agent_ceiling() -> int:
-    """Breadth ceiling for a run that explicitly opts into a worker cap.
-
-    An explicit SONDER_MAX_AGENTS remains authoritative.  Otherwise an
-    explicit run may exceed the hardware-derived breadth default, but it is
-    still bounded by both compiled agent and operator worker ceilings.
-    """
+    """Breadth ceiling for a run that explicitly opts into a worker cap."""
     if os.environ.get("SONDER_MAX_AGENTS", "").strip():
         return max_agents()
     operator_ceiling, _error = operator_worker_ceiling()
     return max(1, min(ABSOLUTE_MAX_AGENTS, operator_ceiling))
-
-
-_AFFIRMATIVE_WORKER_REQUEST = re.compile(
-    r"(?i)^\s*(?:please\s+)?(?:use|run|spawn|launch)\s+"
-    r"(?P<count>" + fleet_briefing.COUNT_TOKEN + r")\s+(?:concurrent\s+)?(?:workers?|agents?)\b"
-)
-_WORKER_COUNT_MENTION = re.compile(
-    r"(?i)(?<!\w)(?P<count>" + fleet_briefing.COUNT_TOKEN + r")(?!\w)\s+"
-    r"(?:concurrent\s+)?(?:workers?|agents?)\b"
-)
-_WORKER_REQUEST_NEGATION = re.compile(
-    r"(?i)\b(?:do\s+not|don't|never|not|no)\b"
-)
-_WORKER_REQUEST_META = re.compile(
-    r"(?i)\b(?:ignore|quoted?|phrase|document|instruction|example|"
-    r"says?|mentions?|explain|why)\b"
-)
-_WORKER_REQUEST_COMPARATIVE = re.compile(
-    r"(?i)\b(?:more|fewer|less|greater|lower)\s+than\b"
-)
-_WORKER_REQUEST_QUOTES = frozenset("\"'`“”‘’")
-
-
-def requested_worker_cap(task: str) -> int | None:
-    """Extract one tightly anchored, affirmative worker-count directive."""
-    text = str(task or "")
-    match = _AFFIRMATIVE_WORKER_REQUEST.match(text)
-    if not match:
-        return None
-    if (
-        _WORKER_REQUEST_NEGATION.search(text)
-        or _WORKER_REQUEST_META.search(text)
-        or _WORKER_REQUEST_COMPARATIVE.search(text)
-        or any(quote in text for quote in _WORKER_REQUEST_QUOTES)
-    ):
-        return None
-    mentions = list(_WORKER_COUNT_MENTION.finditer(text))
-    if len(mentions) != 1 or mentions[0].start("count") != match.start("count"):
-        return None
-    value, error = _positive_int(str(fleet_briefing.NUMBER_WORDS.get(match.group("count").lower(), match.group("count"))))
-    return None if error else min(int(value), ABSOLUTE_MAX_WORKERS)
-
-
-def worker_request_ignored_reason(task: str) -> str:
-    """Why a leading "use N workers" cue was not applied, or "" otherwise.
-
-    ``requested_worker_cap`` deliberately refuses the cue when the request
-    also carries negation, explanatory/meta words, comparatives, quotes, or a
-    second count, so a quoted or discussed worker count never starts a fleet.
-    That refusal used to be silent: "use 2 workers ... report why the test
-    fails" ran one foreground lane with no hint.  This names the reason so the
-    route can say so; it never changes the routing decision itself.
-    """
-    text = str(task or "")
-    match = _AFFIRMATIVE_WORKER_REQUEST.match(text)
-    if not match or requested_worker_cap(text) is not None:
-        return ""
-    cue = match.group(0).strip()
-    for label, pattern in (
-        ("a negation", _WORKER_REQUEST_NEGATION),
-        ("an explanatory or quoting word", _WORKER_REQUEST_META),
-        ("a comparative", _WORKER_REQUEST_COMPARATIVE),
-    ):
-        found = pattern.search(text)
-        if found:
-            detail = "%s (%r)" % (label, found.group(0))
-            break
-    else:
-        if any(quote in text for quote in _WORKER_REQUEST_QUOTES):
-            detail = "quotation marks"
-        elif len(list(_WORKER_COUNT_MENTION.finditer(text))) != 1:
-            detail = "more than one worker count"
-        else:
-            detail = "an invalid worker count"
-    return (
-        "%r was not applied because the request also contains %s, which "
-        "the worker-count cue treats as a quoted or discussed count; to fan "
-        "out anyway, run: /master fleet <task>" % (cue, detail)
-    )
 
 
 def capacity(
@@ -656,7 +444,9 @@ def capacity(
 ) -> dict:
     """Describe queued breadth and bounded concurrent slots for one run."""
     logical = max(1, int(os.cpu_count() or 1))
-    explicit_cap, cap_error = _positive_int(worker_cap) if worker_cap is not None else (None, "")
+    explicit_cap, cap_error = (
+        _positive_int(worker_cap) if worker_cap is not None else (None, "")
+    )
     ceiling = explicit_agent_ceiling() if explicit_cap else max_agents()
     if explicit_cap:
         requested_value, requested_error = _positive_int(requested_agents)
@@ -668,100 +458,44 @@ def capacity(
             requested_agents, default=ceiling if requested_agents is None else 3,
         )
     total, available = physical_memory_bytes()
-    # Workers block on a network call to Ollama rather than burning a core
-    # each, so half the logical CPUs is a sane ceiling (was logical // 4).
-    cpu_slots = max(1, min(DEFAULT_MAX_WORKERS, logical // 2 or 1))
-    if available > 0:
-        usable = max(0, available - RAM_RESERVE_BYTES)
-        ram_slots = max(1, usable // RAM_PER_WORKER_BYTES)
-    else:
-        ram_slots = DEFAULT_MAX_WORKERS
     from sonder_runtime.bootstrap import delegation_wiring as _dw
-    pool_route = _dw.fleet_pool_route(sys.modules.get("server"))  # its carriers replace the local GPU/parallel limits
+    pool_route = _dw.fleet_pool_route(sys.modules.get("server"))
     gpu_slots = 0 if pool_route else gpu_worker_slots()
-
-    limits = {
-        "requested": int(requested),
-        "cpu": int(cpu_slots),
-        "ram": int(ram_slots),
-        "policy": int(DEFAULT_MAX_WORKERS),
-    }
-    if gpu_slots > 0:
-        limits["gpu_vram"] = int(gpu_slots)
-    if _FLEET_WORKER_CAP is not None:
-        limits["fleet_workers"] = int(_FLEET_WORKER_CAP)
-    # Ollama's batching width is the hard ceiling on REAL concurrency.
-    ollama_parallel = int(pool_route[2]["total"]) if pool_route else _dw.effective_cluster_parallel(ollama_parallel_limit(), sys.modules.get("server"))
-    if ollama_parallel > 0:
-        limits["pool_model_capacity" if pool_route else "ollama_num_parallel"] = int(ollama_parallel)
+    ollama_parallel = (
+        int(pool_route[2]["total"])
+        if pool_route
+        else _dw.effective_cluster_parallel(
+            ollama_parallel_limit(), sys.modules.get("server")
+        )
+    )
     with _LOCK:
         reserved = _RESERVED_SLOTS
-    if reserved > 0:
-        capacity_values = [v for k, v in limits.items() if k != "requested"]
-        total_capacity = min(capacity_values) if capacity_values else int(DEFAULT_MAX_WORKERS)
-        limits["reserved_capacity"] = max(1, total_capacity - reserved)
-    automatic = max(1, min(limits.values()))
-    bound_by = min(limits, key=lambda key: (limits[key], key))
-    source, slots = "auto", automatic
     operator_ceiling, operator_error = operator_worker_ceiling()
-    raw_override = os.environ.get("SONDER_PARALLEL_WORKERS", "").strip()
-    if raw_override:
-        override, legacy_error = _positive_int(raw_override)
-        if legacy_error:
-            cap_error = cap_error or "invalid SONDER_PARALLEL_WORKERS: %s" % legacy_error
-        else:
-            slots = min(override, requested, STANDARD_MAX_WORKERS, operator_ceiling)
-            source = bound_by = "SONDER_PARALLEL_WORKERS"
-    if explicit_cap:
-        slots = min(explicit_cap, requested, operator_ceiling, ABSOLUTE_MAX_WORKERS)
-        source = "per-run worker_cap"
-        bound_by = (
-            "operator worker ceiling" if slots == operator_ceiling and explicit_cap > operator_ceiling
-            else "requested agents" if slots == requested and explicit_cap > requested
-            else "per-run worker_cap"
-        )
-    pool_note, slots, bound_by = _dw.pool_capacity_note(pool_route, requested, slots, bound_by)
     gpu_total, gpu_free = gpu_memory_bytes()
-    warnings = [message for message in (operator_error, cap_error, pool_note) if message]
-    if ollama_parallel <= 0 and slots > 1:
-        warnings.append(
-            "OLLAMA_NUM_PARALLEL is unset -- Ollama auto-selects its batch width and "
-            "collapses to 1 on a VRAM-tight box, which serializes every request and "
-            "makes these %d worker slots buy nothing. Set OLLAMA_NUM_PARALLEL=%d and "
-            "restart the Ollama server to actually get the concurrency."
-            % (slots, slots)
-        )
-    elif 0 < ollama_parallel < slots:
-        warnings.append(
-            "OLLAMA_NUM_PARALLEL=%d is below the selected %d worker slots; raise it "
-            "(and restart Ollama) or the extra workers will queue in Ollama."
-            % (ollama_parallel, slots)
-        )
-    warning = "; ".join(warnings)
-    return {
-        "logical_cpus": logical,
-        "total_memory_bytes": total,
-        "available_memory_bytes": available,
-        "gpu_total_memory_bytes": gpu_total,
-        "gpu_free_memory_bytes": gpu_free,
-        "fleet_model_bytes": fleet_model_bytes(),
-        "ollama_num_parallel": int(ollama_parallel),
-        "agent_ceiling": ceiling,
-        "requested_agents": requested,
-        "worker_slots": slots,
-        "automatic_worker_slots": automatic,
-        "requested_worker_cap": explicit_cap or 0,
-        "operator_worker_ceiling": operator_ceiling,
-        "absolute_worker_ceiling": ABSOLUTE_MAX_WORKERS,
-        "worker_cap_error": cap_error,
-        "operator_worker_error": operator_error,
-        "slot_limits": limits,
-        "bound_by": bound_by,
-        "source": source,
-        "warning": warning,
-        "ram_reserve_bytes": RAM_RESERVE_BYTES,
-        "ram_per_worker_bytes": RAM_PER_WORKER_BYTES,
-    }
+    inputs = _capacity_mod.CapacityInputs(
+        logical_cpus=logical,
+        total_memory_bytes=total,
+        available_memory_bytes=available,
+        gpu_total_memory_bytes=gpu_total,
+        gpu_free_memory_bytes=gpu_free,
+        fleet_model_bytes=fleet_model_bytes(),
+        gpu_slots=gpu_slots,
+        ollama_parallel=ollama_parallel,
+        pool_route_active=bool(pool_route),
+        reserved_slots=reserved,
+        fleet_worker_cap=_FLEET_WORKER_CAP,
+        agent_ceiling=ceiling,
+        requested_agents=requested,
+        explicit_cap=explicit_cap,
+        cap_error=cap_error,
+        operator_ceiling=operator_ceiling,
+        operator_error=operator_error,
+        parallel_workers_raw=os.environ.get("SONDER_PARALLEL_WORKERS", ""),
+        pool_note_resolver=lambda req, slots, bound: _dw.pool_capacity_note(
+            pool_route, req, slots, bound
+        ),
+    )
+    return _capacity_mod.compute_capacity(inputs)
 
 
 def parallel_worker_slots(
@@ -771,40 +505,13 @@ def parallel_worker_slots(
     return int(capacity(requested_agents, worker_cap=worker_cap)["worker_slots"])
 
 
-def requests_fleet(task: str) -> bool:
-    """Recognize explicit natural-language requests for fleet fan-out."""
-    return bool(_FLEET_REQUEST.search(task or "") or requested_worker_cap(task))
-
-
-def requires_repository_tools(task: str) -> bool:
-    """Return true when a task asks the model to inspect external repo state."""
-    task = task or ""
-    if _EMBEDDED_EVIDENCE.search(task):
-        return False
-    return bool(_REPOSITORY_REQUEST.search(task) or _REPO_FILE_PATH.search(task))
-
-
-def evidence_gate(task: str, tools_available: bool = True) -> str:
-    """Refuse ungrounded repo inspection only when guarded tools are unavailable."""
-    if requires_repository_tools(task) and not tools_available:
-        return EVIDENCE_REQUIRED
-    return ""
-
-
 _REPOSITORY_ROOT_LABEL = re.compile(
     r"(?im)^\s*(?:repository|repo|project(?:\s+root)?)\s*:\s*(?P<value>[^\r\n]+)"
 )
 
 
 def repository_project_root(task: str) -> str:
-    """Resolve an explicitly named repository/file to an existing project root.
-
-    Delegated repository workers run inside Sonder's process, whose default
-    workspace is the Sonder checkout. The task text is therefore the only
-    source of the caller's intended external project unless it is propagated
-    into ``server._agent_impl(project=...)``. Labels are preferred; an absolute
-    source-file path falls back to its containing directory.
-    """
+    """Resolve an explicitly named repository/file to an existing project root."""
     text = str(task or "")
     for match in _REPOSITORY_ROOT_LABEL.finditer(text):
         raw = match.group("value").strip()
@@ -814,9 +521,6 @@ def repository_project_root(task: str) -> str:
             if close > 1:
                 raw = raw[1:close]
 
-        # A label is often followed by another sentence on the same line
-        # ("Repository: C:\\repo. Read-only review..."). Try progressively
-        # shorter word prefixes, stripping sentence punctuation each time.
         words = raw.split()
         candidates = [raw]
         candidates.extend(" ".join(words[:end]) for end in range(len(words) - 1, 0, -1))
@@ -830,7 +534,7 @@ def repository_project_root(task: str) -> str:
             if os.path.isfile(resolved):
                 return os.path.dirname(resolved)
 
-    file_match = _REPO_FILE_PATH.search(text)
+    file_match = _capacity_mod._REPO_FILE_PATH.search(text)
     if file_match:
         candidate = file_match.group(0).rstrip(".,;:")
         if os.path.isabs(candidate):
@@ -866,16 +570,7 @@ def _is_inside(path: str, root: str) -> bool:
 
 
 def resolve_repository_project_root(task: str, project: str = "") -> str:
-    """Resolve one unambiguous existing repository root or fail closed.
-
-    An explicit host ``project`` is authoritative.  A labeled path in the task
-    may refine it to a file/subdirectory, but may never point outside it.  When
-    no host scope is supplied, a labeled repository or absolute source file is
-    required; silently falling back to Sonder's own cwd caused cross-repo fleet
-    evidence in live dogfood.  A root taken from the task text alone must also
-    lie inside the configured file roots: the task text is caller- or
-    model-written, and the resolved root becomes the worker's read scope.
-    """
+    """Resolve one unambiguous existing repository root or fail closed."""
     explicit_text = str(project or "").strip()
     explicit = canonical_project_root(explicit_text)
     inferred = repository_project_root(task)
@@ -890,23 +585,21 @@ def resolve_repository_project_root(task: str, project: str = "") -> str:
             )
         return explicit
     if inferred:
-        # file_ops owns the allowed roots the file tools also enforce.
         from sonder_runtime.adapters.filesystem.file_ops import inside_allowed_roots
         if not inside_allowed_roots(inferred):
-            raise ValueError("task repository path is outside the configured file roots; add it to file_roots.local or SONDER_FILE_ROOTS, or select a project inside them")
+            raise ValueError(
+                "task repository path is outside the configured file roots; "
+                "add it to file_roots.local or SONDER_FILE_ROOTS, or select a project inside them"
+            )
         return inferred
     raise ValueError(
-        "repository work requires an explicit existing project root; no cwd fallback is allowed. Name it with a 'Repository: <absolute path>' line or select a project inside the configured file roots"
+        "repository work requires an explicit existing project root; no cwd fallback is allowed. "
+        "Name it with a 'Repository: <absolute path>' line or select a project inside the configured file roots"
     )
 
 
 def repository_worker_result(receipt, expected_project: str) -> RepositoryWorkerResult:
     """Validate a guarded host receipt before it can enter fleet aggregation."""
-    # Preserve a host-generated failure from legacy adapters and focused test
-    # doubles that never produced a receipt at all.  A real HostTaskResult may
-    # also begin with ERROR after collecting valid evidence; that case must
-    # continue through the scope/tool/ledger checks below instead of being
-    # discarded solely because of its prose prefix.
     if not hasattr(receipt, "project_scope"):
         raw = str(receipt or "")
         if raw.startswith("ERROR:"):
@@ -950,7 +643,6 @@ def _render_repository_result(result: RepositoryWorkerResult) -> str:
     return fleet_aggregation.render_repository_result(result)
 
 
-
 def _public_outputs(outputs) -> list[tuple[str, str]]:
     return [
         (
@@ -975,12 +667,6 @@ def _repository_worker(prompt: str, project: str = "") -> RepositoryWorkerResult
         require_file_evidence=True,
         read_only=True,
         include_evidence=True,
-        # auto_checklist is what arms the host's "use an inspection tool before
-        # you finalize" nudge (and its retry). Without it this lane was
-        # one-shot: a local model that answered on step 1 without touching a
-        # file tool was immediately failed for missing file evidence, which is
-        # exactly why delegated repository tasks always came back
-        # EVIDENCE_REQUIRED. The direct agent surface passes it and works.
         auto_checklist=True,
         project=project_scope,
         return_host_receipt=True,
@@ -1022,11 +708,6 @@ def _now() -> float:
 
 def _stamp() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-
-
-def estimate_tokens(text: str) -> int:
-    text = text or ""
-    return max(1, (len(text) + 3) // 4) if text else 0
 
 
 def _event(agent_id: str, message: str) -> None:
@@ -1074,12 +755,7 @@ def _prune_local(finished_retention: int = 500) -> None:
 
 
 def subscribe_fleet_snapshots(callback) -> None:
-    """Register a callback invoked on every fleet state transition.
-
-    ``callback(snapshot_dict, trigger_agent_id, trigger_event)`` receives
-    a full fleet snapshot -- convergent state, not a delta -- so late or
-    reordered subscriptions always see the correct current picture.
-    """
+    """Register a callback invoked on every fleet state transition."""
     with _LOCK:
         _SNAPSHOT_SUBSCRIBERS.append(callback)
 
@@ -1150,10 +826,6 @@ def _new_agent(
         "tool_calls": 0,
         "tokens_in": estimate_tokens(task),
         "tokens_out": 0,
-        # Persist the canonical repository root in the pre-existing files_json
-        # field as a backward-compatible recovery receipt. Long-running hosts
-        # intentionally do not hot-reload fleet_store, so this keeps scoped
-        # retries safe even before its new dedicated project column is active.
         "files": (
             [str(metadata.get("project"))]
             if metadata.get("project") else []
@@ -1214,9 +886,6 @@ def _start_agent(agent_id: str, activity: str, **changes) -> bool:
         tier=str(changes.get("tier") or ""),
     )
     if not stored:
-        # A failed start may be a duplicate live invocation or a foreign row.
-        # Release only a proved local queued cancellation, including one
-        # requested by another process. An unreadable ledger retains capacity.
         with contextlib.suppress(Exception):
             _reservation_state.release_cancelled(fleet_store.get_agent(agent_id))
         return False
@@ -1265,98 +934,31 @@ def active_model_call_count() -> int:
         data = fleet_store.snapshot(
             include_finished=False, limit=ABSOLUTE_MAX_AGENTS + 1,
         )
-        # Use the full-table aggregate, NOT a sum over data["agents"]. That list
-        # is paginated (ORDER BY updated_ts DESC LIMIT ~65), so once more than
-        # ~65 fleet rows are active an earlier fleet's in-model-call rows sort
-        # out of the window and the sum drops to 0 while calls are in flight --
-        # and every caller reads 0 as "GPU quiet" and evicts the model or fires
-        # contending work mid-generation.
         return int(data.get("active_model_calls") or 0)
     except Exception as exc:
-        # Resource mutation must fail closed if the durable ledger is unreadable.
         _remember_store_error(exc)
         return 1
 
 
-# Worker failure classification uses the same closed, content-free vocabulary
-# as the fanout receipt store (fanout_store.FAILURE_CLASSES) so an operator
-# reading either ledger sees one taxonomy.  Only these classes are considered
-# plausibly transient and therefore eligible for a bounded in-run retry.
-TRANSIENT_FAILURE_CLASSES = frozenset((
-    "timeout", "unavailable", "throttled", "transport",
-))
-_THROTTLED_MESSAGE = re.compile(
-    r"(?i)\b(?:429|too\s+many\s+requests|rate[- ]limit)",
-)
-_TIMEOUT_MESSAGE = re.compile(r"(?i)\btime[d]?\s*[- ]?out\b|\btimeout\b")
-_UNAVAILABLE_MESSAGE = re.compile(
-    r"(?i)connection\s+(?:refused|reset|aborted)|actively\s+refused|"
-    r"\bunreachable\b|name\s+or\s+service\s+not\s+known|"
-    r"temporarily\s+unavailable|service\s+unavailable|\b50[234]\b|"
-    r"getaddrinfo\s+failed|remote\s+end\s+closed",
-)
-
-
 def classify_worker_error(exc) -> str:
-    """Map one worker exception onto the shared fanout failure vocabulary.
-
-    Classification is deliberately conservative: anything not clearly a
-    transport/availability fault is ``unknown`` (treated as permanent), so a
-    deterministic model or validation failure is never silently re-run.
-    """
-    if isinstance(exc, agent_outcomes.WorkerModelFailure):
-        return exc.failure_class
-    if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
-        return "timeout"
-    if isinstance(exc, ConnectionError):
-        return "unavailable"
-    code = getattr(exc, "code", None)
-    if isinstance(code, int) and not isinstance(code, bool):
-        if code == 429:
-            return "throttled"
-        if 500 <= code <= 599:
-            return "unavailable"
-        if 400 <= code <= 499:
-            return "request_rejected"
-    message = str(exc or "")
-    if _THROTTLED_MESSAGE.search(message):
-        return "throttled"
-    if _TIMEOUT_MESSAGE.search(message):
-        return "timeout"
-    if _UNAVAILABLE_MESSAGE.search(message):
-        return "unavailable"
-    if isinstance(exc, OSError):
-        return "transport"
-    return "unknown"
+    """Map one worker exception onto the shared fanout failure vocabulary."""
+    return _capacity_mod.classify_worker_error(
+        exc,
+        worker_model_failure_cls=agent_outcomes.WorkerModelFailure,
+        timeout_types=(TimeoutError, subprocess.TimeoutExpired),
+    )
 
 
 def worker_transient_retries() -> int:
-    """Bounded extra model-call attempts for transient delegated failures.
-
-    Applies only to delegated workers, never the interactive inline lane, and
-    each extra attempt re-checks cooperative cancellation first.  Default one
-    extra attempt; ``SONDER_FLEET_TRANSIENT_RETRIES`` clamps to 0..3.
-    """
-    raw = os.environ.get("SONDER_FLEET_TRANSIENT_RETRIES", "").strip()
-    if not raw:
-        return 1
-    try:
-        value = int(raw, 10)
-    except ValueError:
-        return 1
-    return max(0, min(value, 3))
+    """Bounded extra model-call attempts for transient delegated failures."""
+    return _capacity_mod.parse_transient_retries(
+        os.environ.get("SONDER_FLEET_TRANSIENT_RETRIES", "")
+    )
 
 
 @contextlib.contextmanager
 def _bind_worker_agent(agent_id: str):
-    """Bind the worker thread to its agent row, and fence its effects on it.
-
-    The row is already fenced for writes (every ``fleet_store`` update is
-    conditional on ``owner_id``). The fence carries that to the tools the
-    worker runs: once the owner's heartbeat expires, the agent is reassigned
-    or cancelled, the permission gate refuses every effect-class tool on this
-    thread at the next call instead of at the next row write.
-    """
+    """Bind the worker thread to its agent row, and fence its effects on it."""
     previous_agent_id = getattr(_WORKER_LOCAL, "agent_id", None)
     _WORKER_LOCAL.agent_id = agent_id
     try:
@@ -1415,17 +1017,10 @@ def _readiness_verifier_receipt(
     agent_id: str, run_id: str, delegated_task_digest: str,
     output: str, verification: dict,
 ) -> str:
-    """Digest the host's completion/provenance checks for an artifact join."""
-    payload = {
-        "run_id": run_id,
-        "producer_id": agent_id,
-        "source_task_digest": delegated_task_digest,
-        "completed_output_digest": fleet_provenance.task_digest(output),
-        "verification": verification,
-    }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return _execution_mod.readiness_verifier_receipt(
+        agent_id, run_id, delegated_task_digest, output, verification,
+        task_digest_fn=fleet_provenance.task_digest,
+    )
 
 
 def _run_worker(
@@ -1443,281 +1038,67 @@ def _run_worker(
     model_route: str = "",
     creation_worker_root: str = "",
 ):
-    def report(outcome) -> None:
-        # Content-free outcome for the adaptive lane scheduler; reporting must
-        # never change the worker's own result.
-        if outcome_sink is not None:
-            with contextlib.suppress(Exception):
-                outcome_sink(outcome)
-
-    def observe_strategy(attempt_number: int, *, accepted: bool,
-                         failure_code: str = "", legacy_retry: bool = False) -> bool:
-        if strategy_observer is None:
-            return legacy_retry
-        return strategy_observer(
-            agent_id=agent_id, master_id=run_id, prompt=prompt,
-            master_digest=master_task_digest, project_scope=project_scope,
-            attempt_number=attempt_number, attempt_limit=attempts_allowed,
-            route=model_route, accepted=accepted, failure_code=failure_code,
-            legacy_retry=legacy_retry,
-        )
-
-    pre_call_metrics = None
-    if objectives:
-        if not _start_agent(agent_id, "validating delegated task provenance"):
-            return "CANCELLED"
-        metrics = fleet_provenance.validate_delegation(
-            master_task,
-            prompt,
-            objectives,
-            expected_master_digest=master_task_digest,
-            expected_delegated_digest=delegated_task_digest,
-            project=project_scope,
-        )
-        if metrics["task_drift"]:
-            _finish(
-                agent_id,
-                error="delegated task provenance changed before model call",
-                task_drift=True,
-                drift_metrics=metrics,
-            )
-            report(adaptive_concurrency.Outcome.CHURN)
-            return _WORKER_FAILED
-        pre_call_metrics = metrics
-        if not _begin_model_call(
-            agent_id, "calling model for provenance-validated task", tool_calls=1,
-        ):
-            final = _finish(agent_id)
-            return final or "CANCELLED"
-    elif not _start_agent(
-        agent_id, "calling model for delegated task", tool_calls=1,
-        in_model_call=True,
-    ):
-        return "CANCELLED"
-    attempts_allowed = 1 + worker_transient_retries()
-    with _bind_worker_agent(agent_id):
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                output = (
-                    worker_fn(prompt, project_scope)
-                    if project_scope else worker_fn(prompt)
-                )
-                if project_scope:
-                    output = _validate_repository_result(output, project_scope)
-                    if creation_worker_root and isinstance(output, RepositoryWorkerResult):
-                        output = fleet_creations.attach_receipt(
-                            output, creation_worker_root,
-                        )
-                break
-            except Exception as exc:  # defensive boundary for worker threads
-                failure_class = classify_worker_error(exc)
-                wait = agent_outcomes.retry_plan(
-                    exc, attempt, attempts_allowed, failure_class,
-                    TRANSIENT_FAILURE_CLASSES, fleet_store,
-                    lambda: cancel_requested(agent_id),
-                )
-                legacy_retry = wait is not None
-                if observe_strategy(
-                    attempt, accepted=False, failure_code=failure_class,
-                    legacy_retry=legacy_retry,
-                ):
-                    _event(
-                        agent_id,
-                        "transient %s failure; retrying model call (attempt %d/%d)"
-                        % (failure_class, attempt + 1, attempts_allowed),
-                    )
-                    report(adaptive_concurrency.Outcome.TRANSIENT_RETRY)
-                    if agent_outcomes.retry_pause(wait or 0.0, lambda: cancel_requested(agent_id)):
-                        return _finish(agent_id) or "CANCELLED"
-                    continue
-                agent_outcomes.remember_transient_failure(agent_id, failure_class, TRANSIENT_FAILURE_CLASSES)
-                final = _finish(agent_id, error="[%s] %s" % (failure_class, exc))
-                report(adaptive_concurrency.Outcome.TRANSIENT_RETRY if failure_class in TRANSIENT_FAILURE_CLASSES
-                       else adaptive_concurrency.Outcome.FAILED)
-                return final if final in ABORT_MARKERS else _WORKER_FAILED
-    stored_output = (
-        _render_repository_result(output)
-        if isinstance(output, RepositoryWorkerResult) else str(output or "")
-    )
-    if objectives:
-        post_call = fleet_provenance.validate_delegation(
-            master_task,
-            prompt,
-            objectives,
-            expected_master_digest=master_task_digest,
-            expected_delegated_digest=delegated_task_digest,
-            project=project_scope,
-            expected_target_digests=pre_call_metrics["target_digests"],
-        )
-        post_call["phase"] = "post_call"
-        if post_call["task_drift"]:
-            _finish(
-                agent_id,
-                error="delegated target changed during model call",
-                task_drift=True,
-                drift_metrics=post_call,
-            )
-            observe_strategy(attempt, accepted=False, failure_code="task_drift")
-            report(adaptive_concurrency.Outcome.CHURN)
-            return _WORKER_FAILED
-        metrics = fleet_provenance.validate_result(
-            stored_output, objectives, project=project_scope,
-        )
-        if metrics["task_drift"]:
-            _finish(
-                agent_id,
-                error="delegated result missed authoritative objective coverage",
-                task_drift=True,
-                drift_metrics=metrics,
-            )
-            observe_strategy(attempt, accepted=False, failure_code="task_drift")
-            report(adaptive_concurrency.Outcome.FAILED)
-            return _WORKER_FAILED
-    final = _finish(agent_id, output=stored_output)
-    observe_strategy(
-        attempt, accepted=final not in ABORT_MARKERS,
-        failure_code="cancelled" if final in ABORT_MARKERS else "",
-    )
-    if final in ABORT_MARKERS:
-        return final
-    report(adaptive_concurrency.Outcome.SUCCEEDED)
-    completed = output if isinstance(output, RepositoryWorkerResult) else final
-    if not run_id:
-        return completed
-    verifier_receipt = _readiness_verifier_receipt(
-        agent_id, run_id, delegated_task_digest, stored_output,
-        metrics if objectives else {"worker_finished": True},
-    )
-    return ReadyWorkerOutput(
-        output=completed,
-        readiness=ArtifactReadiness.from_content(
-            agent_id, run_id, stored_output,
-            source_revision=delegated_task_digest,
-            verifier_receipt=verifier_receipt,
+    hooks = _execution_mod.WorkerExecutionHooks(
+        start_agent=_start_agent,
+        begin_model_call=_begin_model_call,
+        finish=_finish,
+        event=_event,
+        bind_worker_agent=_bind_worker_agent,
+        cancel_requested=cancel_requested,
+        validate_delegation=fleet_provenance.validate_delegation,
+        validate_result=fleet_provenance.validate_result,
+        validate_repository_result=_validate_repository_result,
+        render_repository_result=_render_repository_result,
+        attach_creation_receipt=fleet_creations.attach_receipt,
+        classify_worker_error=classify_worker_error,
+        retry_plan=lambda exc, attempt, allowed, cls, classes, is_cancelled: agent_outcomes.retry_plan(
+            exc, attempt, allowed, cls, classes, fleet_store, is_cancelled,
         ),
+        retry_pause=agent_outcomes.retry_pause,
+        remember_transient_failure=agent_outcomes.remember_transient_failure,
+        worker_transient_retries=worker_transient_retries,
+        task_digest=fleet_provenance.task_digest,
+        worker_failed_sentinel=_WORKER_FAILED,
+    )
+    return _execution_mod.execute_worker(
+        agent_id,
+        prompt,
+        worker_fn,
+        hooks=hooks,
+        project_scope=project_scope,
+        master_task=master_task,
+        objectives=objectives,
+        master_task_digest=master_task_digest,
+        delegated_task_digest=delegated_task_digest,
+        run_id=run_id,
+        outcome_sink=outcome_sink,
+        strategy_observer=strategy_observer,
+        model_route=model_route,
+        creation_worker_root=creation_worker_root,
     )
 
 
 def run_inline(
     task: str, worker_fn, metadata: dict | None = None, project: str = "",
 ) -> dict:
-    objectives = fleet_provenance.parse_objectives(task)
-    repository_task = (
-        bool(objectives)
-        or requires_repository_tools(task)
-        or bool(str(project or "").strip())
+    hooks = _execution_mod.InlineExecutionHooks(
+        parse_objectives=fleet_provenance.parse_objectives,
+        resolve_repository_project_root=resolve_repository_project_root,
+        task_digest=fleet_provenance.task_digest,
+        objective_contract=fleet_provenance.objective_contract,
+        new_agent=_new_agent,
+        start_agent=_start_agent,
+        begin_model_call=_begin_model_call,
+        finish=_finish,
+        bind_worker_agent=_bind_worker_agent,
+        validate_delegation=fleet_provenance.validate_delegation,
+        validate_result=fleet_provenance.validate_result,
+        validate_repository_result=_validate_repository_result,
+        render_repository_result=_render_repository_result,
     )
-    project_scope = (
-        resolve_repository_project_root(task, project) if repository_task else ""
+    return _execution_mod.execute_inline(
+        task, worker_fn, hooks=hooks, metadata=metadata, project=project,
     )
-    metadata = dict(metadata or {})
-    metadata.setdefault("mode", "inline")
-    digest = fleet_provenance.task_digest(task)
-    execution_task = task
-    if objectives:
-        execution_task = "%s\n\n=== AUTHORITATIVE MASTER TASK ===\n%s" % (
-            fleet_provenance.objective_contract(objectives), task,
-        )
-    delegated_digest = fleet_provenance.task_digest(execution_task)
-    metadata["master_task_digest"] = digest
-    metadata["delegated_task_digest"] = delegated_digest
-    metadata["objective_ids"] = [
-        objective.objective_id
-        for objective in objectives
-    ]
-    if project_scope:
-        metadata["project"] = project_scope
-    master_id = _new_agent("master", task, metadata=metadata)
-    start_activity = (
-        "validating inline task provenance" if objectives
-        else "running inline as master"
-    )
-    if not _start_agent(master_id, start_activity, tool_calls=1):
-        return {"mode": "inline", "master_id": master_id, "output": "CANCELLED"}
-    pre_call_metrics = None
-    if objectives:
-        pre_call_metrics = fleet_provenance.validate_delegation(
-            task,
-            execution_task,
-            objectives,
-            expected_master_digest=digest,
-            expected_delegated_digest=delegated_digest,
-            project=project_scope,
-        )
-        if pre_call_metrics["task_drift"]:
-            _finish(
-                master_id,
-                error="inline task provenance changed before model call",
-                task_drift=True,
-                drift_metrics=pre_call_metrics,
-            )
-            return {
-                "mode": "inline", "master_id": master_id,
-                "output": "TASK_DRIFT: inline objective validation failed",
-                "task_drift": True, "drift_metrics": pre_call_metrics,
-            }
-        if not _begin_model_call(
-            master_id, "calling model for provenance-validated inline task",
-            tool_calls=1,
-        ):
-            _finish(master_id)
-            return {"mode": "inline", "master_id": master_id, "output": "CANCELLED"}
-    else:
-        if not _begin_model_call(
-            master_id, "running inline as master", tool_calls=1,
-        ):
-            _finish(master_id)
-            return {"mode": "inline", "master_id": master_id, "output": "CANCELLED"}
-    with _bind_worker_agent(master_id):
-        try:
-            output = (
-                worker_fn(execution_task, project_scope)
-                if project_scope else worker_fn(execution_task)
-            )
-            if project_scope:
-                output = _validate_repository_result(output, project_scope)
-        except Exception as exc:
-            final = _finish(master_id, error=str(exc))
-            return {
-                "mode": "inline",
-                "master_id": master_id,
-                "output": final if final in ABORT_MARKERS else "ERROR: %s" % exc,
-            }
-    stored_output = (
-        _render_repository_result(output)
-        if isinstance(output, RepositoryWorkerResult) else str(output or "")
-    )
-    if objectives:
-        post_call = fleet_provenance.validate_delegation(
-            task,
-            execution_task,
-            objectives,
-            expected_master_digest=digest,
-            expected_delegated_digest=delegated_digest,
-            project=project_scope,
-            expected_target_digests=pre_call_metrics["target_digests"],
-        )
-        post_call["phase"] = "post_call"
-        result_metrics = fleet_provenance.validate_result(
-            stored_output, objectives, project=project_scope,
-        )
-        metrics = post_call if post_call["task_drift"] else result_metrics
-        if metrics["task_drift"]:
-            _finish(
-                master_id,
-                error="inline result missed authoritative objective coverage",
-                task_drift=True,
-                drift_metrics=metrics,
-            )
-            return {
-                "mode": "inline", "master_id": master_id,
-                "output": "TASK_DRIFT: inline result failed objective validation",
-                "task_drift": True, "drift_metrics": metrics,
-            }
-    final = _finish(master_id, output=stored_output)
-    return {"mode": "inline", "master_id": master_id, "output": final}
 
 
 def _subtask_prompts(
@@ -1741,50 +1122,21 @@ def _subtask_prompts(
     )
 
 
-def _objective_assignments(objectives, count: int):
-    if not objectives:
-        return ()
-    buckets = [[] for _ in range(count)]
-    for index, objective in enumerate(objectives):
-        buckets[index % count].append(objective)
-    for index, bucket in enumerate(buckets):
-        if not bucket:
-            bucket.append(objectives[index % len(objectives)])
-    return tuple(tuple(bucket) for bucket in buckets)
-
-
-_ADAPTIVE_OFF_VALUES = frozenset({"0", "false", "no", "off"})
-_ADAPTIVE_ON_VALUES = frozenset({"", "1", "true", "yes", "on"})
-
-
 def adaptive_concurrency_enabled() -> bool:
-    """Operator rollback switch for adaptive fleet concurrency.
-
-    ``SONDER_FLEET_ADAPTIVE_CONCURRENCY`` accepts exactly ``0``/``false``/
-    ``no``/``off`` (pin the cap at the static worker slots) or
-    ``1``/``true``/``yes``/``on``/unset (adaptive), case-insensitively.  Any
-    other value is logged and ignored, leaving the default (adaptive) on.
-    """
-    raw = os.environ.get("SONDER_FLEET_ADAPTIVE_CONCURRENCY", "").strip().lower()
-    if raw in _ADAPTIVE_OFF_VALUES:
-        return False
-    if raw not in _ADAPTIVE_ON_VALUES:
+    """Operator rollback switch for adaptive fleet concurrency."""
+    raw = os.environ.get("SONDER_FLEET_ADAPTIVE_CONCURRENCY", "")
+    enabled, invalid = _capacity_mod.parse_adaptive_concurrency_flag(raw)
+    if invalid:
         logger.warning(
             "ignoring unrecognized SONDER_FLEET_ADAPTIVE_CONCURRENCY=%r; "
             "expected one of 0/false/no/off or 1/true/yes/on; adaptive stays on",
-            raw[:32],
+            raw.strip().lower()[:32],
         )
-    return True
+    return enabled
 
 
 def concurrency_resources() -> adaptive_concurrency.ResourceSnapshot:
-    """Measure host memory headroom for the adaptive lane scheduler.
-
-    The fleet's own pressure band is deliberately NOT used here: it is the
-    fleet's utilization of its own slots, so a healthy run at full width would
-    read as "critical" and throttle itself.  Unknown memory is reported as
-    unknown, never as pressure or as headroom.
-    """
+    """Measure host memory headroom for the adaptive lane scheduler."""
     total, available = physical_memory_bytes()
     if total <= 0 or available <= 0:
         return adaptive_concurrency.ResourceSnapshot()
@@ -1793,40 +1145,8 @@ def concurrency_resources() -> adaptive_concurrency.ResourceSnapshot:
     )
 
 
-def delegated_lane_claims(child_ids, assignments, project_root: str = "") -> list:
-    """Ownership claims for delegated fleet lanes.
-
-    Delegated fleet workers only receive guarded read-only file tools (see
-    :func:`_subtask_prompts`), so their objective files are READ claims:
-    readers never serialize each other and independent read fan-out keeps its
-    full width.  A write-capable lane would pass WRITE claims to
-    :class:`AdaptiveLaneScheduler` and be serialized against overlapping lanes.
-
-    Every path is anchored to ``project_root`` so ``a.py`` and
-    ``<root>/a.py`` are one file.  A path that cannot be anchored (outside the
-    root, escaping with ``..``, absolute without a root) raises
-    ``ValueError`` rather than silently becoming an independent lane.
-    """
-    claims = []
-    for agent_id, assigned in zip(child_ids, assignments or [()] * len(child_ids)):
-        paths = frozenset(
-            adaptive_concurrency.anchor_claim_path(str(objective.path), project_root)
-            for objective in assigned
-        )
-        claims.append(adaptive_concurrency.LaneClaim(
-            agent_id, paths, adaptive_concurrency.LaneAccess.READ,
-        ))
-    return claims
-
-
-class AdaptiveLaneScheduler:
-    """Dispatcher-side owner of the pure adaptive-concurrency policy.
-
-    ``admit``/``complete``/``summary`` are called only by the dispatching
-    thread.  Worker threads report outcomes through :meth:`sink`, which only
-    appends to a locked inbox; the inbox is folded into the policy state on
-    the dispatcher thread at the next completion.
-    """
+class AdaptiveLaneScheduler(_BaseAdaptiveLaneScheduler):
+    """Master-orchestrator scheduler bound to live host memory snapshots."""
 
     def __init__(
         self,
@@ -1838,268 +1158,38 @@ class AdaptiveLaneScheduler:
         policy: adaptive_concurrency.ConcurrencyPolicy | None = None,
         on_decision=None,
     ) -> None:
-        ceiling = max(1, int(ceiling))
-        self.policy = policy or adaptive_concurrency.ConcurrencyPolicy(ceiling=ceiling)
-        self.state = adaptive_concurrency.initial_state(self.policy)
-        self.adaptive = bool(adaptive)
-        claims = list(claims)
-        self.graph = adaptive_concurrency.conflict_graph(claims)
-        self._pending = [claim.lane_id for claim in claims]
-        self._running: set[str] = set()
-        self._resources = resources or concurrency_resources
-        self._on_decision = on_decision
-        self._inbox: list = []
-        self._inbox_lock = threading.Lock()
-        self.decisions: list[dict] = []
-        self.peak_running = 0
-        self.serialized_waits = 0
-        self.handler_failures = 0
-
-    @property
-    def cap(self) -> int:
-        return int(self.state.cap)
-
-    @property
-    def pending(self) -> tuple:
-        return tuple(self._pending)
-
-    @property
-    def running(self) -> frozenset:
-        return frozenset(self._running)
-
-    def record_handler_failure(self) -> None:
-        self.handler_failures += 1
-
-    def sink(self, lane_id: str):
-        def record(outcome) -> None:
-            with self._inbox_lock:
-                self._inbox.append((lane_id, outcome))
-        return record
-
-    def admit(self) -> tuple:
-        admitted = adaptive_concurrency.admissible_lanes(
-            self._pending, self._running, self.cap, self.graph,
+        super().__init__(
+            claims,
+            ceiling,
+            adaptive=adaptive,
+            resources=resources or concurrency_resources,
+            policy=policy,
+            on_decision=on_decision,
         )
-        if len(admitted) < len(self._pending) and (
-            len(self._running) + len(admitted) < self.cap
-        ):
-            # A slot stayed free only because an ownership conflict blocked
-            # every remaining lane: that is the serialization at work.
-            self.serialized_waits += 1
-        for lane_id in admitted:
-            self._pending.remove(lane_id)
-            self._running.add(lane_id)
-        self.peak_running = max(self.peak_running, len(self._running))
-        return admitted
-
-    def complete(self, lane_id: str) -> None:
-        self._running.discard(lane_id)
-        with self._inbox_lock:
-            inbox, self._inbox = self._inbox, []
-        if not self.adaptive:
-            return
-        if not inbox:
-            # Cancelled lanes report nothing; still sample resource pressure.
-            inbox = [(lane_id, adaptive_concurrency.Outcome.SAMPLE)]
-        try:
-            resources = self._resources()
-        except Exception:
-            resources = adaptive_concurrency.ResourceSnapshot()
-        for index, (source, outcome) in enumerate(inbox):
-            self.state, decision = adaptive_concurrency.observe(
-                self.state,
-                outcome,
-                self.policy,
-                resources if index == len(inbox) - 1 else None,
-                source=source,
-            )
-            if decision.action != "hold" or decision.reasons:
-                record = decision.to_dict()
-                record["lane"] = source
-                self.decisions.append(record)
-                if self._on_decision is not None:
-                    with contextlib.suppress(Exception):
-                        self._on_decision(record)
-
-    def summary(self) -> dict:
-        return {
-            "adaptive": self.adaptive,
-            "ceiling": int(self.policy.ceiling),
-            "final_cap": self.cap,
-            "peak_running": int(self.peak_running),
-            "coupled_lanes": adaptive_concurrency.coupled_lane_count(self.graph),
-            "serialized_waits": int(self.serialized_waits),
-            "handler_failures": int(self.handler_failures),
-            "decisions": list(self.decisions),
-        }
-
-
-_MAX_LOGGED_ERROR_CHARS = 200
-
-
-def _bounded_error_text(exc: BaseException) -> str:
-    """One-line, length-bounded ``Type: message`` for operator logs.
-
-    Whitespace (including newlines) is collapsed and the message truncated,
-    so a failure that embeds a large payload cannot flood or forge log lines.
-    """
-    text = " ".join(str(exc).split())
-    if len(text) > _MAX_LOGGED_ERROR_CHARS:
-        text = text[:_MAX_LOGGED_ERROR_CHARS] + "..."
-    return "%s: %s" % (type(exc).__name__, text) if text else type(exc).__name__
 
 
 def dispatch_lanes(
     scheduler, max_workers: int, run_lane, collect, on_error, on_abandon=None,
     on_stall=None,
 ) -> None:
-    """Run every scheduled lane, admitting only what ``scheduler`` allows.
-
-    ``run_lane(lane_id, sink)`` runs on a pool thread and may report
-    :class:`adaptive_concurrency.Outcome` values through ``sink``.
-    ``collect(lane_id, result)`` and ``on_error(lane_id, exc)`` run on this
-    dispatcher thread.  ``max_workers`` is the static ceiling; the pool only
-    ever holds admitted lanes, so the scheduler's live cap and ownership
-    conflicts decide actual concurrency.
-
-    A raising ``collect``/``on_error`` (for example a fleet store that is
-    down while recording a failure) is logged with a bounded message, counted
-    in the scheduler summary (``handler_failures``), and cannot stop later
-    lanes from being admitted.  When ``on_error`` fails the lane's row was
-    never closed (the worker itself raised), so the lane is handed to
-    ``on_abandon``; a failed ``collect`` follows a worker that already closed
-    its own row, so it is not closed twice.  If the loop itself aborts, every
-    lane that never got a future -- still pending, or admitted but rejected
-    by ``pool.submit`` -- is handed to ``on_abandon`` so no durable row is
-    stranded as queued; the original exception still propagates. A lane that
-    makes no progress for the configured deadline is reported through
-    ``on_stall`` and aborts dispatch with ``FleetStalledError``. Live workers
-    retain their reservations until they exit; this generic layer has no safe
-    termination authority.
-    """
-    unsubmitted: list[str] = []
-
-    def close(lane_id: str, when: str) -> None:
-        if on_abandon is None:
-            return
-        try:
-            on_abandon(lane_id)
-        except Exception as abandon_exc:
-            logger.warning(
-                "fleet lane %s could not be closed %s: %s",
-                lane_id, when, _bounded_error_text(abandon_exc),
-            )
-
-    pool = ThreadPoolExecutor(max_workers=max(1, int(max_workers)))
-    futures = {}
-    started_at = {}
-    last_progress_ts = {}
-    progress_deadline = float(
-        getattr(fleet_store, "progress_deadline_seconds", lambda: 120.0)()
+    """Run every scheduled lane, admitting only what ``scheduler`` allows."""
+    _scheduler_mod.dispatch_lanes(
+        scheduler,
+        max_workers,
+        run_lane,
+        collect,
+        on_error,
+        on_abandon=on_abandon,
+        on_stall=on_stall,
+        executor_cls=ThreadPoolExecutor,
+        wait_fn=wait,
+        get_agent_fn=fleet_store.get_agent,
+        progress_deadline_fn=lambda: float(
+            getattr(fleet_store, "progress_deadline_seconds", lambda: 120.0)()
+        ),
+        lane_deadline_fn=_lane_deadline,
+        heartbeat_seconds=HEARTBEAT_SECONDS,
     )
-    lane_deadline = {}
-    wait_slice = max(0.1, min(float(HEARTBEAT_SECONDS), progress_deadline / 4.0))
-    try:
-
-            def _run_lane_at_child_depth(target_lane_id: str, target_sink: object) -> object:
-                from sonder_runtime.application.agents import delegation_runtime as _delegation_rt
-
-                with _delegation_rt.depth_scope(1):
-                    return run_lane(target_lane_id, target_sink)
-
-            def submit_admitted() -> None:
-                admitted = list(scheduler.admit())
-                while admitted:
-                    lane_id = admitted[0]
-                    ctx = contextvars.copy_context()
-                    try:
-                        future = pool.submit(
-                            ctx.run, _run_lane_at_child_depth, lane_id, scheduler.sink(lane_id),
-                        )
-                    except BaseException:
-                        # admit() already marked these lanes running; none of
-                        # them has a future, so the abort path must close them.
-                        unsubmitted.extend(admitted)
-                        raise
-                    admitted.pop(0)
-                    futures[future] = lane_id
-                    started_at[future] = time.monotonic()
-                    last_progress_ts[future] = None
-
-            submit_admitted()
-            while futures:
-                done, pending = wait(
-                    tuple(futures), timeout=wait_slice, return_when=FIRST_COMPLETED,
-                )
-                now = time.monotonic()
-                # Refresh only futures still pending. A completed sibling is
-                # collected below and can never be classified as stalled.
-                for future in pending:
-                    lane_id = futures[future]
-                    with contextlib.suppress(Exception):
-                        row = fleet_store.get_agent(lane_id)
-                        updated_ts = float(row.get("updated_ts") or 0) if row else 0
-                        if updated_ts and (
-                            last_progress_ts.get(future) is None
-                            or updated_ts > last_progress_ts[future]
-                        ):
-                            last_progress_ts[future] = updated_ts
-                            started_at[future] = now
-                        # A lane inside one model call does not touch its row
-                        # until the call returns: it is live until that call's
-                        # own timeout (plus margin) has passed.
-                        lane_deadline[future] = _lane_deadline(row, progress_deadline)
-                stalled = [
-                    future for future in pending
-                    if now - started_at[future]
-                    >= lane_deadline.get(future, progress_deadline)
-                ]
-                if stalled:
-                    stalled_lanes = [futures[future] for future in stalled]
-                    logger.warning(
-                        "fleet lanes stalled; quarantining live workers: %s",
-                        ", ".join(stalled_lanes),
-                    )
-                    if on_stall is not None:
-                        on_stall(tuple(stalled_lanes))
-                    raise FleetStalledError(stalled_lanes)
-                if not done:
-                    logger.info(
-                        "fleet dispatch waiting on %d lane(s); progress deadline %.1fs",
-                        len(futures), progress_deadline,
-                    )
-                    continue
-                for future in done:
-                    lane_id = futures.pop(future)
-                    started_at.pop(future, None)
-                    last_progress_ts.pop(future, None)
-                    lane_deadline.pop(future, None)
-                    try:
-                        result = future.result()
-                    except Exception as exc:
-                        scheduler.sink(lane_id)(adaptive_concurrency.Outcome.FAILED)
-                        handler, args = on_error, (lane_id, exc)
-                    else:
-                        handler, args = collect, (lane_id, result)
-                    try:
-                        handler(*args)
-                    except Exception as handler_exc:
-                        scheduler.record_handler_failure()
-                        logger.warning(
-                            "fleet lane %s result handling failed: %s",
-                            lane_id, _bounded_error_text(handler_exc),
-                        )
-                        if handler is on_error:
-                            close(lane_id, "after its error handler failed")
-                    scheduler.complete(lane_id)
-                submit_admitted()
-    finally:
-        for lane_id in unsubmitted + list(scheduler.pending):
-            close(lane_id, "after dispatch abort")
-        # A worker blocked in a model/tool call is deliberately left running;
-        # there is no safe generic termination authority.  Do not make its
-        # coordinator wait forever during error/abort cleanup.
-        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def run_delegated(
@@ -2109,514 +1199,55 @@ def run_delegated(
     strategy_observer=None,
     build_workspace: bool = False,
 ) -> dict:
-    objectives = fleet_provenance.parse_objectives(task)
-    # A supplied project remains the existing project-bound lane.  Only an
-    # explicitly requested build with no project provisions fresh folders.
-    greenfield_build = bool(build_workspace) and not str(project or "").strip() and not objectives
-    if greenfield_build and requires_repository_tools(task):
-        raise ValueError("build workspace cannot replace required repository scope")
-    repository_task = (
-        bool(objectives)
-        or requires_repository_tools(task)
-        or bool(str(project or "").strip())
-        or greenfield_build
+    hooks = _execution_mod.DelegatedExecutionHooks(
+        parse_objectives=fleet_provenance.parse_objectives,
+        resolve_repository_project_root=resolve_repository_project_root,
+        same_project_root=same_project_root,
+        explicit_agent_ceiling=explicit_agent_ceiling,
+        clamp_agent_count=clamp_agent_count,
+        capacity=capacity,
+        parallel_worker_slots=parallel_worker_slots,
+        task_digest=fleet_provenance.task_digest,
+        objective_contract=fleet_provenance.objective_contract,
+        subtask_prompts=_subtask_prompts,
+        new_agent=_new_agent,
+        start_agent=_start_agent,
+        begin_model_call=_begin_model_call,
+        finish=_finish,
+        event=_event,
+        request_cancel=request_cancel,
+        cancel_requested=cancel_requested,
+        release_reservation=_reservation_state.release,
+        bind_worker_agent=_bind_worker_agent,
+        run_worker=_run_worker,
+        dispatch_lanes=dispatch_lanes,
+        scheduler_cls=AdaptiveLaneScheduler,
+        adaptive_concurrency_enabled=adaptive_concurrency_enabled,
+        render_repository_result=_render_repository_result,
+        public_outputs=_public_outputs,
+        validate_result=fleet_provenance.validate_result,
+        aggregation_metrics=fleet_provenance.aggregation_metrics,
+        validate_aggregate_output=fleet_provenance.validate_aggregate_output,
+        capacity_unavailable_error=agent_outcomes.capacity_unavailable_error,
+        create_workspace=fleet_creations.create_workspace,
+        release_workspace=fleet_creations.release_workspace,
+        build_report=fleet_aggregation.build_report,
+        audit_prompt=fleet_aggregation.audit_prompt,
+        worker_failed_sentinel=_WORKER_FAILED,
     )
-    project_scope = (
-        resolve_repository_project_root(task, project)
-        if repository_task and not greenfield_build else ""
+    return _execution_mod.execute_delegated(
+        task,
+        worker_fn,
+        audit_fn,
+        hooks=hooks,
+        agents=agents,
+        metadata=metadata,
+        on_started=_on_started,
+        project=project,
+        worker_cap=worker_cap,
+        strategy_observer=strategy_observer,
+        build_workspace=build_workspace,
     )
-    explicit_cap, _cap_error = _positive_int(worker_cap) if worker_cap is not None else (None, "")
-    if explicit_cap:
-        agents_value, _agents_error = _positive_int(agents)
-        agents = min(agents_value or explicit_cap, explicit_agent_ceiling())
-    else:
-        agents = clamp_agent_count(agents, default=3)
-    capacity_data = capacity(agents, worker_cap=worker_cap)
-    worker_slots = int(
-        parallel_worker_slots(agents, worker_cap=worker_cap)
-        if worker_cap is not None else parallel_worker_slots(agents)
-    )
-    metadata = dict(metadata or {})
-    metadata.setdefault("mode", "delegated")
-    metadata["requested_agents"] = agents
-    metadata["worker_slots"] = worker_slots
-    if project_scope:
-        metadata["project"] = project_scope
-    master_digest = fleet_provenance.task_digest(task)
-    metadata["master_task_digest"] = master_digest
-    metadata["delegated_task_digest"] = master_digest
-    metadata["objective_ids"] = [
-        objective.objective_id for objective in objectives
-    ]
-    master_id = _new_agent("master", task, metadata=metadata)
-    creation = None
-    worker_projects: tuple[str, ...] = ()
-    build_details = {}
-    if greenfield_build:
-        try:
-            creation = fleet_creations.create_workspace(master_id, agents)
-        except Exception as exc:
-            _finish(master_id, error="build workspace provisioning failed: %s" % exc)
-            raise
-        worker_projects = tuple(str(path) for path in creation.workers)
-        build_details = {"output_workspace": str(creation.root)}
-        _event(master_id, "build output workspace: %s" % creation.root)
-    try:
-        schedule = "queued %d agent(s) across %d worker slot(s)" % (agents, worker_slots)
-        if capacity_data.get("source") == "per-run worker_cap":
-            schedule += " [per-run worker_cap=%d; operator ceiling=%d]" % (
-                capacity_data["requested_worker_cap"],
-                capacity_data["operator_worker_ceiling"],
-            )
-        started = _start_agent(
-            master_id,
-            schedule,
-            requested_agents=agents,
-            worker_slots=worker_slots,
-        )
-        if not started:
-            result = {
-                "mode": "delegated",
-                "master_id": master_id,
-                "agents": [],
-                "worker_slots": worker_slots,
-                **build_details,
-                "outputs": [],
-                "output": "CANCELLED",
-            }
-            if _on_started is not None:
-                _on_started(dict(result))
-            return result
-        assignments = _objective_assignments(objectives, agents)
-        prompts = _subtask_prompts(
-            task,
-            agents,
-            tool_access=repository_task,
-            project=project_scope,
-            objective_assignments=assignments,
-            build_projects=worker_projects,
-        )
-        child_ids = []
-        try:
-            for prompt, assigned in zip(prompts, assignments or [()] * len(prompts)):
-                child_ids.append(_new_agent(
-                    "agent",
-                    prompt,
-                    parent_id=master_id,
-                    metadata={
-                        # fleet_store's child project identity remains the master
-                        # project.  The per-worker execution folder is carried in
-                        # the in-process lane map below, never as a forged child
-                        # project identity.
-                        "project": project_scope,
-                        "master_task_digest": master_digest,
-                        "delegated_task_digest": fleet_provenance.task_digest(prompt),
-                        "objective_ids": [
-                            objective.objective_id for objective in assigned
-                        ],
-                    },
-                ))
-            # Claims are validated inside the startup containment: an objective
-            # path that cannot be anchored to the project fails the fleet here,
-            # with every queued child cancelled, instead of becoming a lane that
-            # silently conflicts with nothing.
-            lane_claims = delegated_lane_claims(
-                child_ids, assignments, project_root=project_scope,
-            )
-        except Exception as exc:
-            # Partial fanout containment: a store failure on child N must not
-            # strand children 1..N-1 as durable queued rows that no worker will
-            # ever run.  Cancel what was queued, fail the master, and report the
-            # startup result so a background caller's ready-wait cannot hang.
-            error = "fleet startup failed after queueing %d of %d delegated agents: %s" % (
-                len(child_ids), agents, exc,
-            )
-            for queued_id in child_ids:
-                with contextlib.suppress(Exception):
-                    request_cancel(queued_id)
-            final = _finish(master_id, error=error)
-            result = {
-                "mode": "delegated",
-                "master_id": master_id,
-                "agents": list(child_ids),
-                "worker_slots": worker_slots,
-                **build_details,
-                "outputs": [],
-                "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
-            }
-            if _on_started is not None:
-                _on_started(dict(result))
-            return result
-        if _on_started is not None:
-            _on_started({
-                "mode": "delegated",
-                "master_id": master_id,
-                "agents": list(child_ids),
-                "worker_slots": worker_slots,
-                **build_details,
-                "outputs": [],
-                "output": "RUNNING",
-            })
-        outputs = []
-        readiness_by_producer = {}
-        readiness_errors = {}
-        fanout_started = time.monotonic()
-        lane_inputs = {
-            agent_id: (prompt, assigned)
-            for agent_id, prompt, assigned in zip(
-                child_ids, prompts, assignments or [()] * len(prompts)
-            )
-        }
-        lane_projects = {
-            agent_id: (worker_projects[index] if greenfield_build else project_scope)
-            for index, agent_id in enumerate(child_ids)
-        }
-
-        def _concurrency_event(record: dict) -> None:
-            _event(
-                master_id,
-                "adaptive concurrency %s: cap %d -> %d (%s)" % (
-                    record["action"], record["previous_cap"], record["cap"],
-                    ",".join(record["reasons"]) or "none",
-                ),
-            )
-
-        # worker_slots is the static ceiling (hardware, operator, per-run cap).
-        # Inside it the adaptive scheduler admits only ownership-compatible lanes
-        # and shrinks/regrows the live cap on retry storms, churn, and memory
-        # pressure (issue #510 section 3).  The pool never holds more than the
-        # admitted lanes, so a shrunk cap takes effect at the next admission.
-        scheduler = AdaptiveLaneScheduler(
-            lane_claims,
-            worker_slots,
-            adaptive=adaptive_concurrency_enabled(),
-            on_decision=_concurrency_event,
-        )
-
-        def _run_lane(agent_id: str, sink):
-            prompt, assigned = lane_inputs[agent_id]
-            return _run_worker(
-                agent_id,
-                prompt,
-                worker_fn,
-                lane_projects[agent_id],
-                task,
-                assigned,
-                master_digest,
-                fleet_provenance.task_digest(prompt),
-                master_id,
-                outcome_sink=sink,
-                strategy_observer=strategy_observer,
-                model_route=str(metadata.get("tier") or ""),
-                creation_worker_root=lane_projects[agent_id] if greenfield_build else "",
-            )
-
-        def _collect(agent_id: str, output) -> None:
-            if output not in ABORT_MARKERS and output is not _WORKER_FAILED:
-                if isinstance(output, ReadyWorkerOutput):
-                    readiness_by_producer[agent_id] = output.readiness
-                    output = output.output
-                else:
-                    readiness_errors[agent_id] = "missing producer readiness evidence"
-                outputs.append((agent_id, output))
-
-        def _lane_error(agent_id: str, exc: BaseException) -> None:
-            _finish(agent_id, error=str(exc))
-
-        def _lane_abandoned(agent_id: str) -> None:
-            # Close a lane dispatch could not finish normally: never started, or
-            # its own failure could not be recorded.  If the durable store is
-            # still refusing writes, at least return the process-local reserved
-            # slot (``_finish`` only releases it after the store write succeeds);
-            # the durable row is then left to owner-lease recovery.
-            try:
-                _finish(agent_id, error="fleet dispatch could not complete this lane")
-            except Exception:
-                _reservation_state.release(agent_id)
-                raise
-
-        try:
-            dispatch_lanes(
-                scheduler, worker_slots, _run_lane, _collect, _lane_error,
-                on_abandon=_lane_abandoned,
-                on_stall=lambda lanes: [request_cancel(lane) for lane in lanes],
-            )
-        except FleetStalledError as exc:
-            concurrency_report = scheduler.summary()
-            # Stalled children stay running/cancel-requested until their actual
-            # calls return.  Never run fan-in or audit against this uncertain set.
-            error = "fleet stalled; result is uncertain: %s" % exc
-            _finish(master_id, error=error)
-            return {
-                "mode": "delegated",
-                "master_id": master_id,
-                "agents": child_ids,
-                "worker_slots": worker_slots,
-                **build_details,
-                "concurrency": concurrency_report,
-                "outputs": _public_outputs(outputs),
-                "output": "STALLED: %s" % error,
-                "stalled": True,
-                "uncertain": True,
-                "stalled_lanes": list(exc.lanes),
-            }
-        concurrency_report = scheduler.summary()
-        if cancel_requested(master_id):
-            final = _finish(master_id)
-            return {
-                "mode": "delegated",
-                "master_id": master_id,
-                "agents": child_ids,
-                "worker_slots": worker_slots,
-                **build_details,
-                "concurrency": concurrency_report,
-                "outputs": _public_outputs(outputs),
-                "output": final,
-            }
-        if not outputs:
-            if objectives:
-                aggregation = fleet_provenance.aggregation_metrics(
-                    objectives, (), len(child_ids),
-                )
-                _finish(
-                    master_id,
-                    error="aggregation refused: every child missed objective evidence",
-                    task_drift=True,
-                    drift_metrics=aggregation,
-                )
-                return {
-                    "mode": "delegated",
-                    "master_id": master_id,
-                    "agents": child_ids,
-                    "worker_slots": worker_slots,
-                    **build_details,
-                    "concurrency": concurrency_report,
-                    "outputs": [],
-                    "output": "TASK_DRIFT: all delegated results missed objective evidence",
-                    "task_drift": True,
-                    "drift_metrics": aggregation,
-                }
-            capacity_error = agent_outcomes.capacity_unavailable_error(repository_task, child_ids)
-            if repository_task and not capacity_error:
-                report = fleet_aggregation.build_report(creation.root, lane_projects, ()) if creation else ""
-                final = _finish(master_id, output=report + EVIDENCE_REQUIRED)
-                return {
-                    "mode": "delegated",
-                    "master_id": master_id,
-                    "agents": child_ids,
-                    "worker_slots": worker_slots,
-                    **build_details,
-                    "concurrency": concurrency_report,
-                    "outputs": [],
-                    "output": final,
-                }
-            error = capacity_error or "all delegated workers failed before producing an auditable result"
-            final = _finish(master_id, error=error)
-            return {
-                "mode": "delegated",
-                "master_id": master_id,
-                "agents": child_ids,
-                "worker_slots": worker_slots,
-                **build_details,
-                "concurrency": concurrency_report,
-                "outputs": [],
-                "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
-            }
-        # Fan-in is an evidence boundary: every successful child must publish a
-        # complete, digest-bound readiness record for this exact master run before
-        # provenance aggregation or the audit model can consume its output. Failed
-        # children have already been handled above and do not publish an artifact.
-        rendered_outputs = {
-            agent_id: (
-                _render_repository_result(output)
-                if isinstance(output, RepositoryWorkerResult) else str(output or "")
-            )
-            for agent_id, output in outputs
-        }
-        # Allow a child that completed early to wait for a long sibling, while
-        # retaining a bounded 24-hour ceiling for stale evidence.
-        readiness_age_seconds = min(
-            24 * 60 * 60,
-            max(15 * 60, time.monotonic() - fanout_started + 5 * 60),
-        )
-        readiness_errors.update(validate_master_slots_for_run(
-            run_id=master_id,
-            expected_producers=child_ids,
-            readiness_by_producer=readiness_by_producer,
-            content_by_producer=rendered_outputs,
-            source_revisions={
-                agent_id: fleet_provenance.task_digest(lane_inputs[agent_id][0])
-                for agent_id in child_ids
-            },
-            require_verifier_receipt={agent_id: True for agent_id in child_ids},
-            # Recompute the host checks at fan-in; never trust the producer's copy.
-            expected_verifier_receipts={
-                agent_id: _readiness_verifier_receipt(
-                    agent_id, master_id, fleet_provenance.task_digest(lane_inputs[agent_id][0]),
-                    rendered_outputs[agent_id], fleet_provenance.validate_result(
-                        rendered_outputs[agent_id], lane_inputs[agent_id][1], project=project_scope,
-                    ) if lane_inputs[agent_id][1] else {"worker_finished": True},
-                ) for agent_id in rendered_outputs
-            },
-            max_age=timedelta(seconds=readiness_age_seconds),
-        ))
-        no_valid = all(agent_id in readiness_errors for agent_id, _output in outputs)
-        if no_valid or repository_task and any(
-            not isinstance(output, RepositoryWorkerResult)
-            or not same_project_root(output.project, lane_projects[agent_id])
-            for agent_id, output in outputs
-            if agent_id not in readiness_errors
-        ):
-            error = ("artifact readiness barrier rejected fan-in: no validated child artifact"
-                     if no_valid else "repository aggregation rejected an unscoped child result")
-            final = _finish(master_id, error=error)
-            return {
-                "mode": "delegated",
-                "master_id": master_id,
-                "agents": child_ids,
-                "worker_slots": worker_slots,
-                **build_details,
-                "concurrency": concurrency_report,
-                "outputs": _public_outputs(outputs) if no_valid else [],
-                "output": final if final in ABORT_MARKERS else "ERROR: %s" % error,
-            }
-        child_metrics = [
-            fleet_provenance.validate_result(
-                _render_repository_result(output)
-                if isinstance(output, RepositoryWorkerResult) else str(output or ""),
-                assigned,
-                project=project_scope,
-            )
-            for (_agent_id, output), assigned in zip(
-                ((agent_id, output) for agent_id, output in outputs
-                 if agent_id not in readiness_errors),
-                [
-                    assignments[child_ids.index(agent_id)]
-                    for agent_id, _output in outputs
-                    if agent_id not in readiness_errors
-                ] if assignments else [()] * len(outputs),
-            )
-        ]
-        if objectives:
-            aggregation = fleet_provenance.aggregation_metrics(
-                objectives, child_metrics, len(child_ids),
-            )
-            if aggregation["task_drift"]:
-                _finish(
-                    master_id,
-                    error="aggregation refused: authoritative objective coverage drifted",
-                    task_drift=True,
-                    drift_metrics=aggregation,
-                )
-                return {
-                    "mode": "delegated",
-                    "master_id": master_id,
-                    "agents": child_ids,
-                    "worker_slots": worker_slots,
-                    **build_details,
-                    "concurrency": concurrency_report,
-                    "outputs": _public_outputs(outputs),
-                    "output": "TASK_DRIFT: aggregation refused due to missing objective evidence",
-                    "task_drift": True,
-                    "drift_metrics": aggregation,
-                }
-        if not _begin_model_call(
-            master_id, "auditing delegated outputs", tool_calls=2,
-        ):
-            final = _finish(master_id)
-            return {
-                "mode": "delegated",
-                "master_id": master_id,
-                "agents": child_ids,
-                "worker_slots": worker_slots,
-                **build_details,
-                "concurrency": concurrency_report,
-                "outputs": _public_outputs(outputs),
-                "output": final,
-            }
-        build_report = (
-            fleet_aggregation.build_report(
-                creation.root, lane_projects,
-                [(agent_id, output) for agent_id, output in outputs
-                 if agent_id not in readiness_errors],
-            )
-            if creation is not None else ""
-        )
-        audit_prompt = fleet_aggregation.audit_prompt(
-            task,
-            ((agent_id, (
-                "[ARTIFACT REJECTED: %s; output withheld from synthesis]"
-                % readiness_errors[agent_id]
-                if agent_id in readiness_errors else rendered_outputs[agent_id]
-            )) for agent_id, _output in outputs),
-            repository_task=repository_task,
-            project=project_scope,
-            objective_contract=fleet_provenance.objective_contract(objectives) if objectives else "",
-            creation_root=str(creation.root) if creation is not None else "",
-        )
-        if build_report:
-            audit_prompt += "\n" + build_report
-        with _bind_worker_agent(master_id):
-            try:
-                merged = audit_fn(audit_prompt)
-            except Exception as exc:
-                merged = build_report + "ERROR: audit failed: %s" % exc
-                final = _finish(master_id, output=merged, error=str(exc))
-                return {
-                    "mode": "delegated",
-                    "master_id": master_id,
-                    "agents": child_ids,
-                    "worker_slots": worker_slots,
-                    **build_details,
-                    "concurrency": concurrency_report,
-                    "outputs": _public_outputs(outputs),
-                    "output": final if final in ABORT_MARKERS else merged,
-                }
-        if repository_task and not greenfield_build:
-            merged = (
-                "=== HOST AGGREGATION SCOPE ===\nproject=%s\nchildren=%s\n\n%s"
-                % (project_scope, ",".join(
-                    agent_id for agent_id, _ in outputs if agent_id not in readiness_errors
-                ), merged)
-            )
-        merged = build_report + merged
-        if objectives:
-            aggregate_metrics = fleet_provenance.validate_aggregate_output(
-                merged, objectives, aggregation,
-            )
-            if aggregate_metrics["task_drift"]:
-                _finish(
-                    master_id,
-                    error="audit aggregate drifted from authoritative objectives",
-                    task_drift=True,
-                    drift_metrics=aggregate_metrics,
-                )
-                return {
-                    "mode": "delegated",
-                    "master_id": master_id,
-                    "agents": child_ids,
-                    "worker_slots": worker_slots,
-                    **build_details,
-                    "concurrency": concurrency_report,
-                    "outputs": _public_outputs(outputs),
-                    "output": "TASK_DRIFT: audit aggregate omitted authoritative objectives",
-                    "task_drift": True,
-                    "drift_metrics": aggregate_metrics,
-                }
-        final = _finish(master_id, output=merged)
-        return {
-            "mode": "delegated",
-            "master_id": master_id,
-            "agents": child_ids,
-            "worker_slots": worker_slots,
-            **build_details,
-            "concurrency": concurrency_report,
-            "outputs": _public_outputs(outputs),
-            "output": final,
-        }
-    finally:
-        if creation is not None:
-            fleet_creations.release_workspace(creation)
 
 
 def start_delegated(
@@ -2626,80 +1257,23 @@ def start_delegated(
     strategy_observer=None,
     build_workspace: bool = False,
 ) -> dict:
-    """Start delegated orchestration in a daemon thread and return ledger IDs.
-
-    A hardware-width fleet can legitimately outlive an MCP request deadline.
-    Running it synchronously made the initiating call time out and, on a
-    single-request transport, prevented status and cancellation calls while the
-    fleet was active. The durable fleet ledger remains authoritative after this
-    function returns.
-    """
-    ready = threading.Event()
-    abandoned = threading.Event()
-    started_result: dict = {}
-    startup_error: list[BaseException] = []
-
-    def on_started(result: dict) -> None:
-        started_result.update(result)
-        ready.set()
-        if abandoned.is_set():
-            # The initiating caller already timed out and reported failure; a
-            # fleet that starts anyway would be an orphan the caller cannot
-            # name, and a caller retry would then duplicate the work.  Cancel
-            # it cooperatively as soon as its durable identity is known.
-            master_id = result.get("master_id")
-            if master_id:
-                with contextlib.suppress(Exception):
-                    request_cancel(master_id)
-
-    def run() -> None:
-        try:
-            run_delegated(
-                task,
-                worker_fn=worker_fn,
-                audit_fn=audit_fn,
-                agents=agents,
-                metadata=metadata,
-                _on_started=on_started,
-                project=project,
-                worker_cap=worker_cap,
-                strategy_observer=strategy_observer,
-                build_workspace=build_workspace,
-            )
-        except Exception as exc:  # keep startup failures observable
-            master_id = started_result.get("master_id")
-            if master_id:
-                with contextlib.suppress(Exception):
-                    _finish(master_id, error=str(exc))
-            else:
-                startup_error.append(exc)
-            ready.set()
-
-    thread = Thread(
-        target=run,
-        name="sonder-master-background",
-        daemon=True,
+    """Start delegated orchestration in a daemon thread and return ledger IDs."""
+    return _execution_mod.start_delegated_background(
+        run_delegated_fn=run_delegated,
+        request_cancel_fn=request_cancel,
+        finish_fn=_finish,
+        thread_cls=Thread,
+        task=task,
+        worker_fn=worker_fn,
+        audit_fn=audit_fn,
+        agents=agents,
+        metadata=metadata,
+        startup_timeout=startup_timeout,
+        project=project,
+        worker_cap=worker_cap,
+        strategy_observer=strategy_observer,
+        build_workspace=build_workspace,
     )
-    thread.start()
-    if not ready.wait(max(0.1, float(startup_timeout))):
-        abandoned.set()
-        # Cover the race where startup completed between the wait timing out
-        # and the abandon flag being visible: cancel by the identity that
-        # on_started already published.  Exactly one of these two paths sees
-        # both the flag and the master id.
-        master_id = started_result.get("master_id")
-        if master_id:
-            with contextlib.suppress(Exception):
-                request_cancel(master_id)
-        raise RuntimeError(
-            "background fleet did not initialize its durable ledger; "
-            "any late startup will be cancelled instead of running as an orphan"
-        )
-    if startup_error:
-        raise RuntimeError("background fleet failed to start: %s" % startup_error[0])
-    result = dict(started_result)
-    result["background"] = True
-    return result
 
 
 def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
@@ -2710,53 +1284,16 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
     except Exception as exc:
         _remember_store_error(exc)
         with _LOCK:
-            rows = sorted(
-                (dict(row) for row in _AGENTS.values()),
-                key=lambda row: row.get("updated_seq") or 0,
-                reverse=True,
-            )
-            active = [
-                row for row in rows
-                if row.get("status") in ("queued", "running")
-            ]
-            listed = rows if include_finished else active
-            listed = listed[:max(1, int(limit or 20))]
-            data = {
-                "active_agents": len(active),
-                "running_agents": sum(
-                    1 for row in active if row.get("status") == "running"
-                ),
-                "queued_agents": sum(
-                    1 for row in active if row.get("status") == "queued"
-                ),
-                "active_model_calls": sum(
-                    1 for row in active if row.get("in_model_call")
-                ),
-                "cancel_pending": sum(
-                    1 for row in active if row.get("cancel_requested")
-                ),
-                "interrupted_agents": sum(
-                    1 for row in rows if row.get("status") == "interrupted"
-                ),
-                "task_drift_agents": sum(
-                    1 for row in rows if row.get("status") == "task_drift"
-                ),
-                "total_agents": len(rows),
-                "total_listed": len(listed),
-                "agents": listed,
-                "events": list(_EVENTS[-_MAX_EVENTS:]),
-                "tokens_in": sum(int(row.get("tokens_in") or 0) for row in rows),
-                "tokens_out": sum(int(row.get("tokens_out") or 0) for row in rows),
-                "latest_master_result": "",
-                "latest_master": {},
-                "stalled_agents": [],
-                "stalled_agent_count": 0,
-                "stalled_agent_total": 0,
-                "progress_deadline_seconds": float(
+            data = _capacity_mod.build_fallback_snapshot(
+                _AGENTS,
+                _EVENTS,
+                include_finished=include_finished,
+                limit=limit,
+                max_events=_MAX_EVENTS,
+                progress_deadline_seconds=float(
                     getattr(fleet_store, "progress_deadline_seconds", lambda: 120.0)()
                 ),
-                "database": "",
-            }
+            )
     from sonder_runtime.application.agents.delegation_runtime import merge_ephemeral_snapshot
     merge_ephemeral_snapshot(data, include_finished=include_finished, limit=limit)
     data["capacity"] = capacity()
@@ -2770,12 +1307,7 @@ def recovery_candidate(selector: str) -> dict | None:
 
 
 def retry_fence_available() -> bool:
-    """Whether the process-stable store carries the retry idempotency fence.
-
-    ``fleet_store`` is deliberately not hot-reloaded, so a reloaded
-    orchestrator may briefly coexist with an older store.  Callers degrade to
-    the historical unfenced behavior in that window instead of failing retries.
-    """
+    """Whether the process-stable store carries the retry idempotency fence."""
     return all(
         callable(getattr(fleet_store, name, None))
         for name in ("acquire_retry_lease", "release_retry_lease")
@@ -2874,155 +1406,12 @@ def receive_retained_agent_messages(
 
 
 def format_capacity(data: dict | None = None) -> str:
-    data = data or capacity()
-    gib = float(1024 ** 3)
-    total = float(data.get("total_memory_bytes") or 0) / gib
-    available = float(data.get("available_memory_bytes") or 0) / gib
-    gpu_total = float(data.get("gpu_total_memory_bytes") or 0) / gib
-    gpu_free = float(data.get("gpu_free_memory_bytes") or 0) / gib
-    model = float(data.get("fleet_model_bytes") or 0) / gib
-    limits = data.get("slot_limits") or {}
-    lines = [
-        "master orchestration capacity",
-        "  logical CPUs: %s | RAM: %.1f/%.1f GiB available" % (
-            data.get("logical_cpus", 0), available, total,
-        ),
-    ]
-    if gpu_total > 0:
-        # `model` is the fleet lane model's ON-DISK size (a static footprint used
-        # for the VRAM headroom calc), NOT live residency -- labeling it
-        # "resident" contradicted the live `free` reading (they could sum past
-        # the card total, and it stayed constant while the GPU was actually idle).
-        lines.append(
-            "  GPU VRAM: %.1f/%.1f GiB free | fleet model: %.2f GiB on disk" % (
-                gpu_free, gpu_total, model,
-            )
-        )
-    else:
-        lines.append("  GPU VRAM: not detected (CPU inference; bounded by CPU slots)")
-    lines.extend([
-        "  agent ceiling: %s queued | concurrent worker slots: %s" % (
-            data.get("agent_ceiling", 0), data.get("worker_slots", 0),
-        ),
-        "  automatic slots: %s | bound by: %s | source: %s" % (
-            data.get("automatic_worker_slots", 0),
-            data.get("bound_by", "?"),
-            data.get("source", "auto"),
-        ),
-        "  per-run requested cap: %s | operator/absolute ceiling: %s/%s" % (
-            data.get("requested_worker_cap", 0) or "none",
-            data.get("operator_worker_ceiling", ABSOLUTE_MAX_WORKERS),
-            data.get("absolute_worker_ceiling", ABSOLUTE_MAX_WORKERS),
-        ),
-    ])
-    if limits:
-        lines.append(
-            "  per-constraint max: %s" % ", ".join(
-                "%s=%s" % (name, limits[name]) for name in sorted(limits)
-            )
-        )
-    parallel = int(data.get("ollama_num_parallel") or 0)
-    lines.append(
-        "  ollama batch width: %s" % (
-            parallel if parallel > 0 else "unset (auto -- may serialize!)"
-        )
-    )
-    lines.append(
-        "  policy: reserve %.1f GiB RAM, %.2f GiB per worker; VRAM %.1f GiB reserved, "
-        "%.2f GiB KV cache per parallel sequence" % (
-            float(data.get("ram_reserve_bytes") or 0) / gib,
-            float(data.get("ram_per_worker_bytes") or 0) / gib,
-            GPU_RESERVE_BYTES / gib,
-            GPU_KV_CACHE_PER_WORKER_BYTES / gib,
-        )
-    )
-    warning = str(data.get("warning") or "").strip()
-    if warning:
-        lines.append("  WARNING: %s" % warning)
-    return "\n".join(lines)
+    return _capacity_mod.format_capacity(data or capacity())
 
 
 def format_snapshot(data: dict) -> str:
-    lines = [
-        "master orchestrator status",
-        "  active agents: %s" % data.get("active_agents", 0),
-        "  cancellation pending: %s" % data.get("cancel_pending", 0),
-        "  interrupted/recoverable: %s" % data.get("interrupted_agents", 0),
-        "  stalled/no-progress: %s (deadline %.1fs)" % (
-            data.get("stalled_agent_total", data.get("stalled_agent_count", 0)),
-            float(data.get("progress_deadline_seconds") or 0),
-        ),
-        "  task drift rejected: %s" % data.get("task_drift_agents", 0),
-        "  tokens in/out: %s/%s" % (data.get("tokens_in", 0), data.get("tokens_out", 0)),
-    ]
-    if data.get("database"):
-        lines.append("  persistence: shared restart-safe fleet ledger")
-    if data.get("store_error"):
-        lines.append("  persistence warning: %s" % data["store_error"][:240])
-    capacity_data = data.get("capacity") or {}
-    if capacity_data:
-        lines.append("  capacity: %s queued ceiling / %s active worker slot(s) [%s]" % (
-            capacity_data.get("agent_ceiling", 0),
-            capacity_data.get("worker_slots", 0),
-            capacity_data.get("source", "auto"),
-        ))
-    agents = data.get("agents") or []
-    if not agents:
-        lines.append("  agents: none yet")
-    for row in agents[:12]:
-        lines.append("  - %(id)s [%(status)s] %(activity)s" % row)
-        if row.get("task_drift"):
-            metrics = row.get("drift_metrics") or {}
-            lines.append(
-                "      task drift: covered=%s/%s missing=%s false_negative=%s loops=%s"
-                % (
-                    metrics.get("objectives_covered", 0),
-                    metrics.get("objectives_total", 0),
-                    metrics.get("missing_evidence", 0),
-                    metrics.get("false_negative", 0),
-                    metrics.get("repeated_tool_loop", 0),
-                )
-            )
-        if row.get("role") == "master" and row.get("requested_agents"):
-            lines.append("      schedule: %s agents / %s worker slots" % (
-                row.get("requested_agents", 0), row.get("worker_slots", 0),
-            ))
-        # Recovery lineage: make an interrupted->retried chain visible so an
-        # operator can tell a fresh failure from one already being replayed.
-        if row.get("retry_of"):
-            lines.append("      retry of: %s" % row["retry_of"])
-        retried_by = str(row.get("retried_by") or "")
-        if retried_by:
-            pending_prefix = getattr(
-                fleet_store, "RETRY_LEASE_PREFIX", "retry-pending:",
-            )
-            lines.append(
-                "      retry claimed: dispatch in progress"
-                if retried_by.startswith(pending_prefix)
-                else "      retried by: %s" % retried_by
-            )
-        lines.append("      task: %s" % (row.get("task") or "")[:180])
-        if row.get("project"):
-            lines.append("      project: %s" % row["project"])
-    latest_result = data.get("latest_master_result") or ""
-    if latest_result:
-        latest = data.get("latest_master") or {}
-        latest_id = str(latest.get("id") or "").strip()
-        latest_task = str(latest.get("task") or "").strip()
-        heading = "latest completed master result"
-        if latest_id:
-            heading += " [%s]" % latest_id
-        lines.extend(["", heading + ":"])
-        if latest_task:
-            lines.append("  task: %s" % latest_task[:240])
-        if latest.get("project"):
-            lines.append("  project: %s" % latest["project"])
-        if int(data.get("active_agents") or 0) > 0:
-            lines.append(
-                "  note: completed history; this is not the result of the active agents above"
-            )
-        lines.append(latest_result[:8000])
-    return "\n".join(lines)
+    pending_prefix = getattr(fleet_store, "RETRY_LEASE_PREFIX", "retry-pending:")
+    return _capacity_mod.format_snapshot(data, retry_lease_prefix=pending_prefix)
 
 
 def reset_for_tests() -> None:
