@@ -168,6 +168,8 @@ AGENT_TOOL_HELP: str = """Available tools:
 - read_board: {"since_seq": 0, "limit": 20, "mentions_only": false}
 - delegate_task: {"task": "<bounded subtask>", "name": "coder|scout|security|skeptic", "tier": "", "model": "", "project": "", "cwd": "", "max_steps": 8} -- depth 0 only; child runs independently and cannot delegate further
 - spawn_agents: {"tasks": [{"task": "<subtask 1>", "name": "scout"}, {"task": "<subtask 2>", "name": "coder"}], "tier": "", "model": "", "project": "", "max_steps": 8} -- depth 0 only; parallel across Main and Node1
+- ensemble_answer: {"prompt": "<question or design problem>", "tiers": "", "synth_tier": "", "num_predict": 700, "mode": "prose|code"} -- local-only multi-model synthesis; compounds answers from bound local models
+- consult: {"prompt": "<question or decision to verify>", "tiers": ""} -- local-only multi-model second opinion with agree/disagree verdict
 - offload: {"prompt": "...", "tier": "fast|code|general|reasoning|vision|cloud-code|cloud-general"}
 
 Reply with exactly one JSON object and no markdown:
@@ -382,6 +384,7 @@ PROJECT_BOUND_AGENT_TOOLS: frozenset[str] = (
         "master_capacity", "self_heal_check", "status", "system_profile_text",
         "emotion_vector_status", "preferences_status", "context_policy_status",
         "delegate_task", "spawn_agents", "report_progress", "post_to_board", "read_board",
+        "ensemble_answer", "consult",
         "environment_status", "toolchain_status", "hardware_profile",
         "tool_inventory", "output_digest", "language_matrix",
         "math_eval", "logic_verify", "regex_lab", "reasoning_board",
@@ -394,6 +397,7 @@ PROJECT_BOUND_AGENT_TOOLS: frozenset[str] = (
 CLOUD_AGENT_NESTED_MODEL_TOOLS: frozenset[str] = frozenset({
     "offload", "master_orchestrate", "master_retry", "workflow_run",
     "delegate_task", "spawn_agents",
+    "ensemble_answer", "consult",
     "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
     "ensemble_codegen_build_loop",
 })

@@ -785,6 +785,60 @@ def format_sse_chunk(
     return "data: %s\n\n" % json.dumps(obj)
 
 
+def run_http_work_slash(
+    arg: str,
+    *,
+    project: str,
+    workspace_project: Any,
+    context: Any,
+    idempotency_key: str,
+    server: Any,
+    account_boundary_refusal: Callable[..., str],
+    idempotent_action: Callable[..., Any],
+    narrate_command: Callable[..., Any],
+    fanout_owner: Callable[[Any], str],
+    fanout_role: Callable[[Any], str],
+    developer_authorized: Callable[[Any], bool],
+    invoke: Callable[[str, int, str], Any],
+) -> Any:
+    """Handle HTTP ``/work`` and ``/agent`` with optional secondary multi-model/fleet modes."""
+    from sonder_runtime.application.agents.delegation import rejected_project_refusal
+
+    parsed_mode = server._parse_agent_mode_arg(arg)
+    if parsed_mode.usage_error:
+        return parsed_mode.usage_error
+    task_boundary_error = account_boundary_refusal("workbench_agent", {}, context)
+    if task_boundary_error:
+        return task_boundary_error
+    work_project = project if workspace_project is None else workspace_project
+    rejected = rejected_project_refusal(work_project, server.served_work_project)
+    if rejected:
+        return rejected
+
+    def _run() -> Any:
+        prepared, prep_err = server._prepare_agent_mode_run(
+            arg,
+            request_owner="" if context is None else fanout_owner(context),
+            request_role="" if context is None else fanout_role(context),
+            allow_fanout=False if context is None else developer_authorized(context),
+        )
+        if prep_err:
+            return prep_err
+        return invoke(prepared.prompt, prepared.max_steps, work_project)
+
+    return idempotent_action(
+        context,
+        idempotency_key,
+        f"workbench\0{work_project}\0{arg.strip()}",
+        lambda: narrate_command(
+            "workbench_agent",
+            {"prompt": parsed_mode.task, "mode": parsed_mode.mode or "single", "project": work_project},
+            _run,
+            context,
+        ),
+    )
+
+
 __all__ = [
     "STRUCTURED_SCHEMA_KEYS",
     "STRUCTURED_SCHEMA_MAX_DEPTH",
@@ -804,6 +858,7 @@ __all__ = [
     "receipt_text",
     "request_model_selector",
     "response_format_schema",
+    "run_http_work_slash",
     "turn_reasoning",
     "uses_default_model_route",
     "validate_structured_schema",

@@ -10,6 +10,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+_STRONG_SYNTH_TIERS = frozenset({"code", "general", "creative"})
+_LIGHT_SYNTH_TIERS = frozenset({"fast", "draft"})
+DEFAULT_SLOW_SYNTH_THRESHOLD_MS = 30_000
 
 _OPEN_FENCE_RE = re.compile(r"^\s*```[A-Za-z0-9_+#.-]*\s*$")
 _CLOSE_FENCE_RE = re.compile(r"^\s*```\s*$")
@@ -134,3 +140,58 @@ def strip_code_fences(text: str) -> str:
     if _OPEN_FENCE_RE.match(lines[0]) and not any(_OPEN_FENCE_RE.match(line) for line in lines[1:]):
         return "\n".join(lines[1:]).lstrip("\r\n")
     return text
+
+
+def select_default_synth_tier(
+    answers: Sequence[Mapping[str, Any]],
+    *,
+    slow_threshold_ms: int = DEFAULT_SLOW_SYNTH_THRESHOLD_MS,
+) -> str:
+    """Pick the default synthesizer tier among answered candidates.
+
+    Historically defaults to the last answering tier.  When that tier is
+    significantly slower than other local candidates (for example a remote CPU
+    reasoning worker taking minutes while a local GPU ``code`` tier finished in
+    seconds), running synthesis on the slow tier doubles latency and can drop
+    long streaming connections.  Prefer the fastest strong answering tier
+    (``code``/``general``/``creative``) that completed at least 2x faster, or
+    any non-light faster tier, falling back to the fastest answer only when all
+    stronger tiers are slow.
+    """
+    if not answers:
+        return ""
+    last = answers[-1]
+    last_tier = str(last.get("tier") or "").strip().lower()
+    try:
+        last_ms = max(0, int(last.get("elapsed_ms") or 0))
+    except (TypeError, ValueError):
+        last_ms = 0
+    if last_ms <= slow_threshold_ms:
+        return last_tier
+
+    def _elapsed(row: Mapping[str, Any]) -> int:
+        try:
+            return max(0, int(row.get("elapsed_ms") or 0))
+        except (TypeError, ValueError):
+            return last_ms
+
+    faster = [
+        row for row in answers[:-1]
+        if str(row.get("tier") or "").strip() and _elapsed(row) * 2 < last_ms
+    ]
+    if not faster:
+        return last_tier
+    strong = [
+        row for row in faster
+        if str(row.get("tier") or "").strip().lower() in _STRONG_SYNTH_TIERS
+    ]
+    if strong:
+        best = min(strong, key=_elapsed)
+        return str(best.get("tier") or "").strip().lower()
+    non_light = [
+        row for row in faster
+        if str(row.get("tier") or "").strip().lower() not in _LIGHT_SYNTH_TIERS
+    ]
+    pool = non_light or faster
+    best = min(pool, key=_elapsed)
+    return str(best.get("tier") or "").strip().lower()

@@ -1782,22 +1782,16 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             return "usage: /weather <city/state or ZIP>"
         return server.weather_lookup(arg.strip())
     if cmd in ("/work", "/agent"):
-        if not arg.strip():
-            return "usage: /work <task>"
-        task_boundary_error = _account_task_boundary_refusal(
-            "workbench_agent", {}, context,
-        )
-        if task_boundary_error:
-            return task_boundary_error
-        work_project = project if workspace_project is None else workspace_project
-        from sonder_runtime.application.agents.delegation import rejected_project_refusal
-        if rejected := rejected_project_refusal(work_project, server.served_work_project):
-            return rejected
-        return _idempotent_http_action(
-            context, idempotency_key, "workbench\0%s\0%s" % (work_project, arg.strip()),
-            lambda: _narrate_http_command("workbench_agent", {"prompt": arg.strip(), "project": work_project}, lambda: server.workbench_agent(
-                prompt=arg.strip(), tier="auto", max_steps=12, project=work_project,
-            ), context),
+        return _chat_helpers.run_http_work_slash(
+            arg, project=project, workspace_project=workspace_project, context=context,
+            idempotency_key=idempotency_key, server=server,
+            account_boundary_refusal=_account_task_boundary_refusal,
+            idempotent_action=_idempotent_http_action, narrate_command=_narrate_http_command,
+            fanout_owner=_fanout_request_owner, fanout_role=_fanout_request_role,
+            developer_authorized=_developer_authorized,
+            invoke=lambda prompt, max_steps, work_project: server.workbench_agent(
+                prompt=prompt, tier="auto", max_steps=max_steps, project=work_project,
+            ),
         )
     if cmd == "/mkdir":
         return _control()
