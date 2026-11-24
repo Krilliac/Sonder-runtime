@@ -1038,11 +1038,12 @@
       ]
     },
     {
-      "file_count": 90,
+      "file_count": 91,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
         "sonder_runtime/bootstrap/agent_help_tools.py",
+        "sonder_runtime/bootstrap/agent_mode_wiring.py",
         "sonder_runtime/bootstrap/anthropic_cli.py",
         "sonder_runtime/bootstrap/app.py",
         "sonder_runtime/bootstrap/app_control.py",
@@ -1134,7 +1135,7 @@
       ]
     },
     {
-      "file_count": 342,
+      "file_count": 343,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1142,6 +1143,7 @@
         "sonder_runtime/domain/adaptive_concurrency.py",
         "sonder_runtime/domain/agent_escalation_identity.py",
         "sonder_runtime/domain/agent_help_parsing.py",
+        "sonder_runtime/domain/agent_modes.py",
         "sonder_runtime/domain/agent_mutation_policy.py",
         "sonder_runtime/domain/agent_observation_quality.py",
         "sonder_runtime/domain/agent_path_keys.py",

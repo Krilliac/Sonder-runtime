@@ -514,26 +514,62 @@ def dispatch_authenticated_get(
         if session_result is None:
             handler._send_not_found()
             return
-        if (
-            session_result.status_code == 200
-            and path.startswith("/v1/sessions/")
-            and isinstance(session_result.body, dict)
-            and session_result.body.get("recovered_sequence") == 0
-        ):
+        if path.startswith("/v1/sessions/"):
             parts = path.split("?", 1)[0].rstrip("/")[len("/v1/sessions/") :].split("/")
-            if len(parts) == 2 and parts[1] == "replay":
-                scoped_id = serve_mod._hosted_storage_id(context, parts[0], "session")
-                if scoped_id and scoped_id != parts[0]:
-                    alt = dispatch_session_route(
-                        facade, f"/v1/sessions/{scoped_id}/replay", query=query_params,
+            if len(parts) == 2 and parts[1] in ("replay", "transcript", "events", "export"):
+                op = parts[1]
+                needs_fallback = (
+                    (
+                        op == "replay"
+                        and session_result.status_code == 200
+                        and isinstance(session_result.body, dict)
+                        and session_result.body.get("recovered_sequence") == 0
                     )
-                    if (
-                        alt is not None
-                        and alt.status_code == 200
-                        and isinstance(alt.body, dict)
-                        and int(alt.body.get("recovered_sequence") or 0) > 0
-                    ):
-                        session_result = alt
+                    or (
+                        op == "transcript"
+                        and session_result.status_code == 404
+                    )
+                    or (
+                        op == "events"
+                        and (
+                            session_result.status_code == 404
+                            or (
+                                session_result.status_code == 200
+                                and isinstance(session_result.body, dict)
+                                and not session_result.body.get("records")
+                            )
+                        )
+                    )
+                    or (
+                        op == "export"
+                        and (
+                            session_result.status_code in (404, 409)
+                            or (
+                                session_result.status_code == 200
+                                and isinstance(session_result.body, dict)
+                                and not session_result.body.get("events")
+                                and not session_result.body.get("steps")
+                            )
+                        )
+                    )
+                )
+                if needs_fallback:
+                    scoped_id = serve_mod._hosted_storage_id(context, parts[0], "session")
+                    if scoped_id and scoped_id != parts[0]:
+                        alt = dispatch_session_route(
+                            facade, f"/v1/sessions/{scoped_id}/{op}", query=query_params,
+                        )
+                        if alt is not None and alt.status_code == 200 and isinstance(alt.body, dict):
+                            if (
+                                (op == "replay" and int(alt.body.get("recovered_sequence") or 0) > 0)
+                                or op == "transcript"
+                                or (op == "events" and bool(alt.body.get("records")))
+                                or (
+                                    op == "export"
+                                    and bool(alt.body.get("events") or alt.body.get("steps"))
+                                )
+                            ):
+                                session_result = alt
         handler._send_json_payload(
             session_result.body, status=session_result.status_code,
         )

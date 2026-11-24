@@ -980,28 +980,38 @@ def handle_chat_completions(
                 storage_session
                 and reply is not None
                 and not execution_routed
-                and not allow_slash_command
                 and isinstance(content, str)
                 and content.strip()
             ):
-                sync_turn_id = uuid.uuid4().hex
-                sync_lane = "web" if web_routed else "chat"
-                serve_mod._append_session_transcript_event(
-                    storage_session,
-                    "user.message",
-                    prompt,
-                    turn_id=sync_turn_id,
-                    request_id=handler._correlation(),
-                    extra={"lane": sync_lane},
+                _slash_cmd = (
+                    prompt.lstrip().split(None, 1)[0].lower()
+                    if isinstance(prompt, str) and prompt.lstrip().startswith("/")
+                    else ""
                 )
-                serve_mod._append_session_transcript_event(
-                    storage_session,
-                    "model.response",
-                    content,
-                    turn_id=sync_turn_id,
-                    request_id=handler._correlation(),
-                    extra={"lane": sync_lane},
-                )
+                _sensitive_slash = _slash_cmd in {
+                    "/login", "/register", "/admin_login", "/admin_register",
+                    "/admin_set_account", "/elevate", "/password", "/token",
+                    "/apikey", "/secret", "/auth", "/account",
+                }
+                if not _sensitive_slash:
+                    sync_turn_id = uuid.uuid4().hex
+                    sync_lane = "web" if web_routed else ("slash" if allow_slash_command else "chat")
+                    serve_mod._append_session_transcript_event(
+                        storage_session,
+                        "user.message",
+                        prompt,
+                        turn_id=sync_turn_id,
+                        request_id=handler._correlation(),
+                        extra={"lane": sync_lane},
+                    )
+                    serve_mod._append_session_transcript_event(
+                        storage_session,
+                        "model.response",
+                        content,
+                        turn_id=sync_turn_id,
+                        request_id=handler._correlation(),
+                        extra={"lane": sync_lane},
+                    )
     except admission_rejected_cls as rejection:
         logger.error(
             f"request admission rejected: code={rejection.code!r}, "

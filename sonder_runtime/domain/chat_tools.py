@@ -349,6 +349,41 @@ CORE_CHAT_TOOL_DEFINITIONS: tuple[ChatToolDefinition, ...] = (
         backend=TOOL_BACKEND_HOST,
     ),
     ChatToolDefinition(
+        name="ensemble_answer",
+        description=(
+            "Ask bound local models the same question independently and compound one "
+            "synthesized answer (local-only; fast local synthesis)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Question or design prompt to put to the local models."},
+                "tiers": {"type": "string", "default": "", "description": "Optional comma-separated local tiers (e.g. 'fast,code')."},
+                "synth_tier": {"type": "string", "default": "", "description": "Optional local tier to synthesize the combined answer."},
+                "num_predict": {"type": "integer", "minimum": 128, "maximum": 1000, "default": 700},
+                "mode": {"type": "string", "enum": ["prose", "code"], "default": "prose"},
+            },
+            "required": ["prompt"],
+        },
+        backend=TOOL_BACKEND_HOST,
+    ),
+    ChatToolDefinition(
+        name="consult",
+        description=(
+            "Ask bound local models independently and return each model's answer with an "
+            "agree/disagree confidence verdict (local-only second opinion)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Question or decision to cross-check across local tiers."},
+                "tiers": {"type": "string", "default": "", "description": "Optional comma-separated local tiers (e.g. 'fast,code')."},
+            },
+            "required": ["prompt"],
+        },
+        backend=TOOL_BACKEND_HOST,
+    ),
+    ChatToolDefinition(
         name="math_eval",
         description=(
             "Exact/high-precision calculator, equation & linear-system solver, matrix/vector algebra, "
