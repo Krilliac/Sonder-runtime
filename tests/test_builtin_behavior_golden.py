@@ -38,7 +38,11 @@ def _load(path: Path):
 
 def _catalog_server_stub():
     """Provide only the registry seam while retaining real catalog derivation."""
-    source_paths = [ROOT.parent / "runtime" / "server.py", ROOT.parent / "sonder_runtime" / "bootstrap" / "computer_use_tools.py"]
+    source_paths = [
+        ROOT.parent / "runtime" / "server.py",
+        ROOT.parent / "sonder_runtime" / "application" / "server_core" / "agent_prompts.py",
+        ROOT.parent / "sonder_runtime" / "bootstrap" / "computer_use_tools.py",
+    ]
     from sonder_runtime.bootstrap.agent_help_tools import discover_agent_tool_registrars
     source_paths.extend(ROOT.parent / "sonder_runtime" / "bootstrap" / (name + ".py")
                         for name, _register in discover_agent_tool_registrars())
@@ -57,14 +61,25 @@ def _catalog_server_stub():
                 break
     tools = [SimpleNamespace(name=name, description="", parameters={}) for name in sorted(set(names))]
     policies = {"_WORK_MUTATION_TOOLS": WORK_MUTATION_TOOLS}
+    policy_map = {
+        "_WORK_INSPECTION_TOOLS": "_WORK_INSPECTION_TOOLS",
+        "WORK_INSPECTION_TOOLS": "_WORK_INSPECTION_TOOLS",
+        "_UNCONFINED_ROOT_TOOLS": "_UNCONFINED_ROOT_TOOLS",
+        "UNCONFINED_ROOT_TOOLS": "_UNCONFINED_ROOT_TOOLS",
+        "REPOSITORY_READ_ONLY_TOOLS": "REPOSITORY_READ_ONLY_TOOLS",
+    }
     for node in tree.body:
-        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.value, ast.Call):
+            targets = [node.target]
+            value = node.value
+        else:
             continue
-        for target in node.targets:
-            if isinstance(target, ast.Name) and target.id in {
-                "_WORK_INSPECTION_TOOLS", "_UNCONFINED_ROOT_TOOLS", "REPOSITORY_READ_ONLY_TOOLS",
-            }:
-                policies[target.id] = frozenset(ast.literal_eval(node.value.args[0]))
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id in policy_map and value.args:
+                policies[policy_map[target.id]] = frozenset(ast.literal_eval(value.args[0]))
     assert len(policies) == 4
     return SimpleNamespace(
         mcp=SimpleNamespace(_tool_manager=SimpleNamespace(list_tools=lambda: tools)),
