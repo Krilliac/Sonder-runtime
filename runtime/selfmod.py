@@ -8,42 +8,48 @@ the rest of Sonder cannot import.
 from __future__ import annotations
 
 import contextlib
-import difflib
 import hashlib
 import json
-import keyword
 import os
 import shutil
 import socket
 import sqlite3
-import stat
 import subprocess
-import sys
-import tempfile
 import time
 import uuid
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import sonder_paths
 import sonder_logging
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
+from sonder_runtime.adapters.selfmod import (
+    backup_restore as _backup_restore,
+    verification as _verification,
+    workspace as _workspace,
+)
+from sonder_runtime.adapters.selfmod.backup_restore import (
+    ROLLBACK_RECEIPT_PREFIX,
+)
+from sonder_runtime.adapters.selfmod.verification import (
+    SMOKE_PROBE as _SMOKE_PROBE,
+    SMOKE_RECEIPT_PREFIX,
+    UNATTENDED_REQUIRED_KINDS,
+)
+from sonder_runtime.adapters.selfmod.workspace import (
+    CandidateIsolationRefused,
+    INVENTORY_EXCLUDED as _INVENTORY_EXCLUDED,
+    UNISOLATED_FLAG,
+)
 from sonder_runtime.application.selfmod.candidate_isolation import (
     ISOLATION_KINDS,
-    IsolationAttestation,
-    IsolationAttestationError,
 )
-from sonder_runtime.application.selfmod.independent_oracle import (
-    ORACLE_PROBE_KIND,
-    OracleError,
-    OracleReceipt,
-    grade_frame,
-    ledger_command as oracle_ledger_command,
-    ledger_output as oracle_ledger_output,
-    payload_nonce,
+from sonder_runtime.application.selfmod.stage_refusal import (
+    SelfmodStageNotApplied,
 )
-from sonder_runtime.application.selfmod.stage_refusal import SelfmodStageNotApplied, require_atomic_checkout_promotion
-from sonder_runtime.application.selfmod.governance import SENSITIVE_PARTS, SENSITIVE_PREFIXES
-from sonder_runtime.application.selfmod.rollback_scope import rollback_manifest
+from sonder_runtime.application.selfmod.governance import (
+    SENSITIVE_PARTS,
+    SENSITIVE_PREFIXES,
+)
 from sonder_runtime.application.evaluation import integrity as _integrity
 
 
@@ -55,8 +61,6 @@ PHASES = (
 )
 ACTIVE_PHASES = {"backed_up", "editing", "testing", "reviewing", "approved", "rollback_requested"}
 TERMINAL_PHASES = {"rejected", "restored", "cancelled"}
-# Attestations a candidate supervisor may build.  Each is accepted only from
-# the supervisor that constructs it (see ``_record_command``).
 _ISOLATED_ATTESTATIONS = ISOLATION_KINDS
 DEFAULT_BUDGETS = {
     "max_files_inspected": 80,
@@ -72,27 +76,16 @@ DEFAULT_BUDGETS = {
 DEFAULT_RETENTION_DAYS = 30
 DEFAULT_RETENTION_GB = 5.0
 LEASE_SECONDS = 180
-# Candidate functions execute in the same Python process as every challenge
-# wrapper and write the stdout the parent grades, so a public-assertion host
-# grade and its clean replay catch concrete cheats but can be forged by a
-# candidate that reads the public tests.  Unattended promotion therefore also
-# requires an independent-oracle receipt (``record_oracle_grade``): raw
-# outputs for per-run, nonce-bound inputs compared by this process with
-# expected values the candidate uid was proven unable to read, bound to the
-# exact tested candidate bytes and baseline.  See ``_oracle_admission_refusal``
-# and docs/architecture/REMAINING-SELFMOD-517-LINUX-ISOLATION.md.
 
-# The fixed set of candidate checks that must each have run and passed before
-# ``review`` may auto-approve, whatever ``require_kinds`` the caller passes:
-# the low-integrity regression partitions and held-out suite the nightly runs
-# (``scripts/nightly_selfmod.py`` ``REGRESSION_KINDS``), the parent-scored
-# host grade over public assertions, and the independent oracle.  The
-# medium-integrity partition is never run against a candidate, and the
-# nightly reports it as not evaluated, which also blocks auto-approval.
-UNATTENDED_REQUIRED_KINDS = (
-    "syntax", "regression", "regression_heavy", "held_out",
-    "host_probe", "host_grade", "oracle_probe", "oracle_grade",
-)
+# Preserve re-exported symbols and module-level seams.
+UNATTENDED_REQUIRED_KINDS = UNATTENDED_REQUIRED_KINDS
+UNISOLATED_FLAG = UNISOLATED_FLAG
+CandidateIsolationRefused = CandidateIsolationRefused
+SelfmodStageNotApplied = SelfmodStageNotApplied
+SMOKE_RECEIPT_PREFIX = SMOKE_RECEIPT_PREFIX
+ROLLBACK_RECEIPT_PREFIX = ROLLBACK_RECEIPT_PREFIX
+_SMOKE_PROBE = _SMOKE_PROBE
+_INVENTORY_EXCLUDED = _INVENTORY_EXCLUDED
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS selfmod_settings (
@@ -179,12 +172,10 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
-    # Older installations retain their test history. The new columns default
-    # to ineligible so old output strings cannot become isolation evidence.
     for table, column, declaration in (
         ("selfmod_runs", "auto_evaluation_eligible", "INTEGER NOT NULL DEFAULT 0"),
         ("selfmod_tests", "isolation", "TEXT NOT NULL DEFAULT 'unverified'"),
-        ("selfmod_runs", "created_by", "TEXT NOT NULL DEFAULT ''"),  # old rows: unattributed
+        ("selfmod_runs", "created_by", "TEXT NOT NULL DEFAULT ''"),
     ):
         if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
@@ -220,33 +211,15 @@ def _event(conn, run_id, kind, details):
 
 
 def _sha(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return _backup_restore.sha256_file(path)
 
 
 def _rel(root: Path, path) -> str:
-    raw = str(path or "").replace("\\", "/").strip().lstrip("/")
-    if not raw or raw in {".", ".."} or "\x00" in raw:
-        raise ValueError("file path must name a repository-relative file")
-    candidate = (root / raw).resolve(strict=False)
-    try:
-        relative = candidate.relative_to(root.resolve())
-    except ValueError as exc:
-        raise ValueError("file path escapes authorized repository") from exc
-    if any(part in {".git", ".hg", ".svn"} for part in relative.parts):
-        raise ValueError("version-control metadata cannot be modified")
-    return relative.as_posix()
+    return _workspace.rel_path(root, path)
 
 
 def _protected(path: str) -> bool:
-    lowered = path.lower().replace("\\", "/")
-    return (
-        any(lowered == p.lower() or lowered.startswith(p.lower()) for p in SENSITIVE_PREFIXES)
-        or any(part in lowered for part in SENSITIVE_PARTS)
-    )
+    return _workspace.is_protected(path)
 
 
 def protected_paths():
@@ -297,9 +270,6 @@ def _git(root: Path, *args, timeout=30):
             if value and value.strip()
         )
     else:
-        # Successful Git commands may still emit advisory CRLF or fsmonitor
-        # warnings on stderr. Structured callers parse stdout as refs or file
-        # names, so never let advisory text enter that data channel.
         output = (result.stdout or "").strip()
     return result.returncode, output[:100_000]
 
@@ -325,51 +295,15 @@ def _git_info(root: Path):
 
 
 def _source_fingerprint(root: Path, files, git_status=""):
-    rows = [git_status]
-    for rel in sorted(files):
-        path = root / rel
-        rows.append("%s:%s" % (rel, _sha(path) if path.is_file() else "<missing>"))
-    return hashlib.sha256("\n".join(rows).encode()).hexdigest()
+    return _workspace.source_fingerprint(root, files, git_status)
 
 
 def _dirty_paths(status):
-    paths = set()
-    for line in str(status or "").splitlines():
-        pieces = line.strip().split(maxsplit=1)
-        value = pieces[1] if len(pieces) == 2 else ""
-        for item in value.split(" -> "):
-            if item:
-                paths.add(item.strip('"').replace("\\", "/"))
-    return paths
-
-
-# Directories whose test_*.py files are not this project's test surface. Without
-# them, _test_inventory over the repo root picked up 2,349 test files inside
-# venv/ (measured) -- so the review baseline, taken from the root, was never a
-# subset of a candidate's venv-less Git worktree, and "test inventory was
-# weakened" fired on every git-mode review. That made review structurally
-# unsatisfiable for ALL callers: 0 of 78 runs ever reached the reviewing phase.
-_INVENTORY_EXCLUDED = frozenset({
-    ".git", "venv", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache",
-    ".ruff_cache", "node_modules", "build", "dist", ".tooling", "workspaces",
-    "site-packages",
-})
+    return _workspace.dirty_paths(status)
 
 
 def _test_inventory(root: Path):
-    inventory = []
-    for path in root.rglob("test_*.py"):
-        if not path.is_file():
-            continue
-        # Exclude on the path RELATIVE to root, never the absolute parts: a
-        # candidate worktree itself lives under a "workspaces/" directory, so
-        # matching absolute parts against the exclusion set emptied every
-        # worktree inventory (0 files) and made the subset check fail the
-        # opposite way.
-        rel = path.relative_to(root)
-        if not _INVENTORY_EXCLUDED.intersection(rel.parts):
-            inventory.append(rel.as_posix())
-    return sorted(inventory)
+    return _workspace.test_inventory(root)
 
 
 def settings():
@@ -550,126 +484,35 @@ def _backup_dir(run_id):
 
 
 def create_backup(run_id):
-    run = get_run(run_id)
-    if run["phase"] != "proposed":
-        raise RuntimeError("backup requires proposed phase")
-    root = Path(run["repository_root"])
-    bundle = _backup_dir(run_id)
-    if bundle.exists():
-        raise RuntimeError("backup bundle already exists")
-    files_dir = bundle / "files"
-    files_dir.mkdir(parents=True, exist_ok=False)
-    records = []
-    try:
-        for rel in run["files"]:
-            source = root / rel
-            existed = source.is_file()
-            destination = files_dir / rel
-            record = {
-                "path": rel, "existed_before": existed,
-                "sha256_before": _sha(source) if existed else None,
-                "size_before": source.stat().st_size if existed else 0,
-                "mode_before": stat.S_IMODE(source.stat().st_mode) if existed else None,
-                "backup_path": str(destination) if existed else None,
-                "sha256_backup": None,
-            }
-            if existed:
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
-                # The bundle is sealed below, but keep the individual backup
-                # writable until sealing completes so integrity checks and
-                # controlled corruption tests can operate on the artifact.
-                if os.name != "nt":
-                    with contextlib.suppress(OSError):
-                        os.chmod(destination, 0o600)
-                record["sha256_backup"] = _sha(destination)
-                if record["sha256_backup"] != record["sha256_before"]:
-                    raise RuntimeError("backup hash mismatch for %s" % rel)
-            records.append(record)
-        manifest = {
-            "run_id": run_id, "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "repository_root": str(root), "starting_commit": run["starting_commit"],
-            "files": records,
-        }
-        manifest_path = bundle / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        manifest_hash = _sha(manifest_path)
-        (bundle / "manifest.sha256").write_text(manifest_hash + "\n", encoding="ascii")
-        if os.name != "nt":
-            for path in sorted(bundle.rglob("*"), reverse=True):
-                with contextlib.suppress(OSError):
-                    os.chmod(path, 0o500 if path.is_dir() else 0o400)
-            os.chmod(bundle, 0o500)
-    except Exception:
-        shutil.rmtree(bundle, ignore_errors=True)
-        raise
-    with _tx() as conn:
-        for record in records:
-            conn.execute(
-                "INSERT INTO selfmod_backups VALUES(?,?,?,?,?,?,?,?)",
-                (run_id, record["path"], int(record["existed_before"]), record["sha256_before"],
-                 record["size_before"], record["mode_before"], record["backup_path"], record["sha256_backup"]),
-            )
-    updated = _phase(run_id, {"proposed"}, "backed_up", "backup", "tamper-evident backup verified", backup_manifest=str(manifest_path))
-    verify_backup(run_id)
-    return updated
+    hooks = _backup_restore.BackupHooks(
+        get_run=get_run,
+        backup_dir=_backup_dir,
+        tx=_tx,
+        phase=_phase,
+        verify_backup=verify_backup,
+    )
+    return _backup_restore.create_backup(run_id, hooks=hooks)
 
 
 def _load_manifest(run_id):
-    bundle = _backup_dir(run_id)
-    manifest_path = bundle / "manifest.json"
-    checksum_path = bundle / "manifest.sha256"
-    if not manifest_path.is_file() or not checksum_path.is_file():
-        raise RuntimeError("backup manifest/checksum missing")
-    expected = checksum_path.read_text(encoding="ascii").strip()
-    if not expected or _sha(manifest_path) != expected:
-        raise RuntimeError("backup manifest is corrupted")
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except ValueError as exc:
-        raise RuntimeError("backup manifest JSON is corrupted") from exc
-    if manifest.get("run_id") != run_id:
-        raise RuntimeError("backup run identity mismatch")
-    return manifest
+    return _backup_restore.load_manifest(run_id, backup_dir_fn=_backup_dir)
 
 
 def verify_backup(run_id):
-    manifest = _load_manifest(run_id)
-    for record in manifest.get("files", []):
-        if not record.get("existed_before"):
-            continue
-        path = Path(record.get("backup_path") or "")
-        if not path.is_file() or _sha(path) != record.get("sha256_backup") or record.get("sha256_backup") != record.get("sha256_before"):
-            raise RuntimeError("backup verification failed for %s" % record.get("path"))
-    with _tx() as conn:
-        _event(conn, run_id, "backup_verified", "%d file records verified" % len(manifest.get("files", [])))
-    return manifest
+    return _backup_restore.verify_backup(
+        run_id, load_manifest_fn=_load_manifest, tx_fn=_tx, event_fn=_event,
+    )
 
 
 def prepare_workspace(run_id):
-    run = get_run(run_id)
-    if run["phase"] != "backed_up":
-        raise RuntimeError("workspace preparation requires verified backup")
-    root = Path(run["repository_root"])
-    destination = workspaces_root() / run_id
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        raise RuntimeError("candidate workspace already exists")
-    git_mode, commit, _ = _git_info(root)
-    branch = "selfmod/%s" % run_id
-    if git_mode and commit:
-        code, output = _git(root, "worktree", "add", "--detach", str(destination), commit, timeout=120)
-        if code:
-            raise RuntimeError("could not create isolated Git worktree: %s" % output)
-        code, output = _git(destination, "switch", "-c", branch)
-        if code:
-            _git(root, "worktree", "remove", "--force", str(destination))
-            raise RuntimeError("could not create selfmod branch: %s" % output)
-    else:
-        ignore = shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", ".venv*", "venv*")
-        shutil.copytree(root, destination, ignore=ignore)
-        branch = ""
-    return _phase(run_id, {"backed_up"}, "editing", "workspace", "isolated candidate workspace created", workspace_path=str(destination), branch_name=branch)
+    return _workspace.prepare_workspace(
+        run_id,
+        get_run_fn=get_run,
+        workspaces_root_fn=workspaces_root,
+        git_info_fn=_git_info,
+        git_fn=_git,
+        phase_fn=_phase,
+    )
 
 
 def candidate_path(run_id):
@@ -681,96 +524,25 @@ def candidate_path(run_id):
 
 
 def apply_candidate_changes(run_id, changes):
-    """Apply already-authorized file contents inside the isolated workspace."""
-    run = get_run(run_id)
-    if run["phase"] != "editing":
-        raise RuntimeError("candidate edits require editing phase")
-    if run["mode"] == "observe":
-        raise PermissionError("observe mode cannot edit")
-    workspace = candidate_path(run_id)
-    allowed = set(run["files"])
-    if len(changes) > run["budgets"]["max_files_changed"]:
-        raise ValueError("change set exceeds file budget")
-    for raw, content in changes.items():
-        rel = _rel(workspace, raw)
-        if rel not in allowed:
-            raise PermissionError("candidate attempted an unrelated file: %s" % rel)
-        if _protected(rel) and not run["maintenance_authorized"]:
-            raise PermissionError("candidate attempted a protected file: %s" % rel)
-        target = workspace / rel
-        if content is None:
-            if target.exists():
-                target.unlink()
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        encoded = str(content).encode("utf-8")
-        # mkstemp creates 0600.  Keep the replaced file's mode (0644 for a new
-        # file) so a candidate evaluated as a distinct uid can read, but not
-        # write, the bytes under test, and a deploy does not narrow the mode.
-        mode = stat.S_IMODE(target.stat().st_mode) if target.is_file() else 0o644
-        fd, tmp_name = tempfile.mkstemp(prefix=target.name + ".selfmod-", dir=target.parent)
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(encoded)
-                stream.flush()
-                os.fsync(stream.fileno())
-            if os.name != "nt":
-                os.chmod(tmp_name, mode)
-            os.replace(tmp_name, target)
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp_name)
-    with _tx() as conn:
-        _event(conn, run_id, "edit", "candidate changed: %s" % ", ".join(sorted(changes)))
-    return inspect_diff(run_id)
+    return _workspace.apply_candidate_changes(
+        run_id,
+        changes,
+        get_run_fn=get_run,
+        candidate_path_fn=candidate_path,
+        tx_fn=_tx,
+        event_fn=_event,
+        inspect_diff_fn=inspect_diff,
+    )
 
 
 def _workspace_diff(run):
-    root = Path(run["repository_root"])
-    workspace = candidate_path(run["id"])
-    lines = []
-    changed = []
-    additions = deletions = 0
-    for rel in run["files"]:
-        before_path, after_path = root / rel, workspace / rel
-        before = before_path.read_text(encoding="utf-8", errors="replace").splitlines(True) if before_path.is_file() else []
-        after = after_path.read_text(encoding="utf-8", errors="replace").splitlines(True) if after_path.is_file() else []
-        if before == after:
-            continue
-        changed.append(rel)
-        diff = list(difflib.unified_diff(before, after, fromfile="a/" + rel, tofile="b/" + rel))
-        lines.extend(diff)
-        additions += sum(1 for line in diff if line.startswith("+") and not line.startswith("+++"))
-        deletions += sum(1 for line in diff if line.startswith("-") and not line.startswith("---"))
-    return "".join(lines), changed, additions, deletions
+    return _workspace.workspace_diff(run, candidate_path_fn=candidate_path)
 
 
 def _all_candidate_changes(run):
-    root, workspace = Path(run["repository_root"]), candidate_path(run["id"])
-    git_mode, _, _ = _git_info(workspace)
-    if git_mode:
-        code1, tracked = _git(workspace, "diff", "--name-only", "HEAD")
-        code2, untracked = _git(workspace, "ls-files", "--others", "--exclude-standard")
-        if code1 or code2:
-            raise RuntimeError("could not inventory candidate changes")
-        return sorted({
-            rel for line in (tracked + "\n" + untracked).splitlines()
-            if line.strip()
-            for rel in [line.strip().replace("\\", "/")]
-            if not any(part in {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"} for part in Path(rel).parts)
-            and not rel.endswith((".pyc", ".pyo"))
-        })
-    paths = set()
-    for base in (root, workspace):
-        for path in base.rglob("*"):
-            if path.is_file() and not any(part in {".git", "__pycache__", ".pytest_cache"} for part in path.parts):
-                paths.add(path.relative_to(base).as_posix())
-    changed = []
-    for rel in paths:
-        before, after = root / rel, workspace / rel
-        if before.is_file() != after.is_file() or (before.is_file() and _sha(before) != _sha(after)):
-            changed.append(rel)
-    return sorted(changed)
+    return _workspace.all_candidate_changes(
+        run, candidate_path_fn=candidate_path, git_info_fn=_git_info, git_fn=_git,
+    )
 
 
 def inspect_diff(run_id):
@@ -823,28 +595,11 @@ def tested_digests(run_id):
 
 
 def _discard_candidate_bytecode(workspace: Path) -> None:
-    """Make the first candidate verdict describe bound source, not stale pyc."""
-    for directory in workspace.rglob("__pycache__"):
-        if directory.is_symlink():
-            raise RuntimeError("candidate bytecode cache is a symlink")
-        if directory.is_dir():
-            shutil.rmtree(directory)
-    for pattern in ("*.pyc", "*.pyo"):
-        for path in workspace.rglob(pattern):
-            if path.is_symlink():
-                raise RuntimeError("candidate bytecode is a symlink")
-            if path.is_file():
-                path.unlink()
+    _workspace.discard_candidate_bytecode(workspace)
 
 
 def begin_testing(run_id):
-    """Enter testing and bind the candidate bytes that the tests will see.
-
-    The record is written by this (host) process before any check can run,
-    because checks may only be recorded in the testing phase. Re-entering
-    after an interruption must find the same bytes; otherwise earlier results
-    would describe different code, so the run fails closed.
-    """
+    """Enter testing and bind the candidate bytes that the tests will see."""
     _discard_candidate_bytecode(candidate_path(run_id))
     snapshot = _candidate_snapshot(run_id)
     existing = tested_digests(run_id)
@@ -863,135 +618,37 @@ def begin_testing(run_id):
 
 
 def _auto_candidate(run) -> bool:
-    """Whether ``run`` is eligible for unattended low-risk evaluation."""
-    return (
-        run.get("mode") == "auto-low-risk" and run.get("risk") == "low"
-        and not run.get("approval_required", True)
-    )
+    return _verification.auto_candidate(run)
 
 
 def _record_command(
     run, kind, command, cwd_path, seconds, expect_failure=False, receipt=None,
     protected_paths=(), low_integrity=None, isolation=None,
 ):
-    run_id = run["id"]
-    isolation_failed = False
-    attestation = "unverified"
-    typed_attestation = None
-    # ``low_integrity`` is explicit for unattended candidate checks.  Keep the
-    # environment fallback for older callers and operators that already opt in
-    # through the process environment, but do not make nightly's choice a
-    # process-global side effect.
-    auto_candidate = _auto_candidate(run) and kind != "reproducer_before"
-    if auto_candidate and low_integrity is False:
-        raise PermissionError("auto-low-risk candidate tests require low-integrity isolation")
-    use_low_integrity = auto_candidate or (
-        os.environ.get("SELFMOD_LOW_INTEGRITY") == "1"
-        if low_integrity is None else bool(low_integrity)
+    def _supervisor():
+        from scripts.selfmod_linux_isolation import candidate_supervisor
+        return candidate_supervisor()
+
+    hooks = _verification.RecordCommandHooks(
+        candidate_supervisor=_supervisor,
+        linux_isolation_unconfigured=_linux_isolation_unconfigured,
+        run_cmd=_run,
+        tx=_tx,
+        event=_event,
     )
-    # Instruction/memory/conftest/task-test files are digested around each candidate check.
-    watch = None if kind == "reproducer_before" else _integrity.ProtectedWriteWatch.start(run.get("workspace_path") or cwd_path)
-    if use_low_integrity:
-        started = time.monotonic()
-        expected = "low"
-        try:
-            # Windows low-integrity Job, or (once a dedicated candidate uid is
-            # configured on Linux) the uid-separated supervisor.  Only the
-            # attestation the selected supervisor builds is accepted.
-            from scripts.selfmod_linux_isolation import candidate_supervisor
-            run_isolated, expected = candidate_supervisor()
-            isolated = run_isolated(
-                command, cwd=cwd_path, timeout=seconds,
-                protected_paths=protected_paths, **dict(isolation or {}),
-            )
-            code = int(isolated["exit_code"])
-            output = str(isolated.get("output") or "")
-            job = isolated.get("job")
-            # The selected supervisor, not the candidate's stdout, constructs
-            # this report from the kernel's view of the candidate.  A
-            # missing/conflicting report is an isolation failure even if
-            # candidate-controlled output claims isolation or exit 0.  The
-            # typed attestation is re-derived here from the report; one the
-            # supervisor attached must agree with it.
-            try:
-                typed = IsolationAttestation.from_supervisor_result(
-                    isolated, expected_kind=expected,
-                    supervisor_uid=os.geteuid() if hasattr(os, "geteuid") else None,
-                )
-            except IsolationAttestationError:
-                raise RuntimeError("invalid supervisor attestation") from None
-            supplied = isolated.get("attestation")
-            if supplied is not None and supplied != typed:
-                raise RuntimeError("invalid supervisor attestation")
-            if typed.integrity_failed:
-                raise RuntimeError("evaluator integrity failed")
-            attestation = expected
-            typed_attestation = typed
-            output = (output + "\nSELFMOD ISOLATION: %s\n" % _json(job))[-100_000:]
-        except Exception as exc:
-            # A missing token/ACL/Job capability rejects this check.  It
-            # cannot accidentally count as a successful negative reproducer.
-            code = 125
-            known = type(exc) is RuntimeError and str(exc) in {
-                "invalid supervisor attestation", "evaluator integrity failed",
-            }
-            if expected == "linux-uid":
-                # The Linux supervisor's fail-closed errors carry host facts
-                # (not root, uid in use, candidate-writable truth), never
-                # candidate output.
-                reason = str(exc)[:300] if isinstance(exc, RuntimeError) else type(exc).__name__
-            elif os.name != "nt":
-                reason = "unsupported platform"
-                if sys.platform.startswith("linux"):
-                    # The Windows supervisor is selected on Linux only when
-                    # no dedicated candidate uid is configured; say how to
-                    # configure the Linux boundary instead.
-                    reason += "; %s" % _linux_isolation_unconfigured()
-            else:
-                reason = str(exc) if known else type(exc).__name__
-            output = "%s isolation unavailable: %s" % (
-                "linux-uid" if expected == "linux-uid" else "low-integrity", reason,
-            )
-            isolation_failed = True
-        duration = int((time.monotonic() - started) * 1000)
-    else:
-        code, output, duration = _run(command, cwd_path, seconds)
-    passed = (code not in (0, 124, 125) if expect_failure else code == 0) and not isolation_failed
-    if receipt is not None and passed and receipt not in output:
-        # "It exited 0" is not "it did the thing". The receipt is computed by
-        # this process from the candidate on disk and is deliberately never
-        # handed to the child, so a probe that returns success without doing
-        # the work -- or that prints a fabricated line -- is refused here.
-        passed = False
-        output = (
-            "%s\nSELFMOD %s GATE REFUSED: the probe exited %s but did not report the "
-            "receipt it could only produce by examining the candidate.\n"
-            "  expected: %s"
-            % (output, str(kind).upper(), code, receipt)
-        )[:100_000]
-    writes = watch.finish() if watch is not None else ()
-    if writes:
-        passed, output = False, (output + _integrity.protected_write_note(kind, writes))[-100_000:]
-    stored_command, stored_output = list(command), output
-    if kind == ORACLE_PROBE_KIND:
-        # The challenge names the held inputs and a passing output is the
-        # held expected values; the ledger (served by /selfmod tests) keeps
-        # only their nonce and digests.  The caller grades the in-memory
-        # result, which ``record_oracle_grade`` binds to this row.
-        stored_command, stored_output = oracle_ledger_command(command), oracle_ledger_output(output)
-    with _tx() as conn:
-        cursor = conn.execute(
-            "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts,isolation) VALUES(?,?,?,?,?,?,?,?,?)",
-            (run_id, str(kind)[:80], _json(stored_command), code, duration, stored_output, int(passed), time.time(), attestation),
-        )
-        test_id = getattr(cursor, "lastrowid", None)
-        if writes:  # a failing row that names the writes; review refuses the run
-            conn.execute(*_integrity.protected_write_row(run_id, test_id, kind, writes, attestation, time.time()))
-        _event(conn, run_id, "test", "%s exit=%s expected=%s duration_ms=%s" % (kind, code, "failure" if expect_failure else "success", duration))
-    return {"kind": kind, "command": list(command), "exit_code": code,
-            "duration_ms": duration, "output": output, "passed": passed,
-            "test_id": test_id, "isolation": attestation,
-            "attestation": typed_attestation}
+    return _verification.record_command(
+        run,
+        kind,
+        command,
+        cwd_path,
+        seconds,
+        expect_failure=expect_failure,
+        receipt=receipt,
+        protected_paths=protected_paths,
+        low_integrity=low_integrity,
+        isolation=isolation,
+        hooks=hooks,
+    )
 
 
 def _linux_isolation_unconfigured() -> str:
@@ -1003,40 +660,8 @@ def _linux_isolation_unconfigured() -> str:
     return UNCONFIGURED_GUIDANCE
 
 
-class CandidateIsolationRefused(PermissionError):
-    """An operator-driven candidate check cannot run behind an isolation boundary.
-
-    Raised before any run, backup, workspace or candidate process exists when
-    this host has no usable candidate supervisor (on Linux: no dedicated
-    candidate uid, or a supervisor that is not root) and the caller has no
-    attended opt-in to run the candidate unisolated.  ``reason`` is the host
-    fact behind the refusal; it never quotes candidate output.
-    """
-
-    def __init__(self, message: str, *, reason: str):
-        super().__init__(message)
-        self.reason = reason
-
-
-# The explicit per-command flag an attended console operator adds to
-# ``/selfmod run`` to accept an unisolated candidate on a host that has no
-# candidate supervisor.  It is honoured only with a console operator attached
-# (``server.control_command(operator_approved=True)``, set only by the REPL).
-UNISOLATED_FLAG = "--unisolated"
-
-
 def candidate_isolation_refusal() -> str | None:
-    """Why this host cannot isolate candidate checks, else ``None``.
-
-    The same host facts every candidate-running driver consults before it
-    creates anything: the selected supervisor's preflight (Linux, a root
-    supervisor, ``no_new_privs``, a configured spare unprivileged uid; on
-    Windows the low-integrity supervisor proves its own boundary per command)
-    and, when the Linux uid supervisor is selected, that the selfmod ledger
-    (baseline, tested digests, decisions) and its directory chain are closed
-    to the candidate uid.  ``run_isolated`` re-checks the boundary for every
-    command, so ``None`` here never authorizes a launch by itself.
-    """
+    """Why this host cannot isolate candidate checks, else ``None``."""
     from scripts import selfmod_linux_isolation
 
     refusal = selfmod_linux_isolation.candidate_isolation_preflight()
@@ -1055,72 +680,20 @@ def candidate_isolation_refusal() -> str | None:
 def operator_candidate_isolation(
     *, unisolated_requested: bool, operator_attended: bool, run_id: str = "",
 ) -> bool:
-    """Choose isolation for an operator-driven run: ``True`` isolated, ``False`` not.
-
-    A host with a candidate supervisor always isolates, whatever was asked.
-    Without one the run is refused (``CandidateIsolationRefused``) unless all
-    of these hold: the operator typed ``--unisolated`` for this command, a
-    console operator is attached (HTTP, MCP and piped callers never are),
-    ``SELFMOD_LOW_INTEGRITY=1`` is not demanding isolation for this process,
-    and the run is not an ``auto-low-risk`` candidate (those always require
-    isolation).  With ``run_id`` the decision is written to the run's audit
-    events.
-    """
-    refusal = candidate_isolation_refusal()
-    if refusal is None:
-        choice, detail = True, "candidate checks run under the selected candidate supervisor"
-    else:
-        remedy = (
-            "configure candidate isolation, or, at an attended console, rerun "
-            "/selfmod run with %s to accept an unisolated candidate" % UNISOLATED_FLAG
-        )
-        if not unisolated_requested:
-            raise CandidateIsolationRefused(
-                "candidate isolation unavailable, no candidate run started: %s; %s"
-                % (refusal, remedy), reason=refusal,
-            )
-        if not operator_attended:
-            raise CandidateIsolationRefused(
-                "candidate isolation unavailable and %s requires an attended console "
-                "operator; HTTP, MCP and unattended callers cannot run a candidate "
-                "unisolated: %s" % (UNISOLATED_FLAG, refusal), reason=refusal,
-            )
-        if os.environ.get("SELFMOD_LOW_INTEGRITY") == "1":
-            raise CandidateIsolationRefused(
-                "candidate isolation unavailable and SELFMOD_LOW_INTEGRITY=1 requires "
-                "isolated candidate checks in this process: %s" % refusal, reason=refusal,
-            )
-        if run_id and _auto_candidate(get_run(run_id)):
-            raise CandidateIsolationRefused(
-                "candidate isolation unavailable and auto-low-risk candidate tests "
-                "require isolation: %s" % refusal, reason=refusal,
-            )
-        choice = False
-        detail = "attended console operator accepted an unisolated candidate (%s): %s" % (
-            UNISOLATED_FLAG, refusal[:300])
-    if run_id:
-        with _tx() as conn:
-            _event(conn, run_id, "isolation", detail)
-    return choice
+    return _workspace.operator_candidate_isolation(
+        unisolated_requested=unisolated_requested,
+        operator_attended=operator_attended,
+        run_id=run_id,
+        refusal_fn=candidate_isolation_refusal,
+        get_run_fn=get_run,
+        auto_candidate_fn=_auto_candidate,
+        tx_fn=_tx,
+        event_fn=_event,
+    )
 
 
 def evaluator_truth_paths(run_id, extra=()) -> tuple[str, ...]:
-    """Evaluator truth every candidate check of ``run_id`` must leave untouched.
-
-    ``extra`` (for example a held-out snapshot) followed by the rollback point:
-    the sealed backup bundle and its manifest, which also records the baseline
-    hashes.  Supervisors refuse to launch when any of these is
-    candidate-writable (Linux) and re-digest them after each check.
-    """
-    paths = [str(path) for path in extra]
-    bundle = _backup_dir(run_id)
-    if bundle.is_dir():
-        paths.append(str(bundle))
-        # The Windows supervisor digests files only; name them explicitly.
-        for name in ("manifest.json", "manifest.sha256"):
-            if (bundle / name).is_file():
-                paths.append(str(bundle / name))
-    return tuple(dict.fromkeys(paths))
+    return _workspace.evaluator_truth_paths(run_id, extra, backup_dir_fn=_backup_dir)
 
 
 def record_reproducer_before(run_id, command, timeout=None):
@@ -1152,37 +725,15 @@ def record_test(
 
 
 def record_host_grade(run_id, probe_id, *, passed: bool, detail: str) -> dict:
-    """Persist a parent-owned verdict bound to a successful low-integrity probe.
-
-    The host owns this comparison and the row it is linked to, rather than
-    trusting a pytest exit status. The candidate still controls its reported
-    function output and can read public tests, so a passing grade alone
-    cannot authorize unattended promotion; that also needs an independent
-    oracle receipt (``record_oracle_grade``).
-    """
-    run = get_run(run_id)
-    if run["phase"] != "testing":
-        raise RuntimeError("host grade requires testing phase")
-    with _tx() as conn:
-        probe = conn.execute(
-            "SELECT kind,passed,isolation FROM selfmod_tests WHERE run_id=? AND id=?",
-            (run_id, probe_id),
-        ).fetchone()
-        if (probe is None or probe["kind"] != "host_probe" or not probe["passed"]
-                or probe["isolation"] not in _ISOLATED_ATTESTATIONS):
-            raise PermissionError("host grade requires a passing attested probe")
-        prior = conn.execute(
-            "SELECT id FROM selfmod_tests WHERE run_id=? AND kind='host_grade'", (run_id,),
-        ).fetchone()
-        if prior is not None:
-            raise RuntimeError("host grade was already recorded")
-        conn.execute(
-            "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts,isolation) VALUES(?,?,?,?,?,?,?,?,?)",
-            (run_id, "host_grade", _json({"probe_id": probe_id}), 0 if passed else 1,
-             0, str(detail)[:100_000], int(bool(passed)), time.time(), probe["isolation"]),
-        )
-        _event(conn, run_id, "host_grade", "parent-scored challenge %s" % ("passed" if passed else "failed"))
-    return {"kind": "host_grade", "passed": bool(passed), "detail": str(detail)[:100_000]}
+    return _verification.record_host_grade(
+        run_id,
+        probe_id,
+        passed=passed,
+        detail=detail,
+        get_run_fn=get_run,
+        tx_fn=_tx,
+        event_fn=_event,
+    )
 
 
 def _baseline_binding(run):
@@ -1190,302 +741,77 @@ def _baseline_binding(run):
     manifest = _load_manifest(run["id"])
     if manifest.get("starting_commit") != run["starting_commit"]:
         raise RuntimeError("backup manifest names a different starting commit")
-    return {"starting_commit": run["starting_commit"] or "",
-            "manifest_sha256": _sha(_backup_dir(run["id"]) / "manifest.json")}
+    return {
+        "starting_commit": run["starting_commit"] or "",
+        "manifest_sha256": _sha(_backup_dir(run["id"]) / "manifest.json"),
+    }
 
 
 def record_oracle_grade(run_id, probe, *, challenge, loaded, attestation,
                         confidential: bool, read_denied: bool) -> dict:
-    """Grade an oracle probe in this (evaluator) process and record the receipt.
-
-    ``probe`` is the in-memory result ``record_test`` returned for the
-    ``oracle_probe`` check, ``challenge`` the parent-held per-run challenge
-    and ``loaded`` the evaluator-held case set
-    (``scripts.selfmod_oracle.LoadedCaseSet``).  The ledger row of that
-    probe stores only the nonce and digests of the challenge and output, so
-    the in-memory argv and output must reproduce exactly those digests
-    (they are the attested run's), the argv must carry this challenge's
-    nonce, the case file must still have the digest it was loaded with, and
-    the tested candidate bytes must be unchanged.  The durable receipt binds
-    the verdict to those candidate digests, the baseline and the probe's
-    supervisor attestation.  Only a ``linux-uid`` probe with a proven read
-    denial yields an independent receipt; that is what ``review`` requires
-    for unattended promotion.
-    """
     from scripts import selfmod_oracle
 
-    run = get_run(run_id)
-    if run["phase"] != "testing":
-        raise RuntimeError("oracle grade requires testing phase")
-    probe_id = probe.get("test_id") if isinstance(probe, dict) else None
-    command, output = (probe.get("command"), probe.get("output")) if isinstance(probe, dict) else (None, None)
-    if type(probe_id) is not int or not isinstance(command, list) or not isinstance(output, str):
-        raise PermissionError("oracle grade requires the recorded oracle probe result")
-    candidate = _candidate_snapshot(run_id)
-    if tested_digests(run_id) != candidate:
-        raise RuntimeError("oracle grade requires the tested candidate bytes")
-    baseline = _baseline_binding(run)
-    if selfmod_oracle.current_digest(loaded.path) != loaded.sha256:
-        raise RuntimeError("held oracle case set changed after it was loaded")
-    typed = attestation if isinstance(attestation, IsolationAttestation) else None
-    with _tx() as conn:
-        row = conn.execute(
-            "SELECT kind,passed,isolation,output,command_json FROM selfmod_tests WHERE run_id=? AND id=?",
-            (run_id, probe_id),
-        ).fetchone()
-        if (row is None or row["kind"] != ORACLE_PROBE_KIND
-                or row["isolation"] not in _ISOLATED_ATTESTATIONS
-                or typed is None or typed.kind != row["isolation"]):
-            raise PermissionError("oracle grade requires an attested oracle probe")
-        if (row["command_json"] != _json(oracle_ledger_command(command))
-                or row["output"] != oracle_ledger_output(output)
-                or bool(row["passed"]) is not bool(probe.get("passed"))):
-            raise PermissionError("oracle probe result does not match its ledger row")
-        if payload_nonce(command) != challenge.nonce:
-            raise PermissionError("oracle probe row was not issued for this challenge")
-        if conn.execute(
-            "SELECT 1 FROM selfmod_oracle_receipts WHERE run_id=?", (run_id,),
-        ).fetchone() is not None:
-            raise RuntimeError("oracle grade was already recorded")
-        probe_passed = bool(row["passed"])
-        verdict = grade_frame(output if probe_passed else "", challenge, loaded.case_set)
-        detail = verdict.detail if probe_passed else "oracle probe did not exit cleanly"
-        receipt = OracleReceipt(
-            run_id=run_id, probe_id=probe_id, attestation=typed.kind,
-            candidate_uid=typed.candidate_uid, supervisor_uid=typed.supervisor_uid,
-            case_set_sha256=loaded.sha256, case_count=verdict.case_count,
-            matched=verdict.matched, nonce=challenge.nonce,
-            outputs_sha256=verdict.outputs_sha256 if probe_passed else None,
-            confidential=bool(confidential), read_denied=bool(confidential and read_denied),
-            passed=bool(verdict.passed and probe_passed),
-            candidate=candidate, baseline=baseline,
-        )
-        text = receipt.to_json()
-        conn.execute(
-            "INSERT INTO selfmod_oracle_receipts VALUES(?,?,?,?,?,?,?)",
-            (run_id, probe_id, int(receipt.passed), int(receipt.independent), text,
-             receipt.digest(), time.time()),
-        )
-        summary = "%s; independent=%s; receipt sha256=%s" % (
-            detail, "yes" if receipt.independent else "no", receipt.digest())
-        conn.execute(
-            "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts,isolation) VALUES(?,?,?,?,?,?,?,?,?)",
-            (run_id, "oracle_grade", _json({"probe_id": probe_id}),
-             0 if receipt.passed else 1, 0, summary, int(receipt.passed), time.time(),
-             row["isolation"]),
-        )
-        _event(conn, run_id, "oracle_grade", "independent oracle %s (independent=%s)" % (
-            "passed" if receipt.passed else "failed", receipt.independent))
-    return {"kind": "oracle_grade", "passed": receipt.passed,
-            "independent": receipt.independent, "detail": detail,
-            "receipt_sha256": receipt.digest()}
-
-
-def oracle_receipt(run_id):
-    """The run's oracle receipt, or ``None``; an inconsistent row raises.
-
-    ``receipt_sha256`` is an unkeyed digest stored in the same row, so this
-    check proves only that the row is canonical and self-consistent (it
-    catches corruption and partial edits).  It is not a seal: a writer who
-    can edit the row can recompute it.  The receipt's integrity rests on the
-    ledger being closed to the candidate uid, which the nightly refuses to
-    run without (``scripts/nightly_selfmod.py`` ``_isolation_refusal``).
-    """
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT passed,independent,receipt_json,receipt_sha256 FROM selfmod_oracle_receipts WHERE run_id=?",
-            (run_id,),
-        ).fetchone()
-    if row is None:
-        return None
-    receipt = OracleReceipt.from_json(row["receipt_json"])
-    if (receipt.digest() != row["receipt_sha256"] or receipt.run_id != run_id
-            or bool(row["passed"]) is not receipt.passed
-            or bool(row["independent"]) is not receipt.independent):
-        raise OracleError("oracle receipt does not match its recorded digest")
-    return receipt
-
-
-def _oracle_admission_refusal(run_id, run):
-    """Why the independent oracle does not authorize unattended promotion, else ``None``."""
-    try:
-        receipt = oracle_receipt(run_id)
-        if receipt is None:
-            return "no independent oracle receipt"
-        tested = tested_digests(run_id)
-        if tested is None or tested != _candidate_snapshot(run_id):
-            return "candidate bytes changed after testing began"
-        return receipt.admission_refusal(candidate=tested, baseline=_baseline_binding(run))
-    except (OracleError, RuntimeError, OSError, ValueError) as exc:
-        return "oracle receipt could not be verified (%s)" % type(exc).__name__
-
-
-SMOKE_RECEIPT_PREFIX = "SELFMOD-SMOKE-RECEIPT"
-
-# Executed by a child process rooted at the candidate workspace, so the bytes
-# that answer are the candidate's own. It imports every declared module that
-# still exists, confirms every declared module that was deleted is genuinely
-# unreachable, and reports a SHA-256 over what it actually loaded.
-#
-# The expected digest is computed by the parent and is never passed in here.
-# That is deliberate: the check this replaced -- `assert Path('.').is_dir()` --
-# was a required gate that could not fail, and replacing it with anything whose
-# only evidence is an exit code would rebuild the same defect one layer up.
-_SMOKE_PROBE = r"""
-import hashlib
-import importlib
-import importlib.util
-import json
-import os
-import pathlib
-import sys
-
-sys.path.insert(0, os.getcwd())
-plan = json.loads(sys.argv[1])
-root = pathlib.Path(os.getcwd()).resolve()
-digest = hashlib.sha256()
-failures = []
-
-for index, rel in enumerate(plan["present"]):
-    name = plan["names"].get(rel)
-    try:
-        if name:
-            module = importlib.import_module(name)
-        else:
-            loader = importlib.util.spec_from_file_location(
-                "_selfmod_smoke_%d" % index, root / rel
-            )
-            module = importlib.util.module_from_spec(loader)
-            loader.loader.exec_module(module)
-    except BaseException as exc:
-        failures.append("%s: %s: %s" % (rel, type(exc).__name__, exc))
-        continue
-    source = getattr(module, "__file__", None)
-    if not source:
-        failures.append("%s: imported but reports no __file__" % rel)
-        continue
-    source = pathlib.Path(source).resolve()
-    if not source.is_relative_to(root):
-        failures.append(
-            "%s: import resolved outside the candidate workspace: %s" % (rel, source)
-        )
-        continue
-    digest.update(b"import\0" + rel.encode("utf-8") + b"\0")
-    digest.update(hashlib.sha256(source.read_bytes()).hexdigest().encode("ascii") + b"\n")
-
-for rel in plan["absent"]:
-    name = plan["names"].get(rel)
-    if (root / rel).exists():
-        failures.append("%s: declared deleted but still present" % rel)
-        continue
-    try:
-        resolved = importlib.util.find_spec(name) if name else None
-    except BaseException:
-        resolved = None
-    if resolved is not None:
-        failures.append("%s: deleted module still resolves as %r" % (rel, name))
-        continue
-    digest.update(b"gone\0" + rel.encode("utf-8") + b"\n")
-
-if failures:
-    sys.stdout.write("SELFMOD SMOKE FAILED -- the candidate does not run:\n")
-    for line in failures:
-        sys.stdout.write("  %s\n" % line)
-    raise SystemExit(1)
-
-sys.stdout.write(
-    "SELFMOD-SMOKE-RECEIPT %s modules=%d gone=%d\n"
-    % (digest.hexdigest(), len(plan["present"]), len(plan["absent"]))
-)
-"""
-
-
-def _module_name(rel: str):
-    """Dotted import name for a repo-relative .py path, or None if it has none."""
-    parts = tuple(PurePosixPath(rel).parts)
-    if not parts or not parts[-1].endswith(".py"):
-        return None
-    parts = parts[:-1] if parts[-1] == "__init__.py" else parts[:-1] + (parts[-1][:-3],)
-    if not parts:
-        return None
-    if not all(part.isidentifier() and not keyword.iskeyword(part) for part in parts):
-        return None
-    return ".".join(parts)
-
-
-def smoke_plan(run_id):
-    """Split the run's declared Python surface into must-import and must-be-gone."""
-    run = get_run(run_id)
-    workspace = candidate_path(run_id)
-    declared = sorted(path for path in run["files"] if path.lower().endswith(".py"))
-    present = [path for path in declared if (workspace / path).is_file()]
-    absent = [path for path in declared if not (workspace / path).is_file()]
-    names = {path: _module_name(path) for path in declared}
-    return {
-        "workspace": workspace,
-        "declared": declared,
-        "present": present,
-        "absent": absent,
-        "names": {key: value for key, value in names.items() if value},
-    }
-
-
-def _smoke_receipt(workspace: Path, present, absent) -> str:
-    digest = hashlib.sha256()
-    for rel in present:
-        digest.update(b"import\0" + rel.encode("utf-8") + b"\0")
-        digest.update(_sha(workspace / rel).encode("ascii") + b"\n")
-    for rel in absent:
-        digest.update(b"gone\0" + rel.encode("utf-8") + b"\n")
-    return "%s %s modules=%d gone=%d" % (
-        SMOKE_RECEIPT_PREFIX, digest.hexdigest(), len(present), len(absent),
+    hooks = _verification.OracleGradeHooks(
+        get_run=get_run,
+        candidate_snapshot=_candidate_snapshot,
+        tested_digests=tested_digests,
+        baseline_binding=_baseline_binding,
+        current_case_digest=selfmod_oracle.current_digest,
+        tx=_tx,
+        event=_event,
+    )
+    return _verification.record_oracle_grade(
+        run_id,
+        probe,
+        challenge=challenge,
+        loaded=loaded,
+        attestation=attestation,
+        confidential=confidential,
+        read_denied=read_denied,
+        hooks=hooks,
     )
 
 
+def oracle_receipt(run_id):
+    return _verification.load_oracle_receipt(run_id, connect_fn=_connect)
+
+
+def _oracle_admission_refusal(run_id, run):
+    return _verification.oracle_admission_refusal(
+        run_id,
+        run,
+        oracle_receipt_fn=oracle_receipt,
+        tested_digests_fn=tested_digests,
+        candidate_snapshot_fn=_candidate_snapshot,
+        baseline_binding_fn=_baseline_binding,
+    )
+
+
+def _module_name(rel: str):
+    return _verification.module_name(rel)
+
+
+def smoke_plan(run_id):
+    return _verification.smoke_plan(
+        run_id, get_run_fn=get_run, candidate_path_fn=candidate_path,
+    )
+
+
+def _smoke_receipt(workspace: Path, present, absent) -> str:
+    return _verification.smoke_receipt(workspace, present, absent)
+
+
 def record_smoke(run_id, *, timeout=None, protected_paths=(), low_integrity=None, isolation=None):
-    """Run the candidate, and require proof that it was the candidate that ran.
-
-    `review()` requires a passing ``smoke`` check.  It once only asserted that
-    the workspace directory existed: a required gate that could not fail.
-    What runs instead is bounded and offline (a stdlib child process: no
-    network, model or operator) and writes nothing; it fails by naming the
-    module and the exception.
-
-    ``low_integrity``, ``protected_paths`` and ``isolation`` select the
-    candidate supervisor exactly as for ``record_test``: the probe imports the
-    candidate, so an operator-driven run isolates it like every other check.
-    """
-    run = get_run(run_id)
-    if run["phase"] != "testing":
-        raise RuntimeError("tests may run only in testing phase")
-    plan = smoke_plan(run_id)
-    seconds = min(int(timeout or run["budgets"]["max_test_seconds"]), run["budgets"]["max_test_seconds"])
-    workspace = plan["workspace"]
-
-    if not plan["declared"]:
-        # An empty target set is the same defect wearing a different hat: a
-        # check with nothing to examine that reports success anyway.
-        message = (
-            "selfmod smoke gate: this run declares no Python file (%s), so there is "
-            "nothing for a smoke check to execute. An empty target set is a refusal, "
-            "not a pass -- declare the module the change actually affects."
-            % (", ".join(run["files"]) or "no files")
-        )
-        return _record_command(
-            run, "smoke", [sys.executable, "-c", "raise SystemExit(%r)" % message],
-            workspace, seconds, protected_paths=protected_paths,
-            low_integrity=low_integrity, isolation=isolation,
-        )
-
-    payload = _json({
-        "present": plan["present"], "absent": plan["absent"], "names": plan["names"],
-    })
-    command = [sys.executable, "-c", _SMOKE_PROBE, payload]
-    receipt = _smoke_receipt(workspace, plan["present"], plan["absent"])
-    return _record_command(
-        run, "smoke", command, workspace, seconds, receipt=receipt,
-        protected_paths=protected_paths, low_integrity=low_integrity,
+    return _verification.record_smoke(
+        run_id,
+        timeout=timeout,
+        protected_paths=protected_paths,
+        low_integrity=low_integrity,
         isolation=isolation,
+        smoke_probe_script=_SMOKE_PROBE,
+        get_run_fn=get_run,
+        smoke_plan_fn=smoke_plan,
+        record_command_fn=_record_command,
     )
 
 
@@ -1496,127 +822,27 @@ def test_results(run_id):
 
 
 def _backup_rehearsal(run_id):
-    manifest = verify_backup(run_id)
-    with tempfile.TemporaryDirectory(prefix="sonder-selfmod-rehearse-") as temp:
-        root = Path(temp)
-        for record in manifest["files"]:
-            target = root / record["path"]
-            if record["existed_before"]:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(record["backup_path"], target)
-                if _sha(target) != record["sha256_before"]:
-                    return False
-            elif target.exists():
-                target.unlink()
-    return True
+    return _backup_restore.backup_rehearsal(run_id, verify_backup_fn=verify_backup)
 
 
 def review(run_id, *, require_kinds=None, unevaluated=()):
-    """Deterministic acceptance review.
-
-    ``unevaluated`` names checks the caller deliberately did not run against
-    the candidate. A run with any unevaluated check can pass review but is
-    never auto-approved: it stops at ``reviewing`` for a human.
-    """
-    unevaluated = tuple(str(item)[:300] for item in (unevaluated or ()))
-    run = get_run(run_id)
-    if run["phase"] != "testing":
-        raise RuntimeError("review requires testing phase")
-    diff = inspect_diff(run_id)
-    results = test_results(run_id)
-    failures = []
-    required = set(require_kinds or ("reproducer_before", "syntax", "targeted", "regression", "smoke"))
-    if run["maintenance_authorized"]:
-        required.add("security")
-    seen = {row["kind"] for row in results if row["passed"]}
-    if required - seen:
-        failures.append("missing passing checks: %s" % ", ".join(sorted(required - seen)))
-    if any(not row["passed"] for row in results):
-        failures.append("one or more recorded checks failed")
-    failures.extend(_integrity.review_refusals(results))  # name cheat trials / protected writes
-    # Only demand a demonstrated pre-existing failure when the caller's
-    # require_kinds actually asks for one. This check sat OUTSIDE the
-    # `required` filter, so passing require_kinds could not waive it -- which
-    # defeated the point of require_kinds and made review impossible for a
-    # caller (like the nightly improvement loop) whose changes are additions,
-    # not bug fixes with a failing test to reproduce first.
-    if "reproducer_before" in required:
-        baseline = [row for row in results if row["kind"] == "reproducer_before"]
-        if not baseline or not any(
-            row["exit_code"] not in (None, 0) and row["passed"] for row in baseline
-        ):
-            failures.append("original failure was not demonstrated before editing")
-    if not diff["changed_files"]:
-        failures.append("candidate produced no scoped diff")
-    tested = tested_digests(run_id)
-    if tested is None:
-        failures.append("no tested-bytes record")
-    elif tested != _candidate_snapshot(run_id):
-        failures.append("candidate bytes changed after testing began")
-    if any(_protected(path) for path in diff["changed_files"]) and not run["maintenance_authorized"]:
-        failures.append("protected file modified")
-    manifest = verify_backup(run_id)
-    existing_tests = {
-        record["path"] for record in manifest["files"]
-        if record["existed_before"] and (
-            record["path"].startswith("tests/")
-            or Path(record["path"]).name.startswith("test_")
-        )
-    }
-    weakened_surface = existing_tests & set(diff["changed_files"])
-    if weakened_surface:
-        failures.append(
-            "pre-existing required tests were modified: %s"
-            % ", ".join(sorted(weakened_surface))
-        )
-    after_inventory = _test_inventory(candidate_path(run_id))
-    before_inventory = set(run["test_inventory_before"])
-    if not before_inventory.issubset(set(after_inventory)):
-        failures.append("test inventory was weakened")
-    if not _backup_rehearsal(run_id):
-        failures.append("rollback rehearsal failed")
-    candidate_results = [row for row in results if row["kind"] != "reproducer_before"]
-    host_grades = [row for row in candidate_results if row["kind"] == "host_grade"]
-    oracle_grades = [row for row in candidate_results if row["kind"] == "oracle_grade"]
-    if any(not row["passed"] for row in oracle_grades):
-        failures.append("independent oracle failed")
-    # Unattended promotion needs every existing gate AND an independent
-    # oracle receipt bound to these tested bytes and this baseline.
-    oracle_refusal = _oracle_admission_refusal(run_id, run)
-    # ``require_kinds`` is the caller's acceptance set and may be narrow; the
-    # unattended floor is fixed so no caller can reach auto-approval without
-    # the regression partitions, the held-out suite and both parent-scored
-    # grades having run and passed against these bytes.
-    unattended_missing = sorted(set(UNATTENDED_REQUIRED_KINDS) - {
-        row["kind"] for row in candidate_results if row["passed"]})
-    auto_eligible = bool(
-        oracle_refusal is None and len(oracle_grades) == 1 and not unattended_missing
-        and not failures and not unevaluated and candidate_results
-        and run["mode"] == "auto-low-risk" and run["risk"] == "low"
-        and not run["approval_required"]
-        and len(host_grades) == 1 and host_grades[0]["passed"]
-        and all(row["isolation"] in _ISOLATED_ATTESTATIONS for row in candidate_results)
+    hooks = _verification.ReviewHooks(
+        get_run=get_run,
+        inspect_diff=inspect_diff,
+        test_results=test_results,
+        tested_digests=tested_digests,
+        candidate_snapshot=_candidate_snapshot,
+        verify_backup=verify_backup,
+        candidate_path=candidate_path,
+        backup_rehearsal=_backup_rehearsal,
+        oracle_admission_refusal=_oracle_admission_refusal,
+        phase=_phase,
+        restore=restore,
+        approve=approve,
     )
-    target = "rejected" if failures else "reviewing"
-    passed_note = "deterministic acceptance checks passed"
-    if unevaluated:
-        passed_note += "; NOT EVALUATED (human review required): " + "; ".join(unevaluated)
-    elif run["mode"] == "auto-low-risk" and not auto_eligible and not failures:
-        passed_note += "; independent evaluator authority unverified (%s; human review required)" % (
-            oracle_refusal
-            or ("unattended gates not passed: %s" % ", ".join(unattended_missing)
-                if unattended_missing else "an existing unattended gate is unmet"))
-    _phase(
-        run_id, {"testing"}, target, "review",
-        "; ".join(failures) if failures else passed_note[:1000],
-        test_inventory_after=_json(after_inventory), last_error="; ".join(failures),
-        auto_evaluation_eligible=int(auto_eligible),
+    return _verification.review_run(
+        run_id, require_kinds=require_kinds, unevaluated=unevaluated, hooks=hooks,
     )
-    if failures:
-        restore(run_id, from_candidate_only=True)
-    elif auto_eligible:
-        approve(run_id, approver="host:auto-low-risk")
-    return get_run(run_id)
 
 
 def approve(run_id, approver="user"):
@@ -1657,8 +883,6 @@ def _deployment_owner_stale(row, now=None):
     if not row["owner_id"]:
         return True
     if row["owner_host"] == socket.gethostname():
-        # Never steal a local lock from a demonstrably live process merely
-        # because a long health check crossed the lease timestamp.
         return not _pid_alive(row["owner_pid"])
     return float(row["lease_until"] or 0) < now
 
@@ -1691,9 +915,6 @@ def deployment_lock(run_id, owner_id=None):
         row = conn.execute("SELECT * FROM selfmod_deployment_lock WHERE id=1").fetchone()
         stale = _deployment_owner_stale(row, now)
         if not stale:
-            # Refused before this caller changed anything: the stage journal
-            # settles it as not applied, so a retry after the holder finishes
-            # is admitted.
             raise SelfmodStageNotApplied("another deployment/rollback holds the process-safe lock")
         conn.execute(
             "UPDATE selfmod_deployment_lock SET owner_id=?,owner_pid=?,owner_host=?,lease_until=?,run_id=? WHERE id=1",
@@ -1718,33 +939,11 @@ def _current_source_matches(run):
 
 
 def _atomic_copy(source: Path, target: Path, mode=None):
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=target.name + ".restore-", dir=target.parent)
-    try:
-        with os.fdopen(fd, "wb") as out, source.open("rb") as inp:
-            shutil.copyfileobj(inp, out)
-            out.flush()
-            os.fsync(out.fileno())
-        if mode is not None and os.name != "nt":
-            os.chmod(temp_name, int(mode))
-        os.replace(temp_name, target)
-    finally:
-        with contextlib.suppress(OSError):
-            os.unlink(temp_name)
+    _backup_restore.atomic_copy(source, target, mode)
 
 
 def _manifest_live_mismatches(manifest):
-    """Return backed-up paths whose live bytes or existence no longer match."""
-    root = Path(manifest["repository_root"])
-    mismatches = []
-    for record in manifest["files"]:
-        target = root / record["path"]
-        if record["existed_before"]:
-            if not target.is_file() or _sha(target) != record["sha256_before"]:
-                mismatches.append(record["path"])
-        elif target.exists():
-            mismatches.append(record["path"])
-    return mismatches
+    return _backup_restore.manifest_live_mismatches(manifest)
 
 
 def _restore_manifest_files(manifest):
@@ -1763,457 +962,121 @@ def _restore_manifest_files(manifest):
 
 
 def _record_deployed_files(run_id, root, paths):
-    records = []
-    for rel in paths:
-        target = Path(root) / rel
-        existed = target.is_file()
-        mode = target.stat().st_mode & 0o777 if target.exists() else None
-        records.append((rel, existed, _sha(target) if existed else None, mode))
-    with _tx() as conn:
-        conn.execute("DELETE FROM selfmod_deployed_files WHERE run_id=?", (run_id,))
-        conn.executemany(
-            "INSERT INTO selfmod_deployed_files(run_id,path,existed_after,sha256_after,mode_after,recorded_ts) VALUES(?,?,?,?,?,?)",
-            [
-                (run_id, rel, int(existed), digest, mode, time.time())
-                for rel, existed, digest, mode in records
-            ],
-        )
-        _event(conn, run_id, "deployed_hashes", "%d deployed paths recorded" % len(records))
-    return records
+    return _backup_restore.record_deployed_files(
+        run_id, root, paths, tx_fn=_tx, event_fn=_event,
+    )
 
 
 def _deployed_file_mismatches(run_id):
-    run = get_run(run_id)
-    root = Path(run["repository_root"])
-    with _connect() as conn:
-        rows = conn.execute(
-            "SELECT path,existed_after,sha256_after,mode_after FROM selfmod_deployed_files WHERE run_id=? ORDER BY path",
-            (run_id,),
-        ).fetchall()
-    if not rows:
-        return ["deployed state was not recorded"]
-    mismatches = []
-    for row in rows:
-        target = root / row["path"]
-        existed = bool(row["existed_after"])
-        if existed:
-            if not target.is_file() or _sha(target) != row["sha256_after"]:
-                mismatches.append(row["path"])
-            elif (
-                os.name != "nt"
-                and row["mode_after"] is not None
-                and target.stat().st_mode & 0o777 != int(row["mode_after"])
-            ):
-                mismatches.append(row["path"])
-        elif target.exists():
-            mismatches.append(row["path"])
-    return mismatches
+    return _backup_restore.deployed_file_mismatches(
+        run_id, get_run_fn=get_run, connect_fn=_connect,
+    )
 
 
 def _remove_bytecode_cache(target: Path):
-    if target.suffix != ".py":
-        return
-    cache = target.parent / "__pycache__"
-    if not cache.is_dir():
-        return
-    for path in cache.glob(target.stem + ".*.py[co]"):
-        with contextlib.suppress(OSError):
-            path.unlink()
-
-
-ROLLBACK_RECEIPT_PREFIX = "SELFMOD-ROLLBACK-RECEIPT"
+    _backup_restore.remove_bytecode_cache(target)
 
 
 def _receipt_digest(pairs):
-    digest = hashlib.sha256()
-    for path, content_sha in sorted(pairs):
-        digest.update(path.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update((content_sha or "-").encode("ascii"))
-        digest.update(b"\n")
-    return digest.hexdigest()
+    return _backup_restore.receipt_digest(pairs)
 
 
 def expected_rollback_receipt(run_id):
-    """The receipt a working rollback must reproduce, derived here, not there.
-
-    Computed by the process that is *doing* the deployment, from the backup
-    manifest, and deliberately never passed to the probe. A deployed
-    ``verify_rollback_ready`` that has been reduced to a no-op cannot print a
-    value it was never told.
-    """
-    manifest = _load_manifest(run_id)
-    records = manifest.get("files") or []
-    if not records:
-        raise RuntimeError("backup manifest records no files; a rollback would restore nothing")
-    pairs = [
-        (record["path"], record["sha256_before"] if record["existed_before"] else "")
-        for record in records
-    ]
-    return _receipt_digest(pairs), len(records)
+    return _backup_restore.expected_rollback_receipt(
+        run_id, load_manifest_fn=_load_manifest,
+    )
 
 
 def _probe_digest(root, records):
-    """Digest the bytes a dry-run rollback actually put on disk.
-
-    Re-derived from the restored files rather than from the manifest, so a
-    restore that silently skipped a path cannot match.
-    """
-    pairs = []
-    for record in records:
-        target = Path(root) / record["path"]
-        if record["existed_before"]:
-            if not target.is_file():
-                raise RuntimeError("rollback did not restore %s" % record["path"])
-            pairs.append((record["path"], _sha(target)))
-        else:
-            if target.exists():
-                raise RuntimeError("rollback did not remove %s" % record["path"])
-            pairs.append((record["path"], ""))
-    return _receipt_digest(pairs)
+    return _backup_restore.probe_digest(root, records)
 
 
 def verify_rollback_ready(run_id):
-    """Dry-run both rollback routes against a throwaway tree; print a receipt.
-
-    Run by the *deployed* code, in a child process, after the new bytes are in
-    place -- which is the only position from which "can this installation still
-    undo itself?" is a real question. It exercises the machinery a rollback
-    actually uses:
-
-    * the in-tree route, ``rollback()`` -> ``restore()`` -> the manifest walk in
-      ``_restore_manifest_files``, redirected at a temporary directory; and
-    * the out-of-tree route, ``selfmod_recover.restore``, driven through its own
-      manifest bundle so its checksum gate, backup verification and path
-      confinement all execute.
-
-    Both must return the exact pre-deploy bytes, and both must agree.
-
-    It writes only inside that temporary directory, so it may fail without
-    changing anything: the caller then rolls back using the code it already has
-    loaded, which is by construction the code from before the deployment.
-
-    Scope, stated plainly: this catches a rollback that is *broken*. It is not a
-    defence against a deployed tree that deliberately forges its own receipt.
-    Nothing that runs inside the tree can settle that.
-    """
     import selfmod_recover
 
-    manifest = verify_backup(run_id)
-    records = manifest.get("files") or []
-    if not records:
-        raise RuntimeError("backup manifest records no files; a rollback would restore nothing")
-    stale = _deployed_file_mismatches(run_id)
-    if stale:
-        raise RuntimeError(
-            "rollback would refuse before it started; deployed bytes already diverge: %s"
-            % ", ".join(stale)
-        )
-    with tempfile.TemporaryDirectory(prefix="sonder-selfmod-rollback-probe-") as temp:
-        scratch = Path(temp)
-        intree = scratch / "intree"
-        intree.mkdir()
-        _restore_manifest_files(dict(manifest, repository_root=str(intree)))
-        intree_digest = _probe_digest(intree, records)
-
-        emergency_root = scratch / "emergency"
-        emergency_root.mkdir()
-        bundle = scratch / "bundle"
-        bundle.mkdir()
-        # The emergency entry point deliberately confines backups to the
-        # manifest bundle. Build a complete temporary bundle for this probe;
-        # reusing the production backup paths would make the probe fail its
-        # own containment contract before exercising restoration.
-        probe_records = []
-        for record in records:
-            probe_record = dict(record)
-            if record["existed_before"]:
-                backup = bundle / "files" / record["path"]
-                backup.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(record["backup_path"], backup)
-                probe_record["backup_path"] = str(backup)
-            probe_records.append(probe_record)
-        manifest_path = bundle / "manifest.json"
-        manifest_path.write_text(
-            json.dumps(
-                dict(manifest, repository_root=str(emergency_root), files=probe_records),
-                indent=2,
-                sort_keys=True,
-            ) + "\n",
-            encoding="utf-8",
-        )
-        (bundle / "manifest.sha256").write_text(_sha(manifest_path) + "\n", encoding="ascii")
-        restored_root = selfmod_recover.restore(manifest_path)
-        if Path(restored_root).resolve() != emergency_root.resolve():
-            raise RuntimeError(
-                "emergency recovery restored into %s, not the probe's scratch tree" % restored_root
-            )
-        emergency_digest = _probe_digest(emergency_root, records)
-
-    if intree_digest != emergency_digest:
-        raise RuntimeError(
-            "the two rollback routes disagree: in-tree %s vs emergency %s"
-            % (intree_digest, emergency_digest)
-        )
-    receipt = "%s intree=%s recover=%s files=%d" % (
-        ROLLBACK_RECEIPT_PREFIX, intree_digest, emergency_digest, len(records),
+    hooks = _backup_restore.RollbackVerifyHooks(
+        verify_backup=verify_backup,
+        deployed_file_mismatches=_deployed_file_mismatches,
+        restore_manifest_files=_restore_manifest_files,
+        emergency_restore=selfmod_recover.restore,
     )
-    print(receipt)
-    return receipt
+    return _backup_restore.verify_rollback_ready(run_id, hooks=hooks)
 
 
 def rollback_probe_command(run_id):
-    """Argv for the probe, with the deployed tree first on ``sys.path``.
-
-    ``.`` is the repository being deployed to, so when that tree carries its own
-    ``selfmod``/``selfmod_recover`` -- which is the case this check exists for --
-    the probe runs the *just-written* bytes. The deploying process's own
-    ``sys.path`` follows as a fallback, so a repository that is not itself a
-    Sonder installation still gets a real dry-run rollback from the running
-    module rather than a `ModuleNotFoundError` dressed up as a broken rollback.
-    """
-    fallback = [entry for entry in sys.path if entry]
-    # Generic child commands intentionally lose all SONDER_* configuration.
-    # This host-generated probe needs only the resolved state locators: pin
-    # them before importing deployed code, including an in-process home
-    # override or paths relative to the deploying process's working directory.
-    probe_state = {
-        "SONDER_SELFMOD_HOME": str(state_root().resolve()),
-        "SONDER_SELFMOD_DB": str(database_path().resolve()),
-    }
-    return [
-        sys.executable, "-c",
-        "import os, sys; os.environ.update(%r); "
-        "sys.path[:0] = ['.']; sys.path.extend(%r); import selfmod; "
-        "selfmod.verify_rollback_ready(%r)" % (probe_state, fallback, str(run_id)),
-    ]
-
-
-def _rollback_probe_detail(code, output, expected_receipt):
-    tail = [line.strip() for line in (output or "").splitlines() if line.strip()]
-    if code:
-        return tail[-1] if tail else "the probe exited %s with no output" % code
-    return (
-        "the probe exited 0 but did not report a matching rollback receipt; "
-        "expected %r" % expected_receipt
+    return _backup_restore.rollback_probe_command(
+        run_id, state_root_fn=state_root, database_path_fn=database_path,
     )
 
 
+def _rollback_probe_detail(code, output, expected_receipt):
+    return _backup_restore.rollback_probe_detail(code, output, expected_receipt)
+
+
 def _verify_deployed_rollback(run_id, root, timeout):
-    """Adjudicated here, performed there. Returns (ok, detail, probe, ...)."""
-    probe = []
-    # Anything that stops this from producing a verdict is itself a failure to
-    # verify, and must reach the rollback path rather than escape as an
-    # exception the caller's generic handler will decline to restore from --
-    # the run is already `deployed` by this point, so an unhandled error here
-    # would leave exactly the unverified deployment this check exists to stop.
-    try:
-        probe = rollback_probe_command(run_id)
-        digest, count = expected_rollback_receipt(run_id)
-        expected = "%s intree=%s recover=%s files=%d" % (ROLLBACK_RECEIPT_PREFIX, digest, digest, count)
-        code, output, duration = _run(probe, root, timeout)
-    except Exception as exc:
-        return False, "rollback verification could not run: %s: %s" % (type(exc).__name__, exc), probe, 1, str(exc), 0
-    ok = code == 0 and expected in (output or "")
-    detail = "" if ok else _rollback_probe_detail(code, output, expected)
-    return ok, detail, probe, code, output, duration
+    return _backup_restore.verify_deployed_rollback(
+        run_id,
+        root,
+        timeout,
+        probe_command_fn=rollback_probe_command,
+        expected_receipt_fn=expected_rollback_receipt,
+        run_fn=_run,
+    )
 
 
 def _digest_mismatches(workspace: Path, changed_files, expected_digests) -> list:
-    """Return changed files whose candidate bytes differ from ``expected_digests``."""
-    expected = {str(key): value for key, value in dict(expected_digests).items()}
-    names = set(str(item) for item in changed_files) | set(expected)
-    mismatched = []
-    for rel in sorted(names):
-        path = Path(workspace) / rel
-        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
-        if rel not in expected or actual != expected[rel]:
-            mismatched.append(rel)
-    return mismatched
+    return _backup_restore.digest_mismatches(workspace, changed_files, expected_digests)
 
 
 def deploy(run_id, *, health_command=None, commit=True, expected_digests=None):
-    """Install an approved single-file candidate.
-
-    The tested-bytes record from begin_testing() is required, and every
-    changed file's SHA-256 is checked before copying and again on the
-    installed bytes. ``expected_digests`` (optional) must equal that record.
-    This applies to every caller, including a human approval deployed later.
-    """
-    run = get_run(run_id)
-    if run["phase"] != "approved":
-        raise SelfmodStageNotApplied("deployment requires explicit/host approval")
-    with deployment_lock(run_id) as deployment_owner:
-        # Every precondition below is checked before the first live byte is
-        # replaced, so a refusal here is ``SelfmodStageNotApplied``: nothing
-        # was deployed and the operator may fix the cause and retry.  Only
-        # failures inside the mutation block below can leave live source
-        # changed.
-        try:
-            if get_run(run_id)["phase"] != "approved":  # re-read under the lock: a cancel() that won the race
-                raise SelfmodStageNotApplied("run left the approved phase before deployment")
-            verify_backup(run_id)
-            ok, conflict = _current_source_matches(run)
-            if not ok:
-                raise SelfmodStageNotApplied(conflict)
-            diff = inspect_diff(run_id)
-            require_atomic_checkout_promotion(diff["changed_files"])
-            _renew_deployment_lock(deployment_owner)
-            if set(diff["changed_files"]) - set(run["files"]):
-                raise SelfmodStageNotApplied("candidate diff no longer matches approved scope")
-            root, workspace = Path(run["repository_root"]), candidate_path(run_id)
-            tested = tested_digests(run_id)
-            if tested is None:
-                raise SelfmodStageNotApplied(
-                    "deployment requires a tested-bytes record; run was never bound")
-            if expected_digests is not None and dict(expected_digests) != tested["files"]:
-                raise SelfmodStageNotApplied("caller digests do not match the tested-bytes record")
-            expected_digests = tested["files"]
-            mismatched = _digest_mismatches(workspace, diff["changed_files"], expected_digests)
-            if mismatched:
-                raise SelfmodStageNotApplied(
-                    "candidate bytes differ from tested bytes: %s" % ", ".join(mismatched)
-                )
-        except SelfmodStageNotApplied:
-            raise
-        except RuntimeError as exc:
-            # verify_backup/inspect_diff/lease renewal refusals: still before
-            # any live byte changed.
-            raise SelfmodStageNotApplied(str(exc)) from exc
-        try:
-            for rel in diff["changed_files"]:
-                source, target = workspace / rel, root / rel
-                if source.is_file():
-                    mode = target.stat().st_mode & 0o777 if target.exists() else source.stat().st_mode & 0o777
-                    _atomic_copy(source, target, mode)
-                    _remove_bytecode_cache(target)
-                elif target.exists():
-                    target.unlink()
-                    _remove_bytecode_cache(target)
-            mismatched = _digest_mismatches(root, diff["changed_files"], expected_digests)
-            if mismatched:
-                raise RuntimeError(
-                    "installed bytes differ from tested bytes: %s" % ", ".join(mismatched)
-                )
-            deployed_commit = ""
-            git_mode, _, _ = _git_info(root)
-            if git_mode and commit and not run["git_status_start"].strip():
-                with _tx() as conn:
-                    conn.execute(
-                        "UPDATE selfmod_runs SET last_error=?,updated_ts=? WHERE id=?",
-                        ("deployment Git commit in progress", time.time(), run_id),
-                    )
-                    _event(conn, run_id, "deploy_commit_start", "recording isolated selfmod commit")
-                code, output = _git(root, "add", "--", *diff["changed_files"])
-                if not code:
-                    code, output = _git(root, "commit", "-m", "selfmod: %s" % run["objective"][:100], "--only", "--", *diff["changed_files"])
-                if code:  # restore() touches Git only once a commit exists: unstage the candidate here
-                    _git(root, "reset", "-q", "--", *diff["changed_files"])
-                    raise RuntimeError("could not stage or commit self-improvement: %s" % output)
-                _, deployed_commit = _git(root, "rev-parse", "HEAD")
-                deployed_commit = deployed_commit.strip()
-                with _tx() as conn:
-                    conn.execute(
-                        "UPDATE selfmod_runs SET deployed_commit=?,last_error='',updated_ts=? WHERE id=?",
-                        (deployed_commit, time.time(), run_id),
-                    )
-                    _event(conn, run_id, "deploy_commit", "Git commit persisted: %s" % deployed_commit)
-            # Bind rollback to the exact bytes that were actually deployed.
-            # A later user edit must be treated as a conflict, not discarded.
-            _record_deployed_files(run_id, root, diff["changed_files"])
-            _phase(run_id, {"approved"}, "deployed", "deploy", "candidate deployed atomically", deployed_commit=deployed_commit, deployed_ts=time.time())
-            # Verify rollback unconditionally; import health does not prove
-            # recovery readiness. Even one maintenance change can break it.
-            # The probe writes only to scratch; on failure, already-loaded
-            # pre-deployment code performs the restore.
-            _renew_deployment_lock(deployment_owner)
-            budget = min(120, run["budgets"]["max_test_seconds"])
-            ok, detail, probe, code, output, duration = _verify_deployed_rollback(run_id, root, budget)
-            with _tx() as conn:
-                conn.execute(
-                    "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts) VALUES(?,?,?,?,?,?,?,?)",
-                    (run_id, "post_deploy_rollback", _json(list(probe)), code, duration, output, int(ok), time.time()),
-                )
-                _event(conn, run_id, "rollback_check", "post-deploy rollback verification exit=%s passed=%s" % (code, ok))
-            if not ok:
-                _phase(run_id, {"deployed"}, "rollback_requested", "rollback", "deployed code cannot perform a rollback")
-                restore(run_id)
-                raise RuntimeError(
-                    "deployed code cannot perform a rollback; automatic rollback completed: %s" % detail
-                )
-            if health_command:
-                _renew_deployment_lock(deployment_owner)
-                code, output, duration = _run(health_command, root, min(120, run["budgets"]["max_test_seconds"]))
-                with _tx() as conn:
-                    conn.execute(
-                        "INSERT INTO selfmod_tests(run_id,kind,command_json,exit_code,duration_ms,output,passed,created_ts) VALUES(?,?,?,?,?,?,?,?)",
-                        (run_id, "post_deploy_health", _json(list(health_command)), code, duration, output, int(code == 0), time.time()),
-                    )
-                    _event(conn, run_id, "health", "post-deploy exit=%s" % code)
-                if code:
-                    _phase(run_id, {"deployed"}, "rollback_requested", "rollback", "post-deployment health check failed")
-                    restore(run_id)
-                    raise RuntimeError("deployment health check failed; automatic rollback completed")
-            return get_run(run_id)
-        except Exception:
-            current = get_run(run_id)
-            if current["phase"] in {"approved", "deployed"}:  # 'deployed': lease/probe/health errors
-                _phase(run_id, {current["phase"]}, "rollback_requested", "deploy_failure", "deployment failed; rollback requested")
-                restore(run_id)
-            raise
+    """Install an approved single-file candidate."""
+    hooks = _backup_restore.DeployHooks(
+        get_run=get_run,
+        deployment_lock=deployment_lock,
+        verify_backup=verify_backup,
+        current_source_matches=_current_source_matches,
+        inspect_diff=inspect_diff,
+        renew_deployment_lock=_renew_deployment_lock,
+        candidate_path=candidate_path,
+        tested_digests=tested_digests,
+        atomic_copy=_atomic_copy,
+        remove_bytecode_cache=_remove_bytecode_cache,
+        git_info=_git_info,
+        git=_git,
+        tx=_tx,
+        event=_event,
+        record_deployed_files=_record_deployed_files,
+        phase=_phase,
+        verify_deployed_rollback=_verify_deployed_rollback,
+        run_cmd=_run,
+        restore=restore,
+    )
+    return _backup_restore.deploy_run(
+        run_id,
+        health_command=health_command,
+        commit=commit,
+        expected_digests=expected_digests,
+        hooks=hooks,
+    )
 
 
 def restore(run_id, from_candidate_only=False):
-    run = get_run(run_id)
-    if from_candidate_only and run["phase"] in {"rejected", "reviewing", "testing", "editing", "interrupted"}:
-        manifest = verify_backup(run_id)
-        mismatches = _manifest_live_mismatches(manifest)
-        if mismatches:
-            # Candidate edits must be isolated. Recover exact backed-up bytes if
-            # an integration bug nevertheless touched an authorized live path;
-            # unrelated live paths are deliberately left alone.
-            with _tx() as conn:
-                _event(
-                    conn, run_id, "live_source_recovery",
-                    "restoring unexpected live changes: %s" % ", ".join(mismatches),
-                )
-            _restore_manifest_files(manifest)
-            remaining = _manifest_live_mismatches(manifest)
-            if remaining:
-                raise RuntimeError(
-                    "unexpected live source changes could not be restored: %s"
-                    % ", ".join(remaining)
-                )
-            details = "candidate rejected; unexpected live source changes restored"
-        else:
-            details = "candidate rejected; live source unchanged"
-        return _phase(
-            run_id, {run["phase"]}, "restored", "restore", details,
-            restored_ts=time.time(),
-        )
-    if run["phase"] not in {"rollback_requested", "deployed", "approved"}:
-        raise RuntimeError("restore is not valid from %s" % run["phase"])
-    manifest = verify_backup(run_id)
-    with _connect() as conn:
-        paths = [row[0] for row in conn.execute(
-            "SELECT path FROM selfmod_deployed_files WHERE run_id=?", (run_id,))]
-    manifest = rollback_manifest(manifest, paths or list((tested_digests(run_id) or {}).get("files", {})))
-    root = Path(manifest["repository_root"])
-    _restore_manifest_files(manifest)
-    if not run.get("git_status_start", "").strip():
-        git_mode, current_commit, _ = _git_info(root)
-        deployment_commit_present = bool(run.get("deployed_commit")) or (
-            current_commit and current_commit != run.get("starting_commit")
-        )
-        if git_mode and deployment_commit_present:
-            paths = [record["path"] for record in manifest["files"]]
-            code, output = _git(root, "add", "--", *paths)
-            if code:
-                raise RuntimeError("restored files but could not stage rollback commit: %s" % output)
-            code, output = _git(root, "commit", "-m", "selfmod rollback: %s" % run["objective"][:90], "--only", "--", *paths)
-            if code:
-                raise RuntimeError("restored files but could not record rollback commit: %s" % output)
-    return _phase(run_id, {run["phase"]}, "restored", "restore", "exact backup hashes restored", restored_ts=time.time())
+    hooks = _backup_restore.RestoreHooks(
+        get_run=get_run,
+        verify_backup=verify_backup,
+        manifest_live_mismatches=_manifest_live_mismatches,
+        restore_manifest_files=_restore_manifest_files,
+        connect=_connect,
+        tx=_tx,
+        event=_event,
+        tested_digests=tested_digests,
+        git_info=_git_info,
+        git=_git,
+        phase=_phase,
+    )
+    return _backup_restore.restore_run(
+        run_id, from_candidate_only=from_candidate_only, hooks=hooks,
+    )
 
 
 def rollback(run_id, reason="user requested rollback"):
@@ -2223,8 +1086,6 @@ def rollback(run_id, reason="user requested rollback"):
     with deployment_lock(run_id):
         conflicts = _deployed_file_mismatches(run_id)
         if conflicts:
-            # Refused before any byte is restored: the operator may reconcile
-            # the manual edit and retry the rollback.
             raise SelfmodStageNotApplied(
                 "rollback conflict: deployed files changed after deployment; "
                 "preserving current bytes: %s" % ", ".join(conflicts)
@@ -2234,7 +1095,7 @@ def rollback(run_id, reason="user requested rollback"):
 
 
 def cancel(run_id):
-    run = get_run(run_id)  # rollback_requested owes a restore; _phase refuses a lock-holding run
+    run = get_run(run_id)
     if run["phase"] in TERMINAL_PHASES | {"deployed", "rollback_requested"}:
         raise RuntimeError("run cannot be cancelled from %s" % run["phase"])
     return _phase(run_id, {run["phase"]}, "cancelled", "cancel", "cancelled by user")
@@ -2269,8 +1130,6 @@ def reconcile_stale_deployment(now=None):
         run_id = lock["run_id"] or ""
         row = conn.execute("SELECT phase FROM selfmod_runs WHERE id=?", (run_id,)).fetchone() if run_id else None
         if row and row["phase"] in {"approved", "deployed", "rollback_requested"}:
-            # Atomically transfer the stale lease to this recovery process.
-            # No new deployer can enter while exact restoration is running.
             conn.execute(
                 "UPDATE selfmod_deployment_lock SET owner_id=?,owner_pid=?,owner_host=?,lease_until=? WHERE id=1 AND owner_id=?",
                 (
@@ -2333,113 +1192,31 @@ def heartbeat(run_id, owner_id, lease_seconds=LEASE_SECONDS):
 
 
 def prune_workspaces(retention_days=None):
-    """Remove scratch workspaces for runs that have finished.
-
-    Backups were pruned on a retention policy from the day this shipped;
-    workspaces never were, so they grew without bound -- measured, 508 MB from
-    five runs, roughly 100 MB of full source copy each.
-
-    Only terminal runs are touched. A workspace is the scratch copy where edits
-    happened; rollback restores from the BACKUP, which has its own retention and
-    is untouched here, so discarding a finished run's workspace loses no
-    recovery path. An unknown run id is left alone rather than assumed dead.
-    """
-    root = workspaces_root()
-    if not root.exists():
-        return []
-    days = int(
-        retention_days if retention_days is not None else settings()["retention_days"]
+    return _workspace.prune_workspaces(
+        retention_days=retention_days,
+        workspaces_root_fn=workspaces_root,
+        settings_fn=settings,
+        connect_fn=_connect,
+        decode_run_fn=_decode_run,
+        git_fn=_git,
+        active_phases=ACTIVE_PHASES,
     )
-    cutoff = time.time() - max(1, days) * 86400
-    # Read the whole ledger, not a window. This asked list_runs for 500 rows,
-    # but list_runs hard-clamps its limit to 200, and nothing ever deletes from
-    # selfmod_runs -- so once the ledger passed 200 runs an older terminal run
-    # was simply absent from this dict, hit the `run is None` skip below, and
-    # its ~100 MB worktree was never reclaimed on that prune or any later one.
-    # The literal 500 already said "whole population"; run_totals was corrected
-    # off the same windowed accessor for the same reason.
-    with _connect() as conn:
-        rows = conn.execute("SELECT * FROM selfmod_runs").fetchall()
-    runs = {row["id"]: _decode_run(row) for row in rows}
-    removed = []
-    for path in root.glob("selfmod-*"):
-        run = runs.get(path.name)
-        if run is None or run["phase"] in ACTIVE_PHASES:
-            continue
-        try:
-            if path.stat().st_mtime >= cutoff:
-                continue
-        except OSError:
-            continue
-        repo = run.get("repository_root") or ""
-        # A workspace is usually a Git WORKTREE, not a plain directory. rmtree
-        # alone leaves git's metadata pointing at a path that no longer exists
-        # ("prunable" in `git worktree list`) and orphans the selfmod/<id>
-        # branch. Tear it down the way it was built.
-        if repo and Path(repo).exists():
-            code, _ = _git(Path(repo), "worktree", "remove", "--force", str(path))
-            if code:
-                with contextlib.suppress(OSError):
-                    shutil.rmtree(path)
-            _git(Path(repo), "worktree", "prune")
-            branch = run.get("branch_name") or ""
-            if branch:
-                _git(Path(repo), "branch", "-D", branch)
-        else:
-            with contextlib.suppress(OSError):
-                shutil.rmtree(path)
-        if not path.exists():
-            removed.append(path.name)
-    return removed
 
 
 def prune_backups(retention_days=None, retention_bytes=None):
-    config = settings()
-    days = int(retention_days if retention_days is not None else config["retention_days"])
-    byte_limit = int(retention_bytes if retention_bytes is not None else config["retention_bytes"])
-    bundles = []
-    for path in backups_root().glob("selfmod-*") if backups_root().exists() else []:
-        try:
-            manifest = _load_manifest(path.name)
-            size = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
-            bundles.append((path, manifest, size, path.stat().st_mtime))
-        except Exception:
-            continue
-    bundles.sort(key=lambda item: item[3], reverse=True)
-    newest_valid = bundles[0][0] if bundles else None
-    total = sum(item[2] for item in bundles)
-    cutoff = time.time() - max(1, days) * 86400
-    keep = {r["id"] for r in _connect().execute("SELECT id,phase FROM selfmod_runs") if r["phase"] in ACTIVE_PHASES | {"deployed", "interrupted"}}  # sole rollback point
-    removed = []
-    for path, _, size, mtime in reversed(bundles):
-        if path == newest_valid or path.name in keep:
-            continue
-        if mtime < cutoff or total > byte_limit:
-            with contextlib.suppress(OSError):
-                if os.name != "nt":
-                    for child in path.rglob("*"):
-                        os.chmod(child, 0o700 if child.is_dir() else 0o600)
-                    os.chmod(path, 0o700)
-                shutil.rmtree(path)
-                removed.append(path.name)
-                total -= size
-    return removed
+    return _backup_restore.prune_backups(
+        retention_days=retention_days,
+        retention_bytes=retention_bytes,
+        settings_fn=settings,
+        backups_root_fn=backups_root,
+        load_manifest_fn=_load_manifest,
+        connect_fn=_connect,
+        active_phases=ACTIVE_PHASES,
+    )
 
 
 def run_totals():
-    """Counts over EVERY run, not just the most recent window.
-
-    These were computed from list_runs(20) -- ORDER BY created_ts DESC LIMIT 20
-    -- and nothing ever deletes from selfmod_runs. So a run parked in
-    `reviewing` or `approved`, exactly where one waits for a human, fell out of
-    the count after 20 newer runs and the operator surface read `active: 0`.
-    `rollback points: 0` read as "nothing to roll back" while backup manifests
-    were still on disk.
-
-    The asymmetry is what marks this a bug rather than a choice: the safety
-    machinery (reconcile_interrupted, reconcile_stale_deployment) already
-    queries every row. Only the human-facing number was windowed.
-    """
+    """Counts over EVERY run, not just the most recent window."""
     placeholders = ",".join("?" * len(ACTIVE_PHASES))
     with _connect() as conn:
         active = conn.execute(
@@ -2475,55 +1252,15 @@ def status_data():
 
 
 def format_status(data=None):
-    data = data or status_data()
-    lines = [
-        "Sonder self-modification",
-        "  enabled: %s | mode: %s" % ("yes" if data["enabled"] else "no", data["mode"]),
-        "  active: %d | deployed: %d | rollback points: %d" % (data["active"], data["deployed"], data["rollback_points"]),
-        "  backup root: %s" % data["backup_root"],
-    ]
-    shown = data["runs"][:10]
-    for run in shown:
-        lines.append("  %s  %-18s %-8s %s" % (run["id"], run["phase"], run["risk"], run["objective"][:80]))
-    # Say that the list is a window. The counts above are over every run, so
-    # without this an operator reading "active: 3" against three visible rows
-    # would conclude they are looking at all of them.
-    total = data.get("total_runs", len(shown))
-    if total > len(shown):
-        lines.append("  (showing %d of %d run(s); counts above are over all)"
-                     % (len(shown), total))
-    return "\n".join(lines)
+    return _workspace.format_status(data or status_data())
 
 
 def format_run(run_id):
-    run = get_run(run_id)
-    return "\n".join([
-        "%s | phase=%s | mode=%s | risk=%s" % (run["id"], run["phase"], run["mode"], run["risk"]),
-        "objective: %s" % run["objective"],
-        "problem: %s" % run["problem"],
-        "files: %s" % (", ".join(run["files"]) or "(none declared)"),
-        "backup: %s" % (run.get("backup_manifest") or "not created"),
-        "approval: %s" % (run.get("approved_by") or ("required" if run["approval_required"] else "host low-risk eligible")),
-        "workspace: %s" % (run.get("workspace_path") or "not created"),
-        "last error: %s" % (run.get("last_error") or "none"),
-    ])
+    return _workspace.format_run(get_run(run_id))
 
 
 def parse_plan_text(text):
-    """Parse `/selfmod plan objective --files a.py,b.py --tests cmd` safely."""
-    text = str(text or "").strip()
-    marker = " --files "
-    if marker not in text:
-        return text, [], []
-    objective, tail = text.split(marker, 1)
-    tests = []
-    if " --tests " in tail:
-        files_text, tests_text = tail.split(" --tests ", 1)
-        tests = [item.strip() for item in tests_text.split(";;") if item.strip()]
-    else:
-        files_text = tail
-    files = [item.strip() for item in files_text.split(",") if item.strip()]
-    return objective.strip(), files, tests
+    return _workspace.parse_plan_text(text)
 
 
 def recursive_guard():
