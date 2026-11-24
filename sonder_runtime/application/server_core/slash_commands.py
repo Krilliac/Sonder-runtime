@@ -54,6 +54,7 @@ AUTOPILOT_HELP_TEXT = (
     "  /autopilot status [id]\n"
     "  /autopilot plan [--observe] [--no-web] [--static] [--goal] <objective>\n"
     "  /autopilot run [--observe] [--no-web] [--static] [--goal] <objective>\n"
+    "  /autopilot ensemble|consult|fanout|fleet [--no-web] [--static] [--goal] <objective>\n"
     "  /autopilot resume|pause|cancel <id>\n"
     "  /autopilot steer|clarify <id> <message>   (owner-scoped note; "
     "clarify also requests a pause)\n"

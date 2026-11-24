@@ -19,6 +19,7 @@ Pure stdlib; no I/O.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 
 SESSION_ID_MAX_LENGTH = 128
@@ -70,5 +71,16 @@ def chat_code(session_id: str) -> str:
     return CHAT_CODE_PREFIX + session_id
 
 
+def hosted_session_storage_id(principal: str, session_id: str) -> str:
+    """Return the deterministic hosted storage id for ``(principal, session_id)``."""
+    cleaned = str(session_id or "").strip()
+    owner = str(principal or "").strip()
+    if not cleaned or not owner or not is_valid_session_id(cleaned):
+        return ""
+    material = f"session\0{owner}\0{cleaned}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+    return f"http-session-{digest}"
+
+
 __all__ = ["CHAT_CODE_PREFIX", "SESSION_ID_MAX_LENGTH", "SESSION_REF_MAX_LENGTH",
-           "chat_code", "is_valid_session_id", "parse_session_ref"]
+           "chat_code", "hosted_session_storage_id", "is_valid_session_id", "parse_session_ref"]

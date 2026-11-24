@@ -4816,17 +4816,22 @@ def main(*, machine_output=False):
                             line, session=session_id, project=project,
                         ))
                     elif cmd in ("/work", "/agent"):
-                        if not arg.strip():
-                            _emit("usage: /work <task>")
-                        elif not workspace_root and not select_default_workspace(arg.strip()):
+                        parsed_mode = server._parse_agent_mode_arg(arg)
+                        if parsed_mode.usage_error:
+                            _emit(parsed_mode.usage_error)
+                        elif not workspace_root and not select_default_workspace(parsed_mode.task):
                             # The memory project name is not a directory; ask
                             # for one and resume this task once it is chosen.
                             ask_for_workspace(arg.strip())
                         else:
                             try:
+                                prepared, prep_err = server._prepare_agent_mode_run(arg)
+                                if prep_err:
+                                    _emit(prep_err)
+                                    continue
                                 out = _run_session_work(session_id, host_project=project,
-                                    prompt=arg.strip(), tier=active_model or active_tier or "auto",
-                                    project=workspace_root, max_steps=12,
+                                    prompt=prepared.prompt, tier=active_model or active_tier or "auto",
+                                    project=workspace_root, max_steps=prepared.max_steps,
                                 )
                             except _WORK_REFUSALS as exc:
                                 report_work_refusal(exc)

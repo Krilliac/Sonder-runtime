@@ -1040,6 +1040,8 @@ _ENTRIES = [
     # -- server.py ---------------------------------------------------------------
     ("runtime/server.py", "_agent_negative_claim_review", "_make_tier_generate", 1, EXEC,
      "agent review verdict steers the tool loop"),
+    ("runtime/server.py", "_agent_dispatch", "ensemble_answer", 2, TEXT,
+     "the agent ensemble_answer and consult tools: local-only multi-model answer returns to the agent as text, prompt input for its next step"),
     ("runtime/server.py", "_agent_dispatch", "offload", 1, TEXT,
      "the agent offload tool: the answer returns to the agent as text, prompt input for its next step"),
     ("runtime/server.py", "_agent_turn", "_make_tier_generate", 1, EXEC, "agent decisions become tool calls"),
@@ -1055,6 +1057,8 @@ _ENTRIES = [
       "which forwards text_only to the framed call")),
     ("runtime/server.py", "_answer_with_history_impl", "_answer", 1, TEXT,
      "chat answer with history (MCP and HTTP chat), default route or by tier"),
+    ("runtime/server.py", "_autopilot_command", "_model_fanout_authorized", 1, TEXT,
+     "host local fanout preflight for /autopilot fanout: bounded candidate text fenced as untrusted reference data"),
     ("runtime/server.py", "_autopilot_json_model", "_make_tier_generate", 1, EXEC,
      "autopilot plans become tasks"),
     ("runtime/server.py", "_autopilot_review_model.generator_factory", "_make_tier_generate", 1, EXEC,
@@ -1121,6 +1125,8 @@ _ENTRIES = [
     ("runtime/server.py", "_post.send", "/api/generate", 1, CHOKE, "pool transport below _post_model"),
     ("runtime/server.py", "_post.send.transport", "/api/chat", 1, CHOKE, "pool transport below _post_model"),
     ("runtime/server.py", "_post.send.transport", "/api/generate", 1, CHOKE, "pool transport below _post_model"),
+    ("runtime/server.py", "_prepare_agent_mode_run", "_model_fanout_authorized", 1, TEXT,
+     "host local fanout preflight for /agent fanout: bounded candidate text fenced as untrusted reference data"),
     ("runtime/server.py", "_prepare_lesson_candidate_bounded.generate", "_gateway_generate_text", 1, TEXT,
      "lesson text, stored as prose and injected into prompts"),
     ("runtime/server.py", "_record_failure_pitfall", "_gateway_generate_text", 1, TEXT,
@@ -1242,6 +1248,8 @@ _ENTRIES = [
      GATEWAY_GENERATE, 4, CHOKE, "packaged gateway plumbing"),
     ("sonder_runtime/application/structured_output.py", "generate_structured", GATEWAY_GENERATE, 1, CHOKE,
      "packaged gateway plumbing; the reply is parsed and checked, never run or applied"),
+    ("sonder_runtime/bootstrap/agent_mode_wiring.py", "dispatch_agent_consult", "consult", 1, TEXT,
+     "the agent consult tool: local-only second opinion returns to the agent as text, prompt input for its next step"),
     ("sonder_runtime/bootstrap/app.py", "build_application", "raw-gateway:" + RAW_GATEWAY_NAME, 5, CHOKE,
      "the unwrapped gateway: built once, wrapped as the default handle, attached to the inference "
      "pool, and handed only to Application.model_gateway (the legacy bridge, which judges the served "

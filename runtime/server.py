@@ -328,10 +328,12 @@ from sonder_runtime.domain.agents.activity_command import (
     agent_argv as _agent_argv,
     batch_operations as _batch_agent_operations,
 )
+from sonder_runtime.bootstrap import agent_mode_wiring as _agent_mode_wiring
 from sonder_runtime.domain.ensemble_synthesis import (
     candidate_boundary as _ensemble_candidate_boundary,
     candidate_references as _ensemble_candidate_references,
     code_synthesis_prompt as _ensemble_code_synthesis_prompt,
+    select_default_synth_tier as _select_default_synth_tier,
     synthesis_prompt as _ensemble_synthesis_prompt,
 )
 from sonder_runtime.domain.context.pack_arguments import (
@@ -2806,70 +2808,29 @@ def _control_dump(arg, prompt, history=None, session="", project=""):
     return out
 
 
+_parse_agent_mode_arg = _agent_mode_wiring.parse_agent_mode_arg
+
+
+def _prepare_agent_mode_run(arg: str, **kw):
+    return _agent_mode_wiring.prepare_agent_mode_run(arg, fanout_fn=_model_fanout_authorized, **kw)
+
+
 def _autopilot_command(arg: str, project: str = "", request_owner: str | None = None) -> str:
-    text = str(arg or "").strip()
-    if not text:
-        return _autopilot_status(request_owner=request_owner)
-    action, _, rest = text.partition(" ")
-    action = action.lower()
-    rest = rest.strip()
-    if action in ("status", "show", "list"):
-        return _autopilot_status(rest, request_owner=request_owner)
-    if action in ("run", "start", "plan"):
-        parsed = _slash_commands_core.parse_autopilot_run_args(action, rest)
-        if parsed.error_detail:
-            err = "ERROR: " + parsed.error_detail
-            return err
-        if parsed.usage_error:
-            return parsed.usage_error
-        if parsed.bind_goal:
-            import goal_store as _gs
-            active = _gs.get_active()
-            if not active:
-                return "--goal requires an active goal (use /goal set first)."
-            ap_result = _composition.goal_to_autopilot(
-                active, policy=parsed.policy, allow_web=parsed.allow_web,
-                project=_resolve_project(project) or "",
-                request_owner=request_owner or "",
-            )
-            if ap_result.get("error"):
-                return "autopilot request failed: %s" % ap_result["error"]
-            launched = _launch_autopilot(ap_result["run_id"])
-            prefix = "autopilot bound to goal %s" % active["id"]
-            if not launched:
-                prefix = _autopilot_not_launched(ap_result["run_id"])
-            return "%s\n  run: %s\n  objective: %s\n  use /autopilot status %s" % (
-                prefix, ap_result["run_id"], active["objective"][:120],
-                ap_result["run_id"],
-            )
-        return _autopilot_start(
-            objective=parsed.objective,
-            project=_resolve_project(project) or "",
-            request_owner=request_owner or "",
-            policy=parsed.policy,
-            allow_web=parsed.allow_web,
-            adaptive=parsed.adaptive,
-            plan_only=action == "plan",
-        )
-    if action in ("steer", "clarify"):
-        run_selector, _, message = rest.partition(" ")
-        message = message.strip()
-        if not run_selector or not message:
-            return "usage: /autopilot %s <run-id> <message>" % action
-        return _autopilot_steer(
-            run_selector, message,
-            kind="clarify" if action == "clarify" else "guidance",
-            request_owner=request_owner,
-        )
-    if action == "resume":
-        return _autopilot_resume(rest, request_owner=request_owner) if rest else "usage: /autopilot resume <run-id>"
-    if action == "pause":
-        return _autopilot_pause(rest, request_owner=request_owner) if rest else "usage: /autopilot pause <run-id>"
-    if action == "cancel":
-        return _autopilot_cancel(rest, request_owner=request_owner) if rest else "usage: /autopilot cancel <run-id>"
-    if action in ("help", "?"):
-        return _slash_commands_core.AUTOPILOT_HELP_TEXT
-    return "ERROR: unknown autopilot action '%s'; try /autopilot help." % action
+    def _active_goal():
+        import goal_store as _gs
+        return _gs.get_active()
+    return _agent_mode_wiring.run_autopilot_command(
+        arg, project=project, request_owner=request_owner,
+        parse_run_args=_slash_commands_core.parse_autopilot_run_args,
+        help_text=_slash_commands_core.AUTOPILOT_HELP_TEXT,
+        resolve_project=_resolve_project, autopilot_status=_autopilot_status,
+        autopilot_start=_autopilot_start, autopilot_steer=_autopilot_steer,
+        autopilot_resume=_autopilot_resume, autopilot_pause=_autopilot_pause,
+        autopilot_cancel=_autopilot_cancel, launch_autopilot=_launch_autopilot,
+        autopilot_not_launched=_autopilot_not_launched,
+        goal_to_autopilot=_composition.goal_to_autopilot,
+        active_goal_fn=_active_goal, fanout_fn=_model_fanout_authorized,
+    )
 
 
 def _runtime_command(arg: str, *, operator_approved: bool = False) -> str:
@@ -3611,7 +3572,10 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd in ("/learning", "/learnhealth", "/metrics"):
         return learning_health_status()
     if cmd in ("/work", "/agent"):
-        return workbench_agent(prompt=arg.strip(), project=_resolve_project(project), max_steps=12) if arg.strip() else "usage: /work <task>"
+        prepared, prep_err = _prepare_agent_mode_run(arg)
+        if prep_err:
+            return prep_err
+        return workbench_agent(prompt=prepared.prompt, project=_resolve_project(project), max_steps=prepared.max_steps)
     if cmd in ("/report", "/endreport"):
         latest = activity_tracker.latest()
         return "%s\n\n%s" % (
@@ -16270,6 +16234,12 @@ def session_export(session: str = "", limit: int = 50, format: str = "") -> str:
                 session_id = found
                 sess = memory_store.get_session(conn, session_id)
         if sess is None:
+            session_id, sess = _agent_mode_wiring.resolve_hosted_session_for_export(
+                conn, session_id, get_session=memory_store.get_session,
+                fuller_turns=_event_turns.fuller_turns,
+                get_repository=lambda: _application().session_repository(),
+            )
+        if sess is None:
             return "ERROR: no session '%s'." % session
         if export_format == "atif":
             return atif_export.interaction_session_atif(
@@ -17680,6 +17650,17 @@ def _agent_dispatch(
                 "ensemble_codegen_build_loop", args,
                 repository_extra_roots=repository_extra_roots,
             ))
+        if tool_name == "ensemble_answer":
+            return _agent_mode_wiring.dispatch_agent_ensemble(
+                args, is_cloud_tier=lambda t: bool(_is_cloud_tier(t) or _provider_bridge.is_hosted(_bridge_provider_for_tier(t))),
+                ensemble_fn=ensemble_answer, unsafe=unsafe,
+            )
+        if tool_name == "consult":
+            return _agent_mode_wiring.dispatch_agent_consult(
+                args, is_cloud_tier=lambda t: bool(_is_cloud_tier(t) or _provider_bridge.is_hosted(_bridge_provider_for_tier(t))),
+                consult_flow=consult_flow, ensemble_fn=ensemble_answer,
+                lookup_scope_fn=lambda: _reference_lookup_multi.consult_scope(_ensemble_targets), unsafe=unsafe,
+            )
         if tool_name == "build_clean":
             return build_clean(**_kw("build_clean", args))
         if tool_name == "rename_symbol":
@@ -19592,6 +19573,7 @@ _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     # a reachable, host-observed way to satisfy its verification standing.
     "test_run", "build_run", "lint_run", "typecheck_run",
     "ensemble_codegen_build_loop",
+    "ensemble_answer", "consult", "delegate_task", "spawn_agents",
     "process_list", "process_memory_risk_inspect", "learn_tool", "task_progress", "task_ledger",
     "task_delete", "task_plan", "task_depend",
     # Other developer-workflow tools remain absent until their agent dispatch
@@ -22495,7 +22477,7 @@ def ensemble_answer(
         # synthesis pass over one input would only launder it.
         return answers[0]["answer"] + lookup.footer(footer)
 
-    synth = (synth_tier or "").strip().lower() or answers[-1]["tier"]
+    synth = (synth_tier or "").strip().lower() or _select_default_synth_tier(answers)
     synth_model, _cloud, _augment, synth_label = _tool_lane_guard.chat_target(_serve_target, synth, False)
     if not synth_model or synth_label is None:
         synth_model = answers[-1]["model"]
