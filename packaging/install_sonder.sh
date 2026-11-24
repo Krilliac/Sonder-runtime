@@ -125,13 +125,21 @@ PY
 }
 verify_and_stage_payload "$TRUSTED_ROOT" "$PACKAGE_SOURCE" "$RELEASE_DIR"
 python3 -m venv "$RELEASE_DIR/venv"
-"$RELEASE_DIR/venv/bin/pip" install --quiet --upgrade pip
-"$RELEASE_DIR/venv/bin/pip" install --quiet -r "$RELEASE_DIR/requirements-runtime.txt"
-# requirements-runtime.txt pins the top-level releases only; pip resolves the
-# transitive closure at install time and there is no hash lock yet (see
-# docs/runbooks/install-server-private.md).  Refuse an inconsistent
-# resolution before the release becomes current, and record exactly what was
-# installed next to the release for audit and reproduction.
+# Use the venv's bundled pip rather than fetching an unpinned pip upgrade as root.
+# Prefer hash-locked requirements-runtime.lock when present alongside
+# requirements-runtime.txt; fail closed when SONDER_REQUIRE_HASHES=1 is set and
+# the lockfile is absent.
+LOCK_FILE="$RELEASE_DIR/requirements-runtime.lock"
+if [ -f "$LOCK_FILE" ]; then
+  "$RELEASE_DIR/venv/bin/python" -m pip install --quiet --require-hashes -r "$LOCK_FILE"
+elif [ "${SONDER_REQUIRE_HASHES:-0}" = "1" ]; then
+  echo "SONDER_REQUIRE_HASHES=1 requires $LOCK_FILE, but it is missing" >&2
+  exit 1
+else
+  "$RELEASE_DIR/venv/bin/python" -m pip install --quiet -r "$RELEASE_DIR/requirements-runtime.txt"
+fi
+# Refuse an inconsistent resolution before the release becomes current, and
+# record exactly what was installed next to the release for audit and reproduction.
 "$RELEASE_DIR/venv/bin/python" -m pip check
 "$RELEASE_DIR/venv/bin/python" -m pip freeze --all > "$RELEASE_DIR/INSTALLED-REQUIREMENTS.txt"
 

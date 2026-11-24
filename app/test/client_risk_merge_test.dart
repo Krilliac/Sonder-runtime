@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sonder_runtime/api.dart';
+import 'package:sonder_runtime/chat/backend.dart';
 import 'package:sonder_runtime/chat/controller.dart';
 import 'package:sonder_runtime/chat_store.dart';
 import 'package:sonder_runtime/models.dart';
@@ -157,6 +157,128 @@ void main() {
       expect(live.language, 'python');
       expect(live.args, {'timeout': '5'});
       backend.lastTurn.done('x');
+      await send;
+      c.dispose();
+    });
+
+    test(
+        'H-09: mergedOnto freezes tool, args, rawArgs, and digest for client calls awaiting approval',
+        () {
+      const origDigest =
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      const evilDigest =
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      final initial = ChatStreamToolEvent.fromJson({
+        'id': 'cafe0009deadbeef',
+        'call_id': 'cafe0009deadbeef',
+        'execution_target': 'client',
+        'tool': 'file_read',
+        'phase': 'awaiting_client_result',
+        'state': 'awaiting_client_approval',
+        'digest': origDigest,
+        'args': {'path': 'README.md'},
+      });
+      final tampered = ChatStreamToolEvent.fromJson({
+        'id': 'cafe0009deadbeef',
+        'call_id': 'cafe0009deadbeef',
+        'execution_target': 'client',
+        'tool': 'run_program',
+        'phase': 'awaiting_client_result',
+        'state': 'awaiting_client_approval',
+        'digest': evilDigest,
+        'args': {'command': 'whoami'},
+      });
+
+      final merged = tampered.mergedOnto(initial);
+      expect(merged.tool, 'file_read');
+      expect(merged.digest, origDigest);
+      expect(merged.args, {'path': 'README.md'});
+      expect(merged.rawArgs, {'path': 'README.md'});
+      // Also keeps frozen payload when previous has executionTarget=='client' with tool/digest
+      // even before state transitions to awaiting_client_approval.
+      final preApproval = initial.copyWith(state: 'running');
+      final mergedPre = tampered.mergedOnto(preApproval);
+      expect(mergedPre.tool, 'file_read');
+      expect(mergedPre.digest, origDigest);
+      expect(mergedPre.rawArgs, {'path': 'README.md'});
+    });
+
+    testWidgets(
+        'H-09: approveClientTool fails closed on tool or digest mismatch and ignores stream overwrite',
+        (tester) async {
+      const origDigest =
+          '1111111111111111111111111111111111111111111111111111111111111111';
+      const wrongDigest =
+          '2222222222222222222222222222222222222222222222222222222222222222';
+      final backend = FakeChatBackend();
+      final c = await _start(tester, backend);
+      c.clientExecEnabled = true;
+      c.clientPermissionMode = 'manual';
+
+      final send = c.send('edit');
+      await tester.pump();
+
+      backend.lastTurn.tool(ChatStreamToolEvent.fromJson({
+        'id': 'cafe0010deadbeef',
+        'call_id': 'cafe0010deadbeef',
+        'execution_target': 'client',
+        'tool': 'file_write',
+        'phase': 'awaiting_client_result',
+        'risk': 'write',
+        'digest': origDigest,
+        'args': {'path': 'safe.txt', 'content': 'hello'},
+      }));
+      await tester.pump();
+
+      // A malicious later SSE frame for the same call_id tries to swap tool/args/digest.
+      backend.lastTurn.tool(ChatStreamToolEvent.fromJson({
+        'id': 'cafe0010deadbeef',
+        'call_id': 'cafe0010deadbeef',
+        'execution_target': 'client',
+        'tool': 'run_program',
+        'phase': 'running',
+        'risk': 'execute',
+        'digest': wrongDigest,
+        'args': {'command': 'calc'},
+      }));
+      await tester.pump();
+
+      final liveEv = c.live.value!.toolCalls.single;
+      expect(liveEv.tool, 'file_write');
+      expect(liveEv.digest, origDigest);
+      expect(liveEv.rawArgs, {'path': 'safe.txt', 'content': 'hello'});
+
+      // Wrong tool name -> rejected without executing.
+      final badTool = await c.approveClientTool(
+          'cafe0010deadbeef', 'run_program', origDigest);
+      expect(badTool.status, ApprovalStatus.failed);
+      expect(badTool.message, contains('mismatch'));
+      expect(backend.clientToolExecs, isEmpty);
+
+      // Wrong digest -> rejected without executing.
+      final badDigest = await c.approveClientTool(
+          'cafe0010deadbeef', 'file_write', wrongDigest);
+      expect(badDigest.status, ApprovalStatus.failed);
+      expect(badDigest.message, contains('mismatch'));
+      expect(backend.clientToolExecs, isEmpty);
+
+      // Missing digest when one was expected -> rejected without executing.
+      final missingDigest =
+          await c.approveClientTool('cafe0010deadbeef', 'file_write', '');
+      expect(missingDigest.status, ApprovalStatus.failed);
+      expect(missingDigest.message, contains('mismatch'));
+      expect(backend.clientToolExecs, isEmpty);
+
+      // Matching tool + digest executes the original frozen payload.
+      final ok = await c.approveClientTool(
+          'cafe0010deadbeef', 'file_write', origDigest);
+      expect(ok.status, ApprovalStatus.approved);
+      expect(backend.clientToolExecs, hasLength(1));
+      expect(backend.clientToolExecs.single.$1, 'file_write');
+      expect(backend.clientToolExecs.single.$2,
+          {'path': 'safe.txt', 'content': 'hello'});
+
+      backend.lastTurn.done('done');
       await send;
       c.dispose();
     });
