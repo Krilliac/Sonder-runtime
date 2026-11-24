@@ -439,4 +439,56 @@ void main() {
         tester.getRect(chip).right, lessThan(tester.getRect(_picker).left + 1));
     await unmountChat(tester);
   });
+
+  testWidgets(
+      'CommandBrowser wraps full help summary below the name on narrow mobile widths',
+      (tester) async {
+    const summary =
+        'Ask multiple model tiers in parallel and synthesize a grounded answer.';
+    const usage = '/ensemble_answer <prompt> [tiers] [judge_tier]';
+    const catalog = CommandCatalog(
+      categories: {'chat': 'Conversation and ensemble helpers'},
+      commands: [
+        SonderCommand(
+          name: '/ensemble_answer',
+          usage: usage,
+          summary: summary,
+          category: 'chat',
+          risk: 'safe',
+        ),
+      ],
+    );
+    tester.view.physicalSize = const Size(360, 760);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: SonderTheme.dark,
+        home: const Scaffold(
+          body: CommandBrowser(catalog: catalog, fromServer: true),
+        ),
+      ),
+    );
+    await tester.enterText(
+        find.byKey(const Key('command-browser-search')), 'ens');
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    final nameFinder = find.text('/ensemble_answer');
+    final summaryFinder = find.text(summary);
+    final usageFinder = find.text(usage);
+    expect(nameFinder, findsOneWidget);
+    expect(summaryFinder, findsOneWidget);
+    expect(usageFinder, findsOneWidget);
+
+    final nameRect = tester.getRect(nameFinder);
+    final summaryRect = tester.getRect(summaryFinder);
+    // Help text must sit below the header row and get full-row width instead of
+    // being squeezed into a 20 px stub next to the category pill.
+    expect(summaryRect.top, greaterThanOrEqualTo(nameRect.bottom - 1));
+    expect(summaryRect.width, greaterThanOrEqualTo(220));
+    expect(tester.widget<Text>(summaryFinder).softWrap, isTrue);
+    expect(tester.widget<Text>(summaryFinder).overflow, isNull);
+  });
 }

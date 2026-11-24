@@ -966,56 +966,137 @@ class CommandRow extends StatelessWidget {
           color: selected ? tokens.accentDim : null,
           padding: const EdgeInsets.symmetric(
               horizontal: SonderSpace.md, vertical: SonderSpace.sm),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  _RiskDot(risk: command.risk),
-                  const SizedBox(width: SonderSpace.sm),
-                  SizedBox(
-                    width: 150,
-                    child: Text(
-                      command.displayName,
-                      style: tokens.mono(13,
-                          color: tokens.accentText,
-                          weight: selected ? FontWeight.w600 : FontWeight.w500),
-                      overflow: TextOverflow.ellipsis,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 480;
+              final nameStyle = tokens.mono(
+                13,
+                color: tokens.accentText,
+                weight: selected ? FontWeight.w600 : FontWeight.w500,
+              );
+              final summaryStyle = text.bodyMedium?.copyWith(
+                color: tokens.text2,
+              );
+              if (compact) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        _RiskDot(risk: command.risk),
+                        const SizedBox(width: SonderSpace.sm),
+                        Expanded(
+                          child: Text(
+                            command.displayName,
+                            style: nameStyle,
+                            softWrap: true,
+                          ),
+                        ),
+                        if (command.category.isNotEmpty) ...[
+                          const SizedBox(width: SonderSpace.sm),
+                          _CategoryTag(category: command.category),
+                        ],
+                      ],
                     ),
-                  ),
-                  if (command.category.isNotEmpty) ...[
-                    const SizedBox(width: SonderSpace.sm),
-                    _CategoryTag(category: command.category),
+                    if (command.summary.isNotEmpty ||
+                        opens != null ||
+                        usage != command.displayName ||
+                        aliases.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(
+                            left: SonderSpace.lg, top: SonderSpace.xxs),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (command.summary.isNotEmpty)
+                              Text(
+                                command.summary,
+                                style: summaryStyle,
+                                softWrap: true,
+                              ),
+                            if (opens != null)
+                              Padding(
+                                padding: const EdgeInsets.only(
+                                    top: SonderSpace.xxs),
+                                child: Text(opens, style: meta, softWrap: true),
+                              ),
+                            if (usage != command.displayName)
+                              Padding(
+                                padding: const EdgeInsets.only(
+                                    top: SonderSpace.xxs),
+                                child: Text(usage, style: meta, softWrap: true),
+                              ),
+                            if (aliases.isNotEmpty)
+                              Text('aliases: $aliases',
+                                  style: meta, softWrap: true),
+                          ],
+                        ),
+                      ),
                   ],
-                  const SizedBox(width: SonderSpace.md),
-                  Expanded(
-                    child: Text(command.summary,
-                        style: text.bodyMedium?.copyWith(color: tokens.text2),
-                        overflow: TextOverflow.ellipsis),
-                  ),
-                  if (opens != null) ...[
-                    const SizedBox(width: SonderSpace.sm),
-                    Text(opens, style: meta),
-                  ],
-                ],
-              ),
-              if (usage != command.displayName || aliases.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(
-                      left: SonderSpace.xxl + SonderSpace.sm, top: SonderSpace.xxs),
-                  child: Column(
+                );
+              }
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      if (usage != command.displayName)
-                        Text(usage,
-                            style: meta, overflow: TextOverflow.ellipsis),
-                      if (aliases.isNotEmpty)
-                        Text('aliases: $aliases',
-                            style: meta, overflow: TextOverflow.ellipsis),
+                      Padding(
+                        padding: const EdgeInsets.only(top: SonderSpace.xs),
+                        child: _RiskDot(risk: command.risk),
+                      ),
+                      const SizedBox(width: SonderSpace.sm),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(
+                          minWidth: 150,
+                          maxWidth: 220,
+                        ),
+                        child: Text(
+                          command.displayName,
+                          style: nameStyle,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (command.category.isNotEmpty) ...[
+                        const SizedBox(width: SonderSpace.sm),
+                        _CategoryTag(category: command.category),
+                      ],
+                      const SizedBox(width: SonderSpace.md),
+                      Expanded(
+                        child: Text(
+                          command.summary,
+                          style: summaryStyle,
+                          softWrap: true,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (opens != null) ...[
+                        const SizedBox(width: SonderSpace.sm),
+                        Text(opens, style: meta),
+                      ],
                     ],
                   ),
-                ),
-            ],
+                  if (usage != command.displayName || aliases.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(
+                          left: SonderSpace.xxl + SonderSpace.sm,
+                          top: SonderSpace.xxs),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (usage != command.displayName)
+                            Text(usage, style: meta, softWrap: true),
+                          if (aliases.isNotEmpty)
+                            Text('aliases: $aliases',
+                                style: meta, softWrap: true),
+                        ],
+                      ),
+                    ),
+                ],
+              );
+            },
           ),
         ),
       ),
@@ -1205,13 +1286,22 @@ class _CommandBrowserState extends State<CommandBrowser> {
     final results = _results;
     final total = widget.catalog.commands.length;
 
+    final compactDialog = MediaQuery.sizeOf(context).width < 520;
     return Dialog(
       key: const Key('command-browser'),
+      insetPadding: compactDialog
+          ? const EdgeInsets.symmetric(
+              horizontal: SonderSpace.md, vertical: SonderSpace.xl)
+          : const EdgeInsets.symmetric(
+              horizontal: SonderSpace.x4, vertical: SonderSpace.xxl),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 760, maxHeight: 620),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-              SonderSpace.lg, SonderSpace.md, SonderSpace.lg, SonderSpace.md),
+          padding: EdgeInsets.fromLTRB(
+              compactDialog ? SonderSpace.md : SonderSpace.lg,
+              SonderSpace.md,
+              compactDialog ? SonderSpace.md : SonderSpace.lg,
+              SonderSpace.md),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1272,6 +1362,7 @@ class _CommandBrowserState extends State<CommandBrowser> {
                               title: Text(entry.key),
                               subtitle: Text(
                                 widget.catalog.categories[entry.key] ?? '',
+                                maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
                               ),
                               trailing: Text('${entry.value.length}',
