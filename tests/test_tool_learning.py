@@ -243,6 +243,42 @@ def test_learn_tool_refuses_probing_denied_unlisted_and_cwd_binaries(tmp_path, m
     assert not ok and reason == "cwd_binary_refused"
 
 
+def test_learn_tool_validates_symlink_targets(tmp_path, monkeypatch):
+    import os
+    from sonder_runtime.adapters.inspection import learn_tool as lt_mod
+
+    work = tmp_path / "work"
+    bin_dir = tmp_path / "bin"
+    work.mkdir()
+    bin_dir.mkdir()
+    monkeypatch.chdir(work)
+
+    real_py = bin_dir / "python3.14"
+    real_py.write_bytes(b"stub")
+    real_sh = bin_dir / "sh"
+    real_sh.write_bytes(b"stub")
+    real_unlisted = bin_dir / "mysterytool99"
+    real_unlisted.write_bytes(b"stub")
+
+    link_ok = bin_dir / "python"
+    link_bad_sh = bin_dir / "git"
+    link_bad_unlisted = bin_dir / "node"
+    try:
+        os.symlink(real_py, link_ok)
+        os.symlink(real_sh, link_bad_sh)
+        os.symlink(real_unlisted, link_bad_unlisted)
+    except OSError:
+        # Windows without developer-mode symlink privilege
+        return
+
+    ok, reason = lt_mod._is_safe_probe_binary(str(link_ok))
+    assert ok and reason == ""
+    ok, reason = lt_mod._is_safe_probe_binary(str(link_bad_sh))
+    assert not ok and reason == "denied_binary"
+    ok, reason = lt_mod._is_safe_probe_binary(str(link_bad_unlisted))
+    assert not ok and reason == "unlisted_binary"
+
+
 def test_learn_tool_server_gates_save_note_and_probe_in_plan_mode(monkeypatch):
     import server
     import permission_modes

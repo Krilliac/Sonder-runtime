@@ -140,7 +140,7 @@ def _run_serve_main(monkeypatch, setting, recorded):
     monkeypatch.setattr(ts, "_CONTROL_PLANE_SERVICE", object())
     monkeypatch.setattr(ts, "PREWARM_ON_START", setting)
     monkeypatch.setattr(ts.sonder_lifecycle, "get", lambda: lifecycle)
-    monkeypatch.setattr(ts, "_validate_bind_security", lambda _host: None)
+    monkeypatch.setattr(ts, "_validate_bind_security", lambda _host, **_kwargs: None)
     monkeypatch.setattr(ts, "_machine_host_names", lambda: None)
     monkeypatch.setattr(ts, "_selected_listener_port", lambda _config: 0)
     monkeypatch.setattr(ts, "_WORK_RUNNER", SimpleNamespace(reconcile=lambda: None))

@@ -21,8 +21,11 @@ of the model — an uncensored or "abliterated" model changes what it will
   (`SONDER_ALLOW_REMOTE_COMPUTE`, additionally requiring per-workload
   `allow_remote`), approximate location, model reasoning
   (`SONDER_EXPOSE_REASONING`), private chain-of-thought
-  (`SONDER_ALLOW_PRIVATE_COT`), and security-adviser tool-lane relaxation
-  (`SONDER_ALLOW_SECURITY_MODEL_TOOLS`, requiring the exact acknowledgement string). Runtime policy can never turn any of these on.
+  (`SONDER_ALLOW_PRIVATE_COT`), security-adviser tool-lane relaxation
+  (`SONDER_ALLOW_SECURITY_MODEL_TOOLS`, requiring the exact acknowledgement string),
+  and non-loopback TLS-proxy backend binding (`SONDER_ALLOW_NON_LOOPBACK_PROXY_BACKEND`,
+  allowing `tls_terminated_by_proxy=true` on a non-loopback address only inside an
+  isolated private network). Runtime policy can never turn any of these on.
 - **Remote Sonder Inference needs four things at once:**
   `SONDER_ALLOW_REMOTE_INFERENCE=1`, an `https://` URL, a
   `SONDER_INFERENCE_API_KEY` and an operation context that allows cloud; a

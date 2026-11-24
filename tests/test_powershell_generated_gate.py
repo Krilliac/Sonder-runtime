@@ -22,15 +22,28 @@ LANGUAGES = ("python", "javascript", "powershell", "cpp", "csharp")
 @pytest.fixture(scope="module")
 def origin_permission_modes():
     """Use the actual origin/main policy, without changing the checkout."""
-    source = subprocess.check_output(
-        ["git", "show", "origin/main:permission_modes.py"],
-        cwd=Path(__file__).resolve().parents[1], text=True, encoding="utf-8",
-    )
+    repo_root = Path(__file__).resolve().parents[1]
+    source = ""
+    chosen_spec = "origin/main:runtime/permission_modes.py"
+    last_error: subprocess.CalledProcessError | None = None
+    for spec in ("origin/main:runtime/permission_modes.py", "origin/main:permission_modes.py"):
+        try:
+            source = subprocess.check_output(
+                ["git", "show", spec],
+                cwd=repo_root, text=True, encoding="utf-8", stderr=subprocess.DEVNULL,
+            )
+            chosen_spec = spec
+            break
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+    else:
+        assert last_error is not None
+        raise last_error
     module = ModuleType("_psast_origin_permission_modes")
     module.__file__ = pm.__file__
     sys.modules[module.__name__] = module
     try:
-        exec(compile(source, "origin/main:permission_modes.py", "exec"), module.__dict__)
+        exec(compile(source, chosen_spec, "exec"), module.__dict__)
         yield module
     finally:
         sys.modules.pop(module.__name__, None)
