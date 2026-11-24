@@ -17,7 +17,6 @@
   "runtime/json_schema_verifier.py::B905": 1,
   "runtime/lesson_pruner.py::B905": 1,
   "runtime/local_service_probe.py::B904": 2,
-  "runtime/master_orchestrator.py::B905": 4,
   "runtime/media_assets.py::B905": 1,
   "runtime/memory_quality.py::B905": 1,
   "runtime/model_assets.py::B905": 5,
@@ -25,14 +24,12 @@
   "runtime/reloadable_mcp.py::F401": 1,
   "runtime/ruff_verifier.py::B904": 1,
   "runtime/server.py::F401": 51,
-  "runtime/server.py::F841": 2,
   "runtime/sonder_client.py::F401": 1,
   "runtime/sonder_config.py::F401": 1,
   "runtime/sonder_doctor.py::F401": 5,
   "runtime/sonder_hardware.py::F401": 1,
   "runtime/sonder_headless.py::F401": 1,
   "runtime/sonder_launcher.py::B904": 1,
-  "runtime/sonder_launcher.py::F401": 5,
   "runtime/sonder_speculation.py::F401": 1,
   "runtime/sqlite_mutate.py::F401": 1,
   "runtime/training_data.py::B008": 3,
@@ -219,9 +216,7 @@
   "sonder_runtime/interfaces/http/facades/model_request.py::F401": 1,
   "sonder_runtime/interfaces/http/handlers.py::F401": 5,
   "sonder_runtime/interfaces/http/handlers.py::F841": 1,
-  "sonder_runtime/interfaces/http/serve.py::B904": 3,
-  "sonder_runtime/interfaces/http/serve.py::F401": 1,
-  "sonder_runtime/interfaces/http/serve.py::F541": 1,
+  "sonder_runtime/interfaces/http/serve.py::B904": 1,
   "sonder_runtime/interfaces/mcp/handlers.py::F841": 1,
   "sonder_runtime/interfaces/repl/handler.py::F401": 1,
   "sonder_runtime/interfaces/repl/handler.py::F841": 1,
@@ -480,12 +475,12 @@
   "tools/tuf_repo.py::F401": 1
  },
  "module_lines": {
-  "runtime/adaptive_training.py": 3072,
-  "runtime/master_orchestrator.py": 3039,
-  "runtime/selfmod.py": 2531,
-  "runtime/server.py": 28760,
-  "runtime/sonder_launcher.py": 2461,
-  "sonder_runtime/interfaces/http/serve.py": 8838
+  "runtime/adaptive_training.py": 1117,
+  "runtime/master_orchestrator.py": 1428,
+  "runtime/selfmod.py": 1268,
+  "runtime/server.py": 23737,
+  "runtime/sonder_launcher.py": 1147,
+  "sonder_runtime/interfaces/http/serve.py": 3811
  },
  "server_shims": []
 }
