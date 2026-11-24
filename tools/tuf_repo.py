@@ -120,13 +120,13 @@ def _save_signer(repo: Path, role: str, index: int, signer: CryptoSigner) -> Non
         encrypted = True
     else:
         warnings.warn(
-            f"{KEYSTORE_PASSPHRASE_ENV} is not set; writing unencrypted TUF keystore key",
+            "SONDER_TUF_KEYSTORE_PASSPHRASE is not set; writing unencrypted TUF keystore key",
             UserWarning,
             stacklevel=2,
         )
         logger.warning(
-            "%s is not set; writing unencrypted TUF keystore key for role=%s",
-            KEYSTORE_PASSPHRASE_ENV, role,
+            "TUF keystore encryption env var is not set; writing unencrypted TUF keystore key for role=%s",
+            role,
         )
         encryption = serialization.NoEncryption()
         encrypted = False
