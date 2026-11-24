@@ -212,6 +212,7 @@ def build_http_chat_tool_turn(
     client_principal: str = "",
     client_session: str = "",
     write_sse_comment_fn: Callable[[], None] | None = None,
+    account_scope: str | None = None,
 ) -> ChatToolTurn | None:
     """Build a ``ChatToolTurn`` for an HTTP chat completion if enabled and capable."""
     if stream_module is not None:
@@ -232,6 +233,11 @@ def build_http_chat_tool_turn(
     if (not use_client_exec and mode == "plan") or not _model_supports_tools(server, model):
         return None
     depth = _delegation.current_depth()
+    account_blocked = (
+        frozenset(getattr(server, "_ACCOUNT_SCOPED_AGENT_BLOCKED_TOOLS", ()))
+        if account_scope is not None
+        else frozenset()
+    )
     if use_client_exec and not authorized_tools:
         admitted = [item.name for item in CLIENT_DELEGATABLE_TOOL_DEFINITIONS]
         tools_payload = client_tools_payload()
@@ -240,6 +246,7 @@ def build_http_chat_tool_turn(
         admitted_core = [
             item.name for item in CORE_CHAT_TOOL_DEFINITIONS
             if not role_tool_policy.agent_refusal(item.name)
+            and item.name not in account_blocked
             and (depth == 0 or item.name not in DELEGATION_TOOLS)
         ]
         admitted = list(dict.fromkeys([*admitted_core, *(d.name for d in CLIENT_DELEGATABLE_TOOL_DEFINITIONS)]))
@@ -254,6 +261,7 @@ def build_http_chat_tool_turn(
         admitted = [
             item.name for item in CORE_CHAT_TOOL_DEFINITIONS
             if not role_tool_policy.agent_refusal(item.name)
+            and item.name not in account_blocked
             and (depth == 0 or item.name not in DELEGATION_TOOLS)
         ]
         tools_payload = chat_tools_payload(allowed_names=admitted, depth=depth)
@@ -275,11 +283,24 @@ def build_http_chat_tool_turn(
                 resolved_project_root = str(resolver(project) or "")
             except Exception:
                 resolved_project_root = ""
+    blocked_tools = frozenset(getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ())) | account_blocked
+    if authorized_tools and account_scope is not None:
+        boundary_fn = getattr(server, "scoped_task_account_boundary", None)
+
+        def _scoped_host_dispatch(*args: Any, **kwargs: Any) -> str:
+            if callable(boundary_fn):
+                with boundary_fn(account_scope):
+                    return str(server._agent_dispatch(*args, **kwargs))
+            return str(server._agent_dispatch(*args, **kwargs))
+
+        dispatch_fn: Callable[..., str] = _scoped_host_dispatch
+    else:
+        dispatch_fn = server._agent_dispatch if authorized_tools else _deny_host_dispatch
     backend = ChatRunBackend(
-        dispatch_agent_tool=server._agent_dispatch if authorized_tools else _deny_host_dispatch,
+        dispatch_agent_tool=dispatch_fn,
         catalog_provider=(lambda: _mcp_catalog(server.mcp)) if authorized_tools else (lambda: {}),
         permission_policy=permission_policy,
-        blocked_tools=frozenset(getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ())),
+        blocked_tools=blocked_tools,
         container_active=lambda: container_active,
         project_root=resolved_project_root,
     )
@@ -393,14 +414,14 @@ def build_http_chat_tool_turn(
         tools_payload=tools_payload,
         backend=backend,
         permission_policy=permission_policy,
-        blocked_tools=frozenset(getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ())),
+        blocked_tools=blocked_tools,
         on_tool_event=on_event if (stream and write_tool_chunk_fn is not None) else None,
         on_agent_event=on_agent_ev if (stream and write_agent_chunk_fn is not None) else None,
         on_board_event=on_board_ev if (stream and write_agent_board_chunk_fn is not None) else None,
         wait_for_approval=wait_hook if (stream and wait_for_approval_fn is not None) else None,
         is_aborted=(lambda: bool(early.client_gone)) if early is not None else None,
         role_refusal=role_tool_policy.agent_refusal,
-        allow_system_tools=allow_system_tools and authorized_tools,
+        allow_system_tools=allow_system_tools and authorized_tools and account_scope is None,
         client_exec_tools=turn_client_tools,
         client_exec_only=bool(use_client_exec and not authorized_tools),
         delegate_client_tool=delegate_client if use_client_exec else None,

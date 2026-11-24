@@ -12,15 +12,34 @@ _store_call = call_repository_operation
 class TaskRepositoryAdapter:
     """Translate the task persistence port to the memory-store boundary."""
 
-    def __init__(self, connection) -> None:
+    def __init__(self, connection, *, default_account_scope: str | None = None) -> None:
         self._connection = connection
+        if default_account_scope is None:
+            self._default_account_scope: str | None = None
+        else:
+            if not isinstance(default_account_scope, str):
+                raise ValueError("task account scope must be a string")
+            cleaned = default_account_scope.strip()
+            if not cleaned:
+                raise ValueError("task account scope must not be empty")
+            if len(cleaned) > 256:
+                raise ValueError("task account scope is too long")
+            self._default_account_scope = cleaned
+
+    def _resolve_scope(self, account_scope: str | None) -> str | None:
+        """Keep an active repository default scope unbreakable and non-widening."""
+        if self._default_account_scope is not None:
+            if account_scope is not None and account_scope != self._default_account_scope:
+                raise PermissionError("task account scope mismatch")
+            return self._default_account_scope
+        return account_scope
 
     def create(self, *, account_scope: str | None = None, **fields) -> dict:
         import sonder_runtime.adapters.memory_store as memory_store
         return _store_call(
             memory_store.create_task,
             self._connection,
-            account_scope=account_scope,
+            account_scope=self._resolve_scope(account_scope),
             **fields,
         )
 
@@ -29,7 +48,7 @@ class TaskRepositoryAdapter:
         return _store_call(
             memory_store.list_tasks,
             self._connection,
-            account_scope=account_scope,
+            account_scope=self._resolve_scope(account_scope),
             **filters,
         )
 
@@ -38,7 +57,7 @@ class TaskRepositoryAdapter:
         return _store_call(
             memory_store.latest_checklist,
             self._connection,
-            account_scope=account_scope,
+            account_scope=self._resolve_scope(account_scope),
         )
 
     def update(
@@ -49,7 +68,7 @@ class TaskRepositoryAdapter:
             memory_store.update_task,
             self._connection,
             task_id,
-            account_scope=account_scope,
+            account_scope=self._resolve_scope(account_scope),
             **changes,
         )
 
@@ -59,7 +78,7 @@ class TaskRepositoryAdapter:
             memory_store.get_task,
             self._connection,
             task_id,
-            account_scope=account_scope,
+            account_scope=self._resolve_scope(account_scope),
         )
 
     def events(
@@ -71,7 +90,7 @@ class TaskRepositoryAdapter:
             self._connection,
             task_id,
             limit=limit,
-            account_scope=account_scope,
+            account_scope=self._resolve_scope(account_scope),
         )
 
     def children(self, task_id: str, *, account_scope: str | None = None) -> list[dict]:
@@ -80,7 +99,7 @@ class TaskRepositoryAdapter:
             memory_store.task_children,
             self._connection,
             task_id,
-            account_scope=account_scope,
+            account_scope=self._resolve_scope(account_scope),
         )
 
     def delete(self, task_id: str, *, account_scope: str | None = None) -> dict:
@@ -89,7 +108,7 @@ class TaskRepositoryAdapter:
             memory_store.delete_task,
             self._connection,
             task_id,
-            account_scope=account_scope,
+            account_scope=self._resolve_scope(account_scope),
         )
 
     def add_dependency(
@@ -101,7 +120,7 @@ class TaskRepositoryAdapter:
             self._connection,
             task_id,
             depends_on,
-            account_scope=account_scope,
+            account_scope=self._resolve_scope(account_scope),
         )
 
     def remove_dependency(
@@ -113,7 +132,7 @@ class TaskRepositoryAdapter:
             self._connection,
             task_id,
             depends_on,
-            account_scope=account_scope,
+            account_scope=self._resolve_scope(account_scope),
         )
 
     def dependencies(
@@ -124,7 +143,7 @@ class TaskRepositoryAdapter:
             memory_store.task_dependencies,
             self._connection,
             task_id,
-            account_scope=account_scope,
+            account_scope=self._resolve_scope(account_scope),
         )
 
     def dependents(
@@ -135,7 +154,7 @@ class TaskRepositoryAdapter:
             memory_store.task_dependents,
             self._connection,
             task_id,
-            account_scope=account_scope,
+            account_scope=self._resolve_scope(account_scope),
         )
 
     def progress(self, project: str = "", *, account_scope: str | None = None) -> dict:
@@ -144,7 +163,7 @@ class TaskRepositoryAdapter:
             memory_store.task_progress,
             self._connection,
             project=project,
-            account_scope=account_scope,
+            account_scope=self._resolve_scope(account_scope),
         )
 
 

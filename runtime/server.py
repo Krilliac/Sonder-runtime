@@ -2606,7 +2606,8 @@ def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     if trace:
         trace_text = _prompts.render("trace_instructions")
         effective_system = "%s\n\n%s" % (system, trace_text) if system else trace_text
-    if cloud or _provider_bridge.is_hosted(provider):  # hosted: no local profile/goal
+    from sonder_runtime.application.tasks.account_scope import active_task_account_scope
+    if cloud or _provider_bridge.is_hosted(provider) or active_task_account_scope() is not None:  # hosted/account: no local profile/goal
         return _join_system_parts(
             _runtime_identity_block(model, cloud, provider), effective_system,
         )
@@ -2826,7 +2827,8 @@ def _autopilot_command(arg: str, project: str = "", request_owner: str | None = 
         resolve_project=_resolve_project, autopilot_status=_autopilot_status,
         autopilot_start=_autopilot_start, autopilot_steer=_autopilot_steer,
         autopilot_resume=_autopilot_resume, autopilot_pause=_autopilot_pause,
-        autopilot_cancel=_autopilot_cancel, launch_autopilot=_launch_autopilot,
+        autopilot_cancel=_autopilot_cancel,
+        launch_autopilot=lambda run_id: _launch_autopilot(run_id, request_owner=request_owner),
         autopilot_not_launched=_autopilot_not_launched,
         goal_to_autopilot=_composition.goal_to_autopilot,
         active_goal_fn=_active_goal, fanout_fn=_model_fanout_authorized,
@@ -3163,7 +3165,7 @@ def _goal_command(arg: str, project: str = "", request_owner: str = "") -> str:
                     request_owner=request_owner,
                 )
                 if not ap_result.get("error"):
-                    launched = _launch_autopilot(ap_result["run_id"])
+                    launched = _launch_autopilot(ap_result["run_id"], request_owner=request_owner or None)
                     if not launched:
                         not_launched_msg = _autopilot_not_launched(ap_result["run_id"])
             return _slash_commands_core.format_goal_set_reply(
@@ -5664,6 +5666,8 @@ def _offload_tier_impl(
 ) -> str:
     """Internal offload path; model failures stay typed for orchestrators."""
     schema = _parse_schema_arg(schema)
+    if active_task_account_scope() is not None:
+        learn, session = False, "none"
     capture_session = _resolve_session(session) if session is not None else None
     # 0 means model-aware automatic sizing. The resolved model is not known
     # until after live tier refresh, so defer selection to the generation
@@ -6754,6 +6758,8 @@ def _sonder_impl(
     model_override: str = "",
     location_consent: bool = None,
 ) -> str:
+    if active_task_account_scope() is not None:
+        return "refused /sonder: hosted account chat must use /v1/chat/completions rather than the local operator /sonder tool."
     session_id = _resolve_session(session)
     with _serialized_session_turn(session_id):
         claim = None
@@ -6819,6 +6825,8 @@ def sonder(
         command = control_command(prompt, session=session, project=project)
         if command is not None:
             return command
+    if active_task_account_scope() is not None:
+        return "refused /sonder: hosted account chat must use /v1/chat/completions rather than the local operator /sonder tool."
     natural = natural_model_request(prompt)
     if natural and natural["kind"] in ("fanout", "ensemble"):
         if natural["prompt"].lstrip().startswith("/"):
@@ -8214,9 +8222,18 @@ def command_registry_list(filter_text: str = "") -> str:
     return command_registry.format_commands(filter_text)
 
 
+from sonder_runtime.application.tasks.account_scope import (
+    active_task_account_scope,
+    autopilot_account_boundary,
+    scoped_task_account_boundary as scoped_task_account_boundary,
+)
+
+
 def _task_service(conn):
     return task_use_cases.TaskService(
-        task_state_adapter.LegacyTaskRepository(conn),
+        task_state_adapter.LegacyTaskRepository(
+            conn, default_account_scope=active_task_account_scope(),
+        ),
         task_state_adapter.LegacyChecklistEventSink(activity_tracker.set_checklist),
     )
 
@@ -16527,8 +16544,6 @@ REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = _agent_prompts_core.REPOSITORY_READ_ONLY_F
 REPOSITORY_AGENT_TOOL_HELP = _agent_prompts_core.REPOSITORY_AGENT_TOOL_HELP
 
 
-
-
 def _agent_tool_help(
     read_only=False, cloud=False, unsafe=False,
     project_bound=False, allow_web=True, allow_location=False,
@@ -17078,6 +17093,7 @@ def _agent_project_root_refusal(tool_name, *, read_only, repository_extra_roots)
 
 
 _AGENT_SYSTEM_OPERATOR_TOOLS = _agent_prompts_core.AGENT_SYSTEM_OPERATOR_TOOLS
+_ACCOUNT_SCOPED_AGENT_BLOCKED_TOOLS = _agent_prompts_core.ACCOUNT_SCOPED_AGENT_BLOCKED_TOOLS
 
 
 def _agent_dispatch(
@@ -17128,6 +17144,9 @@ def _agent_dispatch(
             "be called by an agent. Use an authenticated developer/admin "
             "surface with explicit operator intent." % tool_name
         )
+        return refusal
+    if active_task_account_scope() is not None and tool_name in _ACCOUNT_SCOPED_AGENT_BLOCKED_TOOLS:
+        refusal = "ERROR: HOST POLICY: tool '%s' is unavailable inside an account-scoped agent run." % tool_name
         return refusal
     if tool_name == "ensemble_codegen_build_loop" and not repository_extra_roots:
         # Kept as a named refusal so the error-signal ratchet can distinguish
@@ -17603,7 +17622,7 @@ def _agent_dispatch(
     if tool_name == "tool_manifest":
         return tool_manifest()
     if tool_name == "offload":
-        return offload(**_kw("offload", args))
+        return offload(**(_kw("offload", args) | ({"learn": False, "session": "none"} if active_task_account_scope() is not None else {})))
     with harness_tools.authorized_root_scope(repository_extra_roots):
         if tool_name == "test_discover":
             if read_only:
@@ -17676,7 +17695,6 @@ def _agent_dispatch(
     return _generic_agent_dispatch.dispatch(tool_name, args, mcp, _AGENT_SYSTEM_OPERATOR_TOOLS, run_refusal=_agent_run_tool_refusal, read_only=read_only, project_bound=bool(repository_extra_roots), allow_web=allow_web, allow_location=allow_location, unsafe=unsafe)
 
 
-
 _PROJECT_SCOPED_PATH_TOOLS = _agent_prompts_core.PROJECT_SCOPED_PATH_TOOLS
 _PROJECT_SCOPED_EXECUTION_TOOLS = _agent_prompts_core.PROJECT_SCOPED_EXECUTION_TOOLS
 _DEVELOPER_WORKFLOW_TOOLS = _agent_prompts_core.DEVELOPER_WORKFLOW_TOOLS
@@ -17718,6 +17736,8 @@ def _agent_run_tool_refusal(
     exact defect shape this function exists to prevent.  No caller reads the
     text: both use it as a predicate.
     """
+    if active_task_account_scope() is not None and _canonical_agent_tool_name(tool_name) in _ACCOUNT_SCOPED_AGENT_BLOCKED_TOOLS:
+        return "account-scoped agent boundary"
     if _canonical_agent_tool_name(tool_name) == "agent_lane":
         controller = _standalone_lanes.current()
         if read_only or cloud or controller is None or not controller.available:
@@ -17754,9 +17774,6 @@ def _cloud_agent_tool_policy_error(tool_name, *, unsafe=False):
         local_only_tools=_CLOUD_AGENT_LOCAL_ONLY_TOOLS | _generic_agent_dispatch.generic_only_names(mcp, _AGENT_SYSTEM_OPERATOR_TOOLS, tool_capabilities.dispatch_names(_agent_dispatch, include_generic=False)),
         nested_model_tools=_CLOUD_AGENT_NESTED_MODEL_TOOLS,
     )
-
-
-
 
 
 def _scope_arg_is_rooted(raw):
@@ -17954,7 +17971,6 @@ def _agent_verifier_reachable(read_only, allowed_tools):
     )
 
 
-
 def _agent_verification_standing():
     """Whether the measured record demands a citation, and the measured why.
 
@@ -17963,6 +17979,8 @@ def _agent_verification_standing():
     in both directions: too thin a sample demands verification, and so does a
     record that cannot be read at all.
     """
+    if active_task_account_scope() is not None:
+        return True, "global operator outcomes are isolated; verify before claiming done"
     unreadable = (
         "the measured record could not be read - reliability is unknown, "
         "so verify rather than assume"
@@ -17989,6 +18007,8 @@ def _agent_verification_standing():
 
 def _agent_verification_standing_notice():
     """The three-state calibration block shown to the agent itself."""
+    if active_task_account_scope() is not None:
+        return "VERIFICATION STANDING: account-scoped\n  global operator outcomes are isolated; verify before claiming done"
     try:
         conn = _open_db()
     except Exception:
@@ -18036,6 +18056,8 @@ def _agent_end_report_standing_line():
     lands on ``unreadable`` below -- which demands verification, the same
     answer an empty store gets.
     """
+    if active_task_account_scope() is not None:
+        return ""
     unreadable = (
         "standing: verify before claiming done: yes | caller-judged: the "
         "measured record could not be read"
@@ -18075,10 +18097,6 @@ def _agent_tool_observation_ok(tool_name, observation):
     )
 
 
-
-
-
-
 def _agent_call_signature(tool_name, args):
     """Return a stable signature for equivalent host-scoped tool calls."""
     return _agent_call_signature_policy(
@@ -18086,12 +18104,6 @@ def _agent_call_signature(tool_name, args):
         project_scoped_path_tools=_PROJECT_SCOPED_PATH_TOOLS,
         project_scoped_path_key=_project_scoped_path_key,
     )
-
-
-
-
-
-
 
 
 _WORK_INSPECTION_TOOLS = _agent_prompts_core.WORK_INSPECTION_TOOLS
@@ -18406,7 +18418,8 @@ def _agent_turn(
 
     _maybe_live_reload()
     cancel_check = agent_outcomes.combined_cancel(cancel_check, _foreground_turns.current())  # polled before and between sends
-    capture_session = _resolve_session(session) if session is not None else None
+    account_scoped = active_task_account_scope() is not None
+    capture_session = _resolve_session(session) if (session is not None and not (account_scoped and not str(session).strip())) else None
     # A model failure that ends this run is noted for the escalating
     # workbench runner under this run's own identity, so a nested agent's
     # failure can never be mistaken for it.
@@ -18460,7 +18473,7 @@ def _agent_turn(
     work_root = cwd or project
     work_root, project_error = prepare_loop_project(work_root, writing=not (read_only or cloud), task=prompt)
     project_scope, scope_error = _agent_project_scope(work_root)
-    project_bound = bool(project_scope) and bool(strict_project_tools) and not (bool(cwd) and not bool(project))
+    project_bound = bool(project_scope) and (account_scoped or (bool(strict_project_tools) and not (bool(cwd) and not bool(project))))
     project_error = project_error or scope_error
     if project_error:
         if return_host_receipt:
@@ -18502,17 +18515,11 @@ def _agent_turn(
         default_agent_system = _prompts.render(
             "agent_local", host_brief="" if restricted is not None else _local_agent_brief(project_scope),
         )
-    # Hosted agents receive only the explicitly supplied/default hosted
-    # system text. _build_system also appends mutable local profile, emotion,
-    # goal, and runtime-identity blocks; those are useful local context but
-    # are not part of the caller's cloud disclosure consent.
+    # Hosted, restricted, and account-scoped agents omit mutable local operator profile/goal/playbook blocks.
     system = (
         system or default_agent_system
         if cloud or restricted is not None  # a restricted model gets no private profile either
-        # cloud is False in this branch, so the identity block correctly
-        # describes a locally served model.
-        else _build_system(
-            system or default_agent_system, False, "", model=model, cloud=False)
+        else _build_system(system or default_agent_system, False, "", model=model, cloud=False)
     )
     agent_num_predict = (
         _CLOUD_AGENT_NUM_PREDICT if cloud else _agent_generation_budget.decision_num_predict(provider, cloud, True)
@@ -18658,7 +18665,7 @@ def _agent_turn(
         )
         state.pre_model_context_rendered = bool(context_text)
         transcript += context_text
-    transcript, _ = playbook_context.augment(transcript, prompt, cloud=cloud or restricted is not None or _provider_bridge.hosted_rung_active())
+    transcript, _ = playbook_context.augment(transcript, prompt, cloud=cloud or restricted is not None or account_scoped or _provider_bridge.hosted_rung_active())
 
     def ensure_not_cancelled():
         if _cancel_requested(cancel_check) or _foreground_turns.cancel_requested():
@@ -18891,6 +18898,7 @@ def _agent_turn(
             and _spec_prediction is not None
             and _spec_prediction[0] in _SPECULATABLE_ARGFREE_TOOLS
             and (allowed_tools is None or _spec_prediction[0] in allowed_tools)
+            and not _agent_run_tool_refusal(_spec_prediction[0], read_only=read_only, cloud=cloud, unsafe=unsafe, project_bound=project_bound, allow_web=allow_web, allow_location=allow_location)
             and _predictor.should_speculate(_spec_prediction[1])
         ):
             _predicted_tool = _spec_prediction[0]
@@ -19138,7 +19146,7 @@ def _agent_turn(
             )
         else:
             ensure_not_cancelled()
-            _retired = _spec_engine.resolve(call_signature, tool_name)
+            _retired = None if _agent_run_tool_refusal(tool_name, read_only=read_only, cloud=cloud, unsafe=unsafe, project_bound=project_bound, allow_web=allow_web, allow_location=allow_location) else _spec_engine.resolve(call_signature, tool_name)
             if _retired is not None:
                 tool_dispatched = True
                 observation = _retired.observation
@@ -19609,8 +19617,7 @@ def _autopilot_allowed_tools(run: dict) -> frozenset | None:
     project_scope, _project_error = _agent_project_scope(run.get("project", ""))
     if project_scope:
         allowed = allowed & _PROJECT_BOUND_AGENT_TOOLS
-    return allowed
-
+    return allowed - _ACCOUNT_SCOPED_AGENT_BLOCKED_TOOLS if active_task_account_scope() is not None else allowed
 
 
 def _autopilot_tool_policy(run: dict):
@@ -19950,7 +19957,7 @@ def _autopilot_work_model(
             # or tool action, so a cancel does not wait out the task's steps.
             cancel_check=lambda: bool(effect_fence.reason_lost(fence)),
             **({"pre_model_context": pre_model_context}
-               if strategy_memory is not None else {}),
+               if strategy_memory is not None and active_task_account_scope() is None else {}),
         )
     return output
 
@@ -19986,53 +19993,55 @@ def _execute_autopilot(run_id: str, *, max_cycles=12, plan_only=False, request_o
                 run, task, prior, strategy_memory=strategy_memory,
             )) if strategy_memory is not None else _autopilot_work_model
         )
-        return autopilot_controller.execute_run(
-            run_id,
-            owner_id,
-            owner_pid=os.getpid(),
-            request_owner=request_owner,
-            plan_fn=_autopilot_plan_model,
-            work_fn=work_fn,
-            review_fn=_autopilot_review_model,
-            max_cycles=max_cycles,
-            plan_only=plan_only,
-            strategy_trace=strategy_trace,
-            strategy_memory=strategy_memory,
-        )
+        with autopilot_account_boundary(request_owner):
+            return autopilot_controller.execute_run(
+                run_id,
+                owner_id,
+                owner_pid=os.getpid(),
+                request_owner=request_owner,
+                plan_fn=_autopilot_plan_model,
+                work_fn=work_fn,
+                review_fn=_autopilot_review_model,
+                max_cycles=max_cycles,
+                plan_only=plan_only,
+                strategy_trace=strategy_trace,
+                strategy_memory=strategy_memory,
+            )
     finally:
         stop.set()
         heartbeat.join(timeout=2)
 
 
 def _autopilot_thread_main(run_id: str, max_cycles: int, plan_only: bool, request_owner: str | None = None) -> None:
-    run = _application().automation.get_run(run_id, request_owner=request_owner) or {}
-    try:
-        with activity_tracker.response_span(
-            "autopilot:%s" % run_id,
-            run.get("objective", ""),
-            surface="autopilot",
-            model=run.get("tier", "code"),
-            project=run.get("project", ""),
-        ):
-            result = _execute_autopilot(
-                run_id, max_cycles=max_cycles, plan_only=plan_only, request_owner=request_owner,
-            )
-            activity_tracker.set_result_summary(
-                "%s: %s" % (result.get("status", "unknown"), result.get("summary", ""))
-            )
-            if result.get("status") in ("completed", "failed", "cancelled"):
-                with contextlib.suppress(Exception):
-                    _composition.on_autopilot_terminal(result)
-    except Exception as exc:
-        # execute_run persists model/tool failures whenever it owns the run. A
-        # claim conflict is observable but must never steal or overwrite state.
-        with contextlib.suppress(Exception):
-            activity_tracker.set_result_summary("autopilot worker: %s" % exc)
-    finally:
-        with _AUTOPILOT_THREADS_LOCK:
-            current = _AUTOPILOT_THREADS.get(run_id)
-            if current is threading.current_thread():
-                _AUTOPILOT_THREADS.pop(run_id, None)
+    with autopilot_account_boundary(request_owner):
+        run = _application().automation.get_run(run_id, request_owner=request_owner) or {}
+        try:
+            with activity_tracker.response_span(
+                "autopilot:%s" % run_id,
+                run.get("objective", ""),
+                surface="autopilot",
+                model=run.get("tier", "code"),
+                project=run.get("project", ""),
+            ):
+                result = _execute_autopilot(
+                    run_id, max_cycles=max_cycles, plan_only=plan_only, request_owner=request_owner,
+                )
+                activity_tracker.set_result_summary(
+                    "%s: %s" % (result.get("status", "unknown"), result.get("summary", ""))
+                )
+                if result.get("status") in ("completed", "failed", "cancelled"):
+                    with contextlib.suppress(Exception):
+                        _composition.on_autopilot_terminal(result)
+        except Exception as exc:
+            # execute_run persists model/tool failures whenever it owns the run. A
+            # claim conflict is observable but must never steal or overwrite state.
+            with contextlib.suppress(Exception):
+                activity_tracker.set_result_summary("autopilot worker: %s" % exc)
+        finally:
+            with _AUTOPILOT_THREADS_LOCK:
+                current = _AUTOPILOT_THREADS.get(run_id)
+                if current is threading.current_thread():
+                    _AUTOPILOT_THREADS.pop(run_id, None)
 
 
 def _launch_autopilot(run_id: str, max_cycles=12, plan_only=False, request_owner: str | None = None) -> bool:
@@ -20045,8 +20054,8 @@ def _launch_autopilot(run_id: str, max_cycles=12, plan_only=False, request_owner
             if alive >= _MAX_AUTOPILOT_RUNS:
                 return False
         thread = owned_runtime_thread(
-            target=_autopilot_thread_main,
-            args=(run_id, int(max_cycles), bool(plan_only), request_owner),
+            target=contextvars.copy_context().run,
+            args=(_autopilot_thread_main, run_id, int(max_cycles), bool(plan_only), request_owner),
             name="sonder-autopilot-%s" % run_id,
             daemon=True,
         )
@@ -20261,7 +20270,8 @@ def autopilot_start(
 ) -> str:
     """Create and start a persistent, locally planned autonomous goal run."""
     return _autopilot_start(
-        objective, project=project, tier=tier, policy=policy, allow_web=allow_web,
+        objective, project=project, request_owner=active_task_account_scope() or "",
+        tier=tier, policy=policy, allow_web=allow_web,
         max_cycles=max_cycles, max_failures=max_failures, max_tasks=max_tasks,
         max_replans=max_replans, adaptive=adaptive, plan_only=plan_only, wait=wait,
     )
@@ -20270,25 +20280,25 @@ def autopilot_start(
 @mcp.tool()
 def autopilot_resume(run_id: str, max_cycles: int = 12, wait: bool = False) -> str:
     """Explicitly resume a paused, blocked, ready, or interrupted run."""
-    return _autopilot_resume(run_id, max_cycles=max_cycles, wait=wait)
+    return _autopilot_resume(run_id, max_cycles=max_cycles, wait=wait, request_owner=active_task_account_scope())
 
 
 @mcp.tool()
 def autopilot_pause(run_id: str) -> str:
     """Request a cooperative pause at the next host checkpoint."""
-    return _autopilot_pause(run_id)
+    return _autopilot_pause(run_id, request_owner=active_task_account_scope())
 
 
 @mcp.tool()
 def autopilot_cancel(run_id: str) -> str:
     """Request cancellation; an active task result is discarded."""
-    return _autopilot_cancel(run_id)
+    return _autopilot_cancel(run_id, request_owner=active_task_account_scope())
 
 
 @mcp.tool()
 def autopilot_status(run_id: str = "", include_finished: bool = True) -> str:
     """Inspect one persistent autonomous run or the controller ledger."""
-    return _autopilot_status(run_id, include_finished=include_finished)
+    return _autopilot_status(run_id, include_finished=include_finished, request_owner=active_task_account_scope())
 
 
 @mcp.tool()
@@ -20612,7 +20622,9 @@ def _route_work_request(
 
     selected_tier, reason = _capability_refined_tier(prompt, selected_tier, reason)
 
+    from sonder_runtime.application.tasks.account_scope import active_task_account_scope
     resolved_project = _resolve_project(handoff.project) or ""
+    active_scope = active_task_account_scope()
     if mode == "inspection" or (mode == handoff.requested_mode == "workbench"
                                 and intents.classify_file_intent(prompt)):
         from sonder_runtime.adapters.chat_file_routing import route_file_request
@@ -20622,17 +20634,20 @@ def _route_work_request(
         )
     elif mode == "fleet":
         _narration_reason(reason)
-        master_kwargs = {
-            "task": handoff.objective, "mode": "fleet", "tier": selected_tier,
-            "learn": False,
-        }
-        if explicit_worker_cap:
-            master_kwargs["agents"] = explicit_worker_cap
-            master_kwargs["worker_cap"] = explicit_worker_cap
-        if isinstance(resolved_project, str) and os.path.isdir(resolved_project):
-            master_kwargs["project"] = resolved_project
-        # Only HTTP chat reaches this route, so the project is a served caller's.
-        output = served_project_refusal(master_kwargs.get("project", "")) or master_orchestrate(**master_kwargs)
+        if active_scope is not None:
+            output = "refused /master_orchestrate: account-scoped task state is not available for this autonomous tool; use the scoped task/checklist commands."
+        else:
+            master_kwargs = {
+                "task": handoff.objective, "mode": "fleet", "tier": selected_tier,
+                "learn": False,
+            }
+            if explicit_worker_cap:
+                master_kwargs["agents"] = explicit_worker_cap
+                master_kwargs["worker_cap"] = explicit_worker_cap
+            if isinstance(resolved_project, str) and os.path.isdir(resolved_project):
+                master_kwargs["project"] = resolved_project
+            # Only HTTP chat reaches this route, so the project is a served caller's.
+            output = served_project_refusal(master_kwargs.get("project", "")) or master_orchestrate(**master_kwargs)
     elif mode == "workbench":
         _narration_reason(reason)
         output, selected_tier = _workbench_agent_escalating(
@@ -20642,7 +20657,7 @@ def _route_work_request(
     else:
         active = []
         with contextlib.suppress(Exception):
-            snapshot = autopilot_store.snapshot(include_finished=False, limit=20)
+            snapshot = autopilot_store.snapshot(include_finished=False, limit=20, request_owner=active_scope)
             active = [
                 row for row in snapshot.get("runs", [])
                 if row.get("status") in autopilot_store.ACTIVE_STATUSES
@@ -20659,7 +20674,8 @@ def _route_work_request(
                 header=header, current_run=active[0],
             )
         _narration_reason(reason)
-        output = autopilot_start(
+        start_autopilot = (lambda **kw: _autopilot_start(request_owner=active_scope, **kw)) if active_scope is not None else autopilot_start
+        output = start_autopilot(
             objective=handoff.objective,
             project=resolved_project,
             tier=selected_tier,
@@ -22340,6 +22356,8 @@ def _ensemble_prompt_with_project_facts(task: str, project: str) -> str:
     the request.  Keep newest facts first, matching ``_answer``: the bounded
     renderer otherwise keeps old guidance and drops recent corrections.
     """
+    if active_task_account_scope() is not None:
+        return task
     name = (project or "").strip()
     if not name or name.lower() == "none":
         return task

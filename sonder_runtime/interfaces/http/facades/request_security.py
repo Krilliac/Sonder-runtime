@@ -56,8 +56,9 @@ SCOPED_TASK_TOOLS = frozenset((
 ))
 
 ACCOUNT_UNSCOPED_TASK_TOOLS = frozenset((
-    "agent", "workbench_agent", "master_orchestrate", "master_retry",
+    "master_orchestrate", "master_retry",
     "agent_retry", "self_heal_repair",
+    "mission_start", "mission_status", "composition_bindings",
 ))
 
 ACCOUNT_UNSCOPED_SAVED_WORKFLOW_TOOLS = frozenset((
@@ -68,6 +69,7 @@ ACCOUNT_UNSCOPED_LOOP_ACTIONS = frozenset((
     "checklist_create", "checklist_update", "checklist_show",
     "work", "agent", "workbench_agent", "master", "master_orchestrate",
     "master_retry", "agent_retry", "self_heal_repair",
+    "mission_start", "mission_status", "goal",
 ))
 
 DEVELOPER_AUTHORITY_BY_MODE: dict[str, str] = {
@@ -535,6 +537,17 @@ def account_task_boundary_refusal(
                 "refused /loop: account-scoped task state is not available "
                 "for loop action '%s'; use scoped task/checklist commands."
             ) % action_type
+        if action_type == "sonder":
+            raw_prompt = str(action.get("prompt") or "").strip()
+            if (
+                not raw_prompt.startswith("/")
+                or str(action.get("tier") or "").strip()
+                or str(action.get("model_override") or "").strip()
+            ):
+                return (
+                    "refused /loop: hosted account chat must use /v1/chat/completions "
+                    "rather than the local operator sonder loop action."
+                )
     return ""
 
 

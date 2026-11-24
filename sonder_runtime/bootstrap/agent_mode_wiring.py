@@ -4,6 +4,10 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from sonder_runtime.application.tasks.account_scope import (
+    active_task_account_scope,
+    hosted_account_scope_or_none,
+)
 from sonder_runtime.domain import agent_modes
 from sonder_runtime.domain.cloud_access import LEGACY_ERROR_PREFIX
 from sonder_runtime.domain.session_ref import hosted_session_storage_id
@@ -163,6 +167,14 @@ def run_autopilot_command(
         if strategy_mode and parsed.policy == "observe":
             return f"{LEGACY_ERROR_PREFIX} /autopilot {strategy_mode} requires workspace mode (remove --observe)."
         if parsed.bind_goal:
+            if (
+                hosted_account_scope_or_none(request_owner) is not None
+                or active_task_account_scope() is not None
+            ):
+                return (
+                    "refused /autopilot: --goal binds the local operator goal store and is "
+                    "unavailable for hosted accounts; pass an objective directly."
+                )
             active = active_goal_fn()
             if not active:
                 return "--goal requires an active goal (use /goal set first)."

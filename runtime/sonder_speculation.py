@@ -24,6 +24,7 @@ depends on a prediction being right.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
@@ -520,8 +521,9 @@ class SpeculationEngine:
                         )
                         self._active_workers.pop(id(slot), None)
 
+            ctx = contextvars.copy_context()
             thread = threading.Thread(
-                target=_work, daemon=True, name="sonder-speculation"
+                target=ctx.run, args=(_work,), daemon=True, name="sonder-speculation"
             )
             slot["thread"] = thread
             self._slots.append(slot)

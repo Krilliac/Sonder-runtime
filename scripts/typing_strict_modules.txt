@@ -517,6 +517,7 @@ sonder_runtime/application/structured_output.py
 sonder_runtime/application/subagents/__init__.py
 sonder_runtime/application/subagents/checkpoint_provenance.py
 sonder_runtime/application/tasks/__init__.py
+sonder_runtime/application/tasks/account_scope.py
 sonder_runtime/application/testing/__init__.py
 sonder_runtime/application/tools/__init__.py
 sonder_runtime/application/tools/audit.py
