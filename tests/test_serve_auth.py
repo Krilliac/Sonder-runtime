@@ -2750,7 +2750,8 @@ def test_api_key_mode_cannot_be_bypassed_by_account_token(monkeypatch):
     assert ts._authorized("Bearer " + ("k" * 32)) is True
 
 
-def test_non_loopback_bind_fails_without_strong_auth():
+def test_non_loopback_bind_fails_without_strong_auth(monkeypatch):
+    monkeypatch.delenv("SONDER_ALLOW_NON_LOOPBACK_PROXY_BACKEND", raising=False)
     with pytest.raises(RuntimeError):
         ts._validate_bind_security(
             "0.0.0.0", api_key="", auth_mode="local-open", auth_secret="",
@@ -2761,6 +2762,17 @@ def test_non_loopback_bind_fails_without_strong_auth():
             "0.0.0.0", api_key="k" * 32, auth_mode="api-key", auth_secret="",
             tls_terminated_by_proxy=False,
         )
+    # M-09: tls_terminated_by_proxy=True requires loopback host unless explicitly opted in.
+    with pytest.raises(RuntimeError, match="loopback host"):
+        ts._validate_bind_security(
+            "0.0.0.0", api_key="k" * 32, auth_mode="api-key", auth_secret="",
+            tls_terminated_by_proxy=True,
+        )
+    ts._validate_bind_security(
+        "127.0.0.1", api_key="k" * 32, auth_mode="api-key", auth_secret="",
+        tls_terminated_by_proxy=True,
+    )
+    monkeypatch.setenv("SONDER_ALLOW_NON_LOOPBACK_PROXY_BACKEND", "1")
     ts._validate_bind_security(
         "0.0.0.0", api_key="k" * 32, auth_mode="api-key", auth_secret="",
         tls_terminated_by_proxy=True,
@@ -3455,6 +3467,7 @@ def test_bind_gate_tracks_the_named_minimum_key_length(monkeypatch):
     whether a non-loopback listener opens -- at the old minimum.
     """
     monkeypatch.setattr(runtime_config, "MIN_API_KEY_LENGTH", 40)
+    monkeypatch.setenv("SONDER_ALLOW_NON_LOOPBACK_PROXY_BACKEND", "1")
 
     with pytest.raises(RuntimeError):
         ts._validate_bind_security(

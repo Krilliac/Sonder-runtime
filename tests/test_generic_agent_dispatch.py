@@ -169,3 +169,36 @@ def test_generic_dispatch_refuses_authority_arguments_and_hides_them_from_help()
     assert help_lines
     for line in help_lines:
         assert '"token"' not in line and '"approval"' not in line and '"extra_roots"' not in line
+
+
+@pytest.mark.parametrize("name", [
+    "campaign_generate_compile_execute_record",
+    "campaign_repo_repair",
+    "parallel_generate_run",
+    "parallel_run_code",
+    "debug_inspect",
+    "npu_status",
+    "security_eval",
+    "improve_function",
+    "mesh_generate",
+    "generate_3d_model",
+])
+def test_generic_dispatch_excludes_non_read_only_campaign_and_exec_tools(name):
+    calls = []
+    registry = _registry()
+    registry.tool(name=name)(lambda: calls.append(name) or "ran")
+    result = _call(name, {}, registry)
+    assert "HOST POLICY" in result and "excluded" in result
+    assert calls == []
+
+
+def test_generic_dispatch_read_only_fails_closed_for_undeclared_tools():
+    calls = []
+    registry = _registry()
+    registry.tool(name="unclassified_side_effect_tool")(lambda: calls.append(True) or "ran")
+    result = dispatch.dispatch(
+        "unclassified_side_effect_tool", {}, registry, (),
+        run_refusal=lambda *a, **k: "", read_only=True,
+    )
+    assert "HOST POLICY" in result and "read-only" in result
+    assert calls == []

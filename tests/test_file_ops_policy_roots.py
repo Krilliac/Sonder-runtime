@@ -638,3 +638,23 @@ def test_http_workspace_roots_drops_root_whose_resolution_becomes_drive_or_unc(
     for resolved_target in (Path("C:\\"), Path("\\\\nohost.invalid\\share\\proj")):
         monkeypatch.setattr(Path, "resolve", lambda self, _t=resolved_target: _t)
         assert http_serve._http_workspace_roots(True) == ()
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("raw", [
+    "C:\\CON",
+    "C:\\work\\PRN",
+    "C:\\work\\AUX\\sub",
+    "C:\\work\\nul",
+    "C:\\work\\nul.txt",
+    "C:\\work\\COM1",
+    "C:\\work\\com9.log",
+    "C:\\work\\LPT1",
+    "C:\\work\\lpt9.dat\\sub",
+])
+def test_windows_reserved_dos_device_names_are_refused(raw):
+    from sonder_runtime.platform import policy_roots
+
+    assert policy_roots.try_parse_policy_root(raw) is None
+    with pytest.raises(policy_roots.PolicyRootError, match="reserved device name"):
+        policy_roots.parse_policy_root(raw)

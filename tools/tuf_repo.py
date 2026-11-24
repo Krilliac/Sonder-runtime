@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import shutil
 import sys
+import warnings
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from securesystemslib.signer import CryptoSigner
 from tuf.api.metadata import (
@@ -44,12 +46,44 @@ from tuf.api.metadata import (
     Timestamp,
 )
 
+logger = logging.getLogger(__name__)
+
 ROLES = ("root", "targets", "snapshot", "timestamp")
 THRESHOLDS = {"root": 2, "targets": 2, "snapshot": 1, "timestamp": 1}
 KEY_COUNTS = {"root": 3, "targets": 3, "snapshot": 1, "timestamp": 1}
 # Expiries: long-lived anchors, short-lived freshness (freeze protection).
 EXPIRY_DAYS = {"root": 365, "targets": 90, "snapshot": 7, "timestamp": 1}
 SPEC_VERSION = "1.0.31"
+KEYSTORE_PASSPHRASE_ENV = "SONDER_TUF_KEYSTORE_PASSPHRASE"
+_WINDOWS_RESERVED_DEVICE_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+})
+
+
+def _validate_safe_target_name(target_name: object) -> str:
+    """Validate *target_name* as a strict single-segment safe basename."""
+    if not isinstance(target_name, str) or not target_name:
+        raise ValueError("target name must be a non-empty string")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in target_name):
+        raise ValueError(f"unsafe target name (control character): {target_name!r}")
+    if target_name != target_name.strip() or target_name.endswith((".", " ")):
+        raise ValueError(f"unsafe target name (leading/trailing whitespace or dot): {target_name!r}")
+    if "/" in target_name or "\\" in target_name or ":" in target_name:
+        raise ValueError(f"unsafe target name (path separator or drive letter): {target_name!r}")
+    if target_name in (".", "..") or ".." in target_name:
+        raise ValueError(f"unsafe target name (traversal segment): {target_name!r}")
+    if (
+        PurePosixPath(target_name).parts != (target_name,)
+        or PureWindowsPath(target_name).parts != (target_name,)
+        or Path(target_name).name != target_name
+    ):
+        raise ValueError(f"unsafe target name (must be single basename): {target_name!r}")
+    stem = target_name.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED_DEVICE_NAMES:
+        raise ValueError(f"unsafe target name (reserved device name): {target_name!r}")
+    return target_name
 
 
 def _utc(days: int) -> datetime:
@@ -76,24 +110,48 @@ def _save_signer(repo: Path, role: str, index: int, signer: CryptoSigner) -> Non
     path = _keystore(repo) / f"{role}_{index}.json"
     # Persist the private key material for the ceremony/CI. Production
     # offline keys are held outside the repo and never written here.
+    from cryptography.hazmat.primitives import serialization
+
+    passphrase = os.environ.get(KEYSTORE_PASSPHRASE_ENV, "")
+    if passphrase:
+        encryption: serialization.KeySerializationEncryption = (
+            serialization.BestAvailableEncryption(passphrase.encode("utf-8"))
+        )
+        encrypted = True
+    else:
+        warnings.warn(
+            f"{KEYSTORE_PASSPHRASE_ENV} is not set; writing unencrypted TUF keystore key",
+            UserWarning,
+            stacklevel=2,
+        )
+        logger.warning(
+            "%s is not set; writing unencrypted TUF keystore key for role=%s",
+            KEYSTORE_PASSPHRASE_ENV, role,
+        )
+        encryption = serialization.NoEncryption()
+        encrypted = False
+
+    private_key = getattr(signer, "_private_key", None)
+    if private_key is None and hasattr(signer, "private_bytes"):
+        private_key = serialization.load_pem_private_key(
+            signer.private_bytes, password=None,
+        )
+    if private_key is None:
+        raise ValueError("signer does not expose a serializable private key")
+
     data = {
         "keyid": signer.public_key.keyid,
-        "private_pem": signer.private_bytes.decode("utf-8")
-        if hasattr(signer, "private_bytes") else None,
-    }
-    if data["private_pem"] is None:
-        # sslib CryptoSigner exposes the private key via its crypto object.
-        from cryptography.hazmat.primitives import serialization
-
-        data["private_pem"] = signer._private_key.private_bytes(
+        "encrypted": encrypted,
+        "private_pem": private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        ).decode("utf-8")
-        data["public_pem"] = signer._private_key.public_key().public_bytes(
+            encryption_algorithm=encryption,
+        ).decode("utf-8"),
+        "public_pem": private_key.public_key().public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        ).decode("utf-8")
+        ).decode("utf-8"),
+    }
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(data, fh)
@@ -103,11 +161,39 @@ def _load_signers(repo: Path, role: str) -> list[CryptoSigner]:
     signers = []
     from cryptography.hazmat.primitives import serialization
 
+    passphrase = os.environ.get(KEYSTORE_PASSPHRASE_ENV, "")
     for path in sorted(_keystore(repo).glob(f"{role}_*.json")):
         raw = json.loads(path.read_text(encoding="utf-8"))
-        private_key = serialization.load_pem_private_key(
-            raw["private_pem"].encode("utf-8"), password=None,
+        pem_bytes = str(raw["private_pem"]).encode("utf-8")
+        is_encrypted = (
+            bool(raw.get("encrypted"))
+            or b"BEGIN ENCRYPTED PRIVATE KEY" in pem_bytes
         )
+        if is_encrypted:
+            if not passphrase:
+                raise ValueError(
+                    f"TUF keystore key {path.name} is encrypted; set "
+                    f"{KEYSTORE_PASSPHRASE_ENV} to unlock it"
+                )
+            try:
+                private_key = serialization.load_pem_private_key(
+                    pem_bytes, password=passphrase.encode("utf-8"),
+                )
+            except (ValueError, TypeError) as exc:
+                raise ValueError(
+                    f"failed to decrypt TUF keystore key {path.name}: invalid "
+                    f"{KEYSTORE_PASSPHRASE_ENV}"
+                ) from exc
+        else:
+            warnings.warn(
+                f"loading unencrypted TUF keystore key {path.name}; set "
+                f"{KEYSTORE_PASSPHRASE_ENV} to encrypt keystore keys",
+                UserWarning,
+                stacklevel=2,
+            )
+            private_key = serialization.load_pem_private_key(
+                pem_bytes, password=None,
+            )
         signers.append(CryptoSigner(private_key))
     return signers
 
@@ -190,11 +276,17 @@ def publish_target(
     target_file: str | os.PathLike,
     target_name: str,
 ) -> dict:
+    target_name = _validate_safe_target_name(target_name)
     repo = Path(repo_dir)
     md_dir = _metadata_dir(repo)
     source = Path(target_file)
     if not source.is_file():
         raise FileNotFoundError(f"target file not found: {source}")
+
+    targets_out = (repo / "targets").resolve()
+    dest = (targets_out / target_name).resolve()
+    if not dest.is_relative_to(targets_out) or dest.parent != targets_out:
+        raise ValueError(f"target destination escapes targets directory: {target_name!r}")
 
     targets_md = Metadata.from_file(str(md_dir / "targets.json"))
     target_info = TargetFile.from_file(target_name, str(source))
@@ -227,9 +319,8 @@ def publish_target(
     _write(repo, "timestamp", timestamp_md)
 
     # Stage the target file itself in the repo's targets/ tree.
-    targets_out = repo / "targets"
     targets_out.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, targets_out / target_name)
+    shutil.copy2(source, dest)
 
     return {
         "target": target_name,
@@ -252,11 +343,17 @@ def build_offline_bundle(
     bundle (manifest + metadata/ + targets/) the client verifies via TUF."""
     repo = Path(repo_dir)
     built = Path(built_bundle_dir)
+    built_resolved = built.resolve()
     out = Path(out_dir)
     manifest_src = built / "manifest.json"
     manifest = json.loads(manifest_src.read_text(encoding="utf-8"))
-    archive_name = manifest["archive"]["name"]
-    archive_src = built / archive_name
+    archive_name = _validate_safe_target_name(manifest["archive"]["name"])
+    raw_archive = built / archive_name
+    if raw_archive.is_symlink():
+        raise ValueError(f"refusing symlink archive in build output: {archive_name!r}")
+    archive_src = raw_archive.resolve()
+    if not archive_src.is_relative_to(built_resolved) or archive_src.parent != built_resolved:
+        raise ValueError(f"archive path escapes built bundle directory: {archive_name!r}")
     if not archive_src.is_file():
         raise FileNotFoundError(f"archive not found in build output: {archive_src}")
 
@@ -270,11 +367,15 @@ def build_offline_bundle(
 
     out.mkdir(parents=True, exist_ok=True)
     (out / "metadata").mkdir(exist_ok=True)
-    (out / "targets").mkdir(exist_ok=True)
+    out_targets = (out / "targets").resolve()
+    out_targets.mkdir(exist_ok=True)
+    out_archive = (out_targets / archive_name).resolve()
+    if not out_archive.is_relative_to(out_targets) or out_archive.parent != out_targets:
+        raise ValueError(f"offline bundle target escapes targets directory: {archive_name!r}")
     for name in ROLES:
         shutil.copy2(repo / "metadata" / f"{name}.json",
                      out / "metadata" / f"{name}.json")
-    shutil.copy2(repo / "targets" / archive_name, out / "targets" / archive_name)
+    shutil.copy2(repo / "targets" / archive_name, out_archive)
     # The client loads and verifies bundle/manifest.json; publish the signed
     # copy there (and mirror it into targets/ for layout parity with archive).
     shutil.copy2(repo / "targets" / "manifest.json", out / "manifest.json")

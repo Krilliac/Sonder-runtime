@@ -212,6 +212,87 @@ class InlineImageContextAccountingTests(unittest.TestCase):
         self.assertIn("Generated via `sdxl-turbo` (512x512).", cleaned)
         self.assertLess(len(cleaned), 200)
 
+
+class ImageHardeningTests(unittest.TestCase):
+    def test_call_openai_image_api_refuses_302_and_307_redirects(self):
+        import http.server
+        import threading
+        import urllib.error
+
+        target_hits: list[str] = []
+
+        class _TargetHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                target_hits.append(self.path)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def do_GET(self):
+                target_hits.append(self.path)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *_a):
+                pass
+
+        target_srv = http.server.HTTPServer(("127.0.0.1", 0), _TargetHandler)
+        target_port = target_srv.server_address[1]
+        threading.Thread(target=target_srv.serve_forever, daemon=True).start()
+
+        class _RedirectHandler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                code = 307 if self.path.endswith("307") else 302
+                self.send_response(code)
+                self.send_header("Location", f"http://127.0.0.1:{target_port}/secret")
+                self.end_headers()
+
+            def log_message(self, *_a):
+                pass
+
+        redir_srv = http.server.HTTPServer(("127.0.0.1", 0), _RedirectHandler)
+        redir_port = redir_srv.server_address[1]
+        threading.Thread(target=redir_srv.serve_forever, daemon=True).start()
+
+        try:
+            for suffix, expected_code in (("302", 302), ("307", 307)):
+                backend = image_generation.ImageBackend(
+                    kind="openai_api",
+                    model="sdxl",
+                    endpoint=f"http://127.0.0.1:{redir_port}/{suffix}",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    image_generation._call_openai_image_api(backend, "a fox", timeout=5.0)
+                self.assertEqual(ctx.exception.code, expected_code)
+            self.assertEqual(target_hits, [])
+        finally:
+            redir_srv.shutdown()
+            redir_srv.server_close()
+            target_srv.shutdown()
+            target_srv.server_close()
+
+    def test_fit_inline_budget_rejects_oversize_bytes_when_pillow_unavailable(self):
+        oversize = b"\x89PNG\r\n\x1a\n" + (b"\x00" * (image_generation.MAX_INLINE_IMAGE_BYTES + 1024))
+        with mock.patch.dict("sys.modules", {"PIL": None, "PIL.Image": None}):
+            with self.assertRaisesRegex(ValueError, "inline byte budget"):
+                image_generation._fit_inline_budget(oversize, "image/png")
+
+    def test_generated_images_disk_quota_evicts_oldest_files(self):
+        with TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            old_img = out_dir / "old.png"
+            new_img = out_dir / "new.png"
+            old_img.write_bytes(b"A" * 400)
+            os.utime(old_img, (1_000_000, 1_000_000))
+            new_img.write_bytes(b"B" * 300)
+            evicted = image_generation._enforce_generated_images_quota(
+                out_dir, max_bytes=500, protect={new_img},
+            )
+            self.assertEqual(evicted, 1)
+            self.assertFalse(old_img.exists())
+            self.assertTrue(new_img.is_file())
+
     def test_memory_store_estimate_ignores_base64_image_bytes(self):
         from sonder_runtime.adapters import memory_store
 

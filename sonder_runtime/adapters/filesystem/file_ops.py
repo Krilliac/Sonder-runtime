@@ -142,16 +142,18 @@ CREDENTIAL_READ_TRIPLES = frozenset({
     (".config", "gh", "hosts.yml"),
     (".config", "glab-cli", "config.yml"),
 })
-# Sonder's own first-party package below the install root. The mutation guard
+# TUF release-publisher private keys written by ``tools/tuf_repo.py`` under
+# ``<repo>/keystore/<role>_<index>.json``. Classified as both secret and
+# credential-store material only under a ``keystore`` parent so ordinary user
+# files outside a TUF keystore remain unaffected.
+_TUF_KEYSTORE_FILE_RE = re.compile(r"^(?:root|targets|snapshot|timestamp)_\d+\.json$")
+# Sonder's own first-party packages below the install root. The mutation guard
 # used to recognize Sonder modules only by ``parent == root``, which was true
 # when every module sat directly in the install directory. The SPEC-3 Phase 5
-# extraction moved live control logic into this package -- permission_rules
-# imports ``sonder_runtime.domain.execution.policy`` at module load -- so all
-# 46 of its modules were writable with no developer token while the byte-
-# identical edit to <root>/server.py was refused. That is unauthenticated code
-# execution in the runtime process at the next start, which is exactly what the
-# root-level clause exists to prevent.
-RUNTIME_PACKAGE_DIRS = ("sonder_runtime",)
+# extraction moved live control logic into ``sonder_runtime`` and ``runtime``
+# (which has no ``__init__.py`` so ``_has_package_init`` returns False). Both
+# must stay protected against unauthenticated mutations.
+RUNTIME_PACKAGE_DIRS = ("sonder_runtime", "runtime")
 # First-party code outside that package which the runtime imports or runs:
 # selfmod imports ``scripts.selfmod_linux_isolation``/``scripts.selfmod_oracle``
 # into its own process, the nightly jobs execute ``scripts/*.py`` and
@@ -179,7 +181,7 @@ RUNTIME_PACKAGE_DIRS = ("sonder_runtime",)
 # ``tests/pytest.ini`` before the root's. These names are protected beside the
 # root (matched case-insensitively), and every ``.ini``/``.cfg``/``.toml``
 # file is protected inside the first-party code trees.
-FIRST_PARTY_CODE_DIRS = ("scripts", "migrations", "tools", "tests", "proposals")
+FIRST_PARTY_CODE_DIRS = ("scripts", "migrations", "tools", "tests", "proposals", "runtime", "packaging")
 FIRST_PARTY_CODE_FILES = (("tests", "conftest.py"),)
 PYTEST_COLLECTED_DIRS = ("tests", "proposals")
 PYTEST_CONFIG_FILES = (
@@ -805,6 +807,8 @@ def _is_base_secret_path(path: PurePath) -> bool:
     if name in {".env", ".envrc"} or name.startswith(".env.") or suffix == ".env":
         # ``secrets.env`` / ``prod.env`` / ``sonder.env`` carry the same
         # KEY=VALUE credentials as ``.env``; only the name differs.
+        return True
+    if path.parent.name.lower() == "keystore" and _TUF_KEYSTORE_FILE_RE.fullmatch(name):
         return True
     return (
         suffix in {".cfg", ".ini", ".json", ".toml", ".txt", ".yaml", ".yml"}
@@ -1609,6 +1613,13 @@ def _credential_part(parts) -> str:
         if part in CREDENTIAL_READ_DIRECTORIES:
             return part
         if index < last and (part, lowered[index + 1]) in CREDENTIAL_READ_PAIRS:
+            return "%s/%s" % (part, lowered[index + 1])
+        if (
+            index < last
+            and part == "keystore"
+            and index + 1 == last
+            and _TUF_KEYSTORE_FILE_RE.fullmatch(lowered[index + 1])
+        ):
             return "%s/%s" % (part, lowered[index + 1])
         if index < last and (part, lowered[index + 1]) in CREDENTIAL_READ_DIRECTORY_PAIRS:
             return "%s/%s" % (part, lowered[index + 1])

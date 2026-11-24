@@ -14,6 +14,7 @@ from typing import Any
 
 from ..adapters.security import role_tool_policy as _role_tool_policy
 from ..domain.cloud_access import LEGACY_ERROR_PREFIX
+from ..domain.tools.builtin_traits import builtin_traits as _builtin_traits
 
 # Existing specialized adapters for offload, master and agent_lane remain
 # authoritative. The generic path must never create recursive agent runs.
@@ -37,6 +38,17 @@ DIRECT_ONLY_NAMES = frozenset({
     "batch_job_resume", "batch_job_cancel",
     "model_fanout", "model_fanout_resume", "model_fanout_cancel", "model_fanout_synthesize",
     "session_export", "permission_approvals",
+    # Non-read-only campaign, parallel execution, host shell, repair, and operator tools
+    # must never be reached implicitly via generic agent fallback.
+    "campaign_generate_compile_execute_record", "campaign_repo_repair",
+    "parallel_generate_run", "parallel_generate_run_languages", "parallel_run_code",
+    "debug_inspect", "npu_status", "security_eval", "improve_function",
+    "mesh_generate", "generate_3d_model",
+    "mission_start", "autopilot_start", "autopilot_resume", "autopilot_pause", "autopilot_cancel",
+    "memory_quality_repair", "memory_privacy_repair",
+    "self_heal_repair", "runtime_source_stash", "cloud_opt_in", "unload",
+    "set_context_size", "update_emotion_vectors", "tune_emotion_vectors",
+    "learn_preference", "record_outcome",
 })
 ADMIN_NAMES = frozenset({
     "elevate", "permission_mode", "permission_rule_set", "permission_approve",
@@ -133,6 +145,11 @@ def dispatch(
         return f"{LEGACY_ERROR_PREFIX} HOST POLICY: tool '{tool_name}' requires {refusal}."
     if not allow_web and not unsafe and tool_name in WEB_GATED_NAMES:
         return f"{LEGACY_ERROR_PREFIX} HOST POLICY: tool '{tool_name}' requires allow_web=True."
+    if read_only and not unsafe and not _builtin_traits(tool_name).is_read_only:
+        return (
+            f"{LEGACY_ERROR_PREFIX} HOST POLICY: tool '{tool_name}' is not declared "
+            "read-only and cannot run through generic dispatch when read_only=True."
+        )
     if not isinstance(args, dict):
         return f"{LEGACY_ERROR_PREFIX} tool args must be a JSON object"
     supplied_authority = sorted(AUTHORITY_ARGUMENTS & set(args))

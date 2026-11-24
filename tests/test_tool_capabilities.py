@@ -213,7 +213,8 @@ def test_local_agent_keeps_host_brief_and_all_twelve_tools(monkeypatch, without_
 def test_local_read_only_project_dedup_and_autopilot_sets_are_unchanged():
     names = set(capabilities.CAPABILITIES) - {"tool_help", "file_check"}
     process_tools = {"process_list", "process_memory_risk_inspect"}
-    repository_names = names - process_tools
+    non_read_only_tools = process_tools | {"learn_tool"}
+    repository_names = names - non_read_only_tools
     rootless = {
         "environment_status", "toolchain_status", "hardware_profile", "file_policy",
         "tool_inventory", "language_matrix", "math_eval", "logic_verify", "regex_lab",
@@ -222,19 +223,19 @@ def test_local_read_only_project_dedup_and_autopilot_sets_are_unchanged():
     }
     non_work = {"environment_status", "hardware_profile"}
     assert repository_names <= server.REPOSITORY_READ_ONLY_TOOLS
-    assert process_tools.isdisjoint(server.REPOSITORY_READ_ONLY_TOOLS)
+    assert non_read_only_tools.isdisjoint(server.REPOSITORY_READ_ONLY_TOOLS)
     assert names <= server._PROJECT_BOUND_AGENT_TOOLS
     assert names - rootless <= server._PROJECT_SCOPED_PATH_TOOLS
     assert rootless.isdisjoint(server._PROJECT_SCOPED_PATH_TOOLS)
     assert names <= server._AGENT_DEDUPLICATED_INSPECTION_TOOLS
     assert names - non_work <= server._WORK_INSPECTION_TOOLS
     assert non_work.isdisjoint(server._WORK_INSPECTION_TOOLS)
-    # process_list / process_memory_risk_inspect are workspace-policy only:
-    # they sit outside REPOSITORY_READ_ONLY_TOOLS on purpose, and observe runs
-    # execute with read_only=True, so listing them in the observe allowlist
-    # advertised a call _repository_read_only_error always refused.
-    assert names - non_work - process_tools <= server._AUTOPILOT_OBSERVE_TOOLS
-    assert process_tools.isdisjoint(server._AUTOPILOT_OBSERVE_TOOLS)
+    # process_list / process_memory_risk_inspect / learn_tool are outside
+    # REPOSITORY_READ_ONLY_TOOLS on purpose (learn_tool spawns external CLI
+    # subprocesses and supports save_note), and observe runs execute with
+    # read_only=True, so they belong in the workspace lane only.
+    assert names - non_work - non_read_only_tools <= server._AUTOPILOT_OBSERVE_TOOLS
+    assert non_read_only_tools.isdisjoint(server._AUTOPILOT_OBSERVE_TOOLS)
     assert names - non_work <= server._AUTOPILOT_WORKSPACE_TOOLS
     assert non_work.isdisjoint(server._AUTOPILOT_OBSERVE_TOOLS)
     assert names.isdisjoint(server._WORK_MUTATION_TOOLS)
