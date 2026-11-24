@@ -63,12 +63,27 @@ _GENERATED_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Refuse all 3xx HTTP redirects so SSRF/host checks cannot be bypassed."""
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
         raise urllib.error.HTTPError(
             req.full_url, code, f"HTTP redirects are disabled ({code})", headers, fp,
         )
 
-    def http_error_302(self, req, fp, code, msg, headers):
+    def http_error_302(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+    ) -> Any:
         raise urllib.error.HTTPError(
             req.full_url, code, f"HTTP redirects are disabled ({code})", headers, fp,
         )

@@ -746,6 +746,7 @@ sonder_runtime/interfaces/http/facades/model_request.py
 sonder_runtime/interfaces/http/facades/observability_stream.py
 sonder_runtime/interfaces/http/facades/permission_mode_post.py
 sonder_runtime/interfaces/http/facades/saas_auth.py
+sonder_runtime/interfaces/http/media_routes.py
 sonder_runtime/interfaces/http/memory_replication.py
 sonder_runtime/interfaces/http/served_dispatch_policy.py
 sonder_runtime/interfaces/http/slash_call_arguments.py

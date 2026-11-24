@@ -34,10 +34,12 @@ _OVERLAPPING_ALT_RE = re.compile(
 )
 _ADJACENT_WILDCARDS_RE = re.compile(r"(?:\.\*|\.\+)(?:[^()\\]|\\.){0,6}(?:\.\*|\.\+)")
 
+_re_parser: Any = None
 try:
-    import re._parser as _re_parser  # type: ignore[import-not-found]
+    import re._parser as _loaded_re_parser
+    _re_parser = _loaded_re_parser
 except Exception:  # pragma: no cover - Python <3.11 fallback
-    _re_parser = None  # type: ignore[assignment]
+    _re_parser = None
 
 
 _ASCII_DIGITS = frozenset(range(ord("0"), ord("9") + 1))

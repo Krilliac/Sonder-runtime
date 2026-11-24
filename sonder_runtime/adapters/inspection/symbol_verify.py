@@ -300,7 +300,7 @@ def _inspect_safe_stdlib_attr(module_name: str, attr: str = "") -> dict[str, Any
             }
         cur = getattr(cur, part)
 
-    sig_info: dict[str, Any] = {"inspected": True, "exists": True, "type": type(cur).__name__}
+    sig_info = {"inspected": True, "exists": True, "type": type(cur).__name__}
     if callable(cur):
         try:
             sig = inspect.signature(cur)
