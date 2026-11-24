@@ -152,29 +152,57 @@ def test_mode_enforcement_and_bypass_confirmation(tmp_path: Path):
     with _companion_server(tmp_path, mode="manual") as (port, srv):
         auth = {"X-Sonder-Client-Agent-Token": "secret-token-1234"}
 
-        # Write in manual mode without approved=True returns needs_approval=True
+        # Write in manual mode without approval token returns needs_approval=True
+        # along with a single-use companion approval_token + args_digest.
         st, _, res = _req(
             port,
             "POST",
             "/v1/client-agent/execute",
-            body={"tool": "file_write", "args": {"path": "a.txt", "content": "hi"}},
+            body={"call_id": "call-a1", "tool": "file_write", "args": {"path": "a.txt", "content": "hi"}},
             headers=auth,
         )
         assert st == 200
         assert res["ok"] is False
         assert res["needs_approval"] is True
+        assert res["approval_token"]
+        assert len(res["args_digest"]) == 64
         assert not (tmp_path / "a.txt").exists()
 
-        # Approved once executes it
-        st, _, res = _req(
+        # Bare approved=True without a minted companion approval_token is rejected.
+        st_bare, _, res_bare = _req(
             port,
             "POST",
             "/v1/client-agent/execute",
-            body={"tool": "file_write", "args": {"path": "a.txt", "content": "hi"}, "approved": True},
+            body={
+                "call_id": "call-a1",
+                "tool": "file_write",
+                "args": {"path": "a.txt", "content": "hi"},
+                "approved": True,
+            },
+            headers=auth,
+        )
+        assert st_bare == 200
+        assert res_bare["ok"] is False
+        assert res_bare["needs_approval"] is True
+        assert not (tmp_path / "a.txt").exists()
+
+        # Submitting the companion-minted approval_token + args_digest executes once.
+        st, _, res_ok = _req(
+            port,
+            "POST",
+            "/v1/client-agent/execute",
+            body={
+                "call_id": "call-a1",
+                "tool": "file_write",
+                "args": {"path": "a.txt", "content": "hi"},
+                "approved": True,
+                "approval_token": res["approval_token"],
+                "args_digest": res["args_digest"],
+            },
             headers=auth,
         )
         assert st == 200
-        assert res["ok"] is True
+        assert res_ok["ok"] is True
         assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "hi"
 
         # Default companion (allow_bypass=False) rejects remote escalation to bypass with 403

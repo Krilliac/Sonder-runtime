@@ -187,14 +187,21 @@ if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
   throw "venv creation did not produce $venvPython"
 }
 
-# `pip.exe install --upgrade pip` fails on Windows because the running exe
-# cannot replace itself; `python -m pip` reinvokes pip as a module instead,
-# which both Windows and POSIX accept.
-Invoke-Step -Description 'upgrading pip' -FilePath $venvPython -Arguments @('-m', 'pip', 'install', '--quiet', '--upgrade', 'pip')
-Invoke-Step -Description 'installing runtime dependencies' -FilePath $venvPython -Arguments @('-m', 'pip', 'install', '--quiet', '-r', $requirementsFile)
-# requirements-runtime.txt pins top-level releases only; pip resolves the
-# transitive closure at install time without a hash lock. Refuse an
-# inconsistent resolution (docs/runbooks/install-workstation-local.md).
+# Use the venv's bundled pip via `python -m pip` (never pip.exe directly and
+# never fetch an unpinned pip self-upgrade from the live index). Prefer hash-locked
+# requirements-runtime.lock when present alongside requirements-runtime.txt;
+# fail closed when SONDER_REQUIRE_HASHES=1 is set and the lockfile is absent.
+$lockFile = Join-Path $repo 'requirements-runtime.lock'
+$requireHashes = [string]::Equals($env:SONDER_REQUIRE_HASHES, '1', [StringComparison]::Ordinal)
+if (Test-Path -LiteralPath $lockFile -PathType Leaf) {
+  $pipInstallArgs = @('-m', 'pip', 'install', '--quiet', '--require-hashes', '-r', $lockFile)
+} elseif ($requireHashes) {
+  throw "SONDER_REQUIRE_HASHES=1 requires $lockFile, but it is missing"
+} else {
+  $pipInstallArgs = @('-m', 'pip', 'install', '--quiet', '-r', $requirementsFile)
+}
+Invoke-Step -Description 'installing runtime dependencies' -FilePath $venvPython -Arguments $pipInstallArgs
+# Refuse an inconsistent resolution (docs/runbooks/install-workstation-local.md).
 Invoke-Step -Description 'verifying installed runtime dependencies' -FilePath $venvPython -Arguments @('-m', 'pip', 'check')
 
 if ($ManagedRuntime) {
@@ -209,7 +216,7 @@ if ($ManagedRuntime) {
   }
   if (-not (Test-Path -LiteralPath $managedVenv)) {
     Invoke-Step -Description "creating dedicated managed runtime venv at $managedVenv" -FilePath $py -Arguments (@($pyArgs) + @('-m', 'venv', $managedVenv))
-    Invoke-Step -Description 'installing managed runtime pins' -FilePath $managedPython -Arguments @('-m', 'pip', 'install', '--quiet', '-r', $requirementsFile)
+    Invoke-Step -Description 'installing managed runtime pins' -FilePath $managedPython -Arguments $pipInstallArgs
     # Never seal an inconsistent transitive resolution as the trusted profile.
     Invoke-Step -Description 'verifying managed runtime dependencies' -FilePath $managedPython -Arguments @('-m', 'pip', 'check')
     Invoke-Step -Description 'sealing managed runtime profile' -FilePath $managedPython -Arguments @('-m', 'sonder_runtime.adapters.execution.runtime_profile', 'seal')

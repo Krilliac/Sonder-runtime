@@ -400,3 +400,101 @@ def register_status_for(base, ip):
         {"username": "elsewhere", "password": "another-long-password"},
         ip, {"X-Sonder-Bootstrap-Secret": "wrong-secret"},
     )[0]
+
+
+def test_l04_duplicate_registration_normalizes_in_public_hosting_and_preserves_admin_409(
+    monkeypatch, tmp_path,
+):
+    from sonder_runtime.adapters.web import login_throttle_http
+
+    sonder_lifecycle.reset_for_tests()
+    login_throttle_http.reset_registration_throttle()
+    db_path = tmp_path / "l04.db"
+
+    class _Runtime:
+        def _open_db(self):
+            return memory_store.connect(db_path)
+
+    class _FakeHandler:
+        def __init__(self, ip: str = "198.51.100.55"):
+            self.ip = ip
+            self.headers = {}
+            self.sent = []
+
+        def _client_ip(self):
+            return self.ip
+
+        def _correlation(self):
+            return "corr-l04"
+
+        def _auth_reserve_refused(self):
+            if not sonder_lifecycle.get().reserve_auth_attempt(self.ip):
+                login_throttle_http.send_throttled(self, 2)
+                return True
+            return False
+
+        def _send_json_payload(self, payload, status=200, headers=None):
+            self.sent.append((status, payload, headers or {}))
+
+        def log_error(self, *args):
+            return
+
+    rt = _Runtime()
+    conn = rt._open_db()
+    try:
+        admin = admin_auth.register(conn, "existing_user", "Str0ng!Pass#2026", trusted_local=True)
+    finally:
+        conn.close()
+
+    # 1. Public hosting: duplicate registration returns generic 400 (no username disclosure)
+    # and spends the auth-failure budget instead of refunding.
+    h_pub = _FakeHandler(ip="198.51.100.55")
+    login_throttle_http.handle_register(
+        h_pub,
+        {"username": "existing_user", "password": "Another!Str0ng#2026"},
+        {"authorized": False, "account": None},
+        runtime=rt,
+        admin_auth=admin_auth,
+        allow_registration=True,
+        created_message=lambda acc: f"created {acc['username']}",
+        public_hosting=True,
+    )
+    status_pub, body_pub, _ = h_pub.sent[-1]
+    assert status_pub == 400
+    assert body_pub == {"ok": False, "message": "registration could not be completed"}
+    assert "exists" not in body_pub["message"].lower()
+
+    # 2. Private admin install keeps the documented 409 contract with zero extra metadata.
+    h_priv = _FakeHandler(ip="198.51.100.56")
+    login_throttle_http.handle_register(
+        h_priv,
+        {"username": "existing_user", "password": "Another!Str0ng#2026"},
+        {"authorized": True, "account": admin},
+        runtime=rt,
+        admin_auth=admin_auth,
+        allow_registration=True,
+        created_message=lambda acc: f"created {acc['username']}",
+        public_hosting=False,
+    )
+    status_priv, body_priv, _ = h_priv.sent[-1]
+    assert status_priv == 409
+    assert body_priv == {"ok": False, "message": "account already exists"}
+
+    # 3. Configurable generic-error env mode normalizes private installs too.
+    monkeypatch.setenv("SONDER_GENERIC_REGISTER_ERRORS", "1")
+    h_env = _FakeHandler(ip="198.51.100.57")
+    login_throttle_http.handle_register(
+        h_env,
+        {"username": "existing_user", "password": "Another!Str0ng#2026"},
+        {"authorized": True, "account": admin},
+        runtime=rt,
+        admin_auth=admin_auth,
+        allow_registration=True,
+        created_message=lambda acc: f"created {acc['username']}",
+        public_hosting=False,
+    )
+    status_env, body_env, _ = h_env.sent[-1]
+    assert status_env == 400
+    assert body_env == {"ok": False, "message": "registration could not be completed"}
+    sonder_lifecycle.reset_for_tests()
+    login_throttle_http.reset_registration_throttle()

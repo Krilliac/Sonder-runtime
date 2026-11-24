@@ -7,6 +7,7 @@ request ``Handler`` instance and every call runs on its request thread.
 """
 import logging
 import math
+import os
 import sqlite3
 import threading
 import time
@@ -83,10 +84,24 @@ def _refund(handler: Any) -> None:
     sonder_lifecycle.get().refund_auth_attempt(handler._client_ip())
 
 
+def _generic_register_errors_enabled(
+    *,
+    public_hosting: bool,
+    generic_conflict_error: bool | None,
+) -> bool:
+    if generic_conflict_error is not None:
+        return bool(generic_conflict_error)
+    if public_hosting:
+        return True
+    raw = os.environ.get("SONDER_GENERIC_REGISTER_ERRORS", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def handle_register(handler: Any, req: Mapping[str, Any], context: Mapping[str, Any], *,
                     runtime: Any, admin_auth: Any, allow_registration: bool,
                     created_message: Callable[[Any], str],
                     public_hosting: bool = False,
+                    generic_conflict_error: bool | None = None,
                     extra_fields: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None) -> None:
     if public_hosting:
         retry_after = _check_and_record_public_registration(handler._client_ip())
@@ -125,8 +140,26 @@ def handle_register(handler: Any, req: Mapping[str, Any], context: Mapping[str, 
         _record_failure(handler, "registration-denied")
         handler._send_json_payload({"ok": False, "message": str(error)}, status=403)
     except sqlite3.IntegrityError:
-        _refund(handler)
-        handler._send_json_payload({"ok": False, "message": "account already exists"}, status=409)
+        if _generic_register_errors_enabled(
+            public_hosting=public_hosting,
+            generic_conflict_error=generic_conflict_error,
+        ):
+            # In public self-signup (or explicit generic-error mode), do not
+            # confirm whether a username exists and count the attempt against
+            # the per-IP auth failure budget to prevent username enumeration.
+            _record_failure(handler, "registration-conflict")
+            handler._send_json_payload(
+                {"ok": False, "message": "registration could not be completed"},
+                status=400,
+            )
+        else:
+            # Admin-authenticated / private installs preserve the documented
+            # 409 conflict contract with strictly minimal non-leaky fields.
+            _refund(handler)
+            handler._send_json_payload(
+                {"ok": False, "message": "account already exists"},
+                status=409,
+            )
     except ValueError as error:
         _refund(handler)
         handler._send_json_payload({"ok": False, "message": str(error)}, status=400)
