@@ -28,6 +28,7 @@ import tomllib
 from typing import Any
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
+from sonder_runtime.adapters.inspection.regex_lab import detect_redos_hazards
 
 
 MAX_DATA_BYTES = 16 * 1024 * 1024
@@ -35,6 +36,8 @@ MAX_SCHEMA_BYTES = 2 * 1024 * 1024
 MAX_DEPTH = 48
 MAX_ERRORS = 100
 MAX_PATTERN_CHARS = 512
+MAX_PATTERN_INPUT_CHARS = 65_536
+MAX_MEDIUM_PATTERN_INPUT_CHARS = 4_096
 MAX_JSONL_RECORDS = 10_000
 
 
@@ -229,10 +232,22 @@ def _validate_node(
             if len(pat) > MAX_PATTERN_CHARS:
                 raise SchemaValidateError("schema pattern exceeds length ceiling")
             try:
-                if re.search(pat, value) is None:
-                    errors.append({"path": pointer, "message": "string does not match pattern %r" % pat})
+                compiled = re.compile(pat)
             except re.error as exc:
                 raise SchemaValidateError("invalid schema regex pattern: %s" % exc) from exc
+            hazards = detect_redos_hazards(pat)
+            high_hazards = [h["kind"] for h in hazards if h.get("severity") == "high"]
+            if high_hazards:
+                raise SchemaValidateError(
+                    "schema regex pattern rejected due to ReDoS hazard (%s)" % ", ".join(high_hazards)
+                )
+            input_cap = MAX_MEDIUM_PATTERN_INPUT_CHARS if hazards else MAX_PATTERN_INPUT_CHARS
+            if len(value) > input_cap:
+                raise SchemaValidateError(
+                    "string exceeds regex validation length ceiling (%d > %d chars)" % (len(value), input_cap)
+                )
+            if compiled.search(value) is None:
+                errors.append({"path": pointer, "message": "string does not match pattern %r" % pat})
 
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if "minimum" in schema and value < schema["minimum"]:

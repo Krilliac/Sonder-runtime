@@ -54,6 +54,8 @@ abstract class ChatBackend {
     String mode = 'manual',
     String workspaceRoot = '',
     bool approved = false,
+    String approvalToken = '',
+    String argsDigest = '',
     String companionUrl = Settings.defaultClientAgentUrl,
     String companionToken = '',
   });
@@ -341,6 +343,8 @@ class SonderApiChatBackend implements ChatBackend {
     String mode = 'manual',
     String workspaceRoot = '',
     bool approved = false,
+    String approvalToken = '',
+    String argsDigest = '',
     String companionUrl = Settings.defaultClientAgentUrl,
     String companionToken = '',
   }) =>
@@ -352,6 +356,8 @@ class SonderApiChatBackend implements ChatBackend {
         mode: mode,
         workspaceRoot: workspaceRoot,
         approved: approved,
+        approvalToken: approvalToken,
+        argsDigest: argsDigest,
         companionUrl: companionUrl,
         companionToken: companionToken,
       );

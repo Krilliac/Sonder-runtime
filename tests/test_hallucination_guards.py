@@ -249,6 +249,30 @@ def test_anti_hallucination_tools_wired_across_surfaces():
     fc_out = json.loads(server.control_command("/crosscheck 10 + 10 = 25"))
     assert fc_out["ok"] is True and fc_out["clean"] is False
 
+
+def test_symbol_verify_never_executes_unverified_workspace_module(tmp_path: Path, monkeypatch):
+    marker = tmp_path / "executed.marker"
+    pkg = tmp_path / "evil_live_pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('pwned', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    (pkg / "sub.py").write_text("def safe():\n    return 1\n", encoding="utf-8")
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(tmp_path))
+
+    # Even querying a dotted submodule must never invoke __init__.py via find_spec/import_module!
+    res = sv_mod.symbol_verify(module="evil_live_pkg.sub", symbol="safe")
+    assert res["ok"] is True
+    assert not marker.exists(), "symbol_verify executed untrusted workspace __init__.py!"
+
+    # Repository-scoped verification inspects statically via AST without executing anything.
+    repo_res = sv_mod.symbol_verify(module="evil_live_pkg.sub", symbol="safe", root=str(tmp_path))
+    assert repo_res["ok"] is True and repo_res["verified"] is True
+    assert not marker.exists(), "symbol_verify executed untrusted repo module!"
+
     cons_out = json.loads(server.control_command("/consensus Yes, 10 || No, 20"))
     assert cons_out["ok"] is True and cons_out["verdict_conflict"] is True
 

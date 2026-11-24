@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import fnmatch
 import itertools
 import os
 import re
 import shlex
 import shutil
+import stat
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -191,10 +193,275 @@ def _is_junction(path: Path | str) -> bool:
 
 
 def _is_reparse_or_link(path: Path | str) -> bool:
-    """True when ``path`` is a symlink or (on Windows) an NTFS directory junction."""
+    """True when ``path`` is a symlink, Windows NTFS junction, or other reparse point."""
     if os.path.islink(path):
         return True
-    return _is_junction(path)
+    if _is_junction(path):
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if reparse_flag:
+        try:
+            st = os.lstat(path)
+            if int(getattr(st, "st_file_attributes", 0)) & reparse_flag:
+                return True
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+    return False
+
+
+def _path_is_within_root(path: Path, root: Path) -> bool:
+    try:
+        Path(os.path.normcase(str(path))).relative_to(Path(os.path.normcase(str(root))))
+        return True
+    except ValueError:
+        return False
+
+
+def _reject_link_components(
+    candidate: Path,
+    root: Path,
+    *,
+    allow_escape: bool,
+    raw_text: str,
+) -> None:
+    """Reject any symlink, NTFS junction, or reparse-point component along ``candidate``.
+
+    Walks components below ``root`` when ``candidate`` is lexically under ``root``
+    (so OS-level symlinks above ``root`` such as ``/var -> /private/var`` do not
+    cause false positives), and also checks the leaf itself when ``allow_escape``
+    targets a path outside ``root``.
+    """
+    norm_root = os.path.normcase(str(root)).rstrip("\\/")
+    norm_cand = os.path.normcase(str(candidate))
+    under_root = (
+        norm_cand == norm_root
+        or norm_cand.startswith(norm_root + os.sep)
+        or (os.altsep is not None and norm_cand.startswith(norm_root + os.altsep))
+    )
+    if under_root:
+        rel_parts = candidate.parts[len(root.parts):]
+        cur = root
+        for part in rel_parts:
+            if part in ("", "."):
+                continue
+            if part == "..":
+                cur = cur.parent
+                continue
+            cur = cur / part
+            if _is_reparse_or_link(cur):
+                if not allow_escape:
+                    try:
+                        resolved_target = cur.resolve()
+                        if not _path_is_within_root(resolved_target, root):
+                            raise PermissionError(
+                                f"path '{raw_text}' via symlink/junction escapes workspace root '{root}'"
+                            )
+                    except PermissionError:
+                        raise
+                    except OSError:
+                        pass
+                raise PermissionError(
+                    f"symlink or junction traversal is not permitted in path '{raw_text}' (at '{cur}')"
+                )
+        return
+    if _is_reparse_or_link(candidate):
+        if not allow_escape:
+            raise PermissionError(
+                f"path '{raw_text}' via symlink/junction escapes workspace root '{root}'"
+            )
+        raise PermissionError(
+            f"symlink or junction traversal is not permitted in path '{raw_text}'"
+        )
+
+
+def _windows_final_path_for_fd(fd: int) -> Path | None:
+    """Resolve the kernel final path of an already-opened Windows file descriptor."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    import msvcrt
+
+    handle = msvcrt.get_osfhandle(fd)
+    kernel32 = ctypes.windll.kernel32
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+    get_final_path.restype = ctypes.c_uint32
+
+    buf_len = 512
+    for _ in range(4):
+        buf = ctypes.create_unicode_buffer(buf_len)
+        needed = int(get_final_path(ctypes.c_void_p(handle), buf, buf_len, 0))
+        if needed == 0:
+            raise PermissionError("unable to verify final path of opened file handle")
+        if needed < buf_len:
+            raw_final = buf.value
+            _reject_unsafe_path_spelling(raw_final, allow_local_extended=True)
+            clean = _strip_local_extended_prefix(raw_final)
+            return Path(clean)
+        buf_len = needed + 1
+    raise PermissionError("opened file handle path exceeds verification buffer")
+
+
+def _verify_opened_fd(
+    fd: int,
+    expected_path: Path,
+    root: Path,
+    *,
+    allow_escape: bool,
+    for_write: bool,
+) -> None:
+    """Post-open handle checks: regular file, inside root, non-secret, no TOCTOU swap."""
+    st_fd = os.fstat(fd)
+    if not stat.S_ISREG(st_fd.st_mode):
+        raise PermissionError(f"refusing to open non-regular file '{expected_path}'")
+    if sys.platform == "win32":
+        final_path = _windows_final_path_for_fd(fd)
+        if final_path is None:
+            raise PermissionError("unable to verify final path of opened file handle")
+        resolved_final = final_path.resolve()
+        _reject_unsafe_path_spelling(str(resolved_final))
+        if not allow_escape and not _path_is_within_root(resolved_final, root):
+            raise PermissionError(
+                f"opened file handle '{resolved_final}' escapes workspace root '{root}'"
+            )
+        refusal = (
+            _write_refusal(str(expected_path), resolved_final, root)
+            if for_write
+            else _read_refusal(str(expected_path), resolved_final, root)
+        )
+        if refusal is not None:
+            raise refusal
+    if _is_reparse_or_link(expected_path):
+        raise PermissionError(f"symlink or junction detected at '{expected_path}' after open")
+    try:
+        st_path = os.lstat(expected_path)
+    except OSError as exc:
+        raise PermissionError(f"path '{expected_path}' disappeared during open") from exc
+    if not os.path.samestat(st_fd, st_path):
+        raise PermissionError(f"path '{expected_path}' changed during open (TOCTOU detected)")
+
+
+def _open_regular_file_no_follow(
+    path: Path,
+    root: Path,
+    *,
+    flags: int,
+    allow_escape: bool,
+    for_write: bool,
+    mode: int = 0o600,
+) -> int:
+    """Open ``path`` without following symlinks/junctions and verify the opened descriptor."""
+    _reject_link_components(path, root, allow_escape=allow_escape, raw_text=str(path))
+    extra_flags = getattr(os, "O_CLOEXEC", 0)
+    if sys.platform == "win32":
+        extra_flags |= getattr(os, "O_BINARY", 0)
+    else:
+        extra_flags |= getattr(os, "O_NOFOLLOW", 0)
+
+    fd: int | None = None
+    try:
+        if (
+            sys.platform != "win32"
+            and not allow_escape
+            and _path_is_within_root(path, root)
+            and os.open in os.supports_dir_fd
+            and hasattr(os, "O_DIRECTORY")
+        ):
+            rel = path.relative_to(root)
+            parts = rel.parts
+            if not parts:
+                raise PermissionError(f"refusing to open workspace root directory '{path}'")
+            dir_flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+            step_flags = dir_flags | getattr(os, "O_NOFOLLOW", 0)
+            dir_fd = os.open(root, dir_flags)
+            try:
+                for part in parts[:-1]:
+                    next_fd = os.open(part, step_flags, dir_fd=dir_fd)
+                    os.close(dir_fd)
+                    dir_fd = next_fd
+                fd = os.open(parts[-1], flags | extra_flags, mode, dir_fd=dir_fd)
+            finally:
+                os.close(dir_fd)
+        else:
+            fd = os.open(path, flags | extra_flags, mode)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, getattr(errno, "EMLINK", -1)):
+            raise PermissionError(
+                f"symlink or junction traversal is not permitted in path '{path}'"
+            ) from exc
+        raise
+
+    try:
+        _verify_opened_fd(
+            fd,
+            path,
+            root,
+            allow_escape=allow_escape,
+            for_write=for_write,
+        )
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    return fd
+
+
+def _mkdir_no_links(target_dir: Path, root: Path, *, allow_escape: bool) -> None:
+    """Create ``target_dir`` step-by-step while rejecting any symlink/junction component."""
+    _reject_link_components(target_dir, root, allow_escape=allow_escape, raw_text=str(target_dir))
+    if _path_is_within_root(target_dir, root):
+        rel = Path(os.path.normcase(str(target_dir))).relative_to(Path(os.path.normcase(str(root))))
+        # Preserve original casing from target_dir parts below root.
+        rel_parts = target_dir.parts[len(root.parts):] if len(target_dir.parts) >= len(root.parts) else rel.parts
+        cur = root
+        for part in rel_parts:
+            if part in ("", "."):
+                continue
+            cur = cur / part
+            if os.path.lexists(cur):
+                if _is_reparse_or_link(cur):
+                    raise PermissionError(
+                        f"symlink or junction traversal is not permitted in directory '{cur}'"
+                    )
+                if not cur.is_dir():
+                    raise OSError(f"path component is not a directory: {cur}")
+            else:
+                try:
+                    os.mkdir(cur)
+                except FileExistsError:
+                    if _is_reparse_or_link(cur):
+                        raise PermissionError(
+                            f"symlink or junction traversal is not permitted in directory '{cur}'"
+                        ) from None
+                    if not cur.is_dir():
+                        raise
+        return
+    if not allow_escape:
+        raise PermissionError(f"path '{target_dir}' escapes workspace root '{root}'")
+    # Bypass mode outside workspace root: walk missing tail components and refuse links.
+    missing: list[Path] = []
+    probe = target_dir
+    while not os.path.lexists(probe):
+        missing.append(probe)
+        if probe.parent == probe:
+            break
+        probe = probe.parent
+    if os.path.lexists(probe) and _is_reparse_or_link(probe):
+        raise PermissionError(f"symlink or junction traversal is not permitted in directory '{probe}'")
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory)
+        except FileExistsError:
+            if _is_reparse_or_link(directory):
+                raise PermissionError(
+                    f"symlink or junction traversal is not permitted in directory '{directory}'"
+                ) from None
+            if not directory.is_dir():
+                raise
 
 
 def _strip_local_extended_prefix(target: str) -> str:
@@ -334,6 +601,7 @@ def _resolve_path(raw: object, root: Path, *, allow_escape: bool) -> Path:
     if not candidate.is_absolute():
         candidate = root / candidate
     _reject_unsafe_reparse_ancestors(candidate)
+    _reject_link_components(candidate, root, allow_escape=allow_escape, raw_text=text)
     resolved = candidate.resolve()
     _reject_unsafe_path_spelling(str(resolved))
     if not allow_escape:
@@ -643,12 +911,28 @@ def _format_proc_output(rc: int, stdout_s: str, stderr_s: str) -> tuple[bool, st
 
 def _exec_file_read(args: Mapping[str, Any], root: Path, *, bypass: bool) -> ClientToolExecutionResult:
     path = _resolve_read_path(args.get("path"), root, allow_escape=bypass)
-    if not path.is_file():
+    try:
+        st_pre = os.lstat(path)
+    except FileNotFoundError:
+        return ClientToolExecutionResult(ok=False, error=f"file not found: {path}")
+    if _is_reparse_or_link(path):
+        raise PermissionError(f"symlink or junction traversal is not permitted in path '{path}'")
+    if not stat.S_ISREG(st_pre.st_mode):
         return ClientToolExecutionResult(ok=False, error=f"file not found: {path}")
     offset = max(1, int(args.get("offset") or 1))
     limit = max(1, min(500, int(args.get("limit") or 200)))
+    try:
+        fd = _open_regular_file_no_follow(
+            path,
+            root,
+            flags=os.O_RDONLY,
+            allow_escape=bypass,
+            for_write=False,
+        )
+    except FileNotFoundError:
+        return ClientToolExecutionResult(ok=False, error=f"file not found: {path}")
     # Stream to the requested window instead of decoding the whole file.
-    with path.open("r", encoding="utf-8", errors="replace") as fh:
+    with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as fh:
         slice_lines = [
             line.removesuffix("\n")
             for line in itertools.islice(fh, offset - 1, offset - 1 + limit)
@@ -663,33 +947,78 @@ def _exec_file_write(args: Mapping[str, Any], root: Path, *, bypass: bool) -> Cl
     mode = str(args.get("mode") or "overwrite").strip().lower()
     if mode not in {"create", "overwrite", "append"}:
         return ClientToolExecutionResult(ok=False, error=f"unsupported file_write mode: {mode}")
-    if mode == "create" and path.exists():
+    if mode == "create" and os.path.lexists(path):
         return ClientToolExecutionResult(ok=False, error=f"file already exists: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if mode == "append" and path.exists():
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(content)
+    _mkdir_no_links(path.parent, root, allow_escape=bypass)
+    if mode == "create":
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    elif mode == "append":
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
     else:
-        path.write_text(content, encoding="utf-8")
+        # Never pass O_TRUNC before post-open verification on Windows so a raced
+        # symlink/junction target cannot be truncated before handle checks run.
+        flags = os.O_WRONLY | os.O_CREAT
+    try:
+        fd = _open_regular_file_no_follow(
+            path,
+            root,
+            flags=flags,
+            allow_escape=bypass,
+            for_write=True,
+        )
+    except FileExistsError:
+        return ClientToolExecutionResult(ok=False, error=f"file already exists: {path}")
+    if mode == "overwrite":
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(content)
     return ClientToolExecutionResult(ok=True, output=f"wrote {len(content)} chars to {path}")
 
 
 def _exec_file_edit(args: Mapping[str, Any], root: Path, *, bypass: bool) -> ClientToolExecutionResult:
     path = _resolve_write_path(args.get("path"), root, allow_escape=bypass)
-    if not path.is_file():
+    try:
+        st_pre = os.lstat(path)
+    except FileNotFoundError:
+        return ClientToolExecutionResult(ok=False, error=f"file not found: {path}")
+    if _is_reparse_or_link(path):
+        raise PermissionError(f"symlink or junction traversal is not permitted in path '{path}'")
+    if not stat.S_ISREG(st_pre.st_mode):
         return ClientToolExecutionResult(ok=False, error=f"file not found: {path}")
     old = str(args.get("old") or "")
     new = str(args.get("new") or "")
     if not old:
         return ClientToolExecutionResult(ok=False, error="'old' text must be non-empty")
-    text = path.read_text(encoding="utf-8", errors="replace")
-    count = text.count(old)
-    if count == 0:
-        return ClientToolExecutionResult(ok=False, error="target string not found in file")
-    if count > 1:
-        return ClientToolExecutionResult(ok=False, error=f"target string matched {count} times; must be unique")
-    updated = text.replace(old, new, 1)
-    path.write_text(updated, encoding="utf-8")
+    try:
+        fd = _open_regular_file_no_follow(
+            path,
+            root,
+            flags=os.O_RDWR,
+            allow_escape=bypass,
+            for_write=True,
+        )
+    except FileNotFoundError:
+        return ClientToolExecutionResult(ok=False, error=f"file not found: {path}")
+    # Perform read and in-place write through the same verified descriptor.
+    with os.fdopen(fd, "r+", encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+        count = text.count(old)
+        if count == 0:
+            return ClientToolExecutionResult(ok=False, error="target string not found in file")
+        if count > 1:
+            return ClientToolExecutionResult(ok=False, error=f"target string matched {count} times; must be unique")
+        updated = text.replace(old, new, 1)
+        fh.seek(0)
+        fh.truncate(0)
+        fh.write(updated)
     return ClientToolExecutionResult(ok=True, output=f"edited {path}")
 
 
@@ -704,6 +1033,7 @@ def _exec_file_delete(args: Mapping[str, Any], root: Path, *, bypass: bool) -> C
     if candidate.name not in ("", ".", ".."):
         parent = candidate.parent
         _reject_unsafe_reparse_ancestors(parent)
+        _reject_link_components(parent, root, allow_escape=bypass, raw_text=text)
         resolved_parent = parent.resolve()
         _reject_unsafe_path_spelling(str(resolved_parent))
         if not bypass:
@@ -732,7 +1062,7 @@ def _exec_file_delete(args: Mapping[str, Any], root: Path, *, bypass: bool) -> C
 
 def _exec_directory_create(args: Mapping[str, Any], root: Path, *, bypass: bool) -> ClientToolExecutionResult:
     path = _resolve_write_path(args.get("path"), root, allow_escape=bypass)
-    path.mkdir(parents=True, exist_ok=True)
+    _mkdir_no_links(path, root, allow_escape=bypass)
     return ClientToolExecutionResult(ok=True, output=f"created directory {path}")
 
 

@@ -57,6 +57,27 @@ def test_build_run_explicit_command(tmp_path):
     assert "built-ok" in result["stdout"]
 
 
+@pytest.mark.parametrize("bad_command", [
+    "echo hi & echo pwned",
+    "echo hi | findstr hi",
+    "echo hi ; echo pwned",
+    "echo hi > out.txt",
+    "echo `whoami`",
+    "echo $(whoami)",
+    "echo hi\necho pwned",
+    "cmd /c echo pwned",
+    "powershell -Command Get-Date",
+    "python -c import os",
+    "p^y -Ic print(1)",
+    "%COMSPEC% /c echo pwned",
+])
+def test_build_run_rejects_shell_metacharacters_and_inline_interpreters(tmp_path, bad_command):
+    result = harness_tools.build_run(root=str(tmp_path), command=bad_command)
+    assert result["ok"] is False
+    assert "error" in result and result["error"]
+    assert not (tmp_path / "out.txt").exists()
+
+
 @pytest.mark.skipif(
     not shutil.which("make"), reason="make not available",
 )

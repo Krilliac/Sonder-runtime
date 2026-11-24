@@ -24,7 +24,7 @@ READ_ONLY_TOOLS = frozenset({
     "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic",
     "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check",
     "plan_fallback", "runtime_resilience_check",
-    "prompt_shield", "error_diagnose", "code_audit", "data_transform", "learn_tool",
+    "prompt_shield", "error_diagnose", "code_audit", "data_transform",
     "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan", "diagnostics",
     "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
@@ -57,14 +57,15 @@ _PARALLEL_READS = frozenset({
     "directory_tree", "file_find", "file_read", "file_read_range", "file_digest",
     "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics",
     "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab",
-    "code_graph", "diff_semantic", "symbol_verify", "citation_audit",
+    "code_graph", "diff_semantic", "citation_audit",
     "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check",
     "prompt_shield", "error_diagnose", "code_audit", "data_transform", "output_digest",
 })
 _LOCAL_READS = _PARALLEL_READS | frozenset({
+    "symbol_verify",
     "workspace_inventory", "environment_status", "toolchain_status", "tool_inventory",
     "hardware_profile", "file_policy", "repo_status", "repo_diff", "artifact_risk_inspect",
-    "process_list", "process_memory_risk_inspect", "cloud_models_status", "learn_tool",
+    "process_list", "process_memory_risk_inspect", "cloud_models_status",
 })
 _NETWORK = frozenset({"web_search", "web_fetch", "weather_lookup", "approximate_location_lookup"})
 _DESTRUCTIVE = frozenset({

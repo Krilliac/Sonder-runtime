@@ -63,6 +63,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         help="Additional allowed browser origin (e.g. https://your-host.trycloudflare.com).",
     )
+    parser.add_argument(
+        "--print-token",
+        action="store_true",
+        help="Emit the raw bearer token to stdout at startup (redacted by default).",
+    )
     return parser.parse_args(argv)
 
 
@@ -96,7 +101,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Sonder Client Agent listening on http://{url_host}:{bound_port}")
     print(f"Workspace: {server.policy.workspace_root}")
     print(f"Mode:      {server.policy.mode} (max: {server.policy.max_mode}, can_bypass: {server.policy.can_bypass})")
-    print(f"Token:     {server.token}")
+    if args.print_token:
+        print(f"Token:     {server.token}")
+    else:
+        print("Token:     [redacted] (pass --print-token to display the raw bearer token)")
     if server.allowed_origins:
         print(f"Origins:   {', '.join(sorted(server.allowed_origins))}")
     sys.stdout.flush()

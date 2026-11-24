@@ -18,17 +18,119 @@ from __future__ import annotations
 
 import ast
 import importlib
-import importlib.util
+import importlib.machinery
 import inspect
 import os
 from pathlib import Path
 import sys
+import sysconfig
 from typing import Any
 
 import sonder_runtime.adapters.filesystem.file_ops as file_ops
 
 MAX_CODE_CHARS = 64_000
 MAX_FILE_BYTES = 1 * 1024 * 1024
+
+_EXTENSION_SUFFIXES: tuple[str, ...] = tuple(importlib.machinery.EXTENSION_SUFFIXES)
+
+
+def _stdlib_roots() -> tuple[Path, ...]:
+    """Resolved Python stdlib directories (never CWD or workspace)."""
+    paths = sysconfig.get_paths()
+    out: list[Path] = []
+    seen: set[str] = set()
+    for key in ("stdlib", "platstdlib"):
+        raw = paths.get(key)
+        if not raw:
+            continue
+        try:
+            resolved = Path(raw).resolve()
+        except OSError:
+            continue
+        norm = os.path.normcase(str(resolved))
+        if norm not in seen and resolved.is_dir():
+            seen.add(norm)
+            out.append(resolved)
+    return tuple(out)
+
+
+def _trusted_library_roots() -> tuple[Path, ...]:
+    """Resolved interpreter stdlib and site-packages directories (never CWD/workspace)."""
+    paths = sysconfig.get_paths()
+    try:
+        cwd_norm = os.path.normcase(str(Path.cwd().resolve()))
+    except OSError:
+        cwd_norm = ""
+    out: list[Path] = []
+    seen: set[str] = set()
+    for key in ("stdlib", "platstdlib", "purelib", "platlib"):
+        raw = paths.get(key)
+        if not raw:
+            continue
+        try:
+            resolved = Path(raw).resolve()
+        except OSError:
+            continue
+        norm = os.path.normcase(str(resolved))
+        if norm == cwd_norm or norm in seen or not resolved.is_dir():
+            continue
+        seen.add(norm)
+        out.append(resolved)
+    return tuple(out)
+
+
+def _find_module_on_disk(mod_name: str, roots: tuple[Path, ...]) -> tuple[Path | None, bool]:
+    """Pure zero-execution filesystem lookup for *mod_name* under *roots*.
+
+    Returns ``(source_py_path, found_as_binary_or_namespace)``. Never imports or
+    executes any ``__init__.py`` or module body.
+    """
+    parts = [p for p in mod_name.split(".") if p]
+    if not parts or not all(p.isidentifier() for p in parts):
+        return None, False
+    for root in roots:
+        # 1. Exact .py module file
+        cand_py = root.joinpath(*parts).with_suffix(".py")
+        if cand_py.is_file() and not cand_py.is_symlink():
+            return cand_py, False
+        # 2. Regular package __init__.py
+        cand_pkg = root.joinpath(*parts, "__init__.py")
+        if cand_pkg.is_file() and not cand_pkg.is_symlink():
+            return cand_pkg, False
+        # 3. Compiled extension module (.pyd / .so)
+        parent_dir = root.joinpath(*parts[:-1]) if len(parts) > 1 else root
+        stem = parts[-1]
+        for ext in _EXTENSION_SUFFIXES:
+            cand_ext = parent_dir / f"{stem}{ext}"
+            if cand_ext.is_file() and not cand_ext.is_symlink():
+                return None, True
+        # 4. PEP 420 namespace package directory
+        cand_dir = root.joinpath(*parts)
+        if cand_dir.is_dir() and not cand_dir.is_symlink():
+            return None, True
+    return None, False
+
+
+def _is_verified_stdlib_module(module_name: str) -> bool:
+    """True iff *module_name* is a builtin or resides strictly inside stdlib roots."""
+    top = module_name.split(".", 1)[0]
+    if top not in _SAFE_STDLIB_INSPECT or top not in _STDLIB_NAMES:
+        return False
+    if module_name in sys.builtin_module_names:
+        return True
+    stdlib_dirs = _stdlib_roots()
+    loaded = sys.modules.get(module_name)
+    if loaded is not None:
+        mod_file = getattr(loaded, "__file__", None)
+        if mod_file is None:
+            return True
+        try:
+            resolved = Path(mod_file).resolve()
+        except OSError:
+            return False
+        return any(resolved.is_relative_to(root) for root in stdlib_dirs)
+    src_path, is_ext = _find_module_on_disk(module_name, stdlib_dirs)
+    return src_path is not None or is_ext
 
 # Closed allowlist of safe stdlib modules that may be inspected in-process for
 # C-extension attributes and signatures (zero side effects on import).
@@ -122,13 +224,63 @@ def _ast_module_exports(source_path: Path) -> tuple[set[str], dict[str, dict[str
 
 
 def _inspect_safe_stdlib_attr(module_name: str, attr: str = "") -> dict[str, Any]:
-    top = module_name.split(".", 1)[0]
-    if top not in _SAFE_STDLIB_INSPECT:
+    if not _is_verified_stdlib_module(module_name):
         return {"inspected": False}
-    try:
-        mod = importlib.import_module(module_name)
-    except Exception:
-        return {"inspected": False}
+    mod = sys.modules.get(module_name)
+    if mod is None:
+        # Only import verified stdlib modules (never workspace-shadowed files).
+        if module_name not in sys.builtin_module_names:
+            src_path, is_ext = _find_module_on_disk(module_name, _stdlib_roots())
+            if src_path is not None and not is_ext:
+                # Pure-Python stdlib module not yet imported: inspect via AST without importing.
+                exports, sigs = _ast_module_exports(src_path)
+                if not attr:
+                    return {
+                        "inspected": True,
+                        "exists": True,
+                        "module": module_name,
+                        "sample_exports": sorted(exports)[:60],
+                    }
+                parts = [p for p in attr.split(".") if p]
+                head = parts[0]
+                if head not in exports:
+                    close = [n for n in sorted(exports) if head.lower() in n.lower() or n.lower() in head.lower()][:8]
+                    return {
+                        "inspected": True,
+                        "exists": False,
+                        "missing_part": head,
+                        "suggestions": close,
+                    }
+                target_sig = sigs.get(head)
+                if len(parts) == 2 and target_sig and target_sig.get("kind") == "class":
+                    method_name = parts[1]
+                    msigs = target_sig.get("method_sigs") or {}
+                    if method_name not in msigs:
+                        return {
+                            "inspected": True,
+                            "exists": False,
+                            "missing_part": method_name,
+                            "suggestions": target_sig.get("methods", [])[:8],
+                        }
+                    target_sig = msigs[method_name]
+                sig_info: dict[str, Any] = {"inspected": True, "exists": True, "type": target_sig.get("kind", "symbol") if target_sig else "symbol"}
+                if target_sig and "all_named" in target_sig:
+                    sig_info["signature"] = target_sig.get("signature", "")
+                    sig_info["keyword_names"] = sorted(target_sig["all_named"])
+                    sig_info["accepts_varkw"] = bool(target_sig.get("has_varkw"))
+                return sig_info
+        try:
+            mod = importlib.import_module(module_name)
+        except Exception:
+            return {"inspected": False}
+        mod_file = getattr(mod, "__file__", None)
+        if mod_file is not None:
+            try:
+                resolved = Path(mod_file).resolve()
+            except OSError:
+                return {"inspected": False}
+            if not any(resolved.is_relative_to(root) for root in _stdlib_roots()):
+                return {"inspected": False}
     if not attr:
         public = sorted(name for name in dir(mod) if not name.startswith("_"))[:60]
         return {"inspected": True, "exists": True, "module": module_name, "sample_exports": public}
@@ -148,7 +300,7 @@ def _inspect_safe_stdlib_attr(module_name: str, attr: str = "") -> dict[str, Any
             }
         cur = getattr(cur, part)
 
-    sig_info: dict[str, Any] = {"inspected": True, "exists": True, "type": type(cur).__name__}
+    sig_info = {"inspected": True, "exists": True, "type": type(cur).__name__}
     if callable(cur):
         try:
             sig = inspect.signature(cur)
@@ -291,12 +443,16 @@ def verify_python_symbol(
                 out["reason"] = f"attribute {symbol!r} does not exist on stdlib module {mod_name!r}"
             return out
 
-    # 3. Installed third-party/other stdlib check via find_spec + AST (never executes module)
-    try:
-        spec = importlib.util.find_spec(mod_name)
-    except (ModuleNotFoundError, ValueError, ImportError):
-        spec = None
-    if spec is None:
+    # 3. Installed third-party/other stdlib check via pure filesystem lookup + AST
+    #    (never calls importlib.util.find_spec or importlib.import_module on unverified
+    #    modules, which would execute parent __init__.py or workspace files).
+    origin_path: Path | None = None
+    is_binary_or_ns = False
+    if mod_name in sys.builtin_module_names:
+        is_binary_or_ns = True
+    else:
+        origin_path, is_binary_or_ns = _find_module_on_disk(mod_name, _trusted_library_roots())
+    if origin_path is None and not is_binary_or_ns:
         return {
             "ok": True,
             "verified": False,
@@ -305,17 +461,16 @@ def verify_python_symbol(
             "symbol": symbol,
             "reason": f"module {mod_name!r} is not installed or does not exist in Python {sys.version_info.major}.{sys.version_info.minor}",
         }
-    origin = getattr(spec, "origin", None)
     if not symbol:
         return {
             "ok": True,
             "verified": True,
             "source": "stdlib" if top in _STDLIB_NAMES else "installed_package",
             "module": mod_name,
-            "has_source": bool(origin and str(origin).endswith(".py")),
+            "has_source": origin_path is not None,
         }
-    if origin and str(origin).endswith(".py") and os.path.isfile(origin):
-        exports, sigs = _ast_module_exports(Path(origin))
+    if origin_path is not None and origin_path.is_file():
+        exports, sigs = _ast_module_exports(origin_path)
         head = symbol.split(".", 1)[0]
         if head in exports:
             tsig = sigs.get(head)

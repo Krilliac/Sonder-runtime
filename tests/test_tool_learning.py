@@ -212,3 +212,83 @@ def test_learn_tool_wired_across_chat_and_control_commands():
     assert res["ok"] is True
     assert res["installed"] is True
     assert res["total_flags_discovered"] >= 3
+
+
+def test_learn_tool_refuses_probing_denied_unlisted_and_cwd_binaries(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.inspection import learn_tool as lt_mod
+
+    # Denied shell / destructive binaries must never be probed
+    fake_cmd = tmp_path / "cmd.exe"
+    fake_cmd.write_bytes(b"stub")
+    ok, reason = lt_mod._is_safe_probe_binary(str(fake_cmd))
+    assert not ok and reason == "denied_binary"
+
+    # Arbitrary unlisted binary must not be probed
+    unlisted = tmp_path / "mysterytool99.exe"
+    unlisted.write_bytes(b"stub")
+    ok, reason = lt_mod._is_safe_probe_binary(str(unlisted))
+    assert not ok and reason == "unlisted_binary"
+
+    # Script wrappers (.bat / .cmd) must not be probed
+    bat = tmp_path / "python.bat"
+    bat.write_text("@echo pwned\n", encoding="utf-8")
+    ok, reason = lt_mod._is_safe_probe_binary(str(bat))
+    assert not ok and reason == "script_wrapper_refused"
+
+    # Binary planted in CWD must be refused even with an allowlisted name
+    monkeypatch.chdir(tmp_path)
+    planted = tmp_path / "python.exe"
+    planted.write_bytes(b"stub")
+    ok, reason = lt_mod._is_safe_probe_binary(str(planted))
+    assert not ok and reason == "cwd_binary_refused"
+
+
+def test_learn_tool_validates_symlink_targets(tmp_path, monkeypatch):
+    import os
+    from sonder_runtime.adapters.inspection import learn_tool as lt_mod
+
+    work = tmp_path / "work"
+    bin_dir = tmp_path / "bin"
+    work.mkdir()
+    bin_dir.mkdir()
+    monkeypatch.chdir(work)
+
+    real_py = bin_dir / "python3.14"
+    real_py.write_bytes(b"stub")
+    real_sh = bin_dir / "sh"
+    real_sh.write_bytes(b"stub")
+    real_unlisted = bin_dir / "mysterytool99"
+    real_unlisted.write_bytes(b"stub")
+
+    link_ok = bin_dir / "python"
+    link_bad_sh = bin_dir / "git"
+    link_bad_unlisted = bin_dir / "node"
+    try:
+        os.symlink(real_py, link_ok)
+        os.symlink(real_sh, link_bad_sh)
+        os.symlink(real_unlisted, link_bad_unlisted)
+    except OSError:
+        # Windows without developer-mode symlink privilege
+        return
+
+    ok, reason = lt_mod._is_safe_probe_binary(str(link_ok))
+    assert ok and reason == ""
+    ok, reason = lt_mod._is_safe_probe_binary(str(link_bad_sh))
+    assert not ok and reason == "denied_binary"
+    ok, reason = lt_mod._is_safe_probe_binary(str(link_bad_unlisted))
+    assert not ok and reason == "unlisted_binary"
+
+
+def test_learn_tool_server_gates_save_note_and_probe_in_plan_mode(monkeypatch):
+    import server
+    import permission_modes
+
+    monkeypatch.setattr(permission_modes, "current_mode", lambda: "plan")
+    saved_calls = []
+    monkeypatch.setattr(server, "sonder_remember_fact", lambda **kw: saved_calls.append(kw))
+    out = json.loads(server.learn_tool("python", goal="run script", probe_cli=True, save_note=True))
+    assert out["ok"] is True
+    assert out["probe_status"] == "skipped_probe"
+    assert out.get("saved_to_memory") is False
+    assert "plan mode" in out.get("save_note_error", "")
+    assert saved_calls == []

@@ -111,6 +111,8 @@ from sonder_runtime.adapters.security import role_tool_policy, unsafe_lab
 from sonder_runtime.adapters.security.account_auth import account_auth as admin_auth
 from sonder_runtime.adapters.web import live_reload
 from sonder_runtime.interfaces.http import client_tools as _client_tools_http
+from sonder_runtime.interfaces.http import media_routes as _media_routes
+def _format_media_generation_error(kind, exc): return _media_routes.format_media_generation_error(kind, exc, logger=_serve_logger)
 from sonder_runtime.application.chat.handoff_receipts import (
     ChatWorkReceiptService,
     ChatWorkResult,
@@ -2377,6 +2379,7 @@ def _validate_bind_security(
     auth_mode=None,
     auth_secret=None,
     tls_terminated_by_proxy=None,
+    allow_non_loopback_proxy_backend=None,
 ):
     api_key = API_KEY if api_key is None else api_key
     auth_secret = AUTH_SECRET if auth_secret is None else auth_secret
@@ -2395,6 +2398,10 @@ def _validate_bind_security(
         tls_terminated_by_proxy = _env_flag("SONDER_TLS_TERMINATED_BY_PROXY")
     elif type(tls_terminated_by_proxy) is not bool:
         raise RuntimeError("bind TLS proxy declaration must be a boolean")
+    if allow_non_loopback_proxy_backend is None:
+        allow_non_loopback_proxy_backend = _env_flag("SONDER_ALLOW_NON_LOOPBACK_PROXY_BACKEND")
+    elif type(allow_non_loopback_proxy_backend) is not bool:
+        raise RuntimeError("bind non-loopback proxy backend declaration must be a boolean")
     _serve_logger.debug(
         f"_validate_bind_security: host={host!r}, auth_mode={mode!r}, "
         f"tls_proxy={tls_terminated_by_proxy}"
@@ -2442,6 +2449,16 @@ def _validate_bind_security(
         _serve_logger.critical(f"bind security violation: non-loopback host={host!r} with auth_mode={mode!r} lacks strong credentials, refusing to start")
         raise RuntimeError(
             "non-loopback bind requires explicitly configured strong authentication"
+        )
+    if allow_non_loopback_proxy_backend is not True:
+        _serve_logger.critical(
+            f"bind security violation: non-loopback host={host!r} with tls_terminated_by_proxy=True "
+            "without SONDER_ALLOW_NON_LOOPBACK_PROXY_BACKEND=1, refusing to start"
+        )
+        raise RuntimeError(
+            "tls_terminated_by_proxy requires a loopback host (127.0.0.1 / ::1) so plaintext HTTP "
+            "is not exposed off-host; set SONDER_ALLOW_NON_LOOPBACK_PROXY_BACKEND=1 only when an "
+            "isolated private network terminates TLS"
         )
 
 
@@ -3310,14 +3327,11 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             messages=messages, label=arg.strip() or "chat", state=state
         )
     if cmd in ("/image", "/img"):
-        image_prompt = arg.strip() or "a random image"
-        return _image_generation.generate_chat_image(image_prompt).markdown
+        return _media_routes.run_media_slash("image", arg.strip() or "a random image", _image_generation.generate_chat_image, logger=_serve_logger)
     if cmd == "/gif":
-        gif_prompt = arg.strip() or "a random animated gif"
-        return _image_generation.generate_chat_gif(gif_prompt).markdown
+        return _media_routes.run_media_slash("gif", arg.strip() or "a random animated gif", _image_generation.generate_chat_gif, logger=_serve_logger)
     if cmd in ("/3d", "/model3d"):
-        model_prompt = arg.strip() or "a stylized glowing lantern"
-        return _model3d_generation.generate_chat_3d_model(model_prompt).markdown
+        return _media_routes.run_media_slash("3d", arg.strip() or "a stylized glowing lantern", _model3d_generation.generate_chat_3d_model, logger=_serve_logger)
     if cmd == "/stats":
         return server.sonder_stats()
     if cmd == "/version":
@@ -7928,55 +7942,15 @@ class Handler(BaseHTTPRequestHandler):
                         web_routed = reply is not None
                     if structured_schema is None and reply is None:
                         explicit_image_model = _image_generation.is_image_generation_model_name(model)
-                        allow_media_route = (
-                            allow_control_routes
-                            or _model_to_tier(model) in ("general", "code", "fast", "creative")
+                        allow_media_route = allow_control_routes or _model_to_tier(model) in ("general", "code", "fast", "creative")
+                        media_reply, media_model, media_tier = _media_routes.run_chat_media_route(
+                            prompt=prompt, model=model, allow_media_route=allow_media_route,
+                            explicit_image_model=explicit_image_model, intents=intents,
+                            image_generation=_image_generation, model3d_generation=_model3d_generation,
+                            logger=_serve_logger,
                         )
-                        model3d_prompt = (
-                            intents.classify_3d_model_generation(prompt)
-                            if allow_media_route
-                            else None
-                        )
-                        gif_prompt = (
-                            None
-                            if model3d_prompt
-                            else (
-                                intents.classify_gif_generation(prompt)
-                                if (explicit_image_model or allow_media_route)
-                                else None
-                            )
-                        )
-                        if model3d_prompt:
-                            m3d_result = _model3d_generation.generate_chat_3d_model(model3d_prompt)
-                            reply = m3d_result.markdown
-                            response_model = m3d_result.model_id
-                            response_tier = "3d"
-                        elif gif_prompt:
-                            gif_result = _image_generation.generate_chat_gif(
-                                gif_prompt,
-                                model_override=model if explicit_image_model else "",
-                            )
-                            reply = gif_result.markdown
-                            response_model = gif_result.model_id
-                            response_tier = "image"
-                        else:
-                            image_prompt = (
-                                prompt
-                                if explicit_image_model
-                                else (
-                                    intents.classify_image_generation(prompt)
-                                    if allow_media_route
-                                    else None
-                                )
-                            )
-                            if image_prompt:
-                                img_result = _image_generation.generate_chat_image(
-                                    image_prompt,
-                                    model_override=model if explicit_image_model else "",
-                                )
-                                reply = img_result.markdown
-                                response_model = img_result.model_id
-                                response_tier = "image"
+                        if media_reply is not None:
+                            reply, response_model, response_tier = media_reply, media_model, media_tier
                     if structured_schema is None and reply is None and allow_control_routes:
                         work_session_ref = session or self._correlation()
                         reply = _handle_work_intent(
@@ -8706,7 +8680,7 @@ def main(
         # selects a positional argument or SONDER_PORT.
         CONFIGURED_PORT = port
 
-        _validate_bind_security(HOST)
+        _validate_bind_security(HOST, tls_terminated_by_proxy=TLS_TERMINATED_BY_PROXY)
         lifecycle = sonder_lifecycle.get()
         try:
             # STARTING -> MIGRATING -> READY; no listener opens on failure.
@@ -8729,6 +8703,10 @@ def main(
         try:
             factory = ServeHTTPServer if _server_factory is None else _server_factory
             httpd = factory((HOST, port), Handler)
+            try:
+                httpd.tls_terminated_by_proxy = bool(TLS_TERMINATED_BY_PROXY)
+            except Exception:
+                pass
         except OSError:
             _serve_logger.critical(f"server cannot bind to {HOST}:{port}, port may already be in use", exc_info=True)
             raise

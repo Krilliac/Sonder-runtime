@@ -37,9 +37,30 @@ class AuditFinding:
         }
 
 
+_SECRET_MASK_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"),
+    re.compile(r"\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,}|xox[abp]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{20,})\b"),
+    re.compile(r"(?i)(\b(?:api[_-]?key|access[_-]?key|secret(?:[_-]?key)?|token|passw(?:or)?d|credential)\s*[=:]\s*['\"]?)([^'\"\s,;]{6,})(['\"]?)"),
+)
+
+
+def _mask_secrets(text: str) -> str:
+    """Replace matched secret values with length-only redaction markers."""
+    masked = text
+    for idx, rx in enumerate(_SECRET_MASK_PATTERNS):
+        if idx == 2:
+            masked = rx.sub(
+                lambda m: f"{m.group(1)}<redacted:len={len(m.group(2))}>{m.group(3)}",
+                masked,
+            )
+        else:
+            masked = rx.sub(lambda m: f"<redacted:len={len(m.group(0))}>", masked)
+    return masked
+
+
 def _line_snippet(lines: list[str], lineno: int) -> str:
     if 1 <= lineno <= len(lines):
-        return lines[lineno - 1].strip()[:140]
+        return _mask_secrets(lines[lineno - 1].strip())[:140]
     return ""
 
 

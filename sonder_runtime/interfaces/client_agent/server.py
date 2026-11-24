@@ -1,12 +1,15 @@
 """Loopback HTTP companion server for client-side tool execution."""
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import secrets
 import socketserver
 import threading
+import time
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
@@ -19,12 +22,37 @@ from .executor import (
     ClientAgentPolicy,
     ModeCeilingRefused,
     execute_client_tool,
+    mode_allows_without_prompt,
+    tool_risk_of,
 )
 
 DEFAULT_CLIENT_AGENT_HOST = "127.0.0.1"
 DEFAULT_CLIENT_AGENT_PORT = 11439
 _MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
 _LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+_DEFAULT_APPROVAL_TTL_SECONDS = 300.0
+_MAX_APPROVAL_CHALLENGES = 256
+
+
+def canonical_args_digest(args: Mapping[str, Any] | None) -> str:
+    """Return the SHA-256 hex digest of canonical JSON-encoded tool arguments."""
+    payload = dict(args) if isinstance(args, Mapping) else {}
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+@dataclass(frozen=True)
+class _ApprovalChallenge:
+    token: str
+    call_id: str
+    tool: str
+    args_digest: str
+    expires_at: float
 
 
 def is_loopback_host(host: str) -> bool:
@@ -198,12 +226,68 @@ def build_wsgi_app(
     policy: ClientAgentPolicy,
     token: str,
     allowed_origins: Iterable[str] = (),
+    approval_ttl_seconds: float = _DEFAULT_APPROVAL_TTL_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
 ) -> Callable[[WSGIEnvironment, StartResponse], Iterable[bytes]]:
     """Build the WSGI callable for the local client companion."""
     normalized_origins = frozenset(
         norm for raw in allowed_origins if (norm := normalize_origin(raw)) is not None
     )
     lock = threading.Lock()
+    ttl_seconds = max(1.0, float(approval_ttl_seconds))
+    challenges: list[_ApprovalChallenge] = []
+
+    def _prune_challenges_locked(now: float) -> None:
+        challenges[:] = [c for c in challenges if c.expires_at > now]
+
+    def _mint_challenge_locked(
+        call_id: str,
+        clean_tool: str,
+        args_digest: str,
+    ) -> _ApprovalChallenge:
+        now = float(clock())
+        _prune_challenges_locked(now)
+        while len(challenges) >= _MAX_APPROVAL_CHALLENGES:
+            challenges.pop(0)
+        challenge = _ApprovalChallenge(
+            token=secrets.token_urlsafe(32),
+            call_id=call_id,
+            tool=clean_tool,
+            args_digest=args_digest,
+            expires_at=now + ttl_seconds,
+        )
+        challenges.append(challenge)
+        return challenge
+
+    def _consume_challenge_locked(
+        approval_token: str,
+        *,
+        call_id: str,
+        clean_tool: str,
+        args_digest: str,
+        has_supplied_digest: bool,
+        supplied_args_digest: str,
+    ) -> tuple[bool, str, bool]:
+        now = float(clock())
+        _prune_challenges_locked(now)
+        token_bytes = approval_token.encode("utf-8")
+        matched_idx = -1
+        for idx, candidate in enumerate(challenges):
+            if hmac.compare_digest(candidate.token.encode("utf-8"), token_bytes):
+                matched_idx = idx
+        if matched_idx < 0:
+            return False, "approval token is invalid, expired, or already used", False
+        matched = challenges.pop(matched_idx)
+        call_id_ok = hmac.compare_digest(matched.call_id.encode("utf-8"), call_id.encode("utf-8"))
+        tool_ok = hmac.compare_digest(matched.tool.encode("utf-8"), clean_tool.encode("utf-8"))
+        digest_ok = hmac.compare_digest(matched.args_digest.encode("utf-8"), args_digest.encode("utf-8"))
+        supplied_ok = (not has_supplied_digest) or hmac.compare_digest(
+            matched.args_digest.encode("utf-8"),
+            supplied_args_digest.encode("utf-8"),
+        )
+        if not (call_id_ok and tool_ok and digest_ok and supplied_ok):
+            return False, "approval token does not match call_id, tool, or arguments", True
+        return True, "", False
 
     def _cors_headers(origin_header: str) -> list[tuple[str, str]]:
         if not origin_header:
@@ -407,7 +491,19 @@ def build_wsgi_app(
                     origin_header,
                 )
             approved = body.get("approved") is True
+            call_id = str(body.get("call_id") or "").strip()
+            raw_approval_token = body.get("approval_token")
+            approval_token = raw_approval_token.strip() if isinstance(raw_approval_token, str) else ""
+            has_supplied_digest = "args_digest" in body and body.get("args_digest") is not None
+            raw_supplied_digest = body.get("args_digest")
+            supplied_args_digest = (
+                raw_supplied_digest.strip().lower()
+                if isinstance(raw_supplied_digest, str)
+                else ""
+            )
             requested_mode = str(body.get("mode") or "").strip()
+            clean_tool = tool.lstrip("/")
+            args_digest = canonical_args_digest(raw_args)
             with lock:
                 effective_policy = ClientAgentPolicy(
                     workspace_root=policy.workspace_root,
@@ -421,14 +517,78 @@ def build_wsgi_app(
                     and _MODE_RANK[requested_mode] < _MODE_RANK[policy.mode]
                 ):
                     effective_policy.mode = requested_mode
+                tool_known = clean_tool in CLIENT_DELEGATABLE_TOOLS
+                risk = tool_risk_of(clean_tool) if tool_known else "execute"
+                plan_denied = tool_known and effective_policy.mode == "plan" and risk != "read_only"
+                requires_approval = (
+                    tool_known
+                    and not plan_denied
+                    and not mode_allows_without_prompt(effective_policy.mode, risk)
+                )
+                verified_approval = False
+                challenge_payload: dict[str, Any] | None = None
+                if requires_approval:
+                    if approved and approval_token:
+                        ok_challenge, reason, tampered = _consume_challenge_locked(
+                            approval_token,
+                            call_id=call_id,
+                            clean_tool=clean_tool,
+                            args_digest=args_digest,
+                            has_supplied_digest=has_supplied_digest,
+                            supplied_args_digest=supplied_args_digest,
+                        )
+                        if ok_challenge:
+                            verified_approval = True
+                        elif tampered:
+                            challenge_payload = {
+                                "ok": False,
+                                "output": "",
+                                "error": reason,
+                                "denied": True,
+                                "needs_approval": False,
+                                "mode": effective_policy.mode,
+                                "risk": risk,
+                            }
+                        else:
+                            fresh = _mint_challenge_locked(call_id, clean_tool, args_digest)
+                            challenge_payload = {
+                                "ok": False,
+                                "output": "",
+                                "error": reason,
+                                "denied": False,
+                                "needs_approval": True,
+                                "mode": effective_policy.mode,
+                                "risk": risk,
+                                "approval_token": fresh.token,
+                                "args_digest": fresh.args_digest,
+                            }
+                    else:
+                        fresh = _mint_challenge_locked(call_id, clean_tool, args_digest)
+                        challenge_payload = {
+                            "ok": False,
+                            "output": "",
+                            "error": (
+                                f"approval required on client PC for '{clean_tool}' "
+                                f"({risk}) in {effective_policy.mode} mode"
+                            ),
+                            "denied": False,
+                            "needs_approval": True,
+                            "mode": effective_policy.mode,
+                            "risk": risk,
+                            "approval_token": fresh.token,
+                            "args_digest": fresh.args_digest,
+                        }
+            if challenge_payload is not None:
+                if call_id:
+                    challenge_payload["call_id"] = call_id
+                return _respond(start_response, 200, challenge_payload, origin_header)
             result = execute_client_tool(
                 tool,
                 raw_args,
                 policy=effective_policy,
-                approved=approved,
+                approved=verified_approval,
             )
             payload = result.to_dict()
-            call_id = str(body.get("call_id") or "").strip()
             if call_id:
                 payload["call_id"] = call_id
             return _respond(start_response, 200, payload, origin_header)
@@ -460,6 +620,8 @@ def create_client_agent_server(
     allow_bypass: bool = False,
     token: str | None = None,
     allowed_origins: Iterable[str] = (),
+    approval_ttl_seconds: float = _DEFAULT_APPROVAL_TTL_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
 ) -> ClientAgentServer:
     """Create a loopback-bound ``ClientAgentServer`` ready to ``serve_forever()``."""
     clean_host = host.strip() or DEFAULT_CLIENT_AGENT_HOST
@@ -481,7 +643,13 @@ def create_client_agent_server(
     normalized_origins = frozenset(
         norm for raw in allowed_origins if (norm := normalize_origin(raw)) is not None
     )
-    app = build_wsgi_app(policy=policy, token=effective_token, allowed_origins=normalized_origins)
+    app = build_wsgi_app(
+        policy=policy,
+        token=effective_token,
+        allowed_origins=normalized_origins,
+        approval_ttl_seconds=approval_ttl_seconds,
+        clock=clock,
+    )
     srv = make_server(
         bind_host,
         int(port),

@@ -109,6 +109,7 @@ def test_typed_auth_secret_is_used_for_non_loopback_validation(monkeypatch):
 
     # Explicitly passing the typed host/auth values exercises the same policy
     # used immediately before a configured listener binds.
+    monkeypatch.setenv("SONDER_ALLOW_NON_LOOPBACK_PROXY_BACKEND", "1")
     serve._validate_bind_security(
         "192.0.2.10",
         api_key="typed-api-key-" + ("k" * 24),

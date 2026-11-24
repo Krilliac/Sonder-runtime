@@ -142,8 +142,14 @@ def _password(
 
 
 # Stand-in credentials for the unknown-username path of ``login``.
+_SCRYPT_N = 16384
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+_SCRYPT_DKLEN = 32
+_SCRYPT_MAXMEM = 64 * 1024 * 1024
+_LEGACY_PBKDF2_ITERATIONS = 120_000
 _DUMMY_SALT = "00" * 16
-_DUMMY_DIGEST = "00" * 32
+_DUMMY_DIGEST = f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${_DUMMY_SALT}${'00' * _SCRYPT_DKLEN}"
 
 
 def _throttle_key(conn: sqlite3.Connection, username: str) -> str:
@@ -160,13 +166,102 @@ def _new_token() -> str:
 
 def _hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
     salt = salt or os.urandom(16).hex()
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
+    derived = hashlib.scrypt(
         (password or "").encode("utf-8"),
-        salt.encode("ascii"),
-        120_000,
+        salt=salt.encode("utf-8"),
+        n=_SCRYPT_N,
+        r=_SCRYPT_R,
+        p=_SCRYPT_P,
+        maxmem=_SCRYPT_MAXMEM,
+        dklen=_SCRYPT_DKLEN,
     ).hex()
-    return salt, digest
+    encoded = f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt}${derived}"
+    return salt, encoded
+
+
+def _verify_password(password: str, stored_salt: str | None, stored_hash: str | None) -> bool:
+    """Verify ``password`` against scrypt or legacy PBKDF2-SHA256 stored hashes."""
+    expected = str(stored_hash or "")
+    if expected.startswith("scrypt$"):
+        parts = expected.split("$")
+        if len(parts) != 6:
+            _hash_password(password, _DUMMY_SALT)
+            return False
+        _, n_s, r_s, p_s, salt_hex, hash_hex = parts
+        try:
+            n_val = int(n_s)
+            r_val = int(r_s)
+            p_val = int(p_s)
+            dklen = len(bytes.fromhex(hash_hex))
+        except ValueError:
+            _hash_password(password, _DUMMY_SALT)
+            return False
+        if (
+            n_val < 2
+            or (n_val & (n_val - 1)) != 0
+            or n_val > (1 << 20)
+            or not (1 <= r_val <= 64)
+            or not (1 <= p_val <= 16)
+            or not (16 <= dklen <= 64)
+        ):
+            _hash_password(password, _DUMMY_SALT)
+            return False
+        if (n_val, r_val, p_val, dklen) == (_SCRYPT_N, _SCRYPT_R, _SCRYPT_P, _SCRYPT_DKLEN):
+            _, computed = _hash_password(password, salt_hex)
+            return hmac.compare_digest(computed, expected)
+        derived = hashlib.scrypt(
+            (password or "").encode("utf-8"),
+            salt=salt_hex.encode("utf-8"),
+            n=n_val,
+            r=r_val,
+            p=p_val,
+            maxmem=max(_SCRYPT_MAXMEM, 128 * r_val * n_val * 2),
+            dklen=dklen,
+        ).hex()
+        return hmac.compare_digest(derived, hash_hex)
+    if expected.startswith("pbkdf2_sha256$"):
+        parts = expected.split("$")
+        if len(parts) == 4:
+            _, iter_s, salt_hex, hash_hex = parts
+            try:
+                iterations = int(iter_s)
+                dklen = len(bytes.fromhex(hash_hex))
+            except ValueError:
+                _hash_password(password, _DUMMY_SALT)
+                return False
+        elif len(parts) == 3:
+            _, salt_hex, hash_hex = parts
+            iterations = _LEGACY_PBKDF2_ITERATIONS
+            try:
+                dklen = len(bytes.fromhex(hash_hex))
+            except ValueError:
+                _hash_password(password, _DUMMY_SALT)
+                return False
+        else:
+            _hash_password(password, _DUMMY_SALT)
+            return False
+        if iterations < 1 or iterations > 5_000_000 or not (16 <= dklen <= 64):
+            _hash_password(password, _DUMMY_SALT)
+            return False
+        derived = hashlib.pbkdf2_hmac(
+            "sha256",
+            (password or "").encode("utf-8"),
+            salt_hex.encode("utf-8"),
+            iterations,
+            dklen=dklen,
+        ).hex()
+        return hmac.compare_digest(derived, hash_hex)
+    # Legacy unprefixed PBKDF2-HMAC-SHA256 hex rows created before scrypt migration.
+    if stored_salt and expected:
+        derived = hashlib.pbkdf2_hmac(
+            "sha256",
+            (password or "").encode("utf-8"),
+            str(stored_salt).encode("utf-8"),
+            _LEGACY_PBKDF2_ITERATIONS,
+        ).hex()
+        return hmac.compare_digest(derived, expected)
+    _hash_password(password, _DUMMY_SALT)
+    return False
 
 
 def _hash_token(token: str) -> str:
@@ -360,14 +455,13 @@ def login(
     if not decision.allowed:
         raise login_throttle.LoginThrottled(decision.retry_after_seconds)
     row = conn.execute("SELECT * FROM accounts WHERE username=?", (username,)).fetchone()
-    # An unknown username pays the same PBKDF2 cost as a wrong password, so
+    # An unknown username pays the same scrypt cost as a wrong password, so
     # response time does not reveal which names exist.  The ban check follows
     # the password check for the same reason.
     salt, expected = (
         (row["password_salt"], row["password_hash"]) if row else (_DUMMY_SALT, _DUMMY_DIGEST)
     )
-    _, digest = _hash_password(password, salt)
-    matched = hmac.compare_digest(digest, expected) and row is not None
+    matched = _verify_password(password, salt, expected) and row is not None
     if not matched:
         login_throttle.record_failure(throttle_key)
         raise ValueError("invalid username or password")
@@ -414,8 +508,7 @@ def reauthenticate(conn: sqlite3.Connection, token: str, password: str) -> dict:
         if (row is None or row['banned'] or row['session_revoked']
                 or int(row['session_expires'] or 0) <= _now()):
             raise PermissionError(refusal)
-        _, digest = _hash_password(password, row['password_salt'])
-        if (not hmac.compare_digest(digest, row['password_hash'])
+        if (not _verify_password(password, row['password_salt'], row['password_hash'])
                 or int(row['session_expires'] or 0) <= _now()):
             raise PermissionError(refusal)
         return _public_account_row(row)

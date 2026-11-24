@@ -221,10 +221,15 @@ class SpendLedger:
                         write_json_atomic(path, document)
                         persisted = True
                     except OSError as exc:
-                        logger.warning(
-                            "%s: could not persist in-flight reservation (%s); holding in memory only",
+                        logger.error(
+                            "%s: could not persist in-flight reservation (%s); failing closed",
                             self._label.lower(), type(exc).__name__,
                         )
+                        raise SpendLedgerUnreadable(
+                            "the %s spend ledger %s could not persist in-flight reservation; "
+                            "failing closed to enforce the daily cap"
+                            % (self._label, path.name)
+                        ) from exc
                 self._inflight[token] = (day, res_key, amount, persisted)
                 return token, spent, inflight
 

@@ -34,13 +34,18 @@ def test_installer_reuses_an_existing_venv_unless_force_is_passed():
 
 
 def test_installer_upgrades_pip_via_python_module_not_the_pip_exe_directly():
-    # pip.exe cannot replace its own running executable on Windows; only
-    # `python -m pip install --upgrade pip` works there. Regression coverage
-    # for that exact failure, found by actually running this script.
+    # H-10: Never run pip.exe directly and never fetch an unpinned
+    # `pip install --upgrade pip` from the internet; invoke bundled pip via
+    # `python -m pip` only, with hash-lock support when available.
     text = _text()
 
-    assert "'-m', 'pip', 'install', '--quiet', '--upgrade', 'pip'" in text
+    assert "'-m', 'pip', 'install'" in text
+    assert "'--upgrade', 'pip'" not in text
+    assert "--upgrade pip" not in text
     assert "-FilePath $venvPip " not in text
+    assert "requirements-runtime.lock" in text
+    assert "'--require-hashes'" in text
+    assert "SONDER_REQUIRE_HASHES" in text
 
 
 def test_installer_refuses_to_run_outside_a_sonder_checkout():
@@ -221,3 +226,50 @@ def test_installers_verify_the_resolved_dependency_set():
     assert "'-m', 'pip', 'check'" in text
     check = text.index("'verifying managed runtime dependencies'")
     assert check < text.index("'sonder_runtime.adapters.execution.runtime_profile', 'seal'")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell installer for Windows checkouts")
+def test_h10_require_hashes_fails_closed_when_lockfile_missing_and_uses_lockfile_when_present(tmp_path):
+    import sys
+
+    repo = tmp_path / "repo"
+    script_copy, _ = _fake_checkout(repo)
+    venv = tmp_path / "fake-venv"
+    (venv / "Scripts").mkdir(parents=True)
+    # Minimal stub venv so the installer reuses it without running real `venv`.
+    (venv / "pyvenv.cfg").write_text("home = x\n", encoding="utf-8")
+    # Reuse the current Python executable path via a tiny wrapper? Easier: copy python or point to sys.executable?
+    # The script validates `$venvPython = Join-Path $VenvPath 'Scripts\python.exe'`,
+    # and fail-closed SONDER_REQUIRE_HASHES=1 triggers BEFORE invoking $venvPython!
+    (venv / "Scripts" / "python.exe").write_bytes(b"")
+
+    env = os.environ.copy()
+    env["SONDER_REQUIRE_HASHES"] = "1"
+    env["PIP_INDEX_URL"] = "http://127.0.0.1:1/simple"
+    env["PIP_NO_INPUT"] = "1"
+
+    missing_res = subprocess.run(
+        [
+            "powershell", "-NoProfile", "-File", str(script_copy),
+            "-Python", sys.executable, "-VenvPath", str(venv), "-SkipModelAlias",
+        ],
+        cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert missing_res.returncode != 0
+    assert "requirements-runtime.lock" in (missing_res.stdout + missing_res.stderr)
+
+    # When requirements-runtime.lock exists with an unhashed entry, pip --require-hashes
+    # must reject it rather than silently falling back to unhashed installation.
+    (repo / "requirements-runtime.lock").write_text("mcp==2.2.0\n", encoding="utf-8")
+    real_venv = tmp_path / "real-venv"
+    subprocess.run([sys.executable, "-m", "venv", str(real_venv)], check=True, timeout=120)
+    locked_res = subprocess.run(
+        [
+            "powershell", "-NoProfile", "-File", str(script_copy),
+            "-Python", sys.executable, "-VenvPath", str(real_venv), "-SkipModelAlias",
+        ],
+        cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=120, check=False,
+    )
+    combined = locked_res.stdout + locked_res.stderr
+    assert locked_res.returncode != 0
+    assert "--require-hashes" in combined or "Hashes are required" in combined
