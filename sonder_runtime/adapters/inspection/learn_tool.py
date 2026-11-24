@@ -102,26 +102,40 @@ def _canonical_binary_stem(path: Path) -> str:
 
 
 def _is_safe_probe_binary(binary_path: str) -> tuple[bool, str]:
-    """Verify *binary_path* is an allowlisted, non-symlink, non-CWD executable safe for --help probing."""
+    """Verify *binary_path* is an allowlisted, non-CWD executable safe for --help probing.
+
+    Standard OS PATH symlinks (e.g. ``/usr/bin/python -> python3.14`` on Linux/macOS)
+    are permitted only when BOTH the link name and its resolved target are regular
+    files outside CWD, not script wrappers, not denied, and on the safe allowlist.
+    """
     p = Path(binary_path)
-    if p.is_symlink() or not p.is_file():
+    try:
+        resolved = p.resolve(strict=True)
+    except OSError:
         return False, "symlink_or_missing"
-    if p.suffix.lower() in _DISALLOWED_PROBE_SCRIPT_SUFFIXES:
+    if not resolved.is_file():
+        return False, "symlink_or_missing"
+    if (
+        p.suffix.lower() in _DISALLOWED_PROBE_SCRIPT_SUFFIXES
+        or resolved.suffix.lower() in _DISALLOWED_PROBE_SCRIPT_SUFFIXES
+    ):
         return False, "script_wrapper_refused"
     try:
-        resolved = p.resolve()
         cwd_resolved = Path.cwd().resolve()
         if resolved.is_relative_to(cwd_resolved):
             return False, "cwd_binary_refused"
+        if p.is_symlink() and p.parent.resolve().is_relative_to(cwd_resolved):
+            return False, "cwd_binary_refused"
     except OSError:
         return False, "unresolvable_path"
-    stem = p.stem.lower()
-    base_stem = _canonical_binary_stem(p)
-    if stem in _DENIED_PROBE_BINARIES or base_stem in _DENIED_PROBE_BINARIES:
-        return False, "denied_binary"
-    if stem in _SAFE_PROBE_BINARIES or base_stem in _SAFE_PROBE_BINARIES:
-        return True, ""
-    return False, "unlisted_binary"
+    for candidate in (p, resolved):
+        stem = candidate.stem.lower()
+        base_stem = _canonical_binary_stem(candidate)
+        if stem in _DENIED_PROBE_BINARIES or base_stem in _DENIED_PROBE_BINARIES:
+            return False, "denied_binary"
+        if stem not in _SAFE_PROBE_BINARIES and base_stem not in _SAFE_PROBE_BINARIES:
+            return False, "unlisted_binary"
+    return True, ""
 
 
 def _sanitized_probe_env() -> dict[str, str]:
@@ -234,8 +248,14 @@ def discover_tool_binaries(query: NormalizedToolQuery) -> list[dict[str, str]]:
         hit = shutil.which(cand, path=safe_path)
         if hit:
             p = Path(hit)
-            norm = str(p).lower()
-            if norm not in seen and p.is_file() and not p.is_symlink():
+            try:
+                resolved = p.resolve(strict=True)
+            except OSError:
+                continue
+            if not resolved.is_file():
+                continue
+            norm = str(resolved).lower()
+            if norm not in seen:
                 seen.add(norm)
                 results.append({"name": p.name, "path": str(p), "source": "PATH"})
 

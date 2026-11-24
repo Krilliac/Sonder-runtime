@@ -222,7 +222,10 @@ drift as files change. Anchor on the named function, not just the integer.
   `sonder_runtime/domain/execution/policy.py` `DEFAULT_RULES` left in place;
   security-adviser model tool-lane floor relaxation — `SONDER_ALLOW_SECURITY_MODEL_TOOLS`
   (off by default; requires exact acknowledgement string in host environment and
-  never weakens permission modes, workspace containment, or shipped policy pinning).
+  never weakens permission modes, workspace containment, or shipped policy pinning);
+  non-loopback reverse-proxy backend bind — `SONDER_ALLOW_NON_LOOPBACK_PROXY_BACKEND`
+  (off by default; `tls_terminated_by_proxy=true` requires a loopback bind unless
+  this opt-in is explicitly set for an isolated private TLS-terminating network).
 - **Why it holds:** each capability is default-denied and re-checked at the tool
   boundary, not only at config load; the location gate in particular is checked
   at three independent layers, and the raw IP is explicitly not retained

@@ -107,6 +107,8 @@ def test_agent_dispatch_observed_refusal_in_work_run_does_not_raise_typeerror(mo
     http_work_runs.start(run_id, owner_scope=scope, process_id="p1", deadline_ts=time.time() + 600)
     (tmp_path / "gcd.py").write_text("print(21)\n", encoding="utf-8")
 
+    before_mode = pm.current_mode()
+    pm.set_mode(pm.MANUAL)
     tok = _CURRENT_RUN.set(run_id)
     try:
         with pp.permission_policy.mode_scope("test-principal", "test-session"):
@@ -115,6 +117,7 @@ def test_agent_dispatch_observed_refusal_in_work_run_does_not_raise_typeerror(mo
             )
     finally:
         _CURRENT_RUN.reset(tok)
+        pm.set_mode(before_mode)
 
     assert "HOST POLICY" in out
     assert "TypeError" not in out
