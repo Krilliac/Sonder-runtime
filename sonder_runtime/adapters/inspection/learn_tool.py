@@ -458,3 +458,33 @@ def learn_tool(
         memory_notes=memory_notes,
         web_research=web_results,
     )
+
+
+def maybe_save_playbook_note(
+    data: dict[str, Any],
+    *,
+    save_note: bool,
+    in_plan_mode: bool,
+    decide_fn: Callable[[str, dict[str, Any]], Any],
+    remember_fn: Callable[..., Any],
+) -> None:
+    """Persist ``playbook_summary`` only when permitted outside read-only plan mode."""
+    if not (save_note and data.get("ok") and data.get("playbook_summary")):
+        return
+    if in_plan_mode:
+        data["saved_to_memory"] = False
+        data["save_note_error"] = "refused save_note in read-only plan mode"
+        return
+    decision = decide_fn("sonder_remember_fact", {"text": str(data["playbook_summary"])})
+    if not decision.allowed:
+        data["saved_to_memory"] = False
+        data["save_note_error"] = "refused save_note by permission policy: %s" % (
+            decision.reason or decision.action
+        )
+        return
+    try:
+        remember_fn(text=str(data["playbook_summary"]))
+        data["saved_to_memory"] = True
+    except Exception as exc:
+        data["saved_to_memory"] = False
+        data["save_note_error"] = str(exc)[:160]

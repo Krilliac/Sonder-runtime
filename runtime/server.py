@@ -15417,38 +15417,17 @@ def learn_tool(
         import sonder_runtime.adapters.inspection.learn_tool as _learn_tool
 
         in_plan_mode = permission_modes.current_mode() == "plan"
-        effective_probe_cli = bool(probe_cli) and not in_plan_mode
         data = _learn_tool.learn_tool(
-            tool=tool,
-            goal=goal,
-            subcommand=subcommand,
-            probe_cli=effective_probe_cli,
-            research_web=bool(research_web),
-            timeout=float(timeout),
+            tool=tool, goal=goal, subcommand=subcommand,
+            probe_cli=bool(probe_cli) and not in_plan_mode,
+            research_web=bool(research_web), timeout=float(timeout),
             web_search_fn=_web_cb if research_web else None,
             memory_search_fn=_mem_recall,
         )
-        if save_note and data.get("ok") and data.get("playbook_summary"):
-            if in_plan_mode:
-                data["saved_to_memory"] = False
-                data["save_note_error"] = "refused save_note in read-only plan mode"
-            else:
-                decision = permission_policy.decide(
-                    "sonder_remember_fact",
-                    {"text": str(data["playbook_summary"])},
-                )
-                if not decision.allowed:
-                    data["saved_to_memory"] = False
-                    data["save_note_error"] = "refused save_note by permission policy: %s" % (
-                        decision.reason or decision.action
-                    )
-                else:
-                    try:
-                        sonder_remember_fact(text=str(data["playbook_summary"]))
-                        data["saved_to_memory"] = True
-                    except Exception as exc:
-                        data["saved_to_memory"] = False
-                        data["save_note_error"] = str(exc)[:160]
+        _learn_tool.maybe_save_playbook_note(
+            data, save_note=bool(save_note), in_plan_mode=in_plan_mode,
+            decide_fn=permission_modes.decide, remember_fn=sonder_remember_fact,
+        )
     except Exception as exc:
         _record_direct_tool("learn_tool", args, ok=False, started=started, summary=str(exc))
         return "learn_tool refused: %s" % exc
