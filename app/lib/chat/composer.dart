@@ -1043,7 +1043,7 @@ class CommandRow extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Padding(
-                        padding: const EdgeInsets.only(top: 5),
+                        padding: const EdgeInsets.only(top: SonderSpace.xs),
                         child: _RiskDot(risk: command.risk),
                       ),
                       const SizedBox(width: SonderSpace.sm),
@@ -1290,8 +1290,10 @@ class _CommandBrowserState extends State<CommandBrowser> {
     return Dialog(
       key: const Key('command-browser'),
       insetPadding: compactDialog
-          ? const EdgeInsets.symmetric(horizontal: 12, vertical: 20)
-          : const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
+          ? const EdgeInsets.symmetric(
+              horizontal: SonderSpace.md, vertical: SonderSpace.xl)
+          : const EdgeInsets.symmetric(
+              horizontal: SonderSpace.x4, vertical: SonderSpace.xxl),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 760, maxHeight: 620),
         child: Padding(
