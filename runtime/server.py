@@ -9140,6 +9140,7 @@ def master_orchestrate(
     Status is visible through master_status().
     """
     _maybe_live_reload()
+    from sonder_runtime.application.server_core import orchestration_helpers as _orchestration_helpers_core
     refusal = intents.containment_egress_refusal(task)
     if refusal:
         return refusal
@@ -20544,6 +20545,7 @@ def _route_work_request(
     assert handoff is not None
     # Keep the one admitted typed decision. Reclassifying here could change
     # plan-only/actions semantics between admission and execution.
+    from sonder_runtime.application.server_core import orchestration_helpers as _orchestration_helpers_core
     decision = {"plan_only": lane_decision.plan_only}
     mode = handoff.requested_mode
     reason = lane_decision.reason
@@ -20567,10 +20569,10 @@ def _route_work_request(
             npu_decision = npu_service.route_decide(prompt)
         except Exception:
             npu_decision = None
-        validated_npu = _orchestration_helpers_core.validate_npu_route_decision(
-            npu_decision,
-            valid_modes=npu_contract.ROUTE_MODES,
-            valid_tiers=runtime_policy.BASE_LOCAL_TIERS,
+        validated_npu = (
+            _orchestration_helpers_core.validate_npu_route_decision(
+                npu_decision, valid_modes=npu_contract.ROUTE_MODES, valid_tiers=runtime_policy.BASE_LOCAL_TIERS,
+            ) if npu_decision else None
         )
         npu_fallback_attempted = npu_prefer_active and not validated_npu
         if validated_npu:
