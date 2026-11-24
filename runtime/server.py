@@ -21,7 +21,6 @@ Tiers (escalation ladder, cheapest first):
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 from sonder_runtime.platform.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
 
-import collections
 import atexit
 import base64
 import contextlib
@@ -59,6 +58,20 @@ import sonder_runtime.adapters.memory_store as memory_store
 from sonder_runtime.bootstrap import playbook_context
 from sonder_runtime.bootstrap.playbooks import register_tools as _register_playbook_tools
 import sonder_runtime.application.session.transcript_export as session_transcript_export
+from sonder_runtime.application.server_core import (
+    agent_guards as _agent_guards_core,
+    agent_prompts as _agent_prompts_core,
+    agent_turn_helpers as _agent_turn_core,
+    campaign_helpers as _campaign_helpers_core,
+    codegen_helpers as _codegen_helpers_core,
+    control_commands as _control_commands_core,
+    improvement_reports as _improvement_reports_core,
+    loop_helpers as _loop_helpers_core,
+    memory_backfill as _memory_backfill_core,
+    orchestration_helpers as _orchestration_helpers_core,
+    slash_commands as _slash_commands_core,
+    workspace_tools as _workspace_tools_core,
+)
 from sonder_runtime.application.command_surface.command_text import slash_head as _slash_head
 import orchestrator
 import retriever
@@ -309,7 +322,6 @@ from sonder_runtime.domain.agents.verification_reach import (
     VERIFICATION_TOOLS as _AGENT_VERIFICATION_TOOLS,
     verifier_reachable as _verifier_reachable_policy,
 )
-from sonder_runtime.domain.agents import interpreter_argv as _interpreter_argv
 from sonder_runtime.domain.agents.activity_command import (
     activity_argv as _activity_argv,
     activity_command as _agent_activity_command,
@@ -2804,37 +2816,19 @@ def _autopilot_command(arg: str, project: str = "", request_owner: str | None = 
     if action in ("status", "show", "list"):
         return _autopilot_status(rest, request_owner=request_owner)
     if action in ("run", "start", "plan"):
-        policy = "workspace"
-        allow_web = True
-        adaptive = True
-        bind_goal = False
-        while rest.startswith("--"):
-            option, _, remaining = rest.partition(" ")
-            if option == "--observe":
-                policy = "observe"
-            elif option == "--no-web":
-                allow_web = False
-            elif option == "--static":
-                adaptive = False
-            elif option == "--goal":
-                bind_goal = True
-            else:
-                return "ERROR: unknown autopilot option '%s'." % option
-            rest = remaining.strip()
-        if not rest and not bind_goal:
-            return (
-                "usage: /autopilot %s [--observe] [--no-web] [--static] "
-                "[--goal] <objective>"
-                % action
-            )
-        if bind_goal:
+        parsed = _slash_commands_core.parse_autopilot_run_args(action, rest)
+        if parsed.error_detail:
+            err = "ERROR: " + parsed.error_detail
+            return err
+        if parsed.usage_error:
+            return parsed.usage_error
+        if parsed.bind_goal:
             import goal_store as _gs
             active = _gs.get_active()
             if not active:
                 return "--goal requires an active goal (use /goal set first)."
-            objective = rest or active["objective"]
             ap_result = _composition.goal_to_autopilot(
-                active, policy=policy, allow_web=allow_web,
+                active, policy=parsed.policy, allow_web=parsed.allow_web,
                 project=_resolve_project(project) or "",
                 request_owner=request_owner or "",
             )
@@ -2849,12 +2843,12 @@ def _autopilot_command(arg: str, project: str = "", request_owner: str | None = 
                 ap_result["run_id"],
             )
         return _autopilot_start(
-            objective=rest,
+            objective=parsed.objective,
             project=_resolve_project(project) or "",
             request_owner=request_owner or "",
-            policy=policy,
-            allow_web=allow_web,
-            adaptive=adaptive,
+            policy=parsed.policy,
+            allow_web=parsed.allow_web,
+            adaptive=parsed.adaptive,
             plan_only=action == "plan",
         )
     if action in ("steer", "clarify"):
@@ -2874,16 +2868,7 @@ def _autopilot_command(arg: str, project: str = "", request_owner: str | None = 
     if action == "cancel":
         return _autopilot_cancel(rest, request_owner=request_owner) if rest else "usage: /autopilot cancel <run-id>"
     if action in ("help", "?"):
-        return (
-            "autopilot commands:\n"
-            "  /autopilot status [id]\n"
-            "  /autopilot plan [--observe] [--no-web] [--static] [--goal] <objective>\n"
-            "  /autopilot run [--observe] [--no-web] [--static] [--goal] <objective>\n"
-            "  /autopilot resume|pause|cancel <id>\n"
-            "  /autopilot steer|clarify <id> <message>   (owner-scoped note; "
-            "clarify also requests a pause)\n"
-            "  --goal: bind to the active goal (use /goal set first)"
-        )
+        return _slash_commands_core.AUTOPILOT_HELP_TEXT
     return "ERROR: unknown autopilot action '%s'; try /autopilot help." % action
 
 
@@ -2907,57 +2892,25 @@ def _runtime_command(arg: str, *, operator_approved: bool = False) -> str:
         _refresh_runtime_policy(create=False)
         return result
     if action == "set":
-        local_models = {}
-        routing = {}
-        embedding_model = ""
-        for item in rest.split():
-            if "=" not in item:
-                return "ERROR: runtime assignment must use key=value: %s" % item
-            key, value = item.split("=", 1)
-            key, value = key.strip().lower(), value.strip()
-            if key in runtime_policy.LOCAL_TIERS:
-                local_models[key] = value
-            elif key == "embedding":
-                if not value:
-                    refusal = "ERROR: embedding model cannot be empty."
-                    return refusal
-                embedding_model = value
-            elif key in runtime_policy.ROUTING_LANES:
-                routing[key] = value
-            else:
-                return "ERROR: unknown runtime policy key '%s'." % key
-        if not local_models and not routing and not embedding_model:
-            return (
-                "usage: /runtime set code=<local-model> reasoning=<local-model> "
-                "embedding=<local-embedding-model> workbench=<fast|code|general>"
-            )
+        parsed = _slash_commands_core.parse_runtime_set_args(
+            rest,
+            local_tiers=runtime_policy.LOCAL_TIERS,
+            routing_lanes=runtime_policy.ROUTING_LANES,
+        )
+        if parsed.error_detail:
+            err = "ERROR: " + parsed.error_detail
+            return err
+        if parsed.usage_error:
+            return parsed.usage_error
         update_args = {
-            "local_models_json": json.dumps(local_models),
-            "routing_json": json.dumps(routing),
+            "local_models_json": json.dumps(parsed.local_models),
+            "routing_json": json.dumps(parsed.routing),
         }
-        if embedding_model:
-            update_args["embedding_model"] = embedding_model
-        return runtime_policy_update(
-            **update_args,
-        )
+        if parsed.embedding_model:
+            update_args["embedding_model"] = parsed.embedding_model
+        return runtime_policy_update(**update_args)
     if action in {"help", "?"}:
-        return (
-            "runtime policy commands:\n"
-            "  /runtime status   (cached model readiness; no model call)\n"
-            "  /runtime status refresh   (re-check the local model inventory now)\n"
-            "  /runtime set fast=<model> code=<model> general=<model>\n"
-            "  /runtime set reasoning=<model> vision=<model>   (specialist "
-            "tiers; assign an empty value to leave one unset)\n"
-            "  /runtime set embedding=<installed-embedding-model>\n"
-            "  /runtime set chat=<tier> router=<tier> workbench=<tier> "
-            "autopilot=<tier> fleet=<tier> review=<tier>\n"
-            "  /runtime overflow [status|on|off|threshold <n>|model <m>]   (long-context overflow)\n"
-            "  /runtime tools [allow|revoke|deny|undeny ...]   (per-model tool lists; /runtime tools help)\n"
-            "  /runtime models [set <key> <json>|reset <key>]\n  /runtime reset\n"
-            "Only installed local models are accepted. Embedding changes affect "
-            "future vectors only; use /embeddings apply to refresh stored memory. "
-            "Execution lanes route to fast/code/general only."
-        )
+        return _slash_commands_core.RUNTIME_HELP_TEXT
     return "ERROR: unknown runtime action '%s'; try /runtime help." % action
 
 
@@ -2978,13 +2931,7 @@ def _mcp_command(arg: str) -> str:
             )
         return "%s\n\n%s" % (prefix, format_mcp_runtime())
     if action in {"help", "?"}:
-        return (
-            "MCP runtime commands:\n"
-            "  /mcp status\n"
-            "  /mcp refresh\n"
-            "Updated implementations and tool schemas publish atomically; a bad edit "
-            "keeps the last known-good registry."
-        )
+        return _slash_commands_core.MCP_HELP_TEXT
     return "ERROR: unknown MCP action '%s'; try /mcp help." % action
 
 
@@ -2993,101 +2940,18 @@ def _training_command(arg: str) -> str:
     if not text or text.lower() in {"plan", "status", "hardware"}:
         return adaptive_training.command_text(text or "plan")
     if text.lower() in {"help", "?"}:
-        return (
-            "training commands:\n"
-            "  /hardware\n"
-            "  /training plan [--dry-run] [--model auto|1.5b|3b|7b]\n"
-            "  /training start --confirm [planning options]\n"
-            "  /training status\n"
-            "  /training deploy [--adapter-dir PATH] [--llama-cpp PATH]\n"
-            "  /training adopt-legacy --confirm\n"
-            "  /training release-alias --confirm\n"
-            "  /training rollback\n"
-            "Options: --allow-cpu-offload --max-vram N --max-system-ram N "
-            "--context-length N --sequence-length N --batch-size N "
-            "--gradient-accumulation N --gpu-index N --resume. "
-            "--full-finetune is planning-only; attended start supports QLoRA."
-        )
+        return _slash_commands_core.TRAINING_HELP_TEXT
     return adaptive_training.command_text(text)
 
 
 
 def _selfmod_agent_policy(run):
-    workspace = Path(run["workspace_path"]).resolve()
-    allowed = {(workspace / path).resolve(strict=False) for path in run["files"]}
-    mutation_tools = {"file_write", "file_edit", "file_delete"}
-    path_tools = mutation_tools | {"file_read", "file_read_range", "file_find", "text_search", "directory_tree", "workspace_inventory", "script_search"}
-    path_keys = {
-        "file_write": "path", "file_edit": "path", "file_delete": "path",
-        "file_read": "path", "file_read_range": "path",
-        "directory_tree": "path", "workspace_inventory": "path",
-        "file_find": "root", "text_search": "root", "script_search": "root",
-    }
-    inspected = set()
-    counters = {"tools": 0}
-    started = time.monotonic()
-
-    def policy(tool_name, args):
-        if not isinstance(args, dict):
-            return "ERROR: SELFMOD POLICY: tool arguments must be an object."
-        counters["tools"] += 1
-        if counters["tools"] > run["budgets"]["max_tool_calls"]:
-            return "ERROR: SELFMOD POLICY: tool-call budget exhausted."
-        if time.monotonic() - started > run["budgets"]["max_runtime_seconds"]:
-            return "ERROR: SELFMOD POLICY: total runtime budget exhausted."
-        if tool_name == "workspace_run":
-            try:  # Refuse a UNC/device spelling before resolve can open it (NTLM leak).
-                cwd_text = file_ops._reject_network_path(str(args.get("cwd") or workspace))
-            except PermissionError:
-                refusal = "ERROR: SELFMOD POLICY: the working directory uses a %s." % _network_spelling.REFUSAL
-                return refusal
-            try:
-                cwd = Path(cwd_text).expanduser().resolve(strict=False)
-            except (OSError, ValueError):
-                refusal = "ERROR: SELFMOD POLICY: the working directory could not be checked."
-                return refusal
-            if cwd != workspace and workspace not in cwd.parents:
-                return "ERROR: SELFMOD POLICY: commands must run inside the candidate workspace."
-            command_text = " ".join(str(item) for item in (args.get("args_json") or args.get("args") or []))
-            if "selfmod" in command_text.lower():
-                return "ERROR: SELFMOD POLICY: recursive self-improvement is forbidden."
-            return ""
-        if tool_name not in path_tools:
-            return ""
-        if any(args.get(name) for name in ("token", "approval", "extra_roots")):
-            return "ERROR: SELFMOD POLICY: filesystem authority cannot be expanded by the candidate."
-        raw = args.get("path") or args.get("root") or args.get("cwd") or ""
-        try:  # Refuse a UNC/device spelling before resolve can open it (NTLM leak).
-            target = Path(file_ops._reject_network_path(str(raw))).expanduser()
-        except PermissionError:
-            refusal = "ERROR: SELFMOD POLICY: path uses a %s." % _network_spelling.REFUSAL
-            return refusal
-        if not target.is_absolute():
-            target = workspace / target
-        try:
-            target = target.resolve(strict=False)
-        except (OSError, ValueError):
-            refusal = "ERROR: SELFMOD POLICY: path could not be checked."
-            return refusal
-        if target != workspace and workspace not in target.parents:
-            return "ERROR: SELFMOD POLICY: path is outside the isolated candidate workspace."
-        if tool_name in mutation_tools and target not in allowed:
-            return "ERROR: SELFMOD POLICY: mutation is outside the pre-backed-up file scope."
-        if tool_name not in mutation_tools:
-            inspected.add(str(target))
-            if len(inspected) > run["budgets"]["max_files_inspected"]:
-                return "ERROR: SELFMOD POLICY: file-inspection budget exhausted."
-        # Generic file tools resolve relative paths against the live checkout.
-        # Pin the checked path to the candidate before dispatch so the model
-        # cannot accidentally (or deliberately) mutate the live repository.
-        key = path_keys.get(tool_name)
-        if key:
-            args[key] = str(target)
-        args.pop("token", None)
-        args.pop("approval", None)
-        args.pop("extra_roots", None)
-        return ""
-    return policy
+    return _slash_commands_core.build_selfmod_agent_policy(
+        run,
+        reject_network_path=file_ops._reject_network_path,
+        network_refusal_label=_network_spelling.REFUSAL,
+        error_prefix="ERROR:",
+    )
 
 
 def _selfmod_stage_journal():
@@ -3293,25 +3157,9 @@ def refresh_goal_proposals(scope: str = "") -> dict:
         data = improvement_report_data()
     except Exception:
         return {"proposed": 0, "skipped": 0, "error": "report unavailable"}
-    proposed = skipped = 0
-    for issue in (data.get("issues") or []):
-        severity = str(issue.get("severity") or "").lower()
-        title = str(issue.get("title") or "").strip()
-        action = str(issue.get("action") or "").strip()
-        if severity == "low" or not title:
-            skipped += 1
-            continue
-        objective = "%s: %s" % (issue.get("area", "runtime"), title)
-        criteria = [action] if action else []
-        criteria.append("the same finding no longer appears in "
-                        "system_improvement_report")
-        if goal_store.propose(
-            objective, criteria, scope=scope, source="self-observed",
-        ):
-            proposed += 1
-        else:
-            skipped += 1
-    return {"proposed": proposed, "skipped": skipped, "error": ""}
+    return _slash_commands_core.propose_goals_from_issues(
+        data.get("issues") or (), propose_fn=goal_store.propose, scope=scope,
+    )
 
 
 def _goal_command(arg: str, project: str = "", request_owner: str = "") -> str:
@@ -3334,49 +3182,37 @@ def _goal_command(arg: str, project: str = "", request_owner: str = "") -> str:
         if action in ("show", "status"):
             return _format_goal(goal_store.get_active())
         if action == "set":
-            auto = False
-            plan = False
-            tokens = rest
-            while tokens.startswith("--"):
-                option, _, tokens = tokens.partition(" ")
-                if option == "--auto":
-                    auto = True
-                elif option == "--plan":
-                    plan = True
-                elif option == "--criteria":
-                    tokens = "--criteria " + tokens
-                    break
-                else:
-                    return "unknown goal option '%s'." % option
-                tokens = tokens.strip()
-            objective, _, criteria = tokens.partition("--criteria")
-            if not objective.strip():
-                return "usage: /goal set [--auto] [--plan] <objective> [--criteria a; b; c]"
+            parsed = _slash_commands_core.parse_goal_set_args(rest)
+            if parsed.error:
+                return parsed.error
             goal = goal_store.set_goal(
-                objective.strip(), criteria.strip(), origin="user",
+                parsed.objective, parsed.criteria, origin="user",
             )
-            lines = ["goal set", _format_goal(goal)]
-            if plan and goal.get("criteria"):
-                plan_result = _composition.goal_to_plan(goal)
-                if plan_result.get("error"):
-                    lines.append("plan: %s" % plan_result["error"])
-                else:
-                    lines.append("plan: %d steps decomposed" % plan_result["step_count"])
-            if auto:
-                ap = _composition.goal_to_autopilot(
+            plan_result = (
+                _composition.goal_to_plan(goal)
+                if parsed.plan and goal.get("criteria")
+                else None
+            )
+            ap_result = None
+            launched = False
+            not_launched_msg = ""
+            if parsed.auto:
+                ap_result = _composition.goal_to_autopilot(
                     goal, project=_resolve_project(project) or "",
                     request_owner=request_owner,
                 )
-                if ap.get("error"):
-                    lines.append("autopilot: %s" % ap["error"])
-                elif _launch_autopilot(ap["run_id"]):
-                    lines.append(
-                        "autopilot: %s started (use /autopilot status %s)"
-                        % (ap["run_id"], ap["run_id"])
-                    )
-                else:
-                    lines.append("autopilot: %s" % _autopilot_not_launched(ap["run_id"]))
-            return "\n".join(lines)
+                if not ap_result.get("error"):
+                    launched = _launch_autopilot(ap_result["run_id"])
+                    if not launched:
+                        not_launched_msg = _autopilot_not_launched(ap_result["run_id"])
+            return _slash_commands_core.format_goal_set_reply(
+                goal,
+                format_goal=_format_goal,
+                plan_result=plan_result,
+                autopilot_result=ap_result,
+                autopilot_launched=launched,
+                autopilot_not_launched_msg=not_launched_msg,
+            )
         if action == "note":
             if not rest:
                 return "usage: /goal note <progress note>"
@@ -3397,16 +3233,7 @@ def _goal_command(arg: str, project: str = "", request_owner: str = "") -> str:
                 % (result["proposed"], result["skipped"])
             )
         if action == "proposals":
-            rows = goal_store.proposals()
-            if not rows:
-                return "no pending goal proposals"
-            listing = "\n".join(
-                "%s  %s" % (row["id"], row["objective"][:120]) for row in rows
-            )
-            return listing + (
-                "\n(adopt with /goal adopt <id>; dismiss with "
-                "/goal decline <id>)"
-            )
+            return _slash_commands_core.format_goal_proposals(goal_store.proposals())
         if action in ("adopt", "decline") and not rest:
             return "usage: /goal %s <proposal-id>  (list them with /goal proposals)" % action
         if action == "adopt":
@@ -3415,20 +3242,8 @@ def _goal_command(arg: str, project: str = "", request_owner: str = "") -> str:
             goal = goal_store.decline(rest, actor="user")
             return "declined proposal %s" % goal["id"]
         if action == "history":
-            rows = goal_store.history()
-            if not rows:
-                return "no closed goals"
-            return "\n".join(
-                "%s [%s] %s" % (
-                    row["id"], row["status"], row["objective"][:100],
-                )
-                for row in rows
-            )
-        return (
-            "usage: /goal [show|set <objective> [--criteria a; b]|"
-            "note <text>|done [reason]|abandon [reason]|refresh|"
-            "proposals|adopt <id>|decline <id>|history]"
-        )
+            return _slash_commands_core.format_goal_history(goal_store.history())
+        return _slash_commands_core.GOAL_USAGE_TEXT
     except goal_store.GoalError as exc:
         return "ERROR: %s" % exc
 
@@ -3442,86 +3257,42 @@ def _mission_command(arg: str, project: str = "", request_owner: str = "") -> st
 
     try:
         if action in ("status", "show"):
-            data = _composition.mission_status()
-            return _composition.format_mission_status(data)
-
+            return _composition.format_mission_status(_composition.mission_status())
         if action == "start":
-            auto = False
-            plan = False
-            policy = "workspace"
-            allow_web = True
-            while rest.startswith("--"):
-                option, _, remaining = rest.partition(" ")
-                if option == "--auto":
-                    auto = True
-                elif option == "--plan":
-                    plan = True
-                elif option == "--observe":
-                    policy = "observe"
-                elif option == "--no-web":
-                    allow_web = False
-                else:
-                    return "unknown mission option '%s'." % option
-                rest = remaining.strip()
-            objective, _, criteria = rest.partition("--criteria")
-            if not objective.strip():
-                return (
-                    "usage: /mission start [--auto] [--plan] [--observe] "
-                    "[--no-web] <objective> [--criteria a; b; c]"
-                )
+            parsed = _slash_commands_core.parse_mission_start_args(rest)
+            if parsed.error:
+                return parsed.error
             result = _composition.mission_start(
-                objective.strip(),
-                criteria.strip(),
-                auto=auto,
-                plan=plan,
-                policy=policy,
-                allow_web=allow_web,
+                parsed.objective,
+                parsed.criteria,
+                auto=parsed.auto,
+                plan=parsed.plan,
+                policy=parsed.policy,
+                allow_web=parsed.allow_web,
                 project=_resolve_project(project) or "",
                 request_owner=request_owner,
             )
-            lines = ["mission started"]
-            lines.append(_format_goal(result["goal"]))
-            if result.get("plan"):
-                p = result["plan"]
-                if p.get("error"):
-                    lines.append("plan: %s" % p["error"])
-                else:
-                    lines.append("plan: %d steps decomposed from criteria" % p["step_count"])
-            if result.get("autopilot"):
-                ap = result["autopilot"]
-                if ap.get("error"):
-                    lines.append("autopilot: %s" % ap["error"])
-                else:
-                    lines.append(
-                        "autopilot: %s created (use /autopilot status %s)"
-                        % (ap["run_id"], ap["run_id"])
-                    )
-                    if not _launch_autopilot(ap["run_id"]):
-                        lines.append("autopilot: %s" % _autopilot_not_launched(ap["run_id"]))
-            return "\n".join(lines)
-
+            return _slash_commands_core.format_mission_start_reply(
+                result,
+                format_goal=_format_goal,
+                launch_autopilot=_launch_autopilot,
+                autopilot_not_launched=_autopilot_not_launched,
+            )
         if action in ("done", "complete"):
             import goal_store
             goal = goal_store.complete(rest, actor="user")
             from sonder_runtime.adapters.persistence import composition_store
             composition_store.close_all_for("goal", goal["id"], status="completed")
             return "mission completed: %s" % goal["objective"]
-
         if action in ("abandon", "drop"):
             import goal_store
             goal = goal_store.abandon(rest, actor="user")
             from sonder_runtime.adapters.persistence import composition_store
             composition_store.close_all_for("goal", goal["id"], status="broken")
             return "mission abandoned: %s" % goal["objective"]
-
         if action == "bindings":
-            data = _composition.composition_status()
-            return _composition.format_composition_status(data)
-
-        return (
-            "usage: /mission [status|start [--auto] [--plan] [--observe] "
-            "<objective> [--criteria ...]|done [reason]|abandon [reason]|bindings]"
-        )
+            return _composition.format_composition_status(_composition.composition_status())
+        return _slash_commands_core.MISSION_USAGE_TEXT
     except Exception as exc:
         return "mission failed: %s" % exc
 
@@ -3567,56 +3338,20 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
     # released when this command returns.
     held = contextlib.ExitStack()
     try:
-        if action in {"status", "show", "list"}:
-            return selfmod.format_status()
-        if action == "opportunities":
-            return "Concrete host evidence for proposals:\n\n" + system_improvement_report()
-        if action == "history":
-            return selfmod.format_status()
-        if action == "inspect":
-            return selfmod.format_run(rest)
-        if action == "diff":
-            return selfmod.diff_text(rest) or "(no candidate diff)"
-        if action == "tests":
-            return json.dumps(selfmod.test_results(rest), indent=2, ensure_ascii=False)
-        if action == "backups":
-            rows = [run for run in selfmod.list_runs(100) if run.get("backup_manifest")]
-            return "\n".join("%s %s %s" % (run["id"], run["phase"], run["backup_manifest"]) for run in rows) or "(no backups)"
-        if action == "verify-backup":
-            manifest = selfmod.verify_backup(rest)
-            return "Backup verified: %s (%d file records)" % (rest, len(manifest["files"]))
-        if action == "mode":
-            if not rest:
-                return "selfmod mode: %s" % selfmod.settings()["mode"]
-            return "selfmod mode: %s" % selfmod.set_mode(rest)["mode"]
-        if action in {"disable", "enable"}:
-            return "selfmod enabled: %s" % selfmod.set_enabled(action == "enable")["enabled"]
-        if action == "retention":
-            values = rest.split()
-            if len(values) != 2:
-                return "usage: /selfmod retention <days> <max-gb>"
-            configured = selfmod.set_retention(int(values[0]), int(float(values[1]) * 1024**3))
-            return "selfmod retention: %d days, %.2f GB" % (configured["retention_days"], configured["retention_bytes"] / 1024**3)
-        if action == "prune-backups":
-            removed = selfmod.prune_backups()
-            return "pruned backups: %s" % (", ".join(removed) or "none")
+        basic = _slash_commands_core.dispatch_selfmod_basic_action(
+            action, rest, selfmod=selfmod, improvement_report_fn=system_improvement_report,
+        )
+        if basic is not None:
+            return basic
         if action in {"plan", "run"}:
             selfmod.recursive_guard()
-            words = rest.split()
-            maintenance = "--maintenance" in words
-            unisolated = selfmod.UNISOLATED_FLAG in words
-            parsed_rest = " ".join(
-                part for part in words
-                if part not in ("--maintenance", selfmod.UNISOLATED_FLAG)
+            maintenance, unisolated, parsed_rest = _slash_commands_core.parse_selfmod_plan_flags(
+                rest, selfmod.UNISOLATED_FLAG,
             )
             objective, files, tests = selfmod.parse_plan_text(parsed_rest)
             if not files:
                 return "usage: /selfmod %s <objective> --files path.py,test_path.py [--tests python -m pytest ...] [--maintenance] [%s]" % (action, selfmod.UNISOLATED_FLAG)
             if action == "run":
-                # Settle candidate isolation before a run record exists, so a
-                # host without a candidate supervisor leaves nothing behind.
-                # ``_execute_selfmod_run`` decides again, authoritatively,
-                # against the run it is about to execute.
                 try:
                     selfmod.operator_candidate_isolation(
                         unisolated_requested=unisolated,
@@ -3638,11 +3373,6 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
                 operator_approved=bool(operator_approved),
             )
         if action in _SELFMOD_OPERATOR_STAGE_PHASES:
-            # These stages mutate the run (and, for deploy/rollback, Sonder's
-            # own source); each goes through the selfmod stage journal, under
-            # the run's owner lease, or does not run at all.  A refusal here
-            # happens before any journal record exists for the run, so a
-            # typo'd id or a wrong phase never fences it.
             try:
                 selfmod.get_run(rest)
             except KeyError:
@@ -3652,24 +3382,14 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
             except Exception as exc:
                 return _selfmod_journal_refusal(action, exc)
             try:
-                # Held until this command returns (``held.close()`` below), so
-                # a concurrent operator call on this run is refused before it
-                # composes a journal binding over this one's in-flight intent.
                 held.enter_context(_selfmod_operator_lease(rest))
             except _SelfmodRunBusy as exc:
                 return "refused /selfmod %s: %s" % (action, exc)
-            # Read under the lease: a concurrent call may have moved the run
-            # since the lookup above.
             phase = str(selfmod.get_run(rest).get("phase", ""))
             required = _SELFMOD_OPERATOR_STAGE_PHASES[action]
             if phase != required:
                 return "refused /selfmod %s: run %s is %s; it requires phase %s" % (
                     action, rest, phase, required)
-        if action == "resume":
-            run = selfmod.resume(rest)
-            return selfmod.format_run(run["id"])
-        if action == "cancel":
-            return selfmod.format_run(selfmod.cancel(rest)["id"])
         if action == "approve":
             approver = "explicit local/developer user"
             approved = stages.journaled_stage(
@@ -3677,22 +3397,7 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
                 lambda: selfmod.approve(rest, approver=approver),
             )
             return selfmod.format_run(approved["id"])
-        if action == "reject":
-            run_id, _, reason = rest.partition(" ")
-            return selfmod.format_run(selfmod.reject(run_id, reason or "explicit user rejection")["id"])
         if action == "deploy":
-            # This command proves the new bytes import and that `status()` does
-            # not raise. It does NOT prove the server answers: `status()` catches
-            # `ModelCallError`/`URLError` and *returns* the error as a string, so
-            # this exits 0 with "ERROR contacting Ollama..." in its output, which
-            # nothing reads. Do not grow claims for it.
-            #
-            # It is also deliberately NOT the check that the deployment can be
-            # undone: a `--maintenance` run can rewrite `selfmod.py` and
-            # `selfmod_recover.py` in one deploy, and this command passed on a
-            # tree whose rollback was broken. `selfmod.deploy` now dry-runs both
-            # rollback routes itself, unconditionally, so that property cannot be
-            # lost by editing the argv here or by a caller that passes none.
             health_command = [sys.executable, "-c", "import server; print(server.status())"]
             run = stages.journaled_stage(
                 rest, "deploy", {"health_command": health_command, "commit": True},
@@ -3724,13 +3429,6 @@ def _selfmod_command(arg: str, *, repository_root="", operator_approved=False) -
                 lambda: selfmod.rollback(rest, reason=reason),
             )
             return selfmod.format_run(restored["id"])
-        if action in {"help", "?"}:
-            return (
-                "selfmod: status|opportunities|history|inspect <id>|plan <objective> --files a,b|"
-                "run <objective> --files a,b --tests <command> [--unisolated]|diff <id>|tests <id>|approve <id>|"
-                "reject <id>|deploy <id>|rollback <id>|backups|verify-backup <id>|"
-                "mode observe|propose|auto-low-risk|resume <id>|cancel <id>|retention <days> <GB>|prune-backups|disable|enable"
-            )
         return "ERROR: unknown selfmod action; try /selfmod help"
     except (KeyError, ValueError, RuntimeError, PermissionError, OSError, _SonderError) as exc:
         return "ERROR: %s" % exc
@@ -3855,7 +3553,6 @@ def control_command(prompt: str, history=None, session="", project="",
     if refusal:
         return refusal
     if cmd == "/":
-        # A bare slash is the "what can I type" gesture.
         return command_catalog.format_matches("")
     if cmd == "/help":
         return command_catalog.help_text(arg.strip())
@@ -3882,14 +3579,10 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd in ("/runtime", "/models"):
         return _runtime_command(arg, operator_approved=bool(operator_approved))
     if cmd == "/updatecheck":
-        if arg.strip():
-            return "usage: /updatecheck"
-        return runtime_source_update_status(refresh=True)
+        return "usage: /updatecheck" if arg.strip() else runtime_source_update_status(refresh=True)
     if cmd in ("/update", "/updatesource"):
         action = arg.strip().casefold()
-        if action in ("", "apply", "now"):
-            return runtime_source_update()
-        return "usage: /update [apply]  (check first with /updatecheck)"
+        return runtime_source_update() if action in ("", "apply", "now") else "usage: /update [apply]  (check first with /updatecheck)"
     if cmd in ("/stash", "/runtime-stash"):
         action = arg.strip().casefold().replace("_", "-")
         if action in ("", "status", "list"):
@@ -3908,31 +3601,21 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd == "/approve":
         return _approve_command(arg, operator_approved=bool(operator_approved))
     if cmd in ("/goal", "/goals"):
-        return _goal_command(
-            arg, project=project, request_owner=autopilot_request_owner or "",
-        )
+        return _goal_command(arg, project=project, request_owner=autopilot_request_owner or "")
     if cmd in ("/mission",):
         return _mission_command(arg, project=project, request_owner=autopilot_request_owner or "")
     if cmd in ("/ensemble",):
-        if not arg.strip():
-            return "usage: /ensemble <question>   (polls several local tiers, then compounds one answer)"
-        return ensemble_answer(arg.strip(), project=_resolve_project(project))
+        return ensemble_answer(arg.strip(), project=_resolve_project(project)) if arg.strip() else "usage: /ensemble <question>   (polls several local tiers, then compounds one answer)"
     if cmd in ("/mcp", "/convergence"):
         return _mcp_command(arg)
     if cmd in ("/learning", "/learnhealth", "/metrics"):
         return learning_health_status()
     if cmd in ("/work", "/agent"):
-        if not arg.strip():
-            return "usage: /work <task>"
-        return workbench_agent(
-            prompt=arg.strip(), project=_resolve_project(project), max_steps=12,
-        )
+        return workbench_agent(prompt=arg.strip(), project=_resolve_project(project), max_steps=12) if arg.strip() else "usage: /work <task>"
     if cmd in ("/report", "/endreport"):
         latest = activity_tracker.latest()
         return "%s\n\n%s" % (
-            activity_tracker.format_end_report(
-                latest, calibration_line=_agent_end_report_standing_line(),
-            ),
+            activity_tracker.format_end_report(latest, calibration_line=_agent_end_report_standing_line()),
             activity_tracker.format_transcript(latest),
         )
     if cmd in ("/inventory", "/workspace"):
@@ -3940,22 +3623,13 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd in ("/tree", "/folders"):
         return directory_tree(path=arg.strip() or ".")
     if cmd in ("/search", "/grep"):
-        search_parts = [part.strip() for part in arg.split("|", 2)]
-        if not search_parts or not search_parts[0]:
-            return "usage: /search <text> | <root> | <glob>"
-        return text_search(
-            query=search_parts[0],
-            root=search_parts[1] if len(search_parts) > 1 and search_parts[1] else ".",
-            glob=search_parts[2] if len(search_parts) > 2 and search_parts[2] else "*",
-        )
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or text_search(**kw)
     if cmd in ("/programs", "/programfind"):
         return program_search(query=arg.strip() or "*")
     if cmd in ("/scripts", "/scriptfind"):
-        script_parts = [part.strip() for part in arg.split("|", 1)]
-        return script_search(
-            query=script_parts[0] or "*",
-            root=script_parts[1] if len(script_parts) > 1 and script_parts[1] else ".",
-        )
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or script_search(**kw)
     if cmd in ("/image", "/inspectimage"):
         return image_inspect(path=arg.strip()) if arg.strip() else "usage: /image <path>"
     if cmd in ("/doc", "/document_extract"):
@@ -3965,121 +3639,58 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd in ("/loc", "/code_metrics"):
         return code_metrics(path=arg.strip() or ".")
     if cmd in ("/schema", "/schema_validate"):
-        parts = [part.strip() for part in arg.split("|", 1)]
-        if len(parts) != 2 or not parts[0] or not parts[1]:
-            return "usage: /schema <data path> | <schema path or inline JSON>"
-        if parts[1].startswith("{"):
-            return schema_validate(path=parts[0], schema_json=parts[1])
-        return schema_validate(path=parts[0], schema_path=parts[1])
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or schema_validate(**kw)
     if cmd in ("/languages", "/language_matrix"):
         return language_matrix(language=arg.strip())
     if cmd in ("/calc", "/math_eval"):
         return math_eval(expression=arg.strip()) if arg.strip() else "usage: /calc <expression>"
     if cmd in ("/logic", "/logic_verify"):
-        parts = [part.strip() for part in arg.split("|", 1)]
-        if not parts or not parts[0]:
-            return "usage: /logic <formula> [| <formula_b for equivalence>]"
-        if len(parts) == 2 and parts[1]:
-            return logic_verify(formula=parts[0], action="equivalent", formula_b=parts[1])
-        return logic_verify(formula=parts[0], action="satisfiable")
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or logic_verify(**kw)
     if cmd in ("/regex", "/regex_lab"):
-        parts = [part.strip() for part in arg.split("|", 1)]
-        if not parts or not parts[0]:
-            return "usage: /regex <pattern> [| <sample text>]"
-        return regex_lab(pattern=parts[0], text=parts[1] if len(parts) == 2 else "")
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or regex_lab(**kw)
     if cmd in ("/graph", "/code_graph"):
-        parts = [part.strip() for part in arg.split("|", 1)]
-        if len(parts) == 2 and parts[1]:
-            return code_graph(root=parts[0] or ".", action="impact", target=parts[1])
-        return code_graph(root=arg.strip() or ".", action="summary")
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or code_graph(**kw)
     if cmd in ("/sdiff", "/diff_semantic"):
-        parts = [part.strip() for part in arg.split("|", 1)]
-        if len(parts) != 2 or not parts[0] or not parts[1]:
-            return "usage: /sdiff <path_a> | <path_b>"
-        return diff_semantic(path_a=parts[0], path_b=parts[1])
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or diff_semantic(**kw)
     if cmd in ("/reason", "/reasoning_board"):
-        raw = arg.strip()
-        if not raw or raw.lower() == "summary":
-            return reasoning_board(action="summary")
-        if raw.lower() == "audit":
-            return reasoning_board(action="audit")
-        if raw.lower() == "clear":
-            return reasoning_board(action="clear")
-        board_args = [part.strip() for part in raw.split("|", 1)]
-        if board_args[0].lower() in {"init", "add_fact", "add_hypothesis", "add_decision"} and len(board_args) == 2:
-            return reasoning_board(action=board_args[0].lower(), text=board_args[1])
-        return reasoning_board(action="add_fact", text=raw)
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or reasoning_board(**kw)
     if cmd in ("/symcheck", "/symbol_verify"):
-        parts = [part.strip() for part in arg.split("|", 1)]
-        if not parts or not parts[0]:
-            return "usage: /symcheck <module> [| <symbol>]"
-        return symbol_verify(module=parts[0], symbol=parts[1] if len(parts) == 2 else "")
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or symbol_verify(**kw)
     if cmd in ("/citecheck", "/citation_audit"):
-        parts = [part.strip() for part in arg.split("|", 1)]
-        if len(parts) == 2 and parts[1]:
-            return citation_audit(root=parts[0] or ".", text=parts[1])
-        return citation_audit(root=".", text=arg.strip()) if arg.strip() else "usage: /citecheck [<root> |] <text with file:line citations>"
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or citation_audit(**kw)
     if cmd in ("/crosscheck", "/fact_cross_check"):
         return fact_cross_check(text=arg.strip()) if arg.strip() else "usage: /crosscheck <prose text>"
     if cmd in ("/consensus", "/consistency_check"):
-        parts = [part.strip() for part in arg.split("||") if part.strip()]
-        if len(parts) < 2:
-            return "usage: /consensus <candidate 1> || <candidate 2> [|| ...]"
-        return consistency_check(action="compare_candidates", candidates_json=json.dumps(parts))
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or consistency_check(**kw)
     if cmd in ("/fallback", "/plan_fallback"):
-        parts = [part.strip() for part in arg.split("|", 2)]
-        if not parts or not parts[0]:
-            return "usage: /fallback <failed_tool> [| <error> [| <goal>]]"
-        return plan_fallback(
-            failed_tool=parts[0],
-            error=parts[1] if len(parts) > 1 else "",
-            goal=parts[2] if len(parts) > 2 else "",
-        )
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or plan_fallback(**kw)
     if cmd in ("/resilience", "/runtime_resilience_check"):
         return runtime_resilience_check()
     if cmd in ("/shield", "/prompt_shield"):
-        raw = arg.strip()
-        if not raw:
-            return "usage: /shield <text>  OR  /shield path:<file>"
-        if raw.lower().startswith("path:"):
-            return prompt_shield(path=raw[5:].strip())
-        return prompt_shield(text=raw)
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or prompt_shield(**kw)
     if cmd in ("/diagnose", "/error_diagnose"):
-        parts = [part.strip() for part in arg.split("||", 1)]
-        if not parts or not parts[0]:
-            return "usage: /diagnose <error_or_traceback> [|| <root>]"
-        return error_diagnose(
-            error_text=parts[0],
-            root=parts[1] if len(parts) > 1 else "",
-        )
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or error_diagnose(**kw)
     if cmd in ("/audit", "/code_audit"):
-        raw = arg.strip()
-        if not raw:
-            return "usage: /audit <path>  OR  /audit code:<snippet>"
-        if raw.lower().startswith("code:"):
-            return code_audit(code=raw[5:].strip())
-        return code_audit(path=raw)
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or code_audit(**kw)
     if cmd in ("/transform", "/data_transform"):
-        parts = [part.strip() for part in arg.split("|")]
-        if not parts or not parts[0]:
-            return "usage: /transform <action> | <data> [| <output_format_or_expr>]"
-        act = parts[0]
-        payload = parts[1] if len(parts) > 1 else ""
-        third = parts[2] if len(parts) > 2 else ""
-        if act in ("query", "cron"):
-            return data_transform(action=act, data=payload, expression=third or payload)
-        if act in ("encode", "decode"):
-            return data_transform(action=act, data=payload, encoding=third or "base64")
-        return data_transform(action=act, data=payload, output_format=third or "json")
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or data_transform(**kw)
     if cmd in ("/learntool", "/learn_tool", "/discovertool"):
-        parts = [part.strip() for part in arg.split("|", 2)]
-        if not parts or not parts[0]:
-            return "usage: /learntool <tool> [| <goal> [| <subcommand>]]"
-        return learn_tool(
-            tool=parts[0],
-            goal=parts[1] if len(parts) > 1 else "",
-            subcommand=parts[2] if len(parts) > 2 else "",
-        )
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or learn_tool(**kw)
     if cmd in ("/vision", "/analyzeimage"):
         pieces = [part.strip() for part in arg.split("|", 1)]
         if len(pieces) != 2 or not pieces[0] or not pieces[1]:
@@ -4088,23 +3699,11 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd == "/mkdir":
         return directory_create(path=arg.strip()) if arg.strip() else "usage: /mkdir <path>"
     if cmd == "/runprogram":
-        run_parts = [part.strip() for part in arg.split("|", 2)]
-        if not run_parts or not run_parts[0]:
-            return "usage: /runprogram <program> | <args-json> | <cwd>"
-        return workspace_run(
-            program=run_parts[0],
-            args_json=run_parts[1] if len(run_parts) > 1 and run_parts[1] else "[]",
-            cwd=run_parts[2] if len(run_parts) > 2 and run_parts[2] else ".",
-        )
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or workspace_run(**kw)
     if cmd == "/runscript":
-        run_parts = [part.strip() for part in arg.split("|", 2)]
-        if not run_parts or not run_parts[0]:
-            return "usage: /runscript <path> | <args-json> | <cwd>"
-        return script_run(
-            path=run_parts[0],
-            args_json=run_parts[1] if len(run_parts) > 1 and run_parts[1] else "[]",
-            cwd=run_parts[2] if len(run_parts) > 2 else "",
-        )
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or script_run(**kw)
     if cmd in ("/checklist", "/plan"):
         checklist_id = arg.strip()
         if checklist_id:
@@ -4119,29 +3718,14 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd == "/qualityfix":
         return memory_quality_repair(apply=(arg.strip().lower() == "apply"))
     if cmd in ("/privacy", "/privacyreview"):
-        try:
-            return memory_privacy_review(sample_limit=int(arg.strip() or 20))
-        except ValueError:
-            return "usage: /privacy [sample-limit]"
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or memory_privacy_review(**kw)
     if cmd == "/privacyfix":
-        repair_arg = arg.strip()
-        apply = False
-        if repair_arg.lower().startswith("apply "):
-            apply = True
-            repair_arg = repair_arg[6:].strip()
-        if not repair_arg:
-            return "usage: /privacyfix [apply] <lesson-id[,lesson-id...]>"
-        return memory_privacy_repair(lesson_ids_json=repair_arg, apply=apply)
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or memory_privacy_repair(**kw)
     if cmd in ("/embeddings", "/embedfix"):
-        embed_parts = arg.strip().split()
-        apply = bool(embed_parts and embed_parts[0].lower() == "apply")
-        if apply:
-            embed_parts = embed_parts[1:]
-        try:
-            limit = int(embed_parts[0]) if embed_parts else 25
-        except ValueError:
-            return "usage: /embeddings [apply] [limit]"
-        return memory_embedding_backfill(limit=limit, apply=apply)
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or memory_embedding_backfill(**kw)
     if cmd in ("/emotion", "/emotions", "/vectors", "/mood"):
         return emotion_command(arg)
     if cmd in ("/prefer", "/preference", "/preferences"):
@@ -4161,48 +3745,26 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd in ("/agents", "/masterstatus"):
         return master_status()
     if cmd in ("/capacity", "/agentcapacity"):
-        try:
-            requested = int(arg.strip() or 0)
-        except ValueError:
-            return "usage: /capacity [requested-agents]"
-        return master_capacity(requested)
+        requested, usage = _control_commands_core.parse_capacity_arg(arg)
+        return usage or master_capacity(requested)
     if cmd in ("/agentcancel", "/cancelagents"):
         return master_cancel(arg.strip()) if arg.strip() else "usage: /agentcancel <id|prefix|all>"
     if cmd in ("/agentretry", "/retryagent"):
-        retry_parts = arg.strip().split(None, 1)
-        if not retry_parts:
-            return "usage: /agentretry <master-id|prefix> [tier]"
-        return master_retry(
-            retry_parts[0], retry_parts[1] if len(retry_parts) > 1 else "",
-        )
+        pair, usage = _control_commands_core.parse_agentretry_arg(arg)
+        return usage or master_retry(pair[0], pair[1])
     if cmd in ("/asset", "/assets", "/assetgen", "/artifact"):
-        asset_parts = arg.strip().split(None, 1)
-        if len(asset_parts) != 2:
-            return "usage: /asset <name> <free-form brief>"
-        return artifact_generate(name=asset_parts[0], brief=asset_parts[1])
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or artifact_generate(**kw)
     if cmd in ("/artifactcheck", "/verifyartifact", "/groundartifact"):
-        if not arg.strip():
-            return "usage: /artifactcheck <path> [| recipe]"
-        artifact_path, separator, recipe = arg.partition("|")
-        return artifact_ground(
-            path=artifact_path.strip(),
-            recipe=recipe.strip() if separator else "auto",
-        )
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or artifact_ground(**kw)
     if cmd in ("/weather", "/forecast"):
-        if not arg.strip():
-            return "usage: /weather <city/state or ZIP>"
-        return weather_lookup(arg.strip())
+        return weather_lookup(arg.strip()) if arg.strip() else "usage: /weather <city/state or ZIP>"
     if cmd in ("/forge", "/gamesuite"):
         return game_reference_suite(name=arg.strip() or "sonder-reference")
     if cmd in ("/game", "/gamegen"):
-        game_parts = arg.strip().split(None, 2)
-        if len(game_parts) != 3 or "|" not in game_parts[2]:
-            return "usage: /game <language> <2d|2.5d|3d> <name> | <concept>"
-        game_name, _, concept = game_parts[2].partition("|")
-        return game_generate_and_test(
-            name=game_name.strip(), concept=concept.strip(),
-            language=game_parts[0], dimension=game_parts[1],
-        )
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        return usage or game_generate_and_test(**kw)
     if cmd in ("/gamefleet", "/gamecampaign"):
         campaign_args = _parse_game_campaign_command(arg)
         if campaign_args is None:
@@ -5002,114 +4564,28 @@ def _apply_code_gate(reply, interaction_id=None, regenerate=None, *, allow_execu
         return reply, None, False
     if allow_execution is None:
         allow_execution = _code_gate_allow_runtime_execution()
-    code = _code_gate_target(reply)
-    compile_only = not allow_execution
-    if code is None:
-        code = _code_gate_compile_only_target(reply)
-        if code is None:
-            return reply, None, False
-        compile_only = True
 
-    if compile_only:
-        static_err = _code_gate_static_errors(code)
-        if static_err is None:
-            return reply, None, False
-        failure = _redact_code_gate_text(static_err)
-    else:
-        try:
-            result = grounding.run_code_detail(
-                code, timeout=_CODE_GATE_TIMEOUT, compile_first=True,
+    def _record_unavailable(exc_name: str) -> None:
+        with contextlib.suppress(Exception):
+            activity_tracker.record_event(
+                "code_gate_unavailable",
+                summary="initial code verification unavailable: %s" % exc_name,
             )
-        except Exception as exc:
-            # An unavailable sandbox is intentionally inconclusive: do not label
-            # the reply's code as broken when it never ran.  It must still be
-            # visible to the operator; otherwise a full sandbox outage looks the
-            # same as a reply with no runnable code at all.
-            with contextlib.suppress(Exception):
-                activity_tracker.record_event(
-                    "code_gate_unavailable",
-                    summary="initial code verification unavailable: %s" % (
-                        type(exc).__name__,
-                    ),
-                )
-            return reply, None, False
-        if result.get("ok"):
-            return reply, True, False
-        if result.get("timed_out"):
-            return reply, None, False
-        raw_failure = (
-            result.get("stderr") or result.get("stdout") or "exited with an error"
-        ).strip()
-        failure = _redact_code_gate_text(raw_failure) or "exited with an error"
 
-    if regenerate is not None:
-        max_repairs = _code_gate_max_repairs()
-        seen_digests = {
-            hashlib.sha256(code.strip().encode("utf-8", errors="replace")).hexdigest()
-        }
-        for _attempt in range(1, max_repairs + 1):
-            safe_failure = _redact_code_gate_text(failure) or "exited with an error"
-            repair_prompt = (
-                "The Python code block in your previous answer fails when run:\n"
-                "%s\n\nReturn the corrected complete answer with a fixed, "
-                "runnable Python code block." % safe_failure[:1200]
-            )
-            try:
-                repaired = str(regenerate(repair_prompt) or "")
-            except Exception:
-                repaired = ""
-            repaired_runnable = _code_gate_target(repaired) if repaired else None
-            repaired_interactive = (
-                _code_gate_compile_only_target(repaired)
-                if (repaired and repaired_runnable is None and compile_only)
-                else None
-            )
-            repaired_code = repaired_runnable if repaired_runnable is not None else repaired_interactive
-            if not repaired_code:
-                break
-            digest = hashlib.sha256(
-                repaired_code.strip().encode("utf-8", errors="replace")
-            ).hexdigest()
-            if digest in seen_digests:
-                break
-            seen_digests.add(digest)
-            if repaired_runnable is not None and allow_execution:
-                try:
-                    retry = grounding.run_code_detail(
-                        repaired_runnable, timeout=_CODE_GATE_TIMEOUT,
-                        compile_first=True,
-                    )
-                except Exception:
-                    retry = {"ok": False, "timed_out": False}
-                if retry.get("ok"):
-                    return repaired, True, True
-                if retry.get("timed_out"):
-                    failure = "%s (repair verification timed out)" % failure
-                    break
-                retry_raw = (
-                    retry.get("stderr") or retry.get("stdout") or ""
-                ).strip()
-                if retry_raw:
-                    failure = _redact_code_gate_text(retry_raw) or failure
-            else:
-                retry_static = _code_gate_static_errors(repaired_code)
-                if retry_static is None:
-                    return repaired, True, True
-                failure = _redact_code_gate_text(retry_static) or failure
-
-    safe_failure = _redact_code_gate_text(failure) or "exited with an error"
-    summary = "exited with an error"
-    for line in reversed(safe_failure.splitlines()):
-        if line.strip():
-            summary = line.strip()
-            break
-    summary = _redact_code_gate_text(summary) or "exited with an error"
-    _record_code_gate_failure(interaction_id)
-    return (
-        "%s\n\nNOT VERIFIED: the Python code block in this answer fails when "
-        "run (%s)." % (reply, summary[:300]),
-        False,
-        False,
+    return _workspace_tools_core.run_code_gate(
+        reply,
+        interaction_id=interaction_id,
+        regenerate=regenerate,
+        allow_execution=bool(allow_execution),
+        timeout=_CODE_GATE_TIMEOUT,
+        max_repairs=_code_gate_max_repairs(),
+        code_gate_target=_code_gate_target,
+        code_gate_compile_only_target=_code_gate_compile_only_target,
+        static_errors_fn=_code_gate_static_errors,
+        redact_fn=_redact_code_gate_text,
+        run_code_detail_fn=grounding.run_code_detail,
+        record_unavailable_fn=_record_unavailable,
+        record_failure_fn=_record_code_gate_failure,
     )
 
 
@@ -5572,20 +5048,16 @@ def _chat_request(
     if cloud and reasoning_continuation:
         raise ValueError("reasoning continuation is available only for local models")
     bridged_rung = None if cloud else _provider_bridge.active_rung()
-    active_effort = _chat_effort.active_turn_effort()
-    if active_effort is not None and isinstance(payload, dict):
-        opts = dict(payload.get("options") or {}) if isinstance(payload.get("options"), dict) else {}
-        if "reasoning_effort" not in opts:
-            payload = dict(payload)
-            opts["reasoning_effort"] = active_effort
-            payload["options"] = opts
-        if bridged_rung is None and not cloud and not single_send and "think" not in payload:
-            if active_effort == "off":
-                payload = dict(payload)
-                payload["think"] = False
-            elif _known_thinking_model(model) and _think_option_supported(model):
-                payload = dict(payload)
-                payload["think"] = True
+    payload = _orchestration_helpers_core.apply_turn_effort_to_payload(
+        payload,
+        active_effort=_chat_effort.active_turn_effort(),
+        bridged_rung=bridged_rung,
+        cloud=cloud,
+        single_send=single_send,
+        is_thinking_model=_known_thinking_model,
+        think_supported=_think_option_supported,
+        model=model,
+    )
     _tool_lane_guard.require_generation(model, rung=bridged_rung, text_only=text_only, payload=payload)  # deny list unless text-only
     base_loopback = ollama_endpoint.is_loopback(BASE)
     rerouted = None if bridged_rung is None else _legacy_chat_bridge.ollama_only_reroute(  # a step Inference cannot carry
@@ -7284,26 +6756,21 @@ def _sonder_impl_serialized(
         footer_iid = None
     response = _reference_lookup_lanes.with_sources(response)  # after storage and capture: Sources is never stored
 
-    if trace:
-        params = {
-            "temperature": temperature, "sampling": resolved_temperature.describe(),
-            "num_predict": num_predict,
-            "num_ctx": num_ctx_eff,
-            "num_ctx_native": _platform_native_context(
-                num_ctx_eff,
-                default_value=SESSION_NUM_CTX,
-            ),
-        }
-        trace_block = _format_trace(tgt_model, tier_label, params, trace_ctx)
-        # Footer must stay LAST so parse_interaction_id's $-anchored regex still finds it.
-        traced_response = response + trace_block
-        return (
-            with_footer(traced_response, footer_iid)
-            if footer_iid is not None else _append_activity(traced_response)
-        )
-    return (
-        with_footer(response, footer_iid)
-        if footer_iid is not None else _append_activity(response)
+    return _orchestration_helpers_core.format_traced_reply(
+        response,
+        footer_iid=footer_iid,
+        trace=bool(trace),
+        trace_ctx=trace_ctx if trace else None,
+        model=tgt_model,
+        tier_label=tier_label,
+        temperature=temperature,
+        sampling_desc=resolved_temperature.describe(),
+        num_predict=num_predict,
+        num_ctx=num_ctx_eff,
+        native_ctx=_platform_native_context(num_ctx_eff, default_value=SESSION_NUM_CTX),
+        format_trace_fn=_format_trace,
+        with_footer_fn=with_footer,
+        append_activity_fn=_append_activity,
     )
 
 
@@ -7752,25 +7219,22 @@ def _answer_with_history_impl(
         iid, interaction_snapshot, response, repair_usage,
     ):
         footer_iid = None
-    if trace and trace_ctx is not None:
-        params = {
-            "temperature": temperature, "sampling": resolved_temperature.describe(),
-            "num_predict": 1024,
-            "num_ctx": req_ctx,
-            "num_ctx_native": _platform_native_context(
-                req_ctx,
-                default_value=SESSION_NUM_CTX,
-            ),
-        }
-        trace_block = _format_trace(model, tier_label, params, trace_ctx)
-        traced_response = response + trace_block
-        return (
-            with_footer(traced_response, footer_iid)
-            if footer_iid is not None else _append_activity(traced_response)
-        )
-    if footer_iid is not None:
-        return with_footer(response, footer_iid)
-    return _append_activity(response)
+    return _orchestration_helpers_core.format_traced_reply(
+        response,
+        footer_iid=footer_iid,
+        trace=bool(trace),
+        trace_ctx=trace_ctx,
+        model=model,
+        tier_label=tier_label,
+        temperature=temperature,
+        sampling_desc=resolved_temperature.describe(),
+        num_predict=1024,
+        num_ctx=req_ctx,
+        native_ctx=_platform_native_context(req_ctx, default_value=SESSION_NUM_CTX),
+        format_trace_fn=_format_trace,
+        with_footer_fn=with_footer,
+        append_activity_fn=_append_activity,
+    )
 
 
 def answer_with_history(
@@ -8133,23 +7597,15 @@ def parallel_generate_run(
             result = fanin.consume(future.result(), futures[future])
             generation_results[result["index"]] = result
     elapsed = round(time.time() - started, 3)
-    passed = sum(1 for r in generation_results if r and r.get("ok"))
-    lines = [
-        "parallel generate/run: %d/%d passed in %.3fs (tier=%s, %s)"
-        % (passed, variants, elapsed, tier,
-           _ollama_reporting.workers_label(max_workers, requested_workers, pool_capacity))
-    ]
-    for r in generation_results:
-        status = "PASS" if r.get("ok") else "FAIL"
-        lines.append("[%s] %s" % (status, r.get("name")))
-        out = (r.get("output") or "").strip()
-        if out:
-            lines.append(out[:1200])
-    winner = next((r for r in generation_results if r.get("ok") and r.get("code")), None)
-    if winner:
-        lines.append("winner code:")
-        lines.append("```python\n%s\n```" % winner["code"])
-    return "\n".join(lines)
+    return _campaign_helpers_core.format_parallel_generate_report(
+        generation_results,
+        variants=variants,
+        elapsed=elapsed,
+        tier=tier,
+        workers_label=_ollama_reporting.workers_label(
+            max_workers, requested_workers, pool_capacity,
+        ),
+    )
 
 
 @mcp.tool()
@@ -8174,22 +7630,12 @@ def parallel_generate_run_languages(
     if bad := _temperature_guard.refusal(temperature, lambda e: _format_runtime_model_call_error_policy(e, **_ollama_error_endpoint())):
         return bad
     _refresh_live_cloud_tiers()
-    language_list = [
-        grounding.normalize_language(x)
-        for x in (languages or "").split(",")
-        if x.strip()
-    ]
-    if not language_list:
-        return "ERROR: at least one language is required"
-    allowed = {"python", "javascript", "powershell", "cpp", "csharp"}
-    bad = [x for x in language_list if x not in allowed]
-    if bad:
-        return "ERROR: unsupported language(s): %s" % ", ".join(bad)
-    variants_per_language = max(1, min(int(variants_per_language or 1), 6))
-    jobs = []
-    for lang in language_list:
-        for i in range(variants_per_language):
-            jobs.append((lang, i + 1))
+    jobs, plan_error = _campaign_helpers_core.plan_language_jobs(
+        languages, variants_per_language, normalize_language=grounding.normalize_language,
+    )
+    if plan_error:
+        err = "ERROR: " + plan_error
+        return err
     max_workers = max(1, min(int(max_workers or 1), 12, len(jobs)))
     timeout = max(1, min(int(timeout or 8), 120))
     model = TIERS.get(tier)
@@ -8265,25 +7711,16 @@ def parallel_generate_run_languages(
             result = fanin.consume(future.result(), futures[future])
             results[result["index"]] = result
     elapsed = round(time.time() - started, 3)
-    passed = sum(1 for r in results if r and r.get("ok"))
-    lines = [
-        "parallel multi-language generate/run: %d/%d passed in %.3fs (tier=%s, %s)"
-        % (passed, len(results), elapsed, tier,
-           _ollama_reporting.workers_label(max_workers, requested_workers, pool_capacity))
-    ]
-    for r in results:
-        status = "PASS" if r.get("ok") else "SKIP" if isinstance(r.get("output"), _powershell_gate.ApprovalRequired) else "FAIL"
-        lines.append("[%s] %s [%s]" % (status, r.get("name"), r.get("language")))
-        out = (r.get("output") or "").strip()
-        if out:
-            lines.append(out[:1200])
-    winners = [r for r in results if r.get("ok") and r.get("code")]
-    if winners:
-        lines.append("winner code blocks:")
-        for r in winners[:3]:
-            fence = grounding._LANG_FENCE.get(r["language"], r["language"])
-            lines.append("```%s\n%s\n```" % (fence, r["code"]))
-    return "\n".join(lines)
+    return _campaign_helpers_core.format_parallel_languages_report(
+        results,
+        elapsed=elapsed,
+        tier=tier,
+        workers_label=_ollama_reporting.workers_label(
+            max_workers, requested_workers, pool_capacity,
+        ),
+        approval_required_type=_powershell_gate.ApprovalRequired,
+        lang_fences=grounding._LANG_FENCE,
+    )
 
 
 _CAMPAIGN_TASKS: list[tuple[str, str]] = _campaign_corpus.CAMPAIGN_TASKS
@@ -8318,28 +7755,12 @@ def campaign_generate_compile_execute_record(
     max_workers = max(1, min(int(max_workers or 1), 12, total))
     timeout = max(1, min(int(timeout or 8), 120))
     repair_rounds = max(0, min(int(repair_rounds or 0), 3))
-    language_list = [
-        grounding.normalize_language(x)
-        for x in (languages or "").split(",")
-        if x.strip()
-    ]
-    allowed = {"python", "javascript", "powershell", "cpp", "csharp"}
-    language_list = [x for x in language_list if x in allowed]
-    if not language_list:
-        return "ERROR: no supported languages selected"
-
-    jobs = []
-    for i in range(total):
-        lang = language_list[i % len(language_list)]
-        # Advance the task only after a full pass over the languages. Indexing
-        # both by i pairs them on a fixed residue whenever the two counts share
-        # a factor: 3 languages against 12 tasks gave each language just 4 of
-        # them, and PowerShell could never draw the three tasks it actually
-        # fails - so a 30/30 sweep proved nothing about the hard combinations.
-        task_name, task_text = _CAMPAIGN_TASKS[
-            (i // len(language_list)) % len(_CAMPAIGN_TASKS)
-        ]
-        jobs.append((i, lang, task_name, task_text))
+    jobs, plan_error = _campaign_helpers_core.plan_campaign_jobs(
+        languages, total, _CAMPAIGN_TASKS, normalize_language=grounding.normalize_language,
+    )
+    if plan_error:
+        err = "ERROR: " + plan_error
+        return err
 
     def run_one(index, lang, task_name, task_text):
         attempts = []
@@ -8378,14 +7799,10 @@ def campaign_generate_compile_execute_record(
                 with _CAMPAIGN_LEARN_LOCK:
                     record_msg = record_self_graded_outcome(iid, "tests_passed")
             elif env_failure or approval_required:
-                # Toolchain or approval skip: the model was never judged, so no
-                # outcome and no pitfall are recorded against it.
                 pass
             elif attempt == repair_rounds and record_failures and iid:
                 with _CAMPAIGN_LEARN_LOCK:
                     record_msg = record_self_graded_outcome(iid, "failed")
-                    # A failure that teaches nothing recurs forever; distill
-                    # the guard while the error is still in hand.
                     pitfall, pitfall_note = _record_failure_pitfall(
                         iid, prompt, code, out,
                     )
@@ -8425,71 +7842,13 @@ def campaign_generate_compile_execute_record(
             result = future.result()
             results[result["index"]] = result
     elapsed = round(time.time() - started, 3)
-    passed = sum(1 for r in results if r and r.get("ok"))
-    recorded = sum(
-        1
-        for r in results
-        for a in r.get("attempts", [])
-        if a.get("ok") and a.get("record")
-    )
-    failed_recorded = sum(
-        1
-        for r in results
-        for a in r.get("attempts", [])
-        if not a.get("ok") and a.get("record")
-    )
-    # A failure whose pitfall distillation raised teaches nothing, and the
-    # unattended runner only ever logs these summary lines - so a note buried
-    # in a per-attempt record is invisible exactly when it matters most.
-    # Reported only when non-zero, to keep a healthy run quiet.
-    pitfall_errors = [
-        a.get("pitfall_error")
-        for r in results
-        for a in r.get("attempts", [])
-        if a.get("pitfall_error")
-    ]
-    env_skipped = sum(
-        1
-        for r in results
-        for a in r.get("attempts", [])
-        if a.get("env_skipped")
-    )
-    by_lang = {}
-    for r in results:
-        lang = r["language"]
-        ok, total_lang = by_lang.get(lang, (0, 0))
-        by_lang[lang] = (ok + (1 if r["ok"] else 0), total_lang + 1)
-    lines = [
-        _campaign_headline(
-            passed, len(results), recorded, failed_recorded,
-            len(pitfall_errors), elapsed,
-        ),
-        "by language: %s" % ", ".join(
-            "%s=%d/%d" % (lang, ok, total_lang)
-            for lang, (ok, total_lang) in sorted(by_lang.items())
-        ),
-    ]
-    if pitfall_errors:
-        lines.append("first pitfall error: %s" % pitfall_errors[0])
-    if env_skipped:
-        lines.append(
-            "environment failures skipped, not recorded against the model: %d"
-            % env_skipped,
-        )
     drain = _drain_deferred_distillations(limit=max(16, len(results)))
-    if drain["drained"]:
-        lines.append(_drain_summary_text(drain))
-    for r in results:
-        status = "PASS" if r["ok"] else "SKIP" if r["attempts"][-1].get("approval_required") else "FAIL"
-        lines.append("[%s] %s attempts=%d iid=%s" % (
-            status, r["name"], len(r["attempts"]), r.get("iid") or "-"))
-        final_out = (r["attempts"][-1].get("output") or "").strip()
-        if final_out:
-            lines.append(final_out[:800])
-        record_msg = (r["attempts"][-1].get("record") or "").strip()
-        if record_msg:
-            lines.append(record_msg[:800])
-    return "\n".join(lines)
+    return _campaign_helpers_core.format_campaign_report(
+        results,
+        elapsed=elapsed,
+        headline_fn=_campaign_headline,
+        drain_summary=_drain_summary_text(drain) if drain["drained"] else "",
+    )
 
 
 # Planted-bug repair templates: (name, buggy module source, pytest source).
@@ -8625,47 +7984,12 @@ def campaign_repo_repair(
             outcome = future.result()
             results[outcome["index"]] = outcome
     elapsed = round(time.time() - started, 3)
-    passed = sum(1 for r in results if r and r.get("ok"))
-    infra_skipped = sum(1 for r in results if r and r.get("infra"))
-    # Same blindness as the campaign tier: only this first line survives into
-    # an unattended run's log, so a crashed pitfall distillation has to be
-    # counted here or it is never seen.
-    pitfall_errors = sum(
-        1
-        for r in results if r
-        for a in r.get("attempts", [])
-        if a.get("pitfall_error")
-    )
-    lines = [
-        "campaign repo-repair: %d/%d suites fixed in %.3fs%s%s"
-        % (passed, len(results), elapsed,
-           (" (%d job(s) unattributable — no outcome recorded)"
-            % infra_skipped) if infra_skipped else "",
-           (" (%d pitfall-error(s))" % pitfall_errors)
-           if pitfall_errors else ""),
-    ]
-    if infra_skipped and infra_skipped >= max(1, len(results) // 2):
-        lines.append(
-            "WARNING: most jobs failed for infrastructure reasons (commonly "
-            "memory pressure with too many workers) — lower max_workers or "
-            "free memory; these jobs taught the model nothing.",
-        )
     drain = _drain_deferred_distillations(limit=max(16, len(results)))
-    if drain["drained"]:
-        lines.append(_drain_summary_text(drain))
-    for r in results:
-        status = "PASS" if r["ok"] else "FAIL"
-        lines.append("[%s] %s-%d attempts=%d iid=%s%s" % (
-            status, r["task"], r["index"] + 1, len(r.get("attempts") or []),
-            r.get("iid") or "-",
-            (" (%s)" % r["error"]) if r.get("error") else "",
-        ))
-        attempts = r.get("attempts") or []
-        if attempts and not r["ok"]:
-            lines.append((attempts[-1].get("output") or "")[:400])
-        if attempts and attempts[-1].get("record"):
-            lines.append(attempts[-1]["record"][:200])
-    return "\n".join(lines)
+    return _campaign_helpers_core.format_repo_repair_report(
+        results,
+        elapsed=elapsed,
+        drain_summary=_drain_summary_text(drain) if drain["drained"] else "",
+    )
 
 
 @mcp.tool()
@@ -8794,25 +8118,7 @@ def context_health_data(session: str = "", project: str = "") -> dict:
                                 _events = _repo.events(session_id)
                             else:
                                 _events = ()
-                            _pairs: list[dict[str, str]] = []
-                            _pending_user = ""
-                            for _ev in _events:
-                                _kind = str(
-                                    getattr(_ev, "event_type", "")
-                                    or getattr(_ev, "kind", "")
-                                )
-                                _payload = getattr(_ev, "payload", None) or {}
-                                _text = str(_payload.get("content") or _payload.get("text") or "")
-                                if _kind == "user.message":
-                                    if _pending_user:
-                                        _pairs.append({"task": _pending_user, "response": ""})
-                                    _pending_user = _text
-                                elif _kind in ("model.response", "assistant.message"):
-                                    _pairs.append({"task": _pending_user, "response": _text})
-                                    _pending_user = ""
-                            if _pending_user:
-                                _pairs.append({"task": _pending_user, "response": ""})
-                            scoped_turns = _pairs
+                            scoped_turns = _workspace_tools_core.extract_session_replay_turns(_events)
                     except Exception:
                         pass
                 selected = scoped_turns[-limit:] if limit else []
@@ -9210,100 +8516,15 @@ def scoped_task_tool_dispatch(tool_name: str, kwargs: dict, *, account_scope: st
     values = dict(kwargs or {})
     conn = _open_db()
     try:
-        service = _task_service(conn)
-        if tool_name == "task_create":
-            row = service.create_task(account_scope=account_scope, **values)
-            return "task created\n  " + _format_task(row.to_dict())
-        if tool_name == "task_list":
-            rows = service.list_tasks(account_scope=account_scope, **values)
-            lines = ["sonder tasks"]
-            lines.extend("  " + _format_task(row.to_dict()) for row in rows)
-            return "\n".join(lines) if rows else "\n".join(lines + ["  (no matching tasks)"])
-        if tool_name == "task_update":
-            task_id = values.pop("task_id")
-            row = service.update_task(task_id, account_scope=account_scope, **values)
-            return "task updated\n  " + _format_task(row.to_dict())
-        if tool_name == "task_show":
-            task_id = values.pop("task_id")
-            include_events = values.pop("events", True)
-            detail = service.show_task(
-                task_id, include_events=bool(include_events),
-                account_scope=account_scope, **values,
-            )
-            if not detail.task:
-                return "no task '%s'." % task_id
-            lines = ["task", "  " + _format_task(detail.task.to_dict())]
-            if detail.events:
-                lines.append("events:")
-                lines.extend("  %(ts)s  %(event)s  %(note)s" % event for event in detail.events)
-            return "\n".join(lines)
-        if tool_name == "task_delete":
-            result = service.delete_task(values.pop("task_id"), account_scope=account_scope)
-            return "deleted task %s (removed %d children)" % (
-                result["deleted"][:8], result["children_removed"]
-            )
-        if tool_name == "task_plan":
-            raw_steps = values.pop("steps")
-            steps = json.loads(raw_steps) if isinstance(raw_steps, str) else raw_steps
-            checklist = service.plan_tasks(account_scope=account_scope, steps=steps, **values)
-            return _format_checklist(checklist.to_dict())
-        if tool_name == "task_progress":
-            stats = service.task_progress(account_scope=account_scope, **values)
-            bar_len = 20
-            filled = round(bar_len * stats["progress_pct"] / 100)
-            bar = "#" * filled + "-" * (bar_len - filled)
-            project = values.get("project", "")
-            return "\n".join([
-                "sonder task progress%s" % (" [%s]" % project if project else ""),
-                "  [%s] %.1f%%" % (bar, stats["progress_pct"]),
-                "  total: %d | pending: %d | in_progress: %d | blocked: %d | done: %d | canceled: %d"
-                % (stats["total"], stats["pending"], stats["in_progress"], stats["blocked"],
-                   stats["done"], stats["canceled"]),
-            ])
-        if tool_name == "task_ledger":
-            goal_id = values.pop("goal_id")
-            ledger = service.task_ledger(
-                goal_id, account_scope=account_scope,
-                replan_count=values.pop("replan_count", 0),
-                last_replan_reason=values.pop("last_replan_reason", "") or None,
-            )
-            return json.dumps(
-                {"ledger": ledger.to_dict(), "digest": ledger.digest()},
-                indent=2, sort_keys=True,
-            )
-        if tool_name == "task_depend":
-            task_id = values.pop("task_id")
-            depends_on = values.pop("depends_on")
-            if values.pop("remove", False):
-                result = service.remove_dependency(task_id, depends_on, account_scope=account_scope)
-                if not result.get("removed"):
-                    return "no dependency found"
-                return "removed dependency: %s no longer depends on %s" % (
-                    result["task_id"][:8], result["depends_on"][:8]
-                )
-            result = service.add_dependency(task_id, depends_on, account_scope=account_scope)
-            return "dependency added: %s depends on %s" % (
-                result["task_id"][:8], result["depends_on"][:8]
-            )
-        if tool_name == "checklist_create":
-            raw_items = values.pop("items_json")
-            normalized = task_use_cases.normalize_checklist_items(raw_items)
-            checklist = service.create_checklist(
-                values.pop("title"),
-                [{"title": title, "detail": detail} for title, detail in normalized],
-                account_scope=account_scope, **values,
-            )
-            return _format_checklist(checklist.to_dict())
-        if tool_name == "checklist_show":
-            checklist = service.checklist(values.pop("checklist_id"), account_scope=account_scope)
-            return _format_checklist(checklist.to_dict())
-        if tool_name == "checklist_update":
-            checklist = service.update_checklist(
-                values.pop("checklist_id"), values.pop("item"), values.pop("status"),
-                account_scope=account_scope, **values,
-            )
-            return _format_checklist(checklist.to_dict())
-        return "unsupported scoped task tool '%s'" % tool_name
+        return _workspace_tools_core.dispatch_scoped_task_tool(
+            _task_service(conn),
+            tool_name,
+            values,
+            account_scope=account_scope,
+            format_task=_format_task,
+            format_checklist=_format_checklist,
+            normalize_checklist_items=task_use_cases.normalize_checklist_items,
+        )
     except Exception as exc:
         # This bridge is an HTTP presentation boundary, not an in-process
         # exception contract.  Keep the useful diagnostic while avoiding a
@@ -9667,130 +8888,29 @@ def memory_privacy_repair(lesson_ids_json: str = "[]", apply: bool = False) -> s
 def memory_embedding_backfill(limit: int = 25, apply: bool = False) -> str:
     """Refresh missing, legacy, or incompatible vectors with the local model."""
     _maybe_live_reload()
-    apply = apply is True
-    approved_model = embeddings.EMBED_MODEL
-    approved_base = embeddings.BASE
-    embed_fn = embeddings.embed
-    if _is_cloud_model_name(approved_model):
-        return (
-            "ERROR: embedding backfill requires a local model; configured model "
-            "%r looks cloud-hosted." % approved_model
-        )
-    if not embeddings.endpoint_is_loopback(approved_base):
-        return (
-            "ERROR: embedding refresh is local-only; configured Ollama endpoint "
-            "is not loopback."
-        )
-    limit = _safe_limit_policy(limit, 25, 100)
-    conn = _open_db()
-    updated = 0
-    failed = []
-    conflicted = []
-    target_dimension = embeddings.EXPECTED_DIMENSION
-    target_model = embeddings.canonical_model_name(approved_model)
-    target_revision = embeddings.current_revision(
-        model=approved_model, base=approved_base,
+    result = _memory_backfill_core.run_embedding_backfill(
+        _memory_backfill_core.LESSON_BACKFILL_SPEC,
+        limit=_safe_limit_policy(limit, 25, 100),
+        apply=apply is True,
+        approved_model=embeddings.EMBED_MODEL,
+        approved_base=embeddings.BASE,
+        expected_dimension=embeddings.EXPECTED_DIMENSION,
+        is_cloud_model=_is_cloud_model_name,
+        endpoint_is_loopback=embeddings.endpoint_is_loopback,
+        canonical_model_name=embeddings.canonical_model_name,
+        current_revision=embeddings.current_revision,
+        embed_fn=embeddings.embed,
+        valid_vector=embeddings.valid_vector,
+        to_blob=embeddings.to_blob,
+        open_db=_open_db,
+        select_rows=memory_store.lessons_needing_embedding_refresh,
+        refresh_row=memory_store.refresh_lesson_embedding,
+        count_remaining=memory_store.count_lessons_needing_embedding_refresh,
     )
-    revision_changed = False
-    try:
-        if apply:
-            probe = embed_fn(
-                "Sonder embedding compatibility probe", timeout=30,
-                base=approved_base, model=approved_model,
-            )
-            if not embeddings.valid_vector(probe):
-                return "ERROR: embedding refresh could not probe the configured local model."
-            if embeddings.current_revision(
-                model=approved_model, base=approved_base,
-            ) != target_revision:
-                return "ERROR: embedding model revision changed during compatibility probe."
-            probed_dimension = len(probe)
-            if (
-                target_dimension is not None
-                and probed_dimension != target_dimension
-            ):
-                return (
-                    "ERROR: local embedding probe dimension %d does not match "
-                    "the configured/known dimension %d; update SONDER_EMBED_DIM "
-                    "or the model configuration before refreshing stored text."
-                    % (probed_dimension, target_dimension)
-                )
-            target_dimension = probed_dimension
-        rows = memory_store.lessons_needing_embedding_refresh(
-            conn,
-            target_model,
-            revision=target_revision,
-            dimension=target_dimension,
-            limit=limit,
-        )
-        if apply:
-            for row in rows:
-                try:
-                    if embeddings.current_revision(
-                        model=approved_model, base=approved_base,
-                    ) != target_revision:
-                        failed.append(row["id"])
-                        revision_changed = True
-                        break
-                    vector = embed_fn(
-                        row.get("text") or "", timeout=30,
-                        base=approved_base, model=approved_model,
-                    )
-                    if (
-                        not embeddings.valid_vector(vector)
-                        or len(vector) != target_dimension
-                    ):
-                        failed.append(row["id"])
-                        continue
-                    blob = embeddings.to_blob(vector)
-                    if memory_store.refresh_lesson_embedding(
-                        conn,
-                        row["id"],
-                        blob,
-                        target_model,
-                        revision=target_revision,
-                        dimension=target_dimension,
-                        expected=row,
-                    ):
-                        updated += 1
-                    else:
-                        conflicted.append(row["id"])
-                except (OSError, TypeError, ValueError, OverflowError):
-                    failed.append(row["id"])
-        remaining = memory_store.count_lessons_needing_embedding_refresh(
-            conn,
-            target_model,
-            revision=target_revision,
-            dimension=target_dimension,
-        )
-    finally:
-        conn.close()
-    lines = [
-        "memory embedding backfill",
-        "  mode: %s | local model: %s" % (
-            "apply" if apply else "dry-run", approved_model,
-        ),
-        "  target dimension: %s" % (
-            target_dimension if target_dimension else "unknown until apply probe",
-        ),
-        "  selected stale/missing: %d | updated: %d | conflicted: %d | failed: %d | remaining: %d" % (
-            len(rows), updated, len(conflicted), len(failed), remaining,
-        ),
-    ]
-    if rows:
-        lines.append("  lesson IDs: %s" % ", ".join(row["id"] for row in rows))
-    if failed:
-        lines.append("  failed IDs: %s" % ", ".join(failed))
-    if conflicted:
-        lines.append("  skipped concurrently changed IDs: %s" % ", ".join(conflicted))
-    if revision_changed:
-        lines.append("  model revision changed during refresh; rerun the batch.")
-    if not apply and rows:
-        lines.append(
-            "  dry-run only; apply probes the live local model, then refreshes "
-            "missing or incompatible vectors."
-        )
-    return "\n".join(lines)
+    if result.error_detail:
+        err = "ERROR: " + result.error_detail
+        return err
+    return result.report
 
 
 @mcp.tool()
@@ -9799,143 +8919,29 @@ def memory_interaction_embedding_backfill(
 ) -> str:
     """Refresh raw interaction task vectors with the local embedding model."""
     _maybe_live_reload()
-    apply = apply is True
-    approved_model = embeddings.EMBED_MODEL
-    approved_base = embeddings.BASE
-    embed_fn = embeddings.embed
-    if _is_cloud_model_name(approved_model):
-        return (
-            "ERROR: interaction embedding backfill requires a local model; "
-            "configured model %r looks cloud-hosted." % approved_model
-        )
-    if not embeddings.endpoint_is_loopback(approved_base):
-        return (
-            "ERROR: interaction embedding refresh is local-only; configured "
-            "Ollama endpoint is not loopback."
-        )
-    limit = _safe_limit_policy(limit, 25, 100)
-    conn = _open_db()
-    updated = 0
-    failed = []
-    conflicted = []
-    target_dimension = embeddings.EXPECTED_DIMENSION
-    target_model = embeddings.canonical_model_name(approved_model)
-    target_revision = embeddings.current_revision(
-        model=approved_model, base=approved_base,
+    result = _memory_backfill_core.run_embedding_backfill(
+        _memory_backfill_core.INTERACTION_BACKFILL_SPEC,
+        limit=_safe_limit_policy(limit, 25, 100),
+        apply=apply is True,
+        approved_model=embeddings.EMBED_MODEL,
+        approved_base=embeddings.BASE,
+        expected_dimension=embeddings.EXPECTED_DIMENSION,
+        is_cloud_model=_is_cloud_model_name,
+        endpoint_is_loopback=embeddings.endpoint_is_loopback,
+        canonical_model_name=embeddings.canonical_model_name,
+        current_revision=embeddings.current_revision,
+        embed_fn=embeddings.embed,
+        valid_vector=embeddings.valid_vector,
+        to_blob=embeddings.to_blob,
+        open_db=_open_db,
+        select_rows=memory_store.interactions_needing_task_embedding_refresh,
+        refresh_row=memory_store.refresh_interaction_task_embedding,
+        count_remaining=memory_store.count_interactions_needing_task_embedding_refresh,
     )
-    revision_changed = False
-    try:
-        if apply:
-            probe = embed_fn(
-                "Sonder interaction embedding compatibility probe", timeout=30,
-                base=approved_base, model=approved_model,
-            )
-            if not embeddings.valid_vector(probe):
-                return (
-                    "ERROR: interaction embedding refresh could not probe the "
-                    "configured local model."
-                )
-            if embeddings.current_revision(
-                model=approved_model, base=approved_base,
-            ) != target_revision:
-                return (
-                    "ERROR: interaction embedding model revision changed during "
-                    "compatibility probe."
-                )
-            probed_dimension = len(probe)
-            if (
-                target_dimension is not None
-                and probed_dimension != target_dimension
-            ):
-                return (
-                    "ERROR: local interaction embedding probe dimension %d does "
-                    "not match the configured/known dimension %d; update "
-                    "SONDER_EMBED_DIM or the model configuration before "
-                    "refreshing stored task text."
-                    % (probed_dimension, target_dimension)
-                )
-            target_dimension = probed_dimension
-        rows = memory_store.interactions_needing_task_embedding_refresh(
-            conn,
-            target_model,
-            revision=target_revision,
-            dimension=target_dimension,
-            limit=limit,
-        )
-        if apply:
-            for row in rows:
-                try:
-                    if embeddings.current_revision(
-                        model=approved_model, base=approved_base,
-                    ) != target_revision:
-                        failed.append(row["id"])
-                        revision_changed = True
-                        break
-                    vector = embed_fn(
-                        row.get("task") or "", timeout=30,
-                        base=approved_base, model=approved_model,
-                    )
-                    if (
-                        not embeddings.valid_vector(vector)
-                        or len(vector) != target_dimension
-                    ):
-                        failed.append(row["id"])
-                        continue
-                    if memory_store.refresh_interaction_task_embedding(
-                        conn,
-                        row["id"],
-                        embeddings.to_blob(vector),
-                        target_model,
-                        revision=target_revision,
-                        dimension=target_dimension,
-                        expected=row,
-                    ):
-                        updated += 1
-                    else:
-                        conflicted.append(row["id"])
-                except (OSError, TypeError, ValueError, OverflowError):
-                    failed.append(row["id"])
-        remaining = (
-            memory_store.count_interactions_needing_task_embedding_refresh(
-                conn,
-                target_model,
-                revision=target_revision,
-                dimension=target_dimension,
-            )
-        )
-    finally:
-        conn.close()
-    lines = [
-        "memory interaction embedding backfill",
-        "  mode: %s | local model: %s" % (
-            "apply" if apply else "dry-run", approved_model,
-        ),
-        "  target dimension: %s" % (
-            target_dimension if target_dimension else "unknown until apply probe",
-        ),
-        "  selected stale/missing: %d | updated: %d | conflicted: %d | "
-        "failed: %d | remaining: %d" % (
-            len(rows), updated, len(conflicted), len(failed), remaining,
-        ),
-    ]
-    if rows:
-        lines.append(
-            "  interaction IDs: %s" % ", ".join(row["id"] for row in rows)
-        )
-    if failed:
-        lines.append("  failed IDs: %s" % ", ".join(failed))
-    if conflicted:
-        lines.append(
-            "  skipped concurrently changed IDs: %s" % ", ".join(conflicted)
-        )
-    if revision_changed:
-        lines.append("  model revision changed during refresh; rerun the batch.")
-    if not apply and rows:
-        lines.append(
-            "  dry-run only; apply probes the live local model, then refreshes "
-            "bounded task vectors from their locally stored task text."
-        )
-    return "\n".join(lines)
+    if result.error_detail:
+        err = "ERROR: " + result.error_detail
+        return err
+    return result.report
 
 
 @mcp.tool()
@@ -9957,24 +8963,9 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
     # report that recommends a backfill must use the exact eligibility view
     # the backfill tool and ``learning_health_status`` use.
     learning_state = learning_health_data()
-
-    quality = learning_state["quality"]
-    interactions = learning_state["interactions"]
-    outcomes = learning_state["outcomes"]
-    lesson_count = learning_state["lessons"]
-    fact_count = learning_state["facts"]
-    # The blended rate largely measures the runtime grading its own work.
-    # Publish an acceptance rate only when caller review is large enough to
-    # carry that claim, and keep the blended number explicitly labelled below.
-    reviewed = learning_state.get("reviewed_outcomes", 0)
-    reviewed_positive = learning_state.get("reviewed_positive_percent", 0.0)
     gated_positive, acceptance_basis = learning_health.gating_positive_percent(
         learning_state
     )
-    acceptance = (
-        gated_positive / 100.0 if gated_positive is not None else None
-    )
-    issues = []
     autopilot_available = True
     try:
         autopilot = _application().automation.snapshot(include_finished=False, limit=100)
@@ -9987,258 +8978,22 @@ def improvement_report_data(session: str = "", project: str = "") -> dict:
             "database": autopilot_store.database_path(),
         }
     mcp_state = mcp_runtime_data()
-
-    def add(area, severity, title, action):
-        issues.append({
-            "area": area,
-            "severity": severity,
-            "title": title,
-            "action": action,
-        })
-
-    if interactions and learning_state["outcome_coverage_percent"] < 35.0:
-        add(
-            "learning",
-            "high",
-            "Too few interactions have grounded outcomes.",
-            "Use /accept, /edited, /copied, /pass, /fail, or record_outcome after real use.",
-        )
-    if interactions == 0:
-        add(
-            "learning",
-            "medium",
-            "No learning interactions have been captured yet.",
-            "Ask through Sonder Runtime or run /train so answers can become local lessons.",
-        )
-    if lesson_count < 10:
-        add(
-            "memory",
-            "medium",
-            "Lesson memory is still thin.",
-            "Run grounded practice or teach examples from known-good work.",
-        )
-    if quality.get("exact_duplicate_prunable", 0):
-        add(
-            "memory",
-            "medium",
-            "Duplicate lessons can be pruned.",
-            "Run memory_quality_repair(apply=True) or /qualityfix apply after review.",
-        )
-    if quality.get("path_or_secret_like", 0):
-        add(
-            "privacy",
-            "high",
-            "Some lessons look like they may contain paths or secrets.",
-            "Run /privacy for redacted IDs, then dry-run memory_privacy_repair before any explicit cleanup.",
-        )
-    if quality.get("no_embedding", 0):
-        add(
-            "memory",
-            "medium",
-            "%d lessons are missing semantic embeddings." % quality["no_embedding"],
-            "Run memory_embedding_backfill(apply=False), then backfill a bounded batch with apply=True.",
-        )
-    stale_embeddings = (
-        quality.get("embedding_legacy", 0)
-        + quality.get("embedding_model_mismatch", 0)
-        + quality.get("embedding_revision_mismatch", 0)
-        + quality.get("embedding_dimension_missing", 0)
-        + quality.get("embedding_dimension_invalid", 0)
+    provenance = mcp_state.get("provenance") or {}
+    mcp_recovery_action = (
+        _safe_mcp_recovery_action(provenance) if mcp_state.get("last_error") else ""
     )
-    if stale_embeddings:
-        add(
-            "memory",
-            "medium",
-            "%d lesson embeddings lack current provenance or are incompatible."
-            % stale_embeddings,
-            "Run memory_embedding_backfill(apply=False), then refresh bounded "
-            "batches locally with apply=True.",
-        )
-    if quality.get("vague_without_anchor", 0):
-        add(
-            "memory",
-            "low",
-            "Some lessons are vague and lack concrete anchors.",
-            "Prefer lessons naming APIs, files, errors, commands, or explicit patterns.",
-        )
-    if quality.get("missing_fts", 0) or quality.get("orphan_fts", 0):
-        add(
-            "store",
-            "medium",
-            "Search index drift was detected.",
-            "Run self_heal_check and repair the store before large practice batches.",
-        )
-    if context.get("status") == "hot":
-        add(
-            "context",
-            "medium",
-            "The active conversation is near the context limit.",
-            "Start a new session or let summaries compress older turns before continuing.",
-        )
-    autonomous_attention = sum(
-        1 for row in autopilot.get("runs", [])
-        if row.get("status") in ("blocked", "interrupted")
+    return _improvement_reports_core.assemble_improvement_report(
+        context=context,
+        learning_state=learning_state,
+        gated_positive=gated_positive,
+        acceptance_basis=acceptance_basis,
+        autopilot_available=autopilot_available,
+        autopilot=autopilot,
+        mcp_state=mcp_state,
+        mcp_recovery_action=mcp_recovery_action,
+        cloud_allowed=_cloud_allowed_policy(os.environ),
+        manifest_text=tool_manifest(),
     )
-    if autonomous_attention:
-        add(
-            "autonomy",
-            "medium",
-            "%d autonomous run(s) need explicit review or resume."
-            % autonomous_attention,
-            "Inspect /autopilot status, then deliberately resume, cancel, or revise the goal.",
-        )
-    if not autopilot_available:
-        add(
-            "autonomy",
-            "medium",
-            "Autopilot status is unavailable.",
-            "Run /autopilot status after the store recovers; do not treat missing status as no active work.",
-        )
-    if mcp_state.get("last_error"):
-        provenance = mcp_state.get("provenance") or {}
-        add(
-            "runtime",
-            "high",
-            (
-                "The MCP process is attached to a stale runtime source root."
-                if provenance.get("issue") == "stale_source_root"
-                else "The latest MCP source refresh failed closed."
-            ),
-            _safe_mcp_recovery_action(provenance) or (
-                "Run /mcp status, fix the reported source error, then use "
-                "/mcp refresh; the last known-good tools remain active."
-            ),
-        )
-    elif mcp_state.get("source_changed"):
-        add(
-            "runtime",
-            "medium",
-            "The MCP process has newer source waiting to be loaded.",
-            "Run /mcp refresh or any MCP tool/list request to publish the update atomically.",
-        )
-    if mcp_state.get("last_notification_error"):
-        add(
-            "runtime",
-            "low",
-            "The MCP client did not accept the latest tool-list notification.",
-            "Use /mcp status and reconnect only if the client does not relist tools automatically.",
-        )
-    if not _cloud_allowed_policy(os.environ):
-        add(
-            "deployment",
-            "info",
-            "Hosted tiers are disabled, preserving the local privacy promise.",
-            "Enable hosted/cloud tiers only when you intentionally want prompts to leave this machine.",
-        )
-    manifest_text = tool_manifest()
-    if "ground_artifact" not in manifest_text or "artifact_ground" not in manifest_text:
-        add(
-            "grounding",
-            "medium",
-            "General or format-specific artifact grounding is not advertised.",
-            "Expose ground_artifact and artifact_ground so both in-memory content and real files can be validated.",
-        )
-    # The blended positive rate is dominated by autograded outcomes -- the
-    # runtime setting and marking its own curriculum -- and hides the number an
-    # operator actually needs: how often work a caller delegated was judged
-    # good. learning_health_status separates these; this report used to blend
-    # them, so it could show 96% positive and 100/100 readiness while
-    # caller-judged work sat near 53% and the health view said "watch".
-    if acceptance_basis == "reviewed" and gated_positive < 60.0:
-        add(
-            "learning",
-            "medium",
-            "Caller-judged work succeeds %.1f%% of the time (%d reviewed outcome(s))."
-            % (gated_positive, reviewed),
-            "This is the honest hit rate; the blended figure is inflated by "
-            "autograded self-marking. Review roughly half of delegated output, "
-            "and record negatives -- record_outcome with a failing signal is "
-            "what the store is starved of.",
-        )
-    elif acceptance_basis == "unmeasured" and outcomes >= 200:
-        # #62: since provenance is recorded, "not judged" and "cannot tell who
-        # judged" are different states with different remedies, and reporting
-        # the second as the first would be the same substitution the reviewed
-        # rate itself used to make. Rows written before the column say nothing
-        # either way, so they are named rather than folded into the shortfall.
-        unclassifiable = learning_state.get("unknown_source_outcomes", 0)
-        detail = "Almost no outcomes have been judged by a caller (%d of %d)." % (
-            reviewed, outcomes,
-        )
-        if unclassifiable:
-            detail += (
-                " %d of those predate outcome provenance, so who judged them "
-                "is not recoverable -- they are not evidence either way."
-                % unclassifiable
-            )
-        add(
-            "learning",
-            "low",
-            detail,
-            "Autograded outcomes cannot tell you whether delegated work is any "
-            "good. Use record_outcome after real use so the reviewed rate means "
-            "something.",
-        )
-
-    if not issues:
-        add(
-            "system",
-            "info",
-            "No urgent improvement items detected.",
-            "Keep collecting grounded outcomes and periodically run /quality.",
-        )
-
-    severity_rank = {"high": 0, "medium": 1, "low": 2, "info": 3}
-    issues.sort(key=lambda item: (severity_rank.get(item["severity"], 9), item["area"], item["title"]))
-    score = max(0, min(100, int(round(
-        100
-        - 18 * sum(1 for i in issues if i["severity"] == "high")
-        - 9 * sum(1 for i in issues if i["severity"] == "medium")
-        - 4 * sum(1 for i in issues if i["severity"] == "low")
-    ))))
-    # A clean runtime and many self-recorded outcomes are useful operational
-    # signals, but they do not establish that delegated work is reliable.  Do
-    # not let the aggregate score read like validated quality when a populated
-    # outcome history has no caller-measured sample at all.
-    if outcomes >= 200 and acceptance_basis == "unmeasured":
-        score = min(score, 75)
-    return {
-        "score": score,
-        "interactions": interactions,
-        "outcomes": outcomes,
-        "acceptance_percent": round(acceptance * 100.0, 1) if acceptance is not None else None,
-        "acceptance_basis": acceptance_basis,
-        "reviewed_outcomes": learning_state.get("reviewed_outcomes", 0),
-        "reviewed_positive_percent": learning_state.get("reviewed_positive_percent", 0.0),
-        "autograded_outcomes": learning_state.get("autograded_outcomes", 0),
-        # Published beside the two it qualifies: reviewed + autograded no longer
-        # sum to `outcomes` on a store with pre-provenance rows, and a triple
-        # that silently does not add up is how a count starts reading as a
-        # measurement when it is a floor.
-        "unknown_source_outcomes": learning_state.get(
-            "unknown_source_outcomes", 0,
-        ),
-        "lessons": lesson_count,
-        "facts": fact_count,
-        "cloud_allowed": _cloud_allowed_policy(os.environ),
-        "context_status": context.get("status", "unknown"),
-        "memory_quality": {
-            "duplicates": quality.get("exact_duplicate_prunable", 0),
-            "vague": quality.get("vague_without_anchor", 0),
-            "no_embedding": quality.get("no_embedding", 0),
-            "path_or_secret_like": quality.get("path_or_secret_like", 0),
-            "fts_issues": quality.get("missing_fts", 0) + quality.get("orphan_fts", 0),
-        },
-        "learning_health": learning_state,
-        "autopilot": {
-            "available": autopilot_available,
-            "active": autopilot.get("active_runs", 0),
-            "resumable": autopilot.get("resumable_runs", 0),
-            "database": autopilot.get("database", ""),
-        },
-        "mcp_runtime": mcp_state,
-        "issues": issues,
-    }
 
 
 @mcp.tool()
@@ -10396,32 +9151,19 @@ def master_orchestrate(
     except master_orchestrator.fleet_provenance.ProvenanceError as exc:
         return "ERROR: invalid fleet objective contract: %s" % exc
     inferred_worker_cap = master_orchestrator.requested_worker_cap(task)
-    raw_worker_cap = worker_cap
-    if (worker_cap is None or worker_cap == 0) and not isinstance(worker_cap, bool):
-        worker_cap = inferred_worker_cap
-    worker_cap_supplied = worker_cap is not None and worker_cap != 0
-    if worker_cap_supplied:
-        cap_probe = master_orchestrator.capacity(agents or None, worker_cap=worker_cap)
-        if cap_probe.get("worker_cap_error"):
-            return "ERROR: invalid worker_cap: %s" % cap_probe["worker_cap_error"]
-        worker_cap = int(cap_probe["requested_worker_cap"])
-        if not agents:
-            agents = worker_cap
-    elif isinstance(raw_worker_cap, bool):
-        return "ERROR: invalid worker_cap: boolean values are not worker counts"
-    else:
-        worker_cap = None
-    mode = (mode or "ask").strip().lower()
-    mode = {
-        "delagte": "delegate",
-        "delegte": "delegate",
-        "paralell": "parallel",
-        "inlne": "inline",
-        "workflow": "fleet",
-    }.get(mode, mode)
-    if fleet_prefix or master_orchestrator.requests_fleet(task):
-        if mode in ("ask", "choose", "prompt", "delegate", "delegated", "agents", "parallel"):
-            mode = "fleet"
+    worker_cap, agents, cap_error = _orchestration_helpers_core.resolve_worker_cap(
+        worker_cap,
+        inferred_worker_cap=inferred_worker_cap,
+        agents=agents,
+        capacity_fn=master_orchestrator.capacity,
+    )
+    if cap_error:
+        err = "ERROR: " + cap_error
+        return err
+    mode = _orchestration_helpers_core.normalize_orchestrate_mode(
+        mode,
+        fleet_requested=bool(fleet_prefix or master_orchestrator.requests_fleet(task)),
+    )
     if mode in ("ask", "choose", "prompt"):
         if worker_cap:
             delegate_count = fleet_count = min(
@@ -10568,32 +9310,15 @@ def master_orchestrate(
             **({"build_workspace": True} if build_workspace else {}),
         )
         if run_fleet_in_background:
-            return "\n".join([
-                "master orchestration started",
-                "mode: fleet | master=%s | agents=%d" % (
-                    result["master_id"], len(result.get("agents") or []),
-                ),
-                "worker slots: %d (bounded concurrent model calls)" % (
-                    result.get("worker_slots", 1)
-                ),
-                master_orchestrator.fleet_briefing.format_plan(
-                    task, len(result.get("agents") or []), result.get("worker_slots", 1),
-                    greenfield=not needs_repo_tools, output_workspace=result.get("output_workspace", ""),
-                ),
-                "monitor: master_status() | cancel: master_cancel('%s')" % (
-                    result["master_id"]
-                ),
-            ])
-        lines = [
-            "master orchestration complete",
-            "mode: %s | master=%s | agents=%d" % (
-                "fleet" if mode in ("fleet", "swarm", "fanout") else "delegated",
-                result["master_id"], len(result.get("agents") or [])),
-            "worker slots used: %d (bounded concurrent model calls)" % result.get("worker_slots", 1),
-            "",
-            result["output"],
-        ]
-        return "\n".join(lines).strip()
+            return _orchestration_helpers_core.format_fleet_started_report(
+                result,
+                task=task,
+                needs_repo_tools=needs_repo_tools,
+                format_plan_fn=master_orchestrator.fleet_briefing.format_plan,
+            )
+        return _orchestration_helpers_core.format_delegated_complete_report(
+            result, mode=mode,
+        )
     return "ERROR: unknown mode '%s'. Use ask, inline, delegate, or fleet." % mode
 
 
@@ -10690,70 +9415,22 @@ def master_retry(agent_id: str, tier: str = "") -> str:
     if not selector:
         return "ERROR: agent_id is required; pass an exact master ID or unique prefix."
     candidate = master_orchestrator.recovery_candidate(selector)
-    if not candidate:
-        return "ERROR: no unambiguous persisted master matched %r." % selector
-    status = candidate.get("status") or ""
-    if status not in ("interrupted", "failed", "task_drift", "cancelled"):
-        return "ERROR: master %s is %s; only interrupted/failed/cancelled work or task_drift work can be retried." % (
-            candidate["id"], status or "unknown",
+    retry_kwargs, status, mode, agents, retry_tier, plan_error = (
+        _orchestration_helpers_core.validate_and_plan_master_retry(
+            candidate,
+            selector=selector,
+            tier=tier,
+            parse_objectives=master_orchestrator.fleet_provenance.parse_objectives,
+            provenance_error_type=master_orchestrator.fleet_provenance.ProvenanceError,
+            task_digest=master_orchestrator.fleet_provenance.task_digest,
+            is_dir=os.path.isdir,
         )
-    task = (candidate.get("task") or "").strip()
-    if not task:
-        return "ERROR: persisted master %s has no recoverable task text." % candidate["id"]
-    try:
-        objectives = master_orchestrator.fleet_provenance.parse_objectives(task)
-    except master_orchestrator.fleet_provenance.ProvenanceError as exc:
-        return "ERROR: persisted master provenance is invalid: %s" % exc
-    stored_digest = str(candidate.get("master_task_digest") or "")
-    recovered_digest = master_orchestrator.fleet_provenance.task_digest(task)
-    stored_objective_ids = list(candidate.get("objective_ids") or ())
-    recovered_objective_ids = [
-        objective.objective_id for objective in objectives
-    ]
-    if stored_digest and stored_digest != recovered_digest:
-        return (
-            "ERROR: persisted master task text no longer matches its immutable digest; "
-            "start a fresh orchestration instead of retrying changed work."
-        )
-    if stored_objective_ids != recovered_objective_ids:
-        return (
-            "ERROR: persisted master objective IDs no longer match the task contract; "
-            "start a fresh orchestration instead of retrying ambiguous work."
-        )
-    if objectives and not stored_digest:
-        return (
-            "ERROR: protected legacy master has no immutable task digest; start a "
-            "fresh orchestration instead of retrying unverifiable work."
-        )
-    mode = (candidate.get("mode") or "delegated").lower()
-    if mode not in (
-        "inline", "master", "delegate", "delegated", "agents", "parallel",
-        "fleet", "swarm", "fanout",
-    ):
-        mode = "delegated"
-    agents = int(candidate.get("requested_agents") or 3)
-    retry_tier = str(tier or "code").strip() or "code"
-    retry_kwargs = {
-        "task": task, "mode": mode, "agents": agents, "tier": retry_tier,
-        "learn": False, "retry_of": candidate["id"],
-    }
-    retry_project = str(candidate.get("project") or "").strip()
-    if not retry_project:
-        # Compatibility for masters created by a still-running pre-project
-        # fleet_store module.  New orchestrators mirror the canonical project
-        # root into files_json, which the old persistence path already knows
-        # how to save, until live reload reaches fleet_store itself.
-        for persisted_path in candidate.get("files") or ():
-            value = str(persisted_path or "").strip()
-            if value and os.path.isdir(value):
-                retry_project = value
-                break
-    if retry_project:
-        retry_kwargs["project"] = retry_project
+    )
+    if plan_error:
+        err = "ERROR: " + plan_error
+        return err
     # Idempotency fence: two concurrent (or rapidly repeated) retries of the
-    # same persisted master must not both replay a full fleet.  The pending
-    # lease bridges only this dispatch; once the retry master row is durable it
-    # carries the fence itself, so the lease is always released afterwards.
+    # same persisted master must not both replay a full fleet.
     retry_lease = None
     if master_orchestrator.retry_fence_available() and master_orchestrator.fleet_store.get_agent(
         candidate["id"], role="master",
@@ -10773,17 +9450,14 @@ def master_retry(agent_id: str, tier: str = "") -> str:
             master_orchestrator.release_retry_lease(
                 candidate["id"], retry_lease["token"],
             )
-    return "\n".join([
-        "persisted master retry",
-        "  source: %s [%s] | mode: %s | agents: %d" % (
-            candidate["id"], status, mode, agents,
-        ),
-        "  tier: %s (explicit/local-safe default; original=%s)" % (
-            retry_tier, candidate.get("tier") or "unknown",
-        ),
-        "",
-        result,
-    ]).strip()
+    return _orchestration_helpers_core.format_master_retry_report(
+        candidate,
+        status=status,
+        mode=mode,
+        agents=agents,
+        retry_tier=retry_tier,
+        result=result,
+    )
 
 
 def _admin_account_from_token(token: str):
@@ -12092,104 +10766,39 @@ def context_pack(
     per_file_limit = _context_pack_int(
         max_bytes_per_file, 64000, file_ops.MAX_READ_BYTES,
     )
-    selected = paths[:file_limit]
-    omitted = max(0, len(paths) - len(selected))
-    remaining = total_limit
-    emitted = 0
-    errors = 0
-    truncated_files = 0
-    sections = []
     bypass = _file_bypass_allowed(token, approval)
     developer_authorized = _file_developer_allowed(token)
-
-    for index, requested in enumerate(selected, 1):
-        display = requested.replace("\r", "\\r").replace("\n", "\\n")
-        header = "%s%d/%d: %s =====" % (
-            _CONTEXT_PACK_SECTION_PREFIX, index, len(selected), display,
-        )
-        if remaining <= 0:
-            truncated_files += 1
-            sections.append("\n".join([
-                header,
-                "status: skipped",
-                "included-bytes: 0",
-                "truncated: true (total byte budget exhausted)",
-            ]))
-            continue
-        read_limit = min(per_file_limit, remaining)
-        try:
-            data = file_ops.read_file(
-                requested,
-                max_bytes=read_limit,
-                extra_roots=extra_roots,
-                bypass=bypass,
-                developer_authorized=developer_authorized,
-            )
-            body, body_bytes, decode_truncated = _context_pack_utf8_prefix(
-                data.get("text", ""), read_limit,
-            )
-            source_bytes = int(data.get("bytes", 0))
-            was_truncated = bool(data.get("truncated")) or decode_truncated
-            reason = ""
-            if was_truncated:
-                truncated_files += 1
-                reason = (
-                    "total byte budget"
-                    if read_limit < per_file_limit
-                    else "per-file byte cap"
-                )
-            emitted += body_bytes
-            remaining -= body_bytes
-            lines = [
-                header,
-                "status: ok",
-                "source-bytes: %d" % source_bytes,
-                "included-bytes: %d" % body_bytes,
-                "truncated: %s%s" % (
-                    "true" if was_truncated else "false",
-                    " (%s)" % reason if reason else "",
-                ),
-                "",
-                body,
-            ]
-            sections.append("\n".join(lines))
-        except Exception as exc:
-            errors += 1
-            sections.append("\n".join([
-                header,
-                "status: error",
-                "included-bytes: 0",
-                "truncated: false",
-                "error: %s: %s" % (type(exc).__name__, exc),
-            ]))
-
-    pack_truncated = bool(omitted or truncated_files)
-    summary = (
-        "context pack: requested=%d selected=%d emitted-bytes=%d "
-        "max-files=%d max-total-bytes=%d max-bytes-per-file=%d errors=%d"
-        % (
-            len(paths), len(selected), emitted, file_limit, total_limit,
-            per_file_limit, errors,
-        )
-    )
-    truncation = "pack-truncated: %s" % ("true" if pack_truncated else "false")
-    if omitted:
-        truncation += " (%d file(s) omitted by max-files)" % omitted
-    output = "\n\n".join([summary, truncation] + sections)
-    _record_direct_tool(
-        "context_pack", args, ok=(errors == 0), started=started,
-        summary="%d file(s), %d body byte(s), %d error(s)" % (
-            len(selected), emitted, errors,
+    packed = _workspace_tools_core.assemble_context_pack(
+        paths,
+        file_limit=file_limit,
+        total_limit=total_limit,
+        per_file_limit=per_file_limit,
+        section_prefix=_CONTEXT_PACK_SECTION_PREFIX,
+        read_file_fn=lambda requested, read_limit: file_ops.read_file(
+            requested,
+            max_bytes=read_limit,
+            extra_roots=extra_roots,
+            bypass=bypass,
+            developer_authorized=developer_authorized,
         ),
-        output=output,
+        utf8_prefix_fn=_context_pack_utf8_prefix,
+    )
+    _record_direct_tool(
+        "context_pack", args, ok=(packed.error_count == 0), started=started,
+        summary="%d file(s), %d body byte(s), %d error(s)" % (
+            packed.selected_count, packed.emitted_bytes, packed.error_count,
+        ),
+        output=packed.output,
     )
     activity_tracker.record_event(
         "context_pack",
         summary="%d file(s), %d body byte(s)%s" % (
-            len(selected), emitted, " truncated" if pack_truncated else "",
+            packed.selected_count,
+            packed.emitted_bytes,
+            " truncated" if packed.pack_truncated else "",
         ),
     )
-    return output
+    return packed.output
 
 
 @mcp.tool()
@@ -13487,105 +12096,13 @@ def _static_test_discover(root: str = ".", framework: str = "auto") -> dict:
     pytest, cargo, go, jest, vitest, or dotnet (zero repo code execution and
     zero ``__pycache__``/``.pytest_cache``/``target`` writes).
     """
-    import ast as _ast
-
     resolved = Path(harness_tools._resolve_root(root))
-    fw = str(framework or "auto").strip().lower() or "auto"
-    if fw == "auto":
-        if (resolved / "Cargo.toml").is_file():
-            fw = "cargo"
-        elif (resolved / "go.mod").is_file():
-            fw = "go"
-        elif any(resolved.glob("*.csproj")) or any(resolved.glob("*.sln")):
-            fw = "dotnet"
-        elif (resolved / "vitest.config.ts").is_file() or (resolved / "vitest.config.js").is_file():
-            fw = "vitest"
-        elif (resolved / "jest.config.js").is_file() or (resolved / "jest.config.ts").is_file():
-            fw = "jest"
-        else:
-            fw = "pytest"
-
-    skip_dirs = {
-        ".git", ".hg", ".svn", ".pytest_cache", "__pycache__", "node_modules",
-        "target", "dist", "build", ".venv", "venv", ".mypy_cache", ".ruff_cache",
-    }
-    test_files: list[str] = []
-    test_count = 0
-    max_files = 500
-
-    for dirpath, dirnames, filenames in os.walk(resolved, followlinks=False):
-        cur = Path(dirpath)
-        kept: list[str] = []
-        for d in sorted(dirnames):
-            if d in skip_dirs or d.startswith("."):
-                continue
-            cand = cur / d
-            if cand.is_symlink() or file_ops._is_reparse_point(cand):
-                continue
-            if file_ops.is_credential_store(cand):
-                continue
-            kept.append(d)
-        dirnames[:] = kept
-        for fname in sorted(filenames):
-            if len(test_files) >= max_files:
-                break
-            fpath = cur / fname
-            if fpath.is_symlink() or file_ops._is_reparse_point(fpath):
-                continue
-            if file_ops.is_credential_store(fpath):
-                continue
-            rel = fpath.relative_to(resolved).as_posix()
-            lower = fname.lower()
-            is_py_test = lower.endswith(".py") and (
-                lower.startswith("test_") or lower.endswith("_test.py")
-            )
-            is_js_test = bool(re.search(r"\.(test|spec)\.(js|jsx|ts|tsx|mjs|cjs)$", lower))
-            is_go_test = lower.endswith("_test.go")
-            is_rs_test = lower.endswith(".rs") and (
-                "/tests/" in ("/" + rel) or lower.endswith("_test.rs")
-            )
-            is_cs_test = lower.endswith("tests.cs") or lower.endswith("test.cs")
-            matched = (
-                (fw in ("pytest", "unittest") and is_py_test)
-                or (fw in ("jest", "vitest") and is_js_test)
-                or (fw == "go" and is_go_test)
-                or (fw == "cargo" and is_rs_test)
-                or (fw == "dotnet" and is_cs_test)
-            )
-            if not matched:
-                continue
-            test_files.append(rel)
-            try:
-                raw = fpath.read_bytes()[:262144].decode("utf-8", errors="replace")
-            except OSError:
-                continue
-            if is_py_test:
-                try:
-                    tree = _ast.parse(raw, filename=rel)
-                    test_count += sum(
-                        1 for node in _ast.walk(tree)
-                        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef))
-                        and node.name.startswith("test_")
-                    )
-                except SyntaxError:
-                    pass
-            elif is_js_test:
-                test_count += len(re.findall(r"\b(?:it|test)\s*\(", raw))
-            elif is_go_test:
-                test_count += len(re.findall(r"^\s*func\s+Test\w*\s*\(", raw, re.MULTILINE))
-            elif is_rs_test:
-                test_count += len(re.findall(r"#\[\s*(?:tokio::)?test\b", raw))
-            elif is_cs_test:
-                test_count += len(re.findall(r"\[\s*(?:Fact|Theory|Test|TestMethod)\b", raw))
-        if len(test_files) >= max_files:
-            break
-
-    return {
-        "framework": fw,
-        "test_count": test_count,
-        "test_files": test_files,
-        "static_only": True,
-    }
+    return _workspace_tools_core.static_discover_tests(
+        resolved,
+        framework,
+        is_reparse_point=file_ops._is_reparse_point,
+        is_credential_store=file_ops.is_credential_store,
+    )
 
 
 @mcp.tool()
@@ -16444,26 +14961,7 @@ def game_generate_and_test(
             ok=False, started=started, summary=str(exc),
         )
         return "ERROR: %s" % exc
-    lines = [
-        "generated game: %s" % ("PASS" if result["ok"] else "FAIL"),
-        "  target: %s / %s" % (result["language"], result["dimension"]),
-        "  attempts: %d" % len(result["attempts"]),
-        "  model result: %s | reference fallback: %s" % (
-            "PASS" if result.get("model_ok") else "FAIL",
-            "used" if result.get("fallback_used") else "not used",
-        ),
-        "  root: %s" % result["root"],
-    ]
-    for attempt in result["attempts"]:
-        lines.append("  [%s] attempt %d (%s) iid=%s" % (
-            "PASS" if attempt["ok"] else "FAIL",
-            attempt["attempt"], attempt.get("kind", "model"), attempt.get("iid") or "-",
-        ))
-        if attempt.get("output"):
-            lines.append(str(attempt["output"])[:1200])
-        if attempt.get("record"):
-            lines.append(str(attempt["record"])[:500])
-    output = "\n".join(lines)
+    output = _campaign_helpers_core.format_game_generate_report(result)
     if result.get("root"):
         activity_tracker.record_file_change(
             "create", result["root"], summary="generated persistent game project",
@@ -16514,22 +15012,9 @@ def game_generation_campaign(
         )
     except ValueError as exc:
         return "ERROR: %s" % exc
-    language_order = tuple(dict.fromkeys(
-        item_language for item_language, _ in game_forge.DEFAULT_MATRIX
-    ))
-    if target_language and target_dimension:
-        matrix = ((target_language, target_dimension),)
-    elif target_language:
-        matrix = tuple(
-            (target_language, item_dimension)
-            for item_dimension in ("2d", "2.5d", "3d")
-        )
-    elif target_dimension:
-        matrix = tuple(
-            (item_language, target_dimension) for item_language in language_order
-        )
-    else:
-        matrix = game_forge.DEFAULT_MATRIX
+    matrix = _campaign_helpers_core.resolve_game_campaign_matrix(
+        target_language, target_dimension, game_forge.DEFAULT_MATRIX,
+    )
     total = max(1, min(int(total or 1), 12))
     workers = max(1, min(int(max_workers or 1), 4, total))
     timeout = max(2, min(int(timeout or 30), 60))
@@ -16563,33 +15048,14 @@ def game_generation_campaign(
         for future in as_completed(futures):
             results[futures[future]] = future.result()
     elapsed = round(time.time() - started, 3)
-    passed = sum(1 for result in results if result and result.get("ok"))
-    model_passed = sum(1 for result in results if result and result.get("model_ok"))
-    fallback_passed = sum(
-        1 for result in results
-        if result and result.get("ok") and result.get("fallback_used")
+    output, passed = _campaign_helpers_core.format_game_campaign_report(
+        results,
+        total=total,
+        elapsed=elapsed,
+        workers=workers,
+        target_language=target_language,
+        target_dimension=target_dimension,
     )
-    lines = [
-        "greenfield game campaign: %d/%d runnable in %.3fs "
-        "(model=%d, reference-fallback=%d, workers=%d, target=%s/%s)" % (
-            passed, total, elapsed, model_passed, fallback_passed, workers,
-            target_language or "mixed", target_dimension or "mixed",
-        ),
-    ]
-    for result in results:
-        final = result["attempts"][-1]
-        lines.append("[%s] %s/%s model=%s fallback=%s attempts=%d root=%s" % (
-            "PASS" if result.get("ok") else "FAIL",
-            result.get("language"), result.get("dimension"),
-            "PASS" if result.get("model_ok") else "FAIL",
-            "yes" if result.get("fallback_used") else "no",
-            len(result.get("attempts") or []), result.get("root") or "-",
-        ))
-        if final.get("output"):
-            lines.append(str(final["output"])[:900])
-        if final.get("record"):
-            lines.append(str(final["record"])[:400])
-    output = "\n".join(lines)
     for result in results:
         if result and result.get("root"):
             activity_tracker.record_file_change(
@@ -16659,10 +15125,7 @@ def _loop_permission_refusal(action_type, arguments=None):
 
 def _loop_dispatch(action):
     action_type = (action.get("type") or action.get("action") or "code").strip().lower()
-    activity_args = {
-        k: v for k, v in (action or {}).items()
-        if k not in {"code", "content", "files"}
-    }
+    activity_args = _loop_helpers_core.extract_loop_activity_args(action)
     refusal = _loop_permission_refusal(action_type, action)
     if refusal is not None:
         # A refused action never entered the queue.  Recording it as a normal
@@ -16676,519 +15139,158 @@ def _loop_dispatch(action):
     activity_tracker.record_tool_call(
         "loop:%s" % action_type, activity_args, summary="loop action queued",
     )
+    _kw = _loop_helpers_core.loop_action_kwargs
     if action_type in ("code", "run_code"):
-        result = code_runner.run_code(
-            code=action.get("code", ""),
-            language=action.get("language", "python"),
-            stdin=action.get("stdin", ""),
-            timeout=action.get("timeout", 10),
-            cwd=action.get("cwd") or None,
-        )
-        rc = result.get("returncode")
-        summary = result.get("error") or "returncode %s" % (
-            "(none)" if rc is None else rc
-        )
-        return {
-            "ok": result.get("ok"),
-            "type": "code",
-            "summary": summary,
-            "output": code_runner.format_result(result),
-        }
+        result = code_runner.run_code(**_kw("code", action))
+        return _loop_helpers_core.format_code_loop_result(result, code_runner.format_result(result))
     if action_type in ("project", "run_project"):
         try:
-            result = code_runner.run_project(
-                files_json=action.get("files") or action.get("files_json") or [],
-                commands_json=action.get("commands") or action.get("commands_json") or "",
-                stdin=action.get("stdin", ""),
-                timeout=action.get("timeout", 60),
-            )
+            result = code_runner.run_project(**_kw("project", action))
         except ValueError as e:
-            return {
-                "ok": False,
-                "type": "project",
-                "summary": str(e),
-                "output": "",
-            }
-        return {
-            "ok": result.get("ok"),
-            "type": "project",
-            "summary": "project %s" % ("ok" if result.get("ok") else "failed"),
-            "output": code_runner.format_project_result(result),
-        }
+            return _loop_helpers_core.format_project_loop_error(str(e))
+        return _loop_helpers_core.format_project_loop_result(result, code_runner.format_project_result(result))
     if action_type in ("artifact", "artifact_generate", "assetgen"):
-        return _loop_text_result("artifact_generate", artifact_generate(
-            name=action.get("name", "generated-artifact"),
-            brief=action.get("brief", action.get("prompt", "")),
-            kinds=action.get("kinds", "auto"),
-            dimension=action.get("dimension", "auto"),
-            theme=action.get("theme", "auto"),
-            seed=action.get("seed"),
-            output_dir=action.get("output_dir", ""),
-        ))
+        return _loop_text_result("artifact_generate", artifact_generate(**_kw("artifact_generate", action)))
     if action_type in ("artifact_ground", "artifact_check"):
-        return _loop_verdict_result("artifact_ground", artifact_ground(
-            path=action.get("path", ""),
-            recipe=action.get("recipe", "auto"),
-            requirements_json=action.get("requirements", action.get("requirements_json", "")),
-        ), "artifact grounding: PASS")
+        return _loop_verdict_result("artifact_ground", artifact_ground(**_kw("artifact_ground", action)), "artifact grounding: PASS")
     if action_type in ("game_reference", "game_reference_suite"):
-        return _loop_text_result("game_reference_suite", game_reference_suite(
-            name=action.get("name", "sonder-reference"),
-            theme=action.get("theme", "arcane"),
-            seed=action.get("seed", 1337),
-            max_workers=action.get("max_workers", 2),
-            timeout=action.get("timeout", 30),
-        ))
+        return _loop_text_result("game_reference_suite", game_reference_suite(**_kw("game_reference_suite", action)))
     if action_type in ("game", "game_generate", "game_generate_and_test"):
-        return _loop_text_result("game_generate_and_test", game_generate_and_test(
-            name=action.get("name", "generated-game"),
-            concept=action.get("concept", action.get("prompt", "")),
-            language=action.get("language", "python"),
-            dimension=action.get("dimension", "2d"),
-            theme=action.get("theme", "arcane"),
-            seed=action.get("seed", 1337),
-            tier=action.get("tier", "code"),
-            timeout=action.get("timeout", 30),
-            repair_rounds=action.get("repair_rounds"),
-        ))
+        return _loop_text_result("game_generate_and_test", game_generate_and_test(**_kw("game_generate_and_test", action)))
     if action_type in ("game_campaign", "game_generation_campaign"):
-        return _loop_text_result("game_generation_campaign", game_generation_campaign(
-            name=action.get("name", "game-fleet"),
-            concept=action.get("concept", action.get("prompt", "compact action game")),
-            total=action.get("total", 6),
-            language=action.get("language", ""),
-            dimension=action.get("dimension", ""),
-            theme=action.get("theme", "arcane"),
-            tier=action.get("tier", "code"),
-            max_workers=action.get("max_workers", 2),
-            timeout=action.get("timeout", 30),
-            repair_rounds=action.get("repair_rounds"),
-        ))
+        return _loop_text_result("game_generation_campaign", game_generation_campaign(**_kw("game_generation_campaign", action)))
     if action_type == "offload":
-        return _loop_text_result("offload", offload(
-            prompt=action.get("prompt", ""),
-            tier=action.get("tier", "fast"),
-            system=action.get("system", ""),
-            temperature=action.get("temperature", 0.2),
-            num_predict=action.get("num_predict", 1024),
-            num_ctx=action.get("num_ctx", 4096),
-            learn=action.get("learn", True),
-        ))
+        return _loop_text_result("offload", offload(**_kw("offload", action)))
     if action_type == "sonder":
-        # sonder() hands this project to control_command, whose ``/master`` branch
-        # starts a fleet rooted there: the same model- or caller-written project
-        # as the ``master`` action below, so it takes the same file-roots check.
         project_refusal = served_project_refusal(action.get("project", ""))
         if project_refusal:
             return {**_loop_text_result("sonder", project_refusal), "ok": False}
-        return _loop_text_result("sonder", sonder(
-            prompt=action.get("prompt", ""),
-            system=action.get("system", ""),
-            temperature=action.get("temperature", 0.2),
-            num_predict=action.get("num_predict", 1024),
-            num_ctx=action.get("num_ctx", 4096),
-            context_size=action.get("context_size", ""),
-            trace=action.get("trace", False),
-            strict=action.get("strict"),
-            persona=action.get("persona", ""),
-            session=action.get("session", ""),
-            project=action.get("project", ""),
-            tier=action.get("tier", ""),
-        ))
+        return _loop_text_result("sonder", sonder(**_kw("sonder", action)))
     if action_type == "status":
         return _loop_text_result("status", status())
     if action_type == "diagnostics":
         return _loop_text_result("diagnostics", diagnostics())
     if action_type == "context_health":
-        return _loop_text_result("context_health", context_health(
-            session=action.get("session", ""),
-            project=action.get("project", ""),
-        ))
+        return _loop_text_result("context_health", context_health(**_kw("context_health", action)))
     if action_type == "learning_health":
         return _loop_text_result("learning_health", learning_health_status())
     if action_type == "memory_quality_report":
-        return _loop_text_result("memory_quality_report", memory_quality_report(
-            sample_limit=action.get("sample_limit", 5),
-        ))
+        return _loop_text_result("memory_quality_report", memory_quality_report(**_kw("memory_quality_report", action)))
     if action_type == "memory_quality_repair":
-        return _loop_text_result("memory_quality_repair", memory_quality_repair(
-            apply=action.get("apply") is True,
-        ))
+        return _loop_text_result("memory_quality_repair", memory_quality_repair(**_kw("memory_quality_repair", action)))
     if action_type == "memory_privacy_review":
-        return _loop_text_result("memory_privacy_review", memory_privacy_review(
-            sample_limit=action.get("sample_limit", 20),
-        ))
+        return _loop_text_result("memory_privacy_review", memory_privacy_review(**_kw("memory_privacy_review", action)))
     if action_type == "memory_privacy_repair":
-        return _loop_text_result("memory_privacy_repair", memory_privacy_repair(
-            lesson_ids_json=action.get("lesson_ids", action.get("lesson_ids_json", [])),
-            apply=action.get("apply") is True,
-        ))
+        return _loop_text_result("memory_privacy_repair", memory_privacy_repair(**_kw("memory_privacy_repair", action)))
     if action_type == "memory_embedding_backfill":
-        return _loop_text_result("memory_embedding_backfill", memory_embedding_backfill(
-            limit=action.get("limit", 25), apply=action.get("apply") is True,
-        ))
+        return _loop_text_result("memory_embedding_backfill", memory_embedding_backfill(**_kw("memory_embedding_backfill", action)))
     if action_type == "memory_interaction_embedding_backfill":
-        return _loop_text_result(
-            "memory_interaction_embedding_backfill",
-            memory_interaction_embedding_backfill(
-                limit=action.get("limit", 25), apply=action.get("apply") is True,
-            ),
-        )
+        return _loop_text_result("memory_interaction_embedding_backfill", memory_interaction_embedding_backfill(**_kw("memory_interaction_embedding_backfill", action)))
     if action_type in ("improvement_report", "system_improvement_report"):
-        return _loop_text_result("improvement_report", system_improvement_report(
-            session=action.get("session", ""),
-            project=action.get("project", ""),
-        ))
+        return _loop_text_result("improvement_report", system_improvement_report(**_kw("improvement_report", action)))
     if action_type in ("master_status", "agent_status"):
-        return _loop_text_result("master_status", master_status(
-            include_finished=action.get("include_finished", True),
-            limit=action.get("limit", 20),
-        ))
+        return _loop_text_result("master_status", master_status(**_kw("master_status", action)))
     if action_type in ("master_capacity", "agent_capacity"):
-        capacity_args = {
-            "requested_agents": action.get("requested_agents", action.get("agents", 0)),
-        }
-        if "worker_cap" in action:
-            capacity_args["worker_cap"] = action.get("worker_cap")
-        return _loop_text_result("master_capacity", master_capacity(**capacity_args))
+        return _loop_text_result("master_capacity", master_capacity(**_kw("master_capacity", action)))
     if action_type in ("master_cancel", "agent_cancel"):
-        return _loop_text_result("master_cancel", master_cancel(
-            agent_id=action.get("agent_id", action.get("selector", "")),
-        ))
+        return _loop_text_result("master_cancel", master_cancel(**_kw("master_cancel", action)))
     if action_type in ("master_retry", "agent_retry"):
-        return _loop_text_result("master_retry", master_retry(
-            agent_id=action.get("agent_id", action.get("selector", "")),
-            tier=action.get("tier", ""),
-        ))
+        return _loop_text_result("master_retry", master_retry(**_kw("master_retry", action)))
     if action_type in ("master", "master_orchestrate"):
-        # A loop action's project is model- or caller-written (also over HTTP
-        # ``/loop``), never the operator's selection: it must stay inside the file roots.
         project_refusal = served_project_refusal(action.get("project", ""))
         if project_refusal:
             return {**_loop_text_result("master_orchestrate", project_refusal), "ok": False}
-        return _loop_text_result("master_orchestrate", master_orchestrate(
-            task=action.get("task", action.get("prompt", "")),
-            mode=action.get("mode", "ask"),
-            agents=action.get("agents", 0),
-            worker_cap=action.get("worker_cap", 0),
-            tier=action.get("tier", "auto"),
-            learn=action.get("learn", False),
-            project=action.get("project", ""),
-        ))
+        return _loop_text_result("master_orchestrate", master_orchestrate(**_kw("master_orchestrate", action)))
     if action_type in ("work", "agent", "workbench_agent"):
         with _restricted_tool_lane.suppressed():  # a model chose this action: never a restricted entry
-            return _loop_text_result("workbench_agent", workbench_agent(prompt=action.get("task", action.get("prompt", "")), tier=action.get("tier", "auto"), max_steps=action.get("max_steps", 12),
-                                                                      allow_web=action.get("allow_web", True), project=action.get("project", ""), allow_location=action.get("allow_location", False)))
+            return _loop_text_result("workbench_agent", workbench_agent(**_kw("workbench_agent", action)))
     if action_type == "workspace_inventory":
-        return _loop_text_result("workspace_inventory", workspace_inventory(
-            path=action.get("path", action.get("root", ".")),
-            max_entries=action.get("max_entries", 20000),
-            timeout_seconds=action.get("timeout_seconds", 10.0),
-            top_n=action.get("top_n", 15),
-            include_hidden=action.get("include_hidden", False),
-            include_ignored=action.get("include_ignored", False),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("workspace_inventory", workspace_inventory(**_kw("workspace_inventory", action)))
     if action_type == "directory_tree":
-        return _loop_text_result("directory_tree", directory_tree(
-            path=action.get("path", "."),
-            depth=action.get("depth", 2),
-            max_entries=action.get("max_entries", 200),
-            include_hidden=action.get("include_hidden", False),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("directory_tree", directory_tree(**_kw("directory_tree", action)))
     if action_type == "directory_create":
-        return _loop_text_result("directory_create", directory_create(
-            path=action.get("path", ""),
-            parents=action.get("parents", True),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("directory_create", directory_create(**_kw("directory_create", action)))
     if action_type == "file_read_range":
-        return _loop_text_result("file_read_range", file_read_range(
-            path=action.get("path", ""),
-            start_line=action.get("start_line", 1),
-            end_line=action.get("end_line", 200),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("file_read_range", file_read_range(**_kw("file_read_range", action)))
     if action_type == "text_search":
-        return _loop_text_result("text_search", text_search(
-            query=action.get("query", ""),
-            root=action.get("root", "."),
-            glob=action.get("glob", "*"),
-            regex=action.get("regex", False),
-            case_sensitive=action.get("case_sensitive", False),
-            max_results=action.get("max_results", 100),
-            max_entries=action.get("max_entries", 20000),
-            timeout_seconds=action.get("timeout_seconds", 10.0),
-            include_hidden=action.get("include_hidden", False),
-            include_ignored=action.get("include_ignored", False),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("text_search", text_search(**_kw("text_search", action)))
     if action_type == "script_search":
-        return _loop_text_result("script_search", script_search(
-            query=action.get("query", "*"),
-            root=action.get("root", "."),
-            max_results=action.get("max_results", 100),
-            max_entries=action.get("max_entries", 20000),
-            timeout_seconds=action.get("timeout_seconds", 10.0),
-            include_hidden=action.get("include_hidden", False),
-            include_ignored=action.get("include_ignored", False),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("script_search", script_search(**_kw("script_search", action)))
     if action_type == "program_search":
-        return _loop_text_result("program_search", program_search(
-            query=action.get("query", "*"),
-            max_results=action.get("max_results", 100),
-        ))
+        return _loop_text_result("program_search", program_search(**_kw("program_search", action)))
     if action_type == "workspace_run":
-        return _loop_text_result("workspace_run", workspace_run(
-            program=action.get("program", ""),
-            args_json=action.get("args", action.get("args_json", [])),
-            cwd=action.get("cwd", "."),
-            stdin=action.get("stdin", ""),
-            timeout=action.get("timeout", 30),
-            max_output=action.get("max_output", 128000),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("workspace_run", workspace_run(**_kw("workspace_run", action)))
     if action_type == "script_run":
-        return _loop_text_result("script_run", script_run(
-            path=action.get("path", ""),
-            args_json=action.get("args", action.get("args_json", [])),
-            cwd=action.get("cwd", ""),
-            stdin=action.get("stdin", ""),
-            timeout=action.get("timeout", 30),
-            max_output=action.get("max_output", 128000),
-            risk_policy=action.get("risk_policy", ""),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("script_run", script_run(**_kw("script_run", action)))
     if action_type == "artifact_risk_inspect":
-        return _loop_text_result("artifact_risk_inspect", artifact_risk_inspect(
-            path=action.get("path", ""),
-            max_scan_bytes=action.get("max_scan_bytes", 16 * 1024 * 1024),
-            max_seconds=action.get("max_seconds", 5.0),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("artifact_risk_inspect", artifact_risk_inspect(**_kw("artifact_risk_inspect", action)))
     if action_type == "process_list":
-        return _loop_text_result("process_list", process_list(
-            max_processes=action.get("max_processes", 128),
-            max_seconds=action.get("max_seconds", 0.5),
-        ))
+        return _loop_text_result("process_list", process_list(**_kw("process_list", action)))
     if action_type == "process_memory_risk_inspect":
-        return _loop_text_result(
-            "process_memory_risk_inspect", process_memory_risk_inspect(
-                pid=action.get("pid", 0),
-                max_bytes=action.get("max_bytes", 4 * 1024 * 1024),
-                max_regions=action.get("max_regions", 256),
-                max_seconds=action.get("max_seconds", 1.0),
-            ),
-        )
+        return _loop_text_result("process_memory_risk_inspect", process_memory_risk_inspect(**_kw("process_memory_risk_inspect", action)))
     if action_type == "image_inspect":
-        return _loop_text_result("image_inspect", image_inspect(
-            path=action.get("path", ""),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("image_inspect", image_inspect(**_kw("image_inspect", action)))
     if action_type == "data_inspect":
-        return _loop_text_result("data_inspect", data_inspect(
-            path=action.get("path", ""),
-            max_bytes=action.get("max_bytes", 256000),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("data_inspect", data_inspect(**_kw("data_inspect", action)))
     if action_type == "checklist_create":
-        items = action.get("items", action.get("items_json", []))
-        return _loop_text_result("checklist_create", checklist_create(
-            title=action.get("title", "Workflow checklist"),
-            items_json=items if isinstance(items, str) else json.dumps(items),
-            project=action.get("project", ""),
-            owner=action.get("owner", "workflow"),
-            priority=action.get("priority", 1),
-        ))
+        return _loop_text_result("checklist_create", checklist_create(**_kw("checklist_create", action)))
     if action_type == "checklist_update":
-        return _loop_text_result("checklist_update", checklist_update(
-            checklist_id=action.get("checklist_id", action.get("id", "")),
-            item=str(action.get("item", "")),
-            status=action.get("status", "in_progress"),
-            note=action.get("note", ""),
-        ))
+        return _loop_text_result("checklist_update", checklist_update(**_kw("checklist_update", action)))
     if action_type == "checklist_show":
-        return _loop_text_result("checklist_show", checklist_show(
-            checklist_id=action.get("checklist_id", action.get("id", "")),
-        ))
+        return _loop_text_result("checklist_show", checklist_show(**_kw("checklist_show", action)))
     if action_type == "file_policy":
-        return _loop_text_result("file_policy", file_policy(
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("file_policy", file_policy(**_kw("file_policy", action)))
     if action_type == "file_find":
-        return _loop_text_result("file_find", file_find(
-            query=action.get("query", "*"),
-            root=action.get("root", ""),
-            max_results=action.get("max_results", 50),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("file_find", file_find(**_kw("file_find", action)))
     if action_type == "file_read":
-        return _loop_text_result("file_read", file_read(
-            path=action.get("path", ""),
-            max_bytes=action.get("max_bytes", 256000),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("file_read", file_read(**_kw("file_read", action)))
     if action_type == "file_write":
-        return _loop_text_result("file_write", file_write(
-            path=action.get("path", ""),
-            content=action.get("content", ""),
-            mode=action.get("mode", "create"),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("file_write", file_write(**_kw("file_write", action)))
     if action_type == "file_copy":
-        return _loop_text_result("file_copy", file_copy(
-            source=action.get("source", ""),
-            destination=action.get("destination", ""),
-            overwrite=action.get("overwrite", False),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("file_copy", file_copy(**_kw("file_copy", action)))
     if action_type == "file_move":
-        return _loop_text_result("file_move", file_move(
-            source=action.get("source", ""),
-            destination=action.get("destination", ""),
-            overwrite=action.get("overwrite", False),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("file_move", file_move(**_kw("file_move", action)))
     if action_type == "file_edit":
-        return _loop_text_result("file_edit", file_edit(
-            path=action.get("path", ""),
-            old=action.get("old", ""),
-            new=action.get("new", ""),
-            count=action.get("count", 1),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("file_edit", file_edit(**_kw("file_edit", action)))
     if action_type == "file_delete":
-        return _loop_text_result("file_delete", file_delete(
-            path=action.get("path", ""),
-            recursive=action.get("recursive") is True,
-            dry_run=action.get("dry_run") is not False,
-            confirm=action.get("confirm", ""),
-            token=action.get("token", ""),
-            approval=action.get("approval", ""),
-            extra_roots=action.get("extra_roots", ""),
-        ))
+        return _loop_text_result("file_delete", file_delete(**_kw("file_delete", action)))
     if action_type == "self_heal_check":
         return _loop_text_result("self_heal_check", self_heal_check())
     if action_type == "self_heal_repair":
-        return _loop_text_result("self_heal_repair", self_heal_repair(
-            apply=action.get("apply") is True,
-        ))
+        return _loop_text_result("self_heal_repair", self_heal_repair(**_kw("self_heal_repair", action)))
     if action_type == "profile_status":
         return _loop_text_result("profile_status", system_profile_text())
     if action_type == "emotion_status":
         return _loop_text_result("emotion_status", emotion_vector_status())
     if action_type == "emotion_update":
-        payload = action.get("vectors", action.get("vectors_json", {}))
-        return _loop_text_result("emotion_update", update_emotion_vectors(
-            vectors_json=payload if isinstance(payload, str) else json.dumps(payload),
-            mode=action.get("mode", "merge"),
-        ))
+        return _loop_text_result("emotion_update", update_emotion_vectors(**_kw("emotion_update", action)))
     if action_type == "emotion_tune":
-        return _loop_text_result("emotion_tune", tune_emotion_vectors(
-            feedback_text=action.get("feedback_text", action.get("text", "")),
-            step=action.get("step", 0.1),
-        ))
+        return _loop_text_result("emotion_tune", tune_emotion_vectors(**_kw("emotion_tune", action)))
     if action_type == "learn_preference":
-        return _loop_text_result("learn_preference", learn_preference(
-            text=action.get("text", ""),
-            scope=action.get("scope", "global"),
-        ))
+        return _loop_text_result("learn_preference", learn_preference(**_kw("learn_preference", action)))
     if action_type == "preferences_status":
-        return _loop_text_result("preferences_status", preferences_status(
-            include_disabled=action.get("include_disabled", False),
-            limit=action.get("limit", 50),
-        ))
+        return _loop_text_result("preferences_status", preferences_status(**_kw("preferences_status", action)))
     if action_type == "memory_search":
-        return _loop_text_result("memory_search", memory_search(
-            query=action.get("query", ""),
-            limit=action.get("limit", 10),
-        ))
+        return _loop_text_result("memory_search", memory_search(**_kw("memory_search", action)))
     if action_type == "ground_artifact":
-        return _loop_verdict_result("ground_artifact", ground_artifact(
-            artifact=action.get("artifact", ""),
-            checks_json=json.dumps(action.get("checks", [])),
-        ), "grounding: passed")
+        return _loop_verdict_result("ground_artifact", ground_artifact(**_kw("ground_artifact", action)), "grounding: passed")
     if action_type == "apply_learned":
-        return _loop_text_result("apply_learned", apply_learned(
-            task=action.get("task", ""),
-            limit=action.get("limit", 5),
-        ))
+        return _loop_text_result("apply_learned", apply_learned(**_kw("apply_learned", action)))
     if action_type == "web_search":
-        return _loop_text_result("web_search", web_search(
-            query=action.get("query", ""),
-            limit=action.get("limit", 5),
-        ))
+        return _loop_text_result("web_search", web_search(**_kw("web_search", action)))
     if action_type == "web_fetch":
-        return _loop_text_result("web_fetch", web_fetch(
-            url=action.get("url", ""),
-            max_chars=action.get("max_chars", 8000),
-        ))
+        return _loop_text_result("web_fetch", web_fetch(**_kw("web_fetch", action)))
     if action_type == "weather_lookup":
-        return _loop_text_result("weather_lookup", weather_lookup(
-            location=action.get("location", ""),
-            forecast_days=action.get("forecast_days", 3),
-            units=action.get("units", "auto"),
-        ))
+        return _loop_text_result("weather_lookup", weather_lookup(**_kw("weather_lookup", action)))
     if action_type == "approximate_location_lookup":
-        return _loop_text_result(
-            "approximate_location_lookup",
-            approximate_location_lookup(consent=action.get("consent") is True),
-        )
+        return _loop_text_result("approximate_location_lookup", approximate_location_lookup(**_kw("approximate_location_lookup", action)))
     if action_type == "unload":
         return _loop_text_result("unload", unload(action.get("tier", "all")))
     if action_type == "sleep":
         seconds = code_runner._clamp_delay(action.get("seconds", 1))
         time.sleep(seconds)
-        return {
-            "ok": True,
-            "type": "sleep",
-            "summary": "slept for %.2fs" % seconds,
-            "output": "",
-        }
-    return {
-        "ok": False,
-        "type": action_type or "(unknown)",
-        "summary": "unknown action type",
-        "output": "Valid action types: %s." % ", ".join(_LOOP_ACTION_TYPES),
-    }
+        return _loop_helpers_core.format_sleep_loop_result(seconds)
+    return _loop_helpers_core.format_unknown_loop_result(action_type, _LOOP_ACTION_TYPES)
 
 
 @mcp.tool()
@@ -17578,15 +15680,7 @@ def chat_web_response(
     if intent is None:
         return None
     if intent["kind"] == "capability":
-        if web_tools.enabled():
-            return (
-                "Yes. Live public web search, page fetch, and weather tools are enabled. "
-                "Ask me to search the web or give me a city/state or ZIP for weather."
-            )
-        return (
-            "This Sonder build has web tools, but they are disabled in the current "
-            "runtime by SONDER_WEB_TOOLS."
-        )
+        return _orchestration_helpers_core.web_capability_reply(web_tools.enabled())
     if not web_tools.enabled():
         return "Web tools are disabled in the current runtime by SONDER_WEB_TOOLS."
     location = None
@@ -17633,26 +15727,13 @@ def chat_web_response(
                 "ZIP, for example: `Chicago, IL` or `60601`."
             )
         return prefix + weather_lookup(requested_location)
-    query = intent.get("query", prompt)
-    # Current-info/news phrasing is conversational ("current news headline");
-    # searching it verbatim ranks literal-match domains (current.com) first.
-    # Construct a purposeful, dated provider query and hand it to the agent as
-    # a suggestion while keeping the original question as the task.
-    task = query
-    search_query = web_tools.build_search_query(query, intent.get("kind", "research"))
-    if search_query and search_query != query:
-        task = (
-            "Answer this question using live web results: %s\n"
-            "Suggested web_search query (conversational filler already "
-            "removed; use it or refine it): %s" % (query, search_query)
-        )
-    if intent.get("needs_location"):
-        task = (
-            "%s\n\nThe user explicitly enabled approximate IP location. Their "
-            "approximate city/region is %s. Use only that place label, disclose that "
-            "it may be inaccurate, and do not claim precise location."
-            % (task, web_tools.location_label(location))
-        )
+    task = _orchestration_helpers_core.build_web_research_task(
+        prompt,
+        intent,
+        build_search_query=web_tools.build_search_query,
+        location_label=web_tools.location_label,
+        location=location,
+    )
     # Live-information questions get a web-only toolset and a research system
     # prompt: the default workspace-agent prompt invites text_search /
     # workspace discovery, which wastes serialized local-model steps on a pure
@@ -18469,308 +16550,10 @@ def access_request_preview(path: str, mode: str = "read") -> str:
     }, indent=2, sort_keys=True)
 
 
-AGENT_TOOL_HELP = """Available tools:
-- tool_help: {"query": "search"}
-- file_check: {"path": "file.py"}
-- agent_lane: {"action": "spawn|list|inspect|send_message|wait|interrupt|resume|cancel|reports|ack|retrieve_archive", "payload": {}} -- parent authority is inherited from this run. Spawn payload: command_id, task, workspace_root (within the configured project grant), optional title/tier/max_steps/max_output_tokens/max_wall_seconds. Other actions use lane_id; send_message uses command_id/content; controls use command_id; ack uses report_id/command_id; retrieve_archive uses lane_id/archive_id. Never supply parent identity or tokens.
-- run_code: {"code": "...", "language": "python|js|powershell|cpp|csharp", "stdin": "", "timeout": 10} -- source snippet only; never pass a shell command such as `cargo --version`
-- run_project: {"files_json": {"files": {"src/main.cpp": "..."}}, "commands_json": [{"cmd": ["g++", "src/main.cpp", "-o", "app"]}], "stdin": "", "timeout": 60}
-- artifact_generate: {"name": "brand-kit", "brief": "fiery logo, DOCX report, AVI video, MIDI score, captions, textured humanoid 3D mascot with full morph frames and sequenced Idle Walk Run clips", "kinds": "auto|all|icon,vector,diagram,document,docx,data,spreadsheet,presentation,animation,video,music,midi,captions,timeline,web,model,rigged_model", "dimension": "auto|2d|2.5d|3d", "theme": "auto|ember|verdant|arcane|frost"}
-- artifact_verify: {"path": "artifacts/generated/brand-kit"}
-- artifact_ground: {"path": "artifacts/generated/brand-kit", "recipe": "auto|bundle|writing|data|office|docx|xlsx|pptx|avi|gif|glb|midi|srt|vtt|edl|ui|markdown|json|csv|html|svg|png|ppm|wav|obj", "requirements_json": {"required_files": ["rigged.glb"], "min_vertices": 384, "min_triangles": 192, "min_joints": 17, "min_animations": 6, "min_animation_sequences": 2, "min_skeletal_animations": 4, "min_morph_animations": 2, "min_morph_targets": 2, "min_images": 3, "min_textures": 3, "min_texcoord_sets": 1, "required_animation_clips": ["Idle", "Walk", "Run", "Breathe", "Focus"], "require_humanoid_rig": true, "require_animation_clip_metadata": true, "require_morph_normals": true, "require_morph_tangents": true, "require_embedded_images": true, "require_material_textures": true, "require_named_animations": true, "require_named_morph_targets": true, "require_power_of_two_images": true, "require_tangents": true, "no_external_dependencies": true}}
-- game_reference_suite: {"name": "reference-suite", "theme": "arcane", "max_workers": 2, "timeout": 30}
-- game_generate_and_test: {"name": "arena", "concept": "isometric action RPG", "language": "python|javascript|cpp|csharp", "dimension": "2d|2.5d|3d", "theme": "arcane", "repair_rounds": 1}
-- game_generation_campaign: {"name": "game-fleet", "concept": "action roguelite", "total": 6, "language": "", "dimension": "", "theme": "arcane", "max_workers": 2, "repair_rounds": 1}
-- web_search: {"query": "...", "limit": 5}
-- web_fetch: {"url": "https://...", "max_chars": 8000}
-- weather_lookup: {"location": "Chicago, IL|60601", "forecast_days": 3, "units": "auto|metric|imperial"}
-- approximate_location_lookup: {"consent": true} (only after the user explicitly enables or requests IP location)
-- file_policy: {}
-- workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
-- workspace_compare: {"left": "path/to/left", "right": "path/to/right", "max_entries": 2000, "max_file_bytes": 64000000, "max_total_bytes": 256000000, "max_details": 1000, "max_output_bytes": 256000, "timeout": 5}
-- repo_status: {"root": ".", "timeout": 10, "max_output": 128000}
-- repo_diff: {"root": ".", "staged": false, "path": "", "context": 3, "timeout": 10, "max_output": 128000}
-- project_detect: {"path": ".", "max_depth": 8, "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_results": 500}
-- dependency_inventory: {"path": ".", "max_depth": 5, "max_files": 100, "max_total_bytes": 2000000, "max_results": 2000}
-- directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
-- directory_create: {"path": "output/reports", "parents": true}
-- file_find: {"query": "*.py", "root": ".", "max_results": 50}
-- repository_symbol_index: {"path": ".", "glob": "*", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
-- file_read: {"path": "README.md", "offset": 1, "limit": 120}
-- file_digest: {"path": "artifact.bin", "max_bytes": 32000000}
-- directory_digest: {"path": ".", "max_depth": 12, "max_files": 2000, "max_total_bytes": 32000000, "max_file_bytes": 32000000, "max_results": 2500}
-- file_read_range: {"path": "server.py", "start_line": 1, "end_line": 200}
-- context_pack: {"paths_json": ["README.md", "src/main.py"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
-- repo_log: {"path": ".", "revision": "HEAD", "file_path": "", "count": 20, "timeout": 5, "max_bytes": 256000}
-- repo_show: {"path": ".", "revision": "HEAD", "file_path": "<required contained relative file>", "timeout": 5, "max_bytes": 256000}
-- repo_blame: {"path": ".", "file_path": "<contained relative file>", "revision": "HEAD", "start_line": 1, "end_line": 100, "timeout": 5, "max_bytes": 256000}
-- archive_list: {"path": "bundle.zip", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
-- archive_extract: {"source": "bundle.zip", "destination": "unpacked", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100} -- creates a new directory; never overwrites
-- archive_create: {"root": ".", "inputs_json": ["src", "README.md"], "destination": "release.zip", "archive_format": "zip|tar", "deterministic": true} -- destination must be new and outside input directories
-- artifact_risk_inspect: {"path": "artifact.exe", "max_scan_bytes": 16777216, "max_seconds": 5} -- static indicators only; no content execution or raw content return
-- process_list: {"max_processes": 128, "max_seconds": 0.5} -- requires exact host opt-in; names/PIDs/counts only
-- process_memory_risk_inspect: {"pid": 1234, "max_bytes": 4194304, "max_regions": 256, "max_seconds": 1} -- fixed aggregate indicators only; never raw memory
-- log_inspect: {"path": "logs/app.log", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
-- text_search: {"query": "TODO", "root": ".", "glob": "*.py", "regex": false, "max_results": 100}
-- file_write: {"path": "notes.txt", "content": "...", "mode": "create|overwrite|append"}
-- file_batch_write: {"operations_json": [{"path": "a.txt", "content": "...", "mode": "create|overwrite"}]}
-- json_patch: {"path": "config.json", "operations_json": [{"op": "test", "path": "/version", "value": 1}, {"op": "replace", "path": "/version", "value": 2}], "mode": "preview|apply"}
-- text_patch: {"root": ".", "patch": "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n", "apply": false}
-- file_edit: {"path": "notes.txt", "old": "before", "new": "after", "count": 1} -- must match exactly once; whitespace and CRLF tolerant; result echoes the region with line numbers
-- file_copy: {"source": "assets/input.bin", "destination": "build/input.bin", "overwrite": false}
-- file_move: {"source": "build/draft.bin", "destination": "dist/final.bin", "overwrite": false}
-- file_delete: {"path": "notes.txt", "dry_run": true}
-- scaffold_project: {"kind": "cpp-msvc|cpp-cmake|csharp|rust|python|node|typescript|go|java-maven", "name": "MyApp", "root": "MyApp"} -- writes the full skeleton (.sln/.vcxproj/Cargo.toml/...); use this instead of hand-writing build/solution files
-- environment_status: {} -- host OS, shells, installed toolchains; check before choosing command shapes
-- toolchain_status: {"name": "cargo|git|cmake|...", "refresh": false} -- fixed, local-only version probe for a discovered tool; no command or arguments
-- tool_inventory: {"category": "compiler|build_system|test_runner|linter_formatter|...", "name": "", "refresh": false} -- categorized installed-tool inventory with versions; paths redacted
-- output_digest: {"path": "<task-relevant log file>", "job_id": "", "tail_lines": 20} -- pass exactly one of path or job_id; tail -1 + FAILED/ERROR lines + first parsed errors
-- hardware_profile: {"workload": "general|chat|coding|agentic|research", "refresh": false} -- cross-vendor device inventory and conservative local-model fit; detection is not backend readiness
-- script_search: {"query": "build", "root": ".", "max_results": 100}
-- program_search: {"query": "python", "max_results": 50}
-- workspace_run: {"program": "git", "args_json": ["status", "--short"], "cwd": ".", "timeout": 30}
-- script_run: {"path": "scripts/check.py", "args_json": [], "cwd": ".", "timeout": 30, "risk_policy": "off|report|deny-high|deny-medium|deny-unknown"} -- request may strengthen but never weaken operator policy
-- test_discover: {"root": ".", "framework": "auto"} -- discover tests; auto-detects pytest/jest/vitest/cargo/go/dotnet
-- test_run: {"root": ".", "framework": "auto", "path": "", "pattern": "", "verbose": false, "coverage": false, "timeout": 120} -- run tests filtered by path or pattern; pytest uses the structured runner (host-owned command, hard deadline)
-- lint_run: {"root": ".", "tool": "auto", "path": "", "fix": false, "timeout": 60} -- lint with ruff/flake8/eslint/clippy; fix=true to auto-fix
-- format_code: {"root": ".", "tool": "auto", "path": "", "check_only": false, "timeout": 60} -- format with ruff/black/prettier/rustfmt/gofmt
-- typecheck_run: {"root": ".", "tool": "auto", "path": "", "timeout": 120} -- type check with mypy/pyright/tsc
-- dependency_add: {"root": ".", "packages_json": "[\"requests\"]", "dev": false, "timeout": 60} -- install packages with auto-detected manager
-- dependency_remove: {"root": ".", "packages_json": "[\"requests\"]", "timeout": 60} -- uninstall packages
-- dependency_update: {"root": ".", "packages_json": "[]", "timeout": 120} -- update packages (empty = all)
-- dependency_audit: {"root": ".", "timeout": 60} -- audit for vulnerabilities
-- git_commit: {"root": ".", "message": "fix: description", "paths_json": "[\"src/main.py\"]", "all_tracked": false, "timeout": 30} -- commit staged or specified files
-- git_branch: {"root": ".", "name": "feature/x", "checkout": true, "base": "", "timeout": 10} -- create and checkout a branch
-- git_checkout: {"root": ".", "ref": "main", "timeout": 10} -- switch branch/tag/commit
-- git_stash: {"root": ".", "action": "push|pop|list|drop", "message": "", "include_untracked": true, "timeout": 10}
-- git_tag: {"root": ".", "name": "v1.0.0", "message": "", "delete": false, "timeout": 10}
-- git_merge: {"root": ".", "branch": "feature/x", "no_ff": true, "message": "", "timeout": 30}
-- git_cherry_pick: {"root": ".", "commits_json": "[\"abc123\"]", "timeout": 30}
-- build_run: {"root": ".", "command": "", "timeout": 120} -- auto-detects Make/Cargo/CMake/Meson/.NET/Flutter-Dart/Go/npm/Gradle/Maven; command overrides
-- ensemble_codegen_build_loop: {"project_dir": ".", "files_json": "{\"src/main.py\": \"task-specific file contract\"}", "build_program": "python", "build_args_json": "[\"-m\", \"pytest\", \"-q\"]", "timeout": 120} -- local code + reasoning ensemble with two compiler-feedback attempts per file; requires a project
-- build_clean: {"root": ".", "timeout": 30} -- clean build artifacts
-- rename_symbol: {"root": ".", "old_name": "foo", "new_name": "bar", "glob": "**/*.py", "dry_run": true} -- rename across files; dry_run=false to apply
-- find_references: {"root": ".", "symbol": "MyClass", "glob": "**/*.py"} -- find all occurrences of a symbol
-- diff_files: {"root": ".", "left": "a.py", "right": "b.py", "context": 3} -- unified diff between two files
-- apply_patch: {"root": ".", "patch_text": "...", "check_only": false} -- apply a unified diff patch
-- secret_scan: {"root": ".", "timeout": 30} -- scan for leaked API keys, passwords, tokens, private keys
-- image_inspect: {"path": "artifacts/generated/demo/icon.png"}
-- document_extract: {"path": "artifacts/generated/demo/document.docx", "max_chars": 32000, "max_items": 200} -- extract text/tables/slides/cues from DOCX, XLSX, PPTX, HTML, SVG, SRT, VTT
-- media_inspect: {"path": "artifacts/generated/demo/rigged.glb"} -- inspect WAV audio, MIDI, AVI video, GLB/glTF/OBJ/STL 3D meshes
-- code_metrics: {"path": ".", "max_files": 2000, "top_n": 10} -- language LOC, TODO/FIXME markers, largest files, and complexity hotspots
-- schema_validate: {"path": "config.json", "schema_path": "config.schema.json", "schema_json": ""} -- validate JSON/JSONL/TOML against JSON Schema
-- language_matrix: {"language": ""} -- report supported languages, tools, and live host toolchain readiness
-- math_eval: {"expression": "comb(52,5)", "action": "eval|solve|matrix|convert|date|derivative|integrate", "exact": false} -- exact/high-precision math, equations, matrices, statistics, units, dates
-- logic_verify: {"formula": "(A -> B) & A", "action": "satisfiable|truth_table|equivalent|implies|cnf|csp", "formula_b": ""} -- formal SAT, equivalence/implication counterexamples, and CSP solver
-- regex_lab: {"pattern": "^[a-z]+$", "text": "hello", "should_match": ["abc"], "should_not_match": ["123"]} -- deterministic regex tester, capture groups, substitutions, and ReDoS check
-- code_graph: {"root": ".", "action": "summary|impact|cycles|calls", "target": ""} -- module dependency graph, circular imports, blast-radius impact, and Python call graph
-- diff_semantic: {"path_a": "old.py", "path_b": "new.py", "text_a": "", "text_b": "", "kind": "auto|python|json|toml|ini"} -- AST-aware Python & structural JSON/TOML/INI diff
-- reasoning_board: {"action": "init|add_fact|add_hypothesis|update_hypothesis|add_decision|audit|summary|clear", "board_id": "default", "text": "", "source": ""} -- structured cognitive scratchpad & contradiction audit
-- symbol_verify: {"action": "verify_symbol|audit_code", "module": "json", "symbol": "loads", "kwargs": [], "code": "", "root": ""} -- verify Python stdlib/repo modules, attributes, kwargs, or audit code snippets for hallucinated APIs
-- citation_audit: {"text": "", "root": ".", "claims": [], "sources": []} -- verify file:line citations, verbatim quotes, and source grounding
-- fact_cross_check: {"text": "..."} -- catch prose arithmetic errors, table total mismatches, bad dates/weekdays, list counts, and self-contradictions
-- consistency_check: {"action": "compare_candidates|audit_against_receipts", "candidates": [], "reply": "", "receipts": []} -- compare multiple answers for divergence or audit a reply against tool receipts
-- plan_fallback: {"failed_tool": "run_code", "error": "...", "goal": "...", "tried_tools": []} -- classify a failure and plan ranked, policy-safe alternative tools/strategies
-- runtime_resilience_check: {} -- inspect live model-call retry, context compaction, arg-repair, loop-breaker, and circuit-breaker telemetry
-- prompt_shield: {"text": "...", "path": "", "redact_secrets": true} -- scan text or a guarded file for prompt injection, Trojan-Source Unicode, and secret leaks
-- error_diagnose: {"error_text": "...", "root": ".", "max_frames": 8, "context_lines": 3} -- parse multi-language tracebacks/compiler errors and resolve repo source context
-- code_audit: {"code": "", "path": "<file>", "language": "", "min_severity": "low"} -- static security & Python AST bug-footgun audit
-- data_transform: {"action": "convert|profile|query|encode|decode|timestamp|cron", "data": "...", "path": "", "output_format": "json|csv|markdown|flat", "expression": ""} -- structured data conversion, stats profiling, encoding, timestamps, cron
-- learn_tool: {"tool": "blender|ffmpeg|inkscape|<any tool>", "goal": "<task>", "subcommand": "", "research_web": false, "save_note": false} -- discover and figure out an unfamiliar/external CLI or package via live --version/--help, Python metadata, and optional docs
-- data_inspect: {"path": "data/records.jsonl", "max_bytes": 256000}
-- data_query: {"path": "data/records.jsonl", "sql": "", "projection_json": ["id", "/nested/name"], "filters_json": {"status": "active"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
-- data_convert: {"input_path": "data/records.jsonl", "output_path": "data/records.csv", "fields_json": ["id", "name"], "output_format": "csv", "apply": false, "max_input_bytes": 16000000, "max_output_bytes": 16000000, "max_rows": 10000, "max_columns": 100, "max_fields": 50, "max_field_bytes": 64000, "max_depth": 16, "preview_rows": 5, "timeout": 10}
-- sqlite_mutate: {"path": "data/app.db", "sql": "UPDATE records SET status = ? WHERE id = ?", "parameters_json": ["done", 42], "mode": "preview|apply", "preview_token": "optional preview response token for drift-fenced apply", "max_rows": 1000, "timeout": 2, "max_db_bytes": 67108864}
-- task_create: {"title": "...", "detail": "...", "priority": 2, "project": "...", "owner": "..."}
-- task_list: {"status": ["pending", "blocked"], "project": "", "include_done": false, "limit": 50} -- also accepts legacy "pending|blocked"
-- task_update: {"task_id": "...", "status": "in_progress|blocked|done", "note": "..."}
-- task_show: {"task_id": "..."}
-- task_delete: {"task_id": "..."}
-- task_plan: {"title": "...", "steps": ["Step 1", "Step 2", {"title": "Step 3", "detail": "..."}], "project": "...", "sequential": true}
-- task_progress: {"project": ""}
-- task_ledger: {"goal_id": "...", "replan_count": 0, "last_replan_reason": ""}
-- task_depend: {"task_id": "...", "depends_on": "...", "remove": false}
-- checklist_create: {"title": "...", "items_json": ["Inspect", "Implement", "Validate", "Report"], "project": "..."}
-- checklist_update: {"checklist_id": "...", "item": "1|id-prefix", "status": "in_progress|done|blocked", "note": "..."}
-- checklist_show: {"checklist_id": "..."}
-- command_registry_list: {"filter_text": "filesystem|dangerous|context"}
-- activity_status: {}
-- permission_policy: {"tool_name": "file_delete"}
-- context_compaction_plan: {"session": "", "project": ""}
-- memory_search: {"query": "...", "limit": 10}
-- ground_artifact: {"artifact": "...", "checks_json": [{"type": "contains", "text": "..."}]}
-- apply_learned: {"task": "...", "limit": 5}
-- workflow_run: {"name": "...", "max_iterations": 1}
-- diagnostics: {}
-- context_health: {}
-- learning_health_status: {}
-- evaluation_history_status: {"model": "", "model_digest": "", "suite": "", "suite_version": "", "suite_digest": "", "tolerance": 0.0, "max_records": 10000}
-- context_policy_status: {"context_size": "1m"}
-- set_context_size: {"context_size": "256k"}
-- memory_quality_report: {"sample_limit": 5}
-- memory_quality_repair: {"apply": false}
-- memory_privacy_review: {"sample_limit": 20}
-- memory_privacy_repair: {"lesson_ids_json": ["lesson-id"], "apply": false}
-- memory_embedding_backfill: {"limit": 25, "apply": false}
-- memory_interaction_embedding_backfill: {"limit": 25, "apply": false}
-- system_improvement_report: {}
-- master_orchestrate: {"task": "...", "mode": "ask|inline|delegate|fleet", "agents": 24, "worker_cap": 24, "tier": "code", "project": "/path/to/repo"} -- worker_cap is a per-run override bounded by the operator ceiling
-- master_status: {}
-- master_capacity: {"requested_agents": 0, "worker_cap": 0}
-- master_cancel: {"agent_id": "master-id|prefix|all"}
-- master_retry: {"agent_id": "master-id|prefix", "tier": "code"}
-- self_heal_check: {}
-- self_heal_repair: {"apply": false}
-- status: {}
-- system_profile_text: {}
-- emotion_vector_status: {}
-- update_emotion_vectors: {"vectors_json": {"warmth": 0.5, "brevity": 0.2}, "mode": "merge|replace|clear|reset"}
-- tune_emotion_vectors: {"feedback_text": "be warmer but more concise", "step": 0.1}
-- learn_preference: {"text": "User prefers concise status updates.", "scope": "global"}
-- preferences_status: {"include_disabled": false, "limit": 20}
-- tool_manifest: {}
-- report_progress: {"summary": "<milestone update>", "thinking": "", "phase": "progress"}
-- post_to_board: {"text": "<update or @handle message>", "kind": "chat|status|handoff|praise|complaint|joke|result"}
-- read_board: {"since_seq": 0, "limit": 20, "mentions_only": false}
-- delegate_task: {"task": "<bounded subtask>", "name": "coder|scout|security|skeptic", "tier": "", "model": "", "project": "", "cwd": "", "max_steps": 8} -- depth 0 only; child runs independently and cannot delegate further
-- spawn_agents: {"tasks": [{"task": "<subtask 1>", "name": "scout"}, {"task": "<subtask 2>", "name": "coder"}], "tier": "", "model": "", "project": "", "max_steps": 8} -- depth 0 only; parallel across Main and Node1
-- offload: {"prompt": "...", "tier": "fast|code|general|reasoning|vision|cloud-code|cloud-general"}
-
-Reply with exactly one JSON object and no markdown:
-{"tool": "tool_name", "args": {...}, "reason": "short reason"}
-or
-{"final": "your final answer"}
-"""
-
-
-REPOSITORY_READ_ONLY_TOOLS = frozenset({
-    "tool_help",
-    "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "file_find",
-    "dependency_inventory",
-    "repository_symbol_index", "log_inspect", "file_read", "file_digest", "directory_digest",
-    "file_read_range", "context_pack",
-    "repo_status", "repo_diff",
-    "repo_log", "repo_show", "repo_blame",
-    "project_detect", "data_inspect", "data_query", "archive_list", "artifact_risk_inspect",
-    "verify_artifact",
-    "text_search", "script_search", "program_search", "image_inspect",
-    "document_extract", "media_inspect", "code_metrics", "schema_validate",
-    "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "command_registry_list",
-    "activity_status", "permission_policy", "context_compaction_plan",
-    "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
-    "evaluation_history_status",
-    "memory_quality_report", "memory_privacy_review", "system_improvement_report", "master_status", "master_capacity",
-    "self_heal_check", "status", "system_profile_text", "environment_status", "toolchain_status", "hardware_profile",
-    "tool_inventory", "output_digest",
-    "emotion_vector_status", "preferences_status", "tool_manifest",
-    "report_progress", "post_to_board", "read_board", "reasoning_board",
-    "memory_search", "web_search", "web_fetch", "weather_lookup",
-    "test_discover",
-    # find_references / diff_files are root-confined (see read_only_root_gate);
-    # dependency_audit stays out (it runs pip-audit/npm), and so does secret_scan:
-    # it follows in-root links to files outside the root, which the gate does not vet.
-    "find_references", "diff_files",
-})
-REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = frozenset({
-    "token", "approval", "extra_roots",
-})
-REPOSITORY_AGENT_TOOL_HELP = """Available tools:
-- tool_help: {"query": "search"}
-The JSON values below are schema placeholders, not suggested filenames or
-search terms. Replace every <...> value with an exact task-relevant path,
-symbol, filename, or glob. For a code/symbol audit, start with text_search for
-an exact symbol named by the task; do not default to Python or server.py.
-- file_policy: {}
-- workspace_inventory: {"path": ".", "max_entries": 20000, "timeout_seconds": 10, "top_n": 15}
-- workspace_compare: {"left": "<first task-relevant file or directory>", "right": "<second task-relevant file or directory>", "max_entries": 2000, "max_file_bytes": 64000000, "max_total_bytes": 256000000, "max_details": 1000, "max_output_bytes": 256000, "timeout": 5}
-- repo_status: {"root": ".", "timeout": 10, "max_output": 128000}
-- repo_diff: {"root": ".", "staged": false, "path": "", "context": 3, "timeout": 10, "max_output": 128000}
-- project_detect: {"path": ".", "max_depth": 8, "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_results": 500}
-- dependency_inventory: {"path": ".", "max_depth": 5, "max_files": 100, "max_total_bytes": 2000000, "max_results": 2000}
-- directory_tree: {"path": ".", "depth": 2, "max_entries": 200}
-- file_find: {"query": "<task-relevant filename or glob>", "root": ".", "max_results": 50}
-- repository_symbol_index: {"path": ".", "glob": "<task-relevant source glob>", "language": "auto|python|javascript|typescript|c|cpp|csharp|rust|go", "max_files": 200, "max_total_bytes": 2000000, "max_file_bytes": 256000, "max_symbols": 2000}
-- file_read: {"path": "<task-relevant relative path>", "max_bytes": 256000}
-- file_digest: {"path": "<task-relevant relative file>", "max_bytes": 32000000}
-- directory_digest: {"path": ".", "max_depth": 12, "max_files": 2000, "max_total_bytes": 32000000, "max_file_bytes": 32000000, "max_results": 2500}
-- file_read_range: {"path": "<task-relevant relative path>", "start_line": 1, "end_line": 200}
-- context_pack: {"paths_json": ["<task-relevant relative path>", "<another task-relevant relative path>"], "max_files": 12, "max_total_bytes": 256000, "max_bytes_per_file": 64000}
-- repo_log: {"path": ".", "revision": "HEAD", "file_path": "<optional contained relative path>", "count": 20, "timeout": 5, "max_bytes": 256000}
-- repo_show: {"path": ".", "revision": "HEAD", "file_path": "<required contained relative file>", "timeout": 5, "max_bytes": 256000}
-- repo_blame: {"path": ".", "file_path": "<required contained relative file>", "revision": "HEAD", "start_line": 1, "end_line": 100, "timeout": 5, "max_bytes": 256000}
-- archive_list: {"path": "<task-relevant ZIP or TAR>", "max_entries": 2000, "max_total_bytes": 256000000, "max_ratio": 100, "max_results": 2500}
-- artifact_risk_inspect: {"path": "<task-relevant document, executable, script, or binary>", "max_scan_bytes": 16777216, "max_seconds": 5}
-- verify_artifact: {"path": "<task-relevant downloaded installer, archive, or image>", "expect_type": "pe|msi|zip|iso|elf", "expect_publisher": "<exact complete certificate organization O= value>", "sha256": "<64-hex digest>"}
-- log_inspect: {"path": "<task-relevant log file>", "tail_lines": 0, "context_lines": 2, "max_file_bytes": 64000000, "max_scan_bytes": 4000000, "max_lines": 10000, "max_line_bytes": 4096, "max_results": 100, "max_output_bytes": 256000, "timeout": 5}
-- text_search: {"query": "<exact task symbol or anchor>", "root": ".", "glob": "<task-relevant glob>", "max_results": 100}
-- script_search: {"query": "<task-relevant script name>", "root": ".", "max_results": 100}
-- program_search: {"query": "<required program name>", "max_results": 50}
-- environment_status: {"refresh": false}
-- toolchain_status: {"name": "cargo|git|cmake|...", "refresh": false} -- fixed local version probe; no command, executable path, or arguments
-- tool_inventory: {"category": "compiler|build_system|test_runner|...", "name": "", "refresh": false} -- categorized installed-tool inventory; paths redacted
-- output_digest: {"path": "<task-relevant log file>", "job_id": "", "tail_lines": 20} -- exactly one of path or job_id; bounded failure summary
-- hardware_profile: {"workload": "general|chat|coding|agentic|research", "refresh": false}
-- image_inspect: {"path": "<task-relevant image path>"}
-- document_extract: {"path": "<task-relevant DOCX/XLSX/PPTX/HTML/SVG/SRT/VTT path>", "max_chars": 32000, "max_items": 200}
-- media_inspect: {"path": "<task-relevant WAV/MIDI/AVI/GLB/glTF/OBJ/STL path>"}
-- code_metrics: {"path": ".", "max_files": 2000, "top_n": 10}
-- schema_validate: {"path": "<task-relevant JSON/JSONL/TOML path>", "schema_path": "<schema JSON path>", "schema_json": ""}
-- language_matrix: {"language": ""}
-- math_eval: {"expression": "<expression or equation>", "action": "eval|solve|matrix|convert|date|derivative|integrate", "exact": false}
-- logic_verify: {"formula": "<propositional formula>", "action": "satisfiable|truth_table|equivalent|implies|cnf|csp", "formula_b": ""}
-- regex_lab: {"pattern": "<regex>", "text": "<sample text>", "should_match": [], "should_not_match": []}
-- code_graph: {"root": ".", "action": "summary|impact|cycles|calls", "target": "<file, module, or symbol>"}
-- diff_semantic: {"path_a": "<first file>", "path_b": "<second file>", "text_a": "", "text_b": "", "kind": "auto"}
-- reasoning_board: {"action": "init|add_fact|add_hypothesis|update_hypothesis|add_decision|audit|summary|clear", "board_id": "default", "text": ""}
-- symbol_verify: {"action": "verify_symbol|audit_code", "module": "<module>", "symbol": "<attr>", "code": "", "root": ""}
-- citation_audit: {"text": "<draft with file:line citations>", "root": ".", "claims": [], "sources": []}
-- fact_cross_check: {"text": "<draft prose>"}
-- consistency_check: {"action": "compare_candidates|audit_against_receipts", "candidates": [], "reply": "", "receipts": []}
-- plan_fallback: {"failed_tool": "<tool>", "error": "<error>", "goal": "<task>", "tried_tools": []}
-- runtime_resilience_check: {}
-- prompt_shield: {"text": "<untrusted text>", "path": "", "redact_secrets": true}
-- error_diagnose: {"error_text": "<traceback or compiler error>", "root": ".", "max_frames": 8, "context_lines": 3}
-- code_audit: {"code": "", "path": "<task-relevant source file>", "language": "", "min_severity": "low"}
-- data_transform: {"action": "convert|profile|query|encode|decode|timestamp|cron", "data": "", "path": "", "output_format": "json", "expression": ""}
-- data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
-- data_query: {"path": "<task-relevant SQLite, JSON, JSONL, CSV, or TSV file>", "sql": "<SQLite SELECT/CTE only, otherwise empty>", "projection_json": ["<field or JSON pointer>"], "filters_json": {"<field or JSON pointer>": "<exact value>"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
-- memory_search: {"query": "...", "limit": 10}
-- web_search: {"query": "...", "limit": 5}
-- web_fetch: {"url": "https://...", "max_chars": 8000}
-- weather_lookup: {"location": "Chicago, IL|60601", "forecast_days": 3, "units": "auto|metric|imperial"}
-- test_discover: {"root": ".", "framework": "auto"}
-- find_references: {"root": ".", "symbol": "<exact symbol named by the task>", "glob": "<task-relevant source glob>"}
-- diff_files: {"root": ".", "left": "<first task-relevant file>", "right": "<second task-relevant file>", "context": 3}
-- command_registry_list: {"filter_text": "filesystem|context|status"}
-- activity_status: {}
-- permission_policy: {"tool_name": "file_read"}
-- context_compaction_plan: {"session": "", "project": ""}
-- diagnostics: {}
-- context_health: {"session": "", "project": ""}
-- learning_health_status: {}
-- evaluation_history_status: {"model": "", "model_digest": "", "suite": "", "suite_version": "", "suite_digest": "", "tolerance": 0.0, "max_records": 10000}
-- artifact_ground: {"path": "artifacts/generated/report", "recipe": "auto", "requirements_json": {}}
-- context_policy_status: {"context_size": "32k"}
-- memory_quality_report: {"sample_limit": 5}
-- memory_privacy_review: {"sample_limit": 20}
-- system_improvement_report: {"session": "", "project": ""}
-- master_status: {}
-- master_capacity: {"requested_agents": 0, "worker_cap": 0}
-- self_heal_check: {}
-- status: {}
-- system_profile_text: {}
-- emotion_vector_status: {}
-- preferences_status: {"include_disabled": false, "limit": 20}
-- tool_manifest: {}
-- report_progress: {"summary": "<milestone update>", "thinking": "", "phase": "progress"}
-- post_to_board: {"text": "<update or @handle message>", "kind": "chat|status|handoff|praise|complaint|joke|result"}
-- read_board: {"since_seq": 0, "limit": 20, "mentions_only": false}
-
-Reply with exactly one JSON object and no markdown:
-{"tool": "tool_name", "args": {...}, "reason": "short reason"}
-or
-{"final": "your final answer"}
-"""
+AGENT_TOOL_HELP = _agent_prompts_core.AGENT_TOOL_HELP
+REPOSITORY_READ_ONLY_TOOLS = _agent_prompts_core.REPOSITORY_READ_ONLY_TOOLS
+REPOSITORY_READ_ONLY_FORBIDDEN_ARGS = _agent_prompts_core.REPOSITORY_READ_ONLY_FORBIDDEN_ARGS
+REPOSITORY_AGENT_TOOL_HELP = _agent_prompts_core.REPOSITORY_AGENT_TOOL_HELP
 
 
 
@@ -18895,182 +16678,31 @@ def _scope_target_under(base, raw_value):
 
 
 def _repository_scope_path_error(tool_name, args, project_root):
-    """Reject a project-bound agent path outside its host-selected root.
-
-    Generic guarded reads authorize both Sonder's workspace and configured
-    extra roots.  Repository agents need a narrower contract: when a project is
-    bound, even another normally authorized root (especially Sonder's own cwd)
-    is out of scope.
-    """
-    scoped_tools = _PROJECT_SCOPED_PATH_TOOLS | _PROJECT_SCOPED_EXECUTION_TOOLS
-    if not project_root or tool_name not in scoped_tools:
-        return ""
-    try:
-        raw_project_root = str(project_root).strip()
-        try:
-            if "\\??\\" in raw_project_root:
-                raise PermissionError(raw_project_root)
-            raw_project_root = file_ops._reject_network_path(raw_project_root)
-        except PermissionError:
-            refusal = "ERROR: agent project path rejected: project root uses a %s" % (
-                _network_spelling.REFUSAL
-            )
-            return refusal
-        root = Path(raw_project_root).expanduser().resolve(strict=True)
-        if not root.is_dir():
-            raise ValueError("project root is not a directory")
-        if tool_name == "workspace_run":
-            targets = [("working directory", args.get("cwd") or ".")]
-        elif tool_name == "script_run":
-            targets = [("script path", args.get("path") or "")]
-            if str(args.get("cwd") or "").strip():
-                targets.append(("working directory", args.get("cwd")))
-        elif tool_name == "data_convert":
-            targets = [
-                ("input path", args.get("input_path") or ""),
-                ("output path", args.get("output_path") or ""),
-            ]
-        elif tool_name == "schema_validate":
-            targets = [("path", args.get("path") or "")]
-            if str(args.get("schema_path") or "").strip():
-                targets.append(("schema path", args.get("schema_path")))
-        elif tool_name == "code_graph":
-            targets = [("root", args.get("root") or ".")]
-        elif tool_name in {"symbol_verify", "citation_audit", "error_diagnose"}:
-            targets = []
-            if str(args.get("root") or "").strip():
-                targets.append(("root", args.get("root")))
-        elif tool_name in {"prompt_shield", "code_audit", "data_transform"}:
-            targets = []
-            if str(args.get("path") or "").strip():
-                targets.append(("path", args.get("path")))
-        elif tool_name == "diff_semantic":
-            targets = []
-            if str(args.get("path_a") or "").strip():
-                targets.append(("path_a", args.get("path_a")))
-            if str(args.get("path_b") or "").strip():
-                targets.append(("path_b", args.get("path_b")))
-        elif tool_name == "repo_diff":
-            targets = [("repository root", args.get("root") or ".")]
-            if str(args.get("path") or "").strip():
-                targets.append(("diff path", args.get("path")))
-        elif tool_name == "diff_files":
-            targets = [
-                ("repository root", args.get("root") or "."),
-                ("left path", args.get("left") or ""),
-                ("right path", args.get("right") or ""),
-            ]
-        elif tool_name in _PROJECT_SCOPED_ROOT_AND_PATH_TOOLS:
-            # `path` is optional here, but when present harness_tools appends
-            # it to the child argv, so an unchecked value is a read or write
-            # outside the project even when `root` is contained.  Resolve it
-            # against the tool's OWN root -- that is what the child process
-            # does (cwd=root), and resolving against the project root instead
-            # would falsely reject a legitimate sibling reference from a
-            # subdirectory root.  It is checked, not rebased: for the cargo
-            # and go frameworks `path` names a test target or package pattern
-            # rather than a filesystem path, and rebasing would corrupt it.
-            tool_root = _scope_target_under(root, args.get("root") or ".")
-            targets = [("repository root", tool_root)]
-            raw_path = str(args.get("path") or "").strip()
-            if raw_path:
-                targets.append(("path", _scope_target_under(tool_root, raw_path)))
-        elif tool_name == "file_batch_write":
-            operations = _batch_agent_operations(args)
-            if operations is None or not operations:
-                return "ERROR: agent project path rejected: operations must be a non-empty JSON list"
-            targets = []
-            for index, operation in enumerate(operations):
-                if not isinstance(operation, dict):
-                    return "ERROR: agent project path rejected: operation %d must be an object" % index
-                targets.append(("operation %d path" % index, operation.get("path") or ""))
-        elif tool_name == "context_pack":
-            targets = [
-                ("path", path)
-                for path in _context_pack_paths(
-                    args.get("paths_json", args.get("paths", []))
-                )
-            ]
-        elif tool_name == "archive_create":
-            archive_root = _scope_target_under(root, args.get("root") or ".")
-            targets = [("archive root", archive_root)]
-            try:
-                archive_inputs = archive_create_tool._parse_inputs(
-                    args.get("inputs_json", args.get("inputs", []))
-                )
-            except ValueError as exc:
-                return "ERROR: agent project archive inputs rejected: %s" % exc
-            for raw_input in archive_inputs:
-                targets.append(("archive input", _scope_target_under(archive_root, raw_input)))
-            destination_text = str(args.get("destination") or "").strip()
-            if not destination_text:
-                targets.append(("archive destination", ""))
-            else:
-                targets.append((
-                    "archive destination",
-                    _scope_target_under(archive_root, destination_text),
-                ))
-        elif tool_name in {"file_copy", "file_move"}:
-            targets = [
-                ("source", args.get("source") or ""),
-                ("destination", args.get("destination") or ""),
-            ]
-        elif tool_name == "archive_extract":
-            targets = [
-                ("archive source", args.get("source") or ""),
-                ("archive destination", args.get("destination") or ""),
-            ]
-        elif tool_name == "text_patch":
-            targets = [("root", args.get("root") or ".")]
-            try:
-                targets.extend(
-                    ("patch path", item["path"])
-                    for item in text_patch_ops._parse(args.get("patch", ""))
-                )
-            except (TypeError, ValueError, PermissionError) as exc:
-                return "ERROR: agent project path rejected: invalid patch: %s" % exc
-        elif tool_name == "workspace_compare":
-            targets = [
-                ("left path", args.get("left") or ""),
-                ("right path", args.get("right") or ""),
-            ]
-        else:
-            key = _project_scoped_path_key(tool_name)
-            targets = [("path", args.get(key) or ".")]
-        for label, raw_value in targets:
-            raw = str(raw_value or "").strip()
-            if not raw:
-                return "ERROR: agent project path rejected: %s is required" % label
-            try:  # Refuse a UNC/device spelling before resolve can open it (NTLM leak);
-                if "\\??\\" in raw:  # an NT prefix the branches above joined under root
-                    raise PermissionError(raw)
-                raw = file_ops._reject_network_path(raw)
-            except PermissionError:
-                refusal = "ERROR: agent project path rejected: %s uses a %s" % (
-                    label, _network_spelling.REFUSAL)
-                return refusal
-            if file_ops._foreign_absolute(raw):
-                refusal = "ERROR: agent project path rejected: %s uses a non-native or drive-relative path" % label
-                return refusal
-            target = Path(raw.replace("\\", "/") if os.name != "nt" else raw).expanduser()
-            if not target.is_absolute():
-                target = root / target
-            if label == "diff path":
-                # Preserve a tracked symlink as the lexical Git pathspec while
-                # still resolving and confining every parent component.
-                target = target.parent.resolve(strict=False) / target.name
-            else:
-                target = target.resolve(strict=False)
-            try:
-                target.relative_to(root)
-            except ValueError:
-                return (
-                    "ERROR: agent project path rejected: %s is outside the "
-                    "host-selected project root" % label
-                )
-    except (OSError, TypeError, ValueError) as exc:
-        return "ERROR: agent project scope is invalid: %s" % exc
-    return ""
+    """Reject a project-bound agent path outside its host-selected root."""
+    dedicated = tool_name in {
+        "workspace_run", "script_run", "data_convert", "schema_validate",
+        "code_graph", "symbol_verify", "citation_audit", "error_diagnose",
+        "prompt_shield", "code_audit", "data_transform", "diff_semantic",
+        "repo_diff", "diff_files", "file_batch_write", "context_pack",
+        "archive_create", "file_copy", "file_move", "archive_extract",
+        "text_patch", "workspace_compare",
+    }
+    detail = _agent_guards_core.check_project_scope_paths(
+        tool_name,
+        args,
+        project_root,
+        dedicated=dedicated,
+        reject_network_path=file_ops._reject_network_path,
+        is_foreign_absolute=file_ops._foreign_absolute,
+        is_network_spelling=_is_network_spelling_raw,
+        batch_operations=_batch_agent_operations,
+        context_pack_paths=_context_pack_paths,
+        parse_archive_inputs=archive_create_tool._parse_inputs,
+        parse_text_patch=text_patch_ops._parse,
+        path_key_for=_project_scoped_path_key,
+    )
+    refusal = ("ERROR: " + detail) if detail else ""
+    return refusal
 
 
 _INLINE_INTERPRETER_REFUSAL = (
@@ -19081,16 +16713,12 @@ _STDIN_INTERPRETER_REFUSAL = (
     "ERROR: agent project execution rejected: interpreter code via "
     "stdin is outside the project path guard"
 )
-# %s is the parser's reason (quotes, carets, expansion, control characters,
-# non-ASCII whitespace, for loops) for a build_run command it cannot read.
 _BUILD_RUN_OPAQUE_REFUSAL = "ERROR: agent project execution rejected: %s"
 _COMMAND_STRING_LAUNCHER_REFUSAL = (
     "ERROR: agent project execution rejected: %s is a command-string "
     "launcher (it decodes and runs a command line of its own), which is "
     "outside the project path guard"
 )
-
-
 _ARGV_OUTSIDE_ROOT_REFUSAL = (
     "ERROR: agent project execution rejected: argv path is outside "
     "the host-selected project root"
@@ -19104,257 +16732,63 @@ _PROJECT_EXECUTION_GUARDED_TOOLS = frozenset({"ensemble_codegen_build_loop"})
 
 def _argv_value_outside_root(raw, base, root):
     """Whether one argv value names a path outside ``root``."""
-    drive_match = re.search(r"[A-Za-z]:[\\/]", raw)
-    if drive_match:
-        raw = raw[drive_match.start():]
-    if (
-        (os.name == "nt" and re.fullmatch(r"/[A-Za-z][A-Za-z0-9:+\-]*", raw) and not os.path.lexists(str(base / raw)))
-        or (os.name != "nt" and ".." not in raw and re.fullmatch(r"/[A-Za-z][A-Za-z0-9+\-]*:[A-Za-z0-9_.=+\-]+", raw) and not os.path.lexists(raw))
-    ):
-        return False
-    drive_relative = os.name == "nt" and bool(re.fullmatch(r"[A-Za-z]:[^:=]+", raw))
-    path_like = (
-        drive_relative
-        or os.path.isabs(raw)
-        or raw.startswith((".", "~"))
-        or "/" in raw
-        or "\\" in raw
-        or bool(os.path.splitext(raw)[1])
-    )
-    if not path_like:
-        return False
-    target = Path(raw.replace("\\", "/") if os.name != "nt" else raw).expanduser()
-    if not target.is_absolute():
-        target = base / target
-    try:
-        target.resolve(strict=False).relative_to(root)
-    except (OSError, ValueError):
-        return True
-    return False
+    return _agent_guards_core.argv_value_outside_root(raw, base, root)
 
 
 def _program_token_escape_error(raw_program, base, root, *, check_outside):
     """Reject UNC/device program paths and (for build_run) outside-root executables."""
-    token = str(raw_program or "").strip().strip('"\'').lstrip("@=,;")
-    if not token:
-        return ""
-    if _network_spelling.contains_network_spelling(token):
-        return _NETWORK_EXEC_PATH_REFUSAL % "the program path"
-    if not check_outside:
-        return ""
-    looks_like_path = (
-        token.startswith((".", "~"))
-        or "/" in token
-        or "\\" in token
-        or (os.name == "nt" and bool(re.match(r"^[A-Za-z]:", token)))
+    detail = _agent_guards_core.program_token_escape_detail(
+        raw_program, base, root,
+        check_outside=check_outside,
+        python_executable=sys.executable,
     )
-    if not looks_like_path:
-        return ""
-    target = Path(token.replace("\\", "/") if os.name != "nt" else token).expanduser()
-    if not target.is_absolute():
-        target = base / target
-    try:
-        resolved = target.resolve(strict=False)
-        if os.path.normcase(str(resolved)) == os.path.normcase(os.path.realpath(sys.executable)):
-            return ""
-        resolved.relative_to(root)
-    except (OSError, ValueError):
-        return _ARGV_OUTSIDE_ROOT_REFUSAL
-    return ""
+    refusal = ("ERROR: " + detail) if detail else ""
+    return refusal
 
 
 def _agent_project_execution_argument_error(tool_name, args, project_root):
     """Reject explicit project-execution escape paths and inline interpreters."""
-    guarded = (
-        _PROJECT_SCOPED_EXECUTION_TOOLS
-        | _PROJECT_SCOPED_COMMAND_TOOLS
-        | _PROJECT_EXECUTION_GUARDED_TOOLS
+    detail = _agent_guards_core.check_project_execution_arguments(
+        tool_name,
+        args,
+        project_root,
+        reject_network_path=file_ops._reject_network_path,
+        extract_argv=_agent_argv,
+        python_executable=sys.executable,
     )
-    if tool_name not in guarded or not isinstance(args, dict):
-        return ""
-    has_project_root = bool(str(project_root or "").strip())
-    if not has_project_root and tool_name not in _PROJECT_SCOPED_COMMAND_TOOLS:
-        return ""
-    root = None
-    if has_project_root:
-        try:
-            root = Path(str(project_root)).expanduser().resolve(strict=True)
-        except (OSError, ValueError) as exc:
-            refusal = "ERROR: agent project scope is invalid: %s" % exc
-            return refusal
-    stdin_present = bool(str(args.get("stdin") or ""))
-    is_windows = os.name == "nt"
-    program_tokens = []
-    if tool_name in _PROJECT_SCOPED_COMMAND_TOOLS:
-        plan = _interpreter_argv.analyze_build_command(
-            str(args.get("command") or ""),
-            stdin_present=stdin_present,
-            is_windows=is_windows,
-        )
-        if plan.opaque_reason:
-            return _BUILD_RUN_OPAQUE_REFUSAL % plan.opaque_reason
-        if plan.launcher:
-            return _COMMAND_STRING_LAUNCHER_REFUSAL % plan.launcher
-        if plan.inline_violation:
-            return _INLINE_INTERPRETER_REFUSAL
-        if plan.stdin_violation:
-            return _STDIN_INTERPRETER_REFUSAL
-        argv = list(plan.path_tokens)
-        program_tokens = list(plan.program_tokens)
-        base_value = args.get("root") or "."
-    else:
-        if tool_name == "ensemble_codegen_build_loop":
-            program_raw = str(args.get("build_program") or "")
-            argv = _agent_argv({"args_json": args.get("build_args_json", "[]")})
-            base_value = args.get("project_dir") or "."
-            stdin_present = False
-        else:
-            program_raw = str(args.get("program") or "")
-            argv = _agent_argv(args)
-            base_value = args.get("cwd") or (
-                os.path.dirname(str(args.get("path") or ""))
-                if tool_name == "script_run" else "."
-            )
-        if program_raw:
-            program_tokens = [program_raw]
-        verdict, detail = _interpreter_argv.analyze_argv_command(
-            program_raw, argv, stdin_present=stdin_present,
-        )
-        if verdict == "launcher":
-            return _COMMAND_STRING_LAUNCHER_REFUSAL % detail
-        if verdict == "inline":
-            return _INLINE_INTERPRETER_REFUSAL
-        if verdict == "stdin":
-            return _STDIN_INTERPRETER_REFUSAL
-    try:
-        base_value = file_ops._reject_network_path(str(base_value))
-    except PermissionError:
-        return _NETWORK_EXEC_PATH_REFUSAL % "the working directory"
-    try:
-        base = Path(base_value).expanduser().resolve(strict=False)
-    except (OSError, ValueError) as exc:
-        refusal = "ERROR: agent project execution rejected: working directory: %s" % exc
-        return refusal
-    check_prog_outside = (tool_name in _PROJECT_SCOPED_COMMAND_TOOLS) and (root is not None)
-    for prog_tok in program_tokens:
-        prog_err = _program_token_escape_error(
-            prog_tok, base, root, check_outside=check_prog_outside,
-        )
-        if prog_err:
-            return prog_err
-    for raw_item in argv:
-        net_bad, candidates = _interpreter_argv.expand_argv_path_candidates(
-            raw_item, is_windows=is_windows,
-        )
-        if net_bad:
-            return _NETWORK_EXEC_PATH_REFUSAL % "an argv path"
-        if root is not None and any(_argv_value_outside_root(value, base, root) for value in candidates):
-            return _ARGV_OUTSIDE_ROOT_REFUSAL
-    return ""
+    refusal = ("ERROR: " + detail) if detail else ""
+    return refusal
 
 
 def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
-    if not isinstance(args, dict):
-        return "ERROR: repository read-only tool args must be a JSON object."
-    if tool_name not in REPOSITORY_READ_ONLY_TOOLS:
-        return "ERROR: tool '%s' is not allowed by the repository read-only policy." % tool_name
-    if tool_name in _GIT_IGNORE_DISCOVERY_TOOLS and args.get("include_ignored"):
-        return (
-            "ERROR: repository read-only tool '%s' forbids include_ignored=true."
-            % tool_name
-        )
-    forbidden = sorted(
-        name for name in REPOSITORY_READ_ONLY_FORBIDDEN_ARGS.intersection(args)
-        if not (
-            name == "extra_roots"
-            and trusted_extra_roots
-            and args.get("extra_roots") == trusted_extra_roots
-        )
+    precheck = _agent_guards_core.check_read_only_preconditions(
+        tool_name,
+        args,
+        trusted_extra_roots=trusted_extra_roots,
+        git_ignore_discovery_tools=_GIT_IGNORE_DISCOVERY_TOOLS,
     )
-    if forbidden:
-        return (
-            "ERROR: repository read-only tool '%s' forbids argument(s): %s."
-            % (tool_name, ", ".join(forbidden))
-        )
+    if precheck:
+        refusal = "ERROR: " + precheck
+        return refusal
     scope_error = _repository_scope_path_error(
         tool_name, args, trusted_extra_roots,
     )
     if scope_error:
         return scope_error
     try:
-        if tool_name in {
-            "file_read", "file_digest", "file_read_range", "image_inspect",
-            "document_extract", "media_inspect", "data_inspect", "data_query",
-            "log_inspect", "artifact_risk_inspect", "artifact_ground", "verify_artifact",
-        }:
+        checks, special = _agent_guards_core.collect_read_only_path_checks(
+            tool_name, args, context_pack_paths=_context_pack_paths,
+        )
+        for check in checks:
             file_ops.resolve_repository_read_path(
-                args.get("path", ""),
-                allow_workspace_root=False,
+                check.path,
+                allow_workspace_root=check.allow_workspace_root,
                 reject_sensitive=True,
                 extra_roots=trusted_extra_roots,
             )
-        elif tool_name == "schema_validate":
-            file_ops.resolve_repository_read_path(
-                args.get("path", ""),
-                allow_workspace_root=False,
-                reject_sensitive=True,
-                extra_roots=trusted_extra_roots,
-            )
-            if str(args.get("schema_path") or "").strip():
-                file_ops.resolve_repository_read_path(
-                    args.get("schema_path", ""),
-                    allow_workspace_root=False,
-                    reject_sensitive=True,
-                    extra_roots=trusted_extra_roots,
-                )
-        elif tool_name == "code_metrics":
-            file_ops.resolve_repository_read_path(
-                args.get("path", ".") or ".",
-                allow_workspace_root=True,
-                reject_sensitive=True,
-                extra_roots=trusted_extra_roots,
-            )
-        elif tool_name == "code_graph":
-            file_ops.resolve_repository_read_path(
-                args.get("root", ".") or ".",
-                allow_workspace_root=True,
-                reject_sensitive=True,
-                extra_roots=trusted_extra_roots,
-            )
-        elif tool_name in {"symbol_verify", "citation_audit", "error_diagnose"} and str(args.get("root") or "").strip():
-            file_ops.resolve_repository_read_path(
-                args.get("root", ""),
-                allow_workspace_root=True,
-                reject_sensitive=True,
-                extra_roots=trusted_extra_roots,
-            )
-        elif tool_name in {"prompt_shield", "code_audit", "data_transform"} and str(args.get("path") or "").strip():
-            file_ops.resolve_repository_read_path(
-                args.get("path", ""),
-                allow_workspace_root=False,
-                reject_sensitive=True,
-                extra_roots=trusted_extra_roots,
-            )
-        elif tool_name == "diff_semantic":
-            for key in ("path_a", "path_b"):
-                if str(args.get(key) or "").strip():
-                    file_ops.resolve_repository_read_path(
-                        args.get(key, ""),
-                        allow_workspace_root=False,
-                        reject_sensitive=True,
-                        extra_roots=trusted_extra_roots,
-                    )
-        elif tool_name == "output_digest" and str(args.get("path") or "").strip():
-            file_ops.resolve_repository_read_path(
-                args.get("path", ""),
-                allow_workspace_root=False,
-                reject_sensitive=True,
-                extra_roots=trusted_extra_roots,
-            )
-        elif tool_name in {"repo_status", "repo_diff"}:
-            root_value = args.get("root", "") or "."
+        if special == "repo_diff_or_status":
             resolved_root = file_ops.resolve_repository_read_path(
-                root_value,
+                args.get("root", "") or ".",
                 allow_workspace_root=True,
                 reject_sensitive=True,
                 extra_roots=trusted_extra_roots,
@@ -19362,18 +16796,9 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
             diff_path = str(args.get("path") or "").strip()
             if tool_name == "repo_diff" and diff_path:
                 git_tools._resolve_diff_path(
-                    resolved_root, diff_path,
-                    extra_roots=trusted_extra_roots,
+                    resolved_root, diff_path, extra_roots=trusted_extra_roots,
                 )
-        elif tool_name == "context_pack":
-            for path in _context_pack_paths(args.get("paths_json", args.get("paths", []))):
-                file_ops.resolve_repository_read_path(
-                    path,
-                    allow_workspace_root=False,
-                    reject_sensitive=True,
-                    extra_roots=trusted_extra_roots,
-                )
-        elif tool_name in {"repo_log", "repo_show", "repo_blame"}:
+        elif special == "git_history":
             root = git_history.resolve_repo_root(
                 args.get("path", "."), extra_roots=trusted_extra_roots,
             )
@@ -19387,27 +16812,9 @@ def _repository_read_only_error(tool_name, args, trusted_extra_roots=""):
                 git_history.resolve_show_target(root, args.get("file_path", ""))
             else:
                 git_history.resolve_path_filter(root, args.get("file_path", ""))
-        elif tool_name == "archive_list":
-            file_ops.resolve_repository_read_path(
-                args.get("path", ""), allow_workspace_root=False,
-                reject_sensitive=True, extra_roots=trusted_extra_roots,
-            )
-        elif tool_name == "workspace_compare":
-            for path in (args.get("left", ""), args.get("right", "")):
-                file_ops.resolve_repository_read_path(
-                    path, allow_workspace_root=True, reject_sensitive=True,
-                    extra_roots=trusted_extra_roots,
-                )
-        elif tool_name in {"find_references", "diff_files"}:
+        elif special == "root_confined_read":
             from sonder_runtime.adapters.filesystem import read_only_root_gate
             read_only_root_gate.check_root_confined_read(tool_name, args, trusted_extra_roots)
-        elif tool_name in {"workspace_inventory", "dependency_inventory", "project_detect", "directory_digest", "directory_tree", "file_find", "repository_symbol_index", "text_search", "script_search"}:
-            file_ops.resolve_repository_read_path(
-                args.get("path", "") or args.get("root", "") or ".",
-                allow_workspace_root=True,
-                reject_sensitive=True,
-                extra_roots=trusted_extra_roots,
-            )
     except (OSError, PermissionError, RuntimeError, ValueError) as exc:
         return "ERROR: repository read-only path rejected: %s" % exc
     return ""
@@ -19461,34 +16868,15 @@ def _agent_generate_decision(
             error = exc
         if attempt >= repair_limit:
             break
-        valid_shape = (
-            '{"final":"answer"}'
-            if require_final else
-            '{"tool":"name","args":{},"reason":"brief"} or {"final":"answer"}'
-        )
-        recovery = ""
-        if length_limited:
-            recovery = (
-                "\nHOST LENGTH RECOVERY: the previous decision hit its output "
-                "limit. Do not repeat the oversized response. For a large "
-                "file_write, emit one valid chunk of at most %d characters now "
-                "and use append on a later tool turn; otherwise simplify the "
-                "decision."
-                % _CLOUD_AGENT_WRITE_CHUNK_HINT
-            )
-        repair_prompt = (
-            step_prompt
-            + "\n\nHOST FORMAT REPAIR %d/%d: Your previous response was invalid. "
-            "Return exactly one JSON object and no prose or Markdown. Use %s.\n"
-            "Parser error: %s%s\nPrevious response excerpt:\n%s"
-            % (
-                attempt + 1,
-                repair_limit,
-                valid_shape,
-                error,
-                recovery,
-                str(raw or "")[:1000],
-            )
+        repair_prompt = _agent_prompts_core.build_decision_repair_prompt(
+            step_prompt,
+            attempt=attempt,
+            repair_limit=repair_limit,
+            require_final=require_final,
+            error=error,
+            raw=str(raw or ""),
+            length_limited=length_limited,
+            write_chunk_hint=_CLOUD_AGENT_WRITE_CHUNK_HINT,
         )
         try:
             raw = gen(repair_prompt)
@@ -19563,17 +16951,8 @@ def _agent_negative_claim_review(
         model=model,
         cloud=cloud,
     )
-    review_prompt = (
-        "Task:\n%s\n\nProposed final:\n%s\n\n%s\n\n"
-        "JSON schema: {\"decision\":\"accept|continue\",\"reason\":\"brief\","
-        "\"tool\":\"%s or empty\","
-        "\"args\":{}}"
-        % (
-            str(task or "")[:8000],
-            str(final or "")[:4000],
-            _agent_observation_prompt(observations, max_chars=7000),
-            "|".join(vocabulary),
-        )
+    review_prompt = _agent_prompts_core.build_claim_review_prompt(
+        task, final, _agent_observation_prompt(observations, max_chars=7000), vocabulary,
     )
     if cloud and cloud_budget_state is None:
         cloud_budget_state = {
@@ -19625,43 +17004,9 @@ def _agent_negative_claim_review(
                 "args": {},
             }
         try:
-            payload = _extract_agent_json(raw)
-            if not isinstance(payload, dict):
-                raise ValueError("claim review must be a JSON object")
-            decision = str(payload.get("decision") or "").strip().lower()
-            if decision not in {"accept", "continue"}:
-                raise ValueError("claim review decision must be accept or continue")
-            reason = re.sub(r"\s+", " ", str(payload.get("reason") or "")).strip()
-            tool = str(payload.get("tool") or "").strip()
-            args = payload.get("args") or {}
-            if not reason:
-                raise ValueError("claim review needs a reason")
-            if not isinstance(args, dict):
-                raise ValueError("claim review args must be a JSON object")
-            # Validate against what this run admits, not the superset.  A
-            # hosted reviewer naming ``text_search`` used to pass here and be
-            # refused a step later, spending the whole claim-review budget on
-            # a tool that could never run.
-            #
-            # An empty tool on ``continue`` is accepted: it is the reviewer
-            # saying "I cannot settle this with the tools I have", which the
-            # caller already handles by withholding evidence and ultimately
-            # returning EVIDENCE_REQUIRED.  That is strictly safer than an
-            # ``accept`` it cannot support, and it is the same shape this
-            # function's own parse-failure fallback returns.
-            if decision == "continue" and tool and tool not in vocabulary:
-                raise ValueError(
-                    "continued claim review needs one of these approved "
-                    "read-only tools: %s" % ", ".join(vocabulary)
-                )
-            if decision == "accept":
-                tool, args = "", {}
-            return {
-                "decision": decision,
-                "reason": reason[:500],
-                "tool": tool,
-                "args": args,
-            }
+            return _agent_guards_core.parse_claim_review_payload(
+                _extract_agent_json(raw), vocabulary,
+            )
         except (TypeError, ValueError) as exc:
             last_error = str(exc)
             correction = (
@@ -19761,24 +17106,7 @@ def _agent_project_root_refusal(tool_name, *, read_only, repository_extra_roots)
     return refusal
 
 
-_AGENT_SYSTEM_OPERATOR_TOOLS = frozenset({
-    # The caller's judgement is the operator's review; a model must not review its own work.
-    "record_outcome",
-    "admin_login", "admin_register", "admin_set_account", "admin_accounts",
-    "elevate", "permission_mode", "permission_rule_set", "permission_approve",
-    "runtime_policy_update", "update_system_profile",
-    "runtime_source_update", "runtime_source_stash",
-    "autopilot_start", "autopilot_resume", "autopilot_pause", "autopilot_cancel", "mission_start",
-    "self_heal_repair", "memory_export", "memory_privacy_repair",
-    "memory_quality_repair", "workflow_list", "workflow_save", "workflow_delete", "workflow_run",
-    # These process-wide controls require a human operator at an authenticated
-    # surface.  An agent is intentionally never that operator, even in unsafe
-    # lab mode: prompt text must not be able to alter later users' runtime
-    # behaviour or unload their models.
-    "set_context_size", "unload", "update_emotion_vectors",
-    "tune_emotion_vectors", "learn_preference",
-    "ollama_pool_admin_status", "cloud_opt_in",
-})
+_AGENT_SYSTEM_OPERATOR_TOOLS = _agent_prompts_core.AGENT_SYSTEM_OPERATOR_TOOLS
 
 
 def _agent_dispatch(
@@ -19909,13 +17237,10 @@ def _agent_dispatch(
             args = dict(args)
             args["extra_roots"] = repository_extra_roots
             args["approval"] = _TRUSTED_REPOSITORY_APPROVAL
+    from sonder_runtime.application.server_core import agent_dispatch_helpers as _adh
+    _kw = _adh.agent_tool_kwargs
     if tool_name == "run_code":
-        return run_code(
-            code=args.get("code", ""),
-            language=args.get("language", "python"),
-            stdin=args.get("stdin", ""),
-            timeout=args.get("timeout", 10),
-        )
+        return run_code(**_kw("run_code", args))
     if tool_name in ("delegate_task", "spawn_agents", "report_progress", "post_status", "post_to_board", "read_board"):
         from sonder_runtime.bootstrap import delegation_wiring as _dw
         return _dw.dispatch_agent_tool(sys.modules[__name__], tool_name, args, read_only=read_only, repository_extra_roots=repository_extra_roots, allow_web=allow_web)
@@ -19938,83 +17263,25 @@ def _agent_dispatch(
             lane_failure = "ERROR: agent_lane " + type(exc).__name__ + ": " + str(exc)
             return lane_failure
     if tool_name == "toolchain_status":
-        return toolchain_status(
-            name=args.get("name", ""),
-            refresh=bool(args.get("refresh", False)),
-        )
+        return toolchain_status(**_kw("toolchain_status", args))
     if tool_name == "tool_inventory":
-        return tool_inventory(
-            category=args.get("category", ""),
-            name=args.get("name", ""),
-            refresh=bool(args.get("refresh", False)),
-        )
+        return tool_inventory(**_kw("tool_inventory", args))
     if tool_name == "output_digest":
-        return output_digest(
-            path=args.get("path", ""),
-            job_id=args.get("job_id", ""),
-            tail_lines=args.get("tail_lines", 20),
-        )
+        return output_digest(**_kw("output_digest", args))
     if tool_name == "run_project":
-        return run_project(
-            files_json=args.get("files_json", args.get("files", [])),
-            commands_json=args.get("commands_json", args.get("commands", "")),
-            stdin=args.get("stdin", ""),
-            timeout=args.get("timeout", 60),
-        )
+        return run_project(**_kw("run_project", args))
     if tool_name in ("artifact_generate", "assetgen"):
-        return artifact_generate(
-            name=args.get("name", "generated-artifact"),
-            brief=args.get("brief", args.get("prompt", "")),
-            kinds=args.get("kinds", "auto"),
-            dimension=args.get("dimension", "auto"),
-            theme=args.get("theme", "auto"),
-            seed=args.get("seed"),
-            output_dir=args.get("output_dir", ""),
-        )
+        return artifact_generate(**_kw("artifact_generate", args))
     if tool_name == "artifact_verify":
         return artifact_verify(args.get("path", ""))
     if tool_name == "artifact_ground":
-        return artifact_ground(
-            path=args.get("path", ""),
-            recipe=args.get("recipe", "auto"),
-            requirements_json=args.get("requirements_json", args.get("requirements", "")),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return artifact_ground(**_kw("artifact_ground", args))
     if tool_name == "game_reference_suite":
-        return game_reference_suite(
-            name=args.get("name", "sonder-reference"),
-            theme=args.get("theme", "arcane"),
-            seed=args.get("seed", 1337),
-            max_workers=args.get("max_workers", 2),
-            timeout=args.get("timeout", 30),
-        )
+        return game_reference_suite(**_kw("game_reference_suite", args))
     if tool_name in ("game_generate_and_test", "game_generate"):
-        return game_generate_and_test(
-            name=args.get("name", "generated-game"),
-            concept=args.get("concept", args.get("prompt", "")),
-            language=args.get("language", "python"),
-            dimension=args.get("dimension", "2d"),
-            theme=args.get("theme", "arcane"),
-            seed=args.get("seed", 1337),
-            tier=args.get("tier", "code"),
-            timeout=args.get("timeout", 30),
-            repair_rounds=args.get("repair_rounds"),
-        )
+        return game_generate_and_test(**_kw("game_generate_and_test", args))
     if tool_name in ("game_generation_campaign", "game_campaign"):
-        return game_generation_campaign(
-            name=args.get("name", "game-fleet"),
-            concept=args.get("concept", args.get("prompt", "compact action game")),
-            total=args.get("total", 6),
-            language=args.get("language", ""),
-            dimension=args.get("dimension", ""),
-            theme=args.get("theme", "arcane"),
-            tier=args.get("tier", "code"),
-            max_workers=args.get("max_workers", 2),
-            timeout=args.get("timeout", 30),
-            repair_rounds=args.get("repair_rounds"),
-        )
+        return game_generation_campaign(**_kw("game_generation_campaign", args))
     if tool_name == "web_search":
         if not allow_web:
             return "ERROR: web access disabled for this agent run"
@@ -20041,326 +17308,82 @@ def _agent_dispatch(
             )
         return approximate_location_lookup(bool(args.get("consent", False)))
     if tool_name == "memory_search":
-        # A project-bound run reads only its host-selected project's memory.
         return _memory_search_scoped(
             args.get("query", ""), args.get("limit", 10),
             bound_project=repository_extra_roots,
         )
     if tool_name == "file_policy":
-        return file_policy(
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return file_policy(**_kw("file_policy", args))
     if tool_name == "repo_status":
-        return repo_status(
-            root=args.get("root", "."),
-            timeout=args.get("timeout", 10),
-            max_output=args.get("max_output", 128000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return repo_status(**_kw("repo_status", args))
     if tool_name == "repo_diff":
-        return repo_diff(
-            root=args.get("root", "."),
-            staged=args.get("staged") is True,
-            path=args.get("path", ""),
-            context=args.get("context", 3),
-            timeout=args.get("timeout", 10),
-            max_output=args.get("max_output", 128000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return repo_diff(**_kw("repo_diff", args))
     if tool_name == "workspace_inventory":
-        return workspace_inventory(
-            path=args.get("path", args.get("root", ".")),
-            max_entries=args.get("max_entries", 20000),
-            timeout_seconds=args.get("timeout_seconds", 10.0),
-            top_n=args.get("top_n", 15),
-            include_hidden=args.get("include_hidden", False),
-            include_ignored=args.get("include_ignored", False),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return workspace_inventory(**_kw("workspace_inventory", args))
     if tool_name == "project_detect":
-        return project_detect(
-            path=args.get("path", args.get("root", ".")),
-            max_depth=args.get("max_depth", 8),
-            max_files=args.get("max_files", 200),
-            max_total_bytes=args.get("max_total_bytes", 2_000_000),
-            max_file_bytes=args.get("max_file_bytes", 256_000),
-            max_results=args.get("max_results", 500),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return project_detect(**_kw("project_detect", args))
     if tool_name == "dependency_inventory":
-        return dependency_inventory(
-            path=args.get("path", args.get("root", ".")),
-            max_depth=args.get("max_depth", 5),
-            max_files=args.get("max_files", 100),
-            max_total_bytes=args.get("max_total_bytes", 2000000),
-            max_results=args.get("max_results", 2000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return dependency_inventory(**_kw("dependency_inventory", args))
     if tool_name == "directory_tree":
-        return directory_tree(
-            path=args.get("path", args.get("root", ".")),
-            depth=args.get("depth", 2),
-            max_entries=args.get("max_entries", 200),
-            include_hidden=args.get("include_hidden", False),
-            include_ignored=args.get("include_ignored", False),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return directory_tree(**_kw("directory_tree", args))
     if tool_name == "directory_create":
-        return directory_create(
-            path=args.get("path", ""),
-            parents=args.get("parents", True),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return directory_create(**_kw("directory_create", args))
     if tool_name == "file_find":
-        return file_find(
-            query=args.get("query", "*"),
-            root=args.get("root", ""),
-            max_results=args.get("max_results", 50),
-            include_ignored=args.get("include_ignored", False),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return file_find(**_kw("file_find", args))
     if tool_name == "repository_symbol_index":
-        return repository_symbol_index(
-            path=args.get("path", args.get("root", ".")),
-            glob=args.get("glob", "*"),
-            language=args.get("language", ""),
-            max_files=args.get("max_files", 200),
-            max_total_bytes=args.get("max_total_bytes", 2_000_000),
-            max_file_bytes=args.get("max_file_bytes", 256_000),
-            max_symbols=args.get("max_symbols", 2_000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return repository_symbol_index(**_kw("repository_symbol_index", args))
     if tool_name == "file_read_range":
-        return file_read_range(
-            path=args.get("path", ""),
-            start_line=args.get("start_line", args.get("start", 1)),
-            end_line=args.get("end_line", args.get("end", 200)),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return file_read_range(**_kw("file_read_range", args))
     if tool_name == "context_pack":
-        return context_pack(
-            paths_json=args.get("paths_json", args.get("paths", [])),
-            max_files=args.get("max_files", 12),
-            max_total_bytes=args.get("max_total_bytes", 256000),
-            max_bytes_per_file=args.get("max_bytes_per_file", 64000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return context_pack(**_kw("context_pack", args))
     if tool_name == "data_inspect":
-        return data_inspect(
-            path=args.get("path", ""),
-            max_bytes=args.get("max_bytes", 256000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return data_inspect(**_kw("data_inspect", args))
     if tool_name == "data_query":
-        return data_query(
-            path=args.get("path", ""),
-            sql=args.get("sql", ""),
-            projection_json=(
-                json.dumps(args.get("projection_json"))
-                if not isinstance(args.get("projection_json", "[]"), str)
-                else args.get("projection_json", "[]")
-            ),
-            filters_json=(
-                json.dumps(args.get("filters_json"))
-                if not isinstance(args.get("filters_json", "{}"), str)
-                else args.get("filters_json", "{}")
-            ),
-            max_rows=args.get("max_rows", 100),
-            max_columns=args.get("max_columns", 50),
-            max_output_bytes=args.get("max_output_bytes", 256000),
-            max_scan_bytes=args.get("max_scan_bytes", 4000000),
-            timeout=args.get("timeout", 5.0),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return data_query(**_kw("data_query", args))
     if tool_name == "data_convert":
-        fields = args.get("fields_json", args.get("fields", []))
-        if not isinstance(fields, str):
-            fields = json.dumps(fields, ensure_ascii=False)
-        return data_convert(
-            input_path=args.get("input_path", ""),
-            output_path=args.get("output_path", ""),
-            fields_json=fields,
-            output_format=args.get("output_format", ""),
-            apply=args.get("apply", False),
-            max_input_bytes=args.get("max_input_bytes", 16_000_000),
-            max_output_bytes=args.get("max_output_bytes", 16_000_000),
-            max_rows=args.get("max_rows", 10_000),
-            max_columns=args.get("max_columns", 100),
-            max_fields=args.get("max_fields", 50),
-            max_field_bytes=args.get("max_field_bytes", 64_000),
-            max_depth=args.get("max_depth", 16),
-            preview_rows=args.get("preview_rows", 5),
-            timeout=args.get("timeout", 10.0),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return data_convert(**_kw("data_convert", args))
     if tool_name == "sqlite_mutate":
-        parameters = args.get("parameters_json", args.get("parameters", []))
-        if not isinstance(parameters, str):
-            parameters = json.dumps(parameters, ensure_ascii=False)
-        return sqlite_mutate(
-            path=args.get("path", ""), sql=args.get("sql", ""),
-            parameters_json=parameters, mode=args.get("mode", "preview"),
-            max_rows=args.get("max_rows", 1000), timeout=args.get("timeout", 2.0),
-            max_db_bytes=args.get("max_db_bytes", 67108864),
-            preview_token=args.get("preview_token", ""),
-            token=args.get("token", ""), approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return sqlite_mutate(**_kw("sqlite_mutate", args))
     if tool_name == "log_inspect":
-        return log_inspect(
-            path=args.get("path", ""),
-            tail_lines=args.get("tail_lines", 0),
-            context_lines=args.get("context_lines", 2),
-            max_file_bytes=args.get("max_file_bytes", 64000000),
-            max_scan_bytes=args.get("max_scan_bytes", 4000000),
-            max_lines=args.get("max_lines", 10000),
-            max_line_bytes=args.get("max_line_bytes", 4096),
-            max_results=args.get("max_results", 100),
-            max_output_bytes=args.get("max_output_bytes", 256000),
-            timeout=args.get("timeout", 5.0),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return log_inspect(**_kw("log_inspect", args))
     if tool_name == "workspace_compare":
-        return workspace_compare(
-            left=args.get("left", ""),
-            right=args.get("right", ""),
-            max_entries=args.get("max_entries", 2000),
-            max_file_bytes=args.get("max_file_bytes", 64000000),
-            max_total_bytes=args.get("max_total_bytes", 256000000),
-            max_details=args.get("max_details", 1000),
-            max_output_bytes=args.get("max_output_bytes", 256000),
-            timeout=args.get("timeout", 5.0),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return workspace_compare(**_kw("workspace_compare", args))
     if tool_name == "repo_log":
-        return repo_log(
-            path=args.get("path", "."),
-            revision=args.get("revision", "HEAD"),
-            file_path=args.get("file_path", ""),
-            count=args.get("count", 20),
-            timeout=args.get("timeout", 5.0),
-            max_bytes=args.get("max_bytes", 256000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return repo_log(**_kw("repo_log", args))
     if tool_name == "repo_show":
-        return repo_show(
-            path=args.get("path", "."),
-            revision=args.get("revision", "HEAD"),
-            file_path=args.get("file_path", ""),
-            timeout=args.get("timeout", 5.0),
-            max_bytes=args.get("max_bytes", 256000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return repo_show(**_kw("repo_show", args))
     if tool_name == "repo_blame":
-        return repo_blame(
-            path=args.get("path", "."),
-            file_path=args.get("file_path", ""),
-            revision=args.get("revision", "HEAD"),
-            start_line=args.get("start_line", 1),
-            end_line=args.get("end_line", 0),
-            timeout=args.get("timeout", 5.0),
-            max_bytes=args.get("max_bytes", 256000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return repo_blame(**_kw("repo_blame", args))
     if tool_name == "archive_list":
-        return archive_list(
-            path=args.get("path", ""),
-            max_entries=args.get("max_entries", archive_tools.DEFAULT_MAX_ENTRIES),
-            max_file_bytes=args.get("max_file_bytes", archive_tools.DEFAULT_MAX_FILE_BYTES),
-            max_total_bytes=args.get("max_total_bytes", archive_tools.DEFAULT_MAX_TOTAL_BYTES),
-            max_ratio=args.get("max_ratio", archive_tools.DEFAULT_MAX_RATIO),
-            max_path_depth=args.get("max_path_depth", archive_tools.DEFAULT_MAX_PATH_DEPTH),
-            max_results=args.get("max_results", archive_tools.DEFAULT_MAX_RESULTS),
-            max_seconds=args.get("max_seconds", archive_tools.DEFAULT_MAX_SECONDS),
-            token=args.get("token", ""), approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return archive_list(**_kw("archive_list", args, archive_defaults={
+            "max_entries": archive_tools.DEFAULT_MAX_ENTRIES,
+            "max_file_bytes": archive_tools.DEFAULT_MAX_FILE_BYTES,
+            "max_total_bytes": archive_tools.DEFAULT_MAX_TOTAL_BYTES,
+            "max_ratio": archive_tools.DEFAULT_MAX_RATIO,
+            "max_path_depth": archive_tools.DEFAULT_MAX_PATH_DEPTH,
+            "max_results": archive_tools.DEFAULT_MAX_RESULTS,
+            "max_seconds": archive_tools.DEFAULT_MAX_SECONDS,
+        }))
     if tool_name == "archive_extract":
-        return archive_extract(
-            source=args.get("source", ""), destination=args.get("destination", ""),
-            max_entries=args.get("max_entries", archive_tools.DEFAULT_MAX_ENTRIES),
-            max_file_bytes=args.get("max_file_bytes", archive_tools.DEFAULT_MAX_FILE_BYTES),
-            max_total_bytes=args.get("max_total_bytes", archive_tools.DEFAULT_MAX_TOTAL_BYTES),
-            max_ratio=args.get("max_ratio", archive_tools.DEFAULT_MAX_RATIO),
-            max_path_depth=args.get("max_path_depth", archive_tools.DEFAULT_MAX_PATH_DEPTH),
-            max_seconds=args.get("max_seconds", archive_tools.DEFAULT_MAX_SECONDS),
-            token=args.get("token", ""), approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return archive_extract(**_kw("archive_extract", args, archive_defaults={
+            "max_entries": archive_tools.DEFAULT_MAX_ENTRIES,
+            "max_file_bytes": archive_tools.DEFAULT_MAX_FILE_BYTES,
+            "max_total_bytes": archive_tools.DEFAULT_MAX_TOTAL_BYTES,
+            "max_ratio": archive_tools.DEFAULT_MAX_RATIO,
+            "max_path_depth": archive_tools.DEFAULT_MAX_PATH_DEPTH,
+            "max_seconds": archive_tools.DEFAULT_MAX_SECONDS,
+        }))
     if tool_name == "archive_create":
-        inputs = args.get("inputs_json", args.get("inputs", []))
-        if not isinstance(inputs, str):
-            inputs = json.dumps(inputs, ensure_ascii=False)
-        return archive_create(
-            root=args.get("root", "."), inputs_json=inputs,
-            destination=args.get("destination", ""),
-            archive_format=args.get("archive_format", args.get("format", "zip")),
-            deterministic=args.get("deterministic", True),
-            max_files=args.get("max_files", archive_create_tool.DEFAULT_MAX_FILES),
-            max_entries=args.get("max_entries", archive_create_tool.DEFAULT_MAX_ENTRIES),
-            max_file_bytes=args.get("max_file_bytes", archive_create_tool.DEFAULT_MAX_FILE_BYTES),
-            max_total_bytes=args.get("max_total_bytes", archive_create_tool.DEFAULT_MAX_TOTAL_BYTES),
-            max_depth=args.get("max_depth", archive_create_tool.DEFAULT_MAX_DEPTH),
-            max_results=args.get("max_results", archive_create_tool.DEFAULT_MAX_RESULTS),
-            token=args.get("token", ""), approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return archive_create(**_kw("archive_create", args, archive_create_defaults={
+            "max_files": archive_create_tool.DEFAULT_MAX_FILES,
+            "max_entries": archive_create_tool.DEFAULT_MAX_ENTRIES,
+            "max_file_bytes": archive_create_tool.DEFAULT_MAX_FILE_BYTES,
+            "max_total_bytes": archive_create_tool.DEFAULT_MAX_TOTAL_BYTES,
+            "max_depth": archive_create_tool.DEFAULT_MAX_DEPTH,
+            "max_results": archive_create_tool.DEFAULT_MAX_RESULTS,
+        }))
     if tool_name == "text_search":
-        return text_search(
-            query=args.get("query", args.get("pattern", "")),
-            root=args.get("root", "."),
-            glob=args.get("glob", "*"),
-            regex=args.get("regex", False),
-            case_sensitive=args.get("case_sensitive", False),
-            max_results=args.get("max_results", 100),
-            max_entries=args.get("max_entries", 20000),
-            timeout_seconds=args.get("timeout_seconds", 10.0),
-            include_hidden=args.get("include_hidden", False),
-            include_ignored=args.get("include_ignored", False),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return text_search(**_kw("text_search", args))
     if tool_name == "file_read":
         from sonder_runtime.adapters.inspection_executor import render_agent_file_page
         return render_agent_file_page(
@@ -20368,494 +17391,130 @@ def _agent_dispatch(
             activity=activity_tracker, reload=_maybe_live_reload,
         )
     if tool_name == "file_digest":
-        return file_digest(
-            path=args.get("path", ""),
-            max_bytes=args.get("max_bytes", 32_000_000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return file_digest(**_kw("file_digest", args))
     if tool_name == "directory_digest":
-        return directory_digest(
-            path=args.get("path", args.get("root", ".")),
-            max_depth=args.get("max_depth", 12),
-            max_files=args.get("max_files", 2_000),
-            max_total_bytes=args.get("max_total_bytes", 32_000_000),
-            max_file_bytes=args.get("max_file_bytes", 32_000_000),
-            max_results=args.get("max_results", 2_500),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return directory_digest(**_kw("directory_digest", args))
     if tool_name == "file_write":
-        return file_write(
-            path=args.get("path", ""),
-            content=args.get("content", ""),
-            mode=args.get("mode", "create"),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return file_write(**_kw("file_write", args))
     if tool_name == "file_copy":
-        return file_copy(
-            source=args.get("source", ""),
-            destination=args.get("destination", ""),
-            overwrite=args.get("overwrite", False),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return file_copy(**_kw("file_copy", args))
     if tool_name == "file_move":
-        return file_move(
-            source=args.get("source", ""),
-            destination=args.get("destination", ""),
-            overwrite=args.get("overwrite", False),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return file_move(**_kw("file_move", args))
     if tool_name == "file_batch_write":
-        operations = args.get("operations_json", args.get("operations", []))
-        if not isinstance(operations, str):
-            operations = json.dumps(operations, ensure_ascii=False)
-        return file_batch_write(
-            operations_json=operations,
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return file_batch_write(**_kw("file_batch_write", args))
     if tool_name == "json_patch":
-        operations = args.get("operations_json", args.get("operations", []))
-        if not isinstance(operations, str):
-            operations = json.dumps(operations, ensure_ascii=False)
-        return json_patch(
-            path=args.get("path", ""),
-            operations_json=operations,
-            mode=args.get("mode", "preview"),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return json_patch(**_kw("json_patch", args))
     if tool_name == "text_patch":
-        return text_patch(
-            root=args.get("root", "."), patch=args.get("patch", ""),
-            apply=args.get("apply") is True, token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return text_patch(**_kw("text_patch", args))
     if tool_name == "scaffold_project":
-        return scaffold_project(
-            kind=args.get("kind", ""),
-            name=args.get("name", ""),
-            root=args.get("root", ""),
-            apply=bool(args.get("apply", True)),
-        )
+        return scaffold_project(**_kw("scaffold_project", args))
     if tool_name == "environment_status":
-        return environment_status(refresh=bool(args.get("refresh", False)))
+        return environment_status(**_kw("environment_status", args))
     if tool_name == "hardware_profile":
-        return hardware_profile(
-            workload=args.get("workload", "general"),
-            refresh=bool(args.get("refresh", False)),
-            model=args.get("model", ""),
-        )
+        return hardware_profile(**_kw("hardware_profile", args))
     if tool_name == "file_edit":
-        return file_edit(
-            path=args.get("path", ""),
-            old=args.get("old", ""),
-            new=args.get("new", ""),
-            count=args.get("count", 1),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return file_edit(**_kw("file_edit", args))
     if tool_name == "file_delete":
-        return file_delete(
-            path=args.get("path", ""),
-            recursive=args.get("recursive", False),
-            dry_run=args.get("dry_run", True),
-            confirm=args.get("confirm", ""),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return file_delete(**_kw("file_delete", args))
     if tool_name == "script_search":
-        return script_search(
-            query=args.get("query", "*"),
-            root=args.get("root", "."),
-            max_results=args.get("max_results", 100),
-            max_entries=args.get("max_entries", 20000),
-            timeout_seconds=args.get("timeout_seconds", 10.0),
-            include_hidden=args.get("include_hidden", False),
-            include_ignored=args.get("include_ignored", False),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return script_search(**_kw("script_search", args))
     if tool_name == "program_search":
-        return program_search(
-            query=args.get("query", "*"),
-            max_results=args.get("max_results", 100),
-        )
+        return program_search(**_kw("program_search", args))
     if tool_name == "workspace_run":
-        return workspace_run(
-            program=args.get("program", ""),
-            args_json=args.get("args_json", args.get("args", [])),
-            cwd=args.get("cwd", "."),
-            stdin=args.get("stdin", ""),
-            timeout=args.get("timeout", 30),
-            max_output=args.get("max_output", 128000),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return workspace_run(**_kw("workspace_run", args))
     if tool_name == "script_run":
-        return script_run(
-            path=args.get("path", ""),
-            args_json=args.get("args_json", args.get("args", [])),
-            cwd=args.get("cwd", ""),
-            stdin=args.get("stdin", ""),
-            timeout=args.get("timeout", 30),
-            max_output=args.get("max_output", 128000),
-            risk_policy=args.get("risk_policy", ""),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return script_run(**_kw("script_run", args))
     if tool_name == "artifact_risk_inspect":
-        return artifact_risk_inspect(
-            path=args.get("path", ""),
-            max_scan_bytes=args.get("max_scan_bytes", 16 * 1024 * 1024),
-            max_seconds=args.get("max_seconds", 5.0),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return artifact_risk_inspect(**_kw("artifact_risk_inspect", args))
     if tool_name == "verify_artifact":
-        return verify_artifact(
-            path=args.get("path", ""),
-            expect_type=args.get("expect_type", ""),
-            expect_publisher=args.get("expect_publisher", ""),
-            sha256=args.get("sha256", ""),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return verify_artifact(**_kw("verify_artifact", args))
     if tool_name == "process_list":
-        return process_list(
-            max_processes=args.get("max_processes", 128),
-            max_seconds=args.get("max_seconds", 0.5),
-        )
+        return process_list(**_kw("process_list", args))
     if tool_name == "process_memory_risk_inspect":
-        return process_memory_risk_inspect(
-            pid=args.get("pid", 0),
-            max_bytes=args.get("max_bytes", 4 * 1024 * 1024),
-            max_regions=args.get("max_regions", 256),
-            max_seconds=args.get("max_seconds", 1.0),
-        )
+        return process_memory_risk_inspect(**_kw("process_memory_risk_inspect", args))
     if tool_name == "image_inspect":
-        return image_inspect(
-            path=args.get("path", ""),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return image_inspect(**_kw("image_inspect", args))
     if tool_name == "document_extract":
-        return document_extract(
-            path=args.get("path", ""),
-            max_chars=args.get("max_chars", 32000),
-            max_items=args.get("max_items", 200),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return document_extract(**_kw("document_extract", args))
     if tool_name == "media_inspect":
-        return media_inspect(
-            path=args.get("path", ""),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return media_inspect(**_kw("media_inspect", args))
     if tool_name == "code_metrics":
-        return code_metrics(
-            path=args.get("path", "."),
-            max_files=args.get("max_files", 2000),
-            top_n=args.get("top_n", 10),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return code_metrics(**_kw("code_metrics", args))
     if tool_name == "schema_validate":
-        return schema_validate(
-            path=args.get("path", ""),
-            schema_path=args.get("schema_path", ""),
-            schema_json=args.get("schema_json", ""),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return schema_validate(**_kw("schema_validate", args))
     if tool_name == "language_matrix":
-        return language_matrix(language=args.get("language", ""))
+        return language_matrix(**_kw("language_matrix", args))
     if tool_name == "math_eval":
-        return math_eval(
-            expression=args.get("expression", ""),
-            action=args.get("action", "eval"),
-            exact=bool(args.get("exact", False)),
-            precision=args.get("precision", 0),
-            variables_json=args.get("variables_json", args.get("variables", "")),
-            variable=args.get("variable", "x"),
-            equations_json=args.get("equations_json", args.get("equations", "")),
-            bracket_json=args.get("bracket_json", args.get("bracket", "")),
-            matrix_op=args.get("matrix_op", ""),
-            matrix_a_json=args.get("matrix_a_json", args.get("matrix_a", "")),
-            matrix_b_json=args.get("matrix_b_json", args.get("matrix_b", "")),
-            value=args.get("value"),
-            from_unit=args.get("from_unit", ""),
-            to_unit=args.get("to_unit", ""),
-            date_a=args.get("date_a", ""),
-            date_b=args.get("date_b", ""),
-            add_days=args.get("add_days"),
-            at=args.get("at", 0.0),
-            low=args.get("low", 0.0),
-            high=args.get("high", 1.0),
-        )
+        return math_eval(**_kw("math_eval", args))
     if tool_name == "logic_verify":
-        return logic_verify(
-            formula=args.get("formula", ""),
-            action=args.get("action", "satisfiable"),
-            formula_b=args.get("formula_b", ""),
-            premises_json=args.get("premises_json", args.get("premises", "")),
-            conclusion=args.get("conclusion", ""),
-            domains_json=args.get("domains_json", args.get("domains", "")),
-            constraints_json=args.get("constraints_json", args.get("constraints", "")),
-        )
+        return logic_verify(**_kw("logic_verify", args))
     if tool_name == "regex_lab":
-        return regex_lab(
-            pattern=args.get("pattern", ""),
-            text=args.get("text", ""),
-            samples_json=args.get("samples_json", args.get("samples", "")),
-            should_match_json=args.get("should_match_json", args.get("should_match", "")),
-            should_not_match_json=args.get("should_not_match_json", args.get("should_not_match", "")),
-            replacement=args.get("replacement"),
-            flags=args.get("flags", ""),
-            mode=args.get("mode", "search"),
-            max_matches=args.get("max_matches", 20),
-        )
+        return regex_lab(**_kw("regex_lab", args))
     if tool_name == "code_graph":
-        return code_graph(
-            root=args.get("root", "."),
-            action=args.get("action", "summary"),
-            target=args.get("target", ""),
-            max_files=args.get("max_files", 1500),
-            top_n=args.get("top_n", 15),
-            max_depth=args.get("max_depth", 6),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return code_graph(**_kw("code_graph", args))
     if tool_name == "diff_semantic":
-        return diff_semantic(
-            path_a=args.get("path_a", ""),
-            path_b=args.get("path_b", ""),
-            text_a=args.get("text_a", ""),
-            text_b=args.get("text_b", ""),
-            kind=args.get("kind", "auto"),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return diff_semantic(**_kw("diff_semantic", args))
     if tool_name == "reasoning_board":
-        return reasoning_board(
-            action=args.get("action", "summary"),
-            board_id=args.get("board_id", "default"),
-            goal=args.get("goal", ""),
-            text=args.get("text", ""),
-            source=args.get("source", ""),
-            hypothesis_id=args.get("hypothesis_id", ""),
-            status=args.get("status", ""),
-            confidence=args.get("confidence"),
-            evidence_for=args.get("evidence_for", ""),
-            evidence_against=args.get("evidence_against", ""),
-            fact_refs_json=args.get("fact_refs_json", args.get("fact_refs", "")),
-            alternatives_json=args.get("alternatives_json", args.get("alternatives", "")),
-        )
+        return reasoning_board(**_kw("reasoning_board", args))
     if tool_name == "symbol_verify":
-        return symbol_verify(
-            action=args.get("action", "verify_symbol"),
-            module=args.get("module", ""),
-            symbol=args.get("symbol", ""),
-            kwargs_json=args.get("kwargs_json", args.get("kwargs", "")),
-            code=args.get("code", ""),
-            root=args.get("root", ""),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return symbol_verify(**_kw("symbol_verify", args))
     if tool_name == "citation_audit":
-        return citation_audit(
-            text=args.get("text", ""),
-            root=args.get("root", ""),
-            claims_json=args.get("claims_json", args.get("claims", "")),
-            sources_json=args.get("sources_json", args.get("sources", "")),
-            token=args.get("token", ""),
-            approval=args.get("approval", ""),
-            extra_roots=args.get("extra_roots", ""),
-        )
+        return citation_audit(**_kw("citation_audit", args))
     if tool_name == "fact_cross_check":
-        return fact_cross_check(text=args.get("text", ""))
+        return fact_cross_check(**_kw("fact_cross_check", args))
     if tool_name == "consistency_check":
-        return consistency_check(
-            action=args.get("action", "compare_candidates"),
-            candidates_json=args.get("candidates_json", args.get("candidates", "")),
-            reply=args.get("reply", ""),
-            receipts_json=args.get("receipts_json", args.get("receipts", "")),
-        )
+        return consistency_check(**_kw("consistency_check", args))
     if tool_name == "plan_fallback":
-        return plan_fallback(
-            failed_tool=args.get("failed_tool", ""),
-            error=args.get("error", ""),
-            goal=args.get("goal", ""),
-            available_tools_json=args.get("available_tools_json", args.get("available_tools", "")),
-            tried_tools_json=args.get("tried_tools_json", args.get("tried_tools", "")),
-        )
+        return plan_fallback(**_kw("plan_fallback", args))
     if tool_name == "runtime_resilience_check":
         return runtime_resilience_check()
     if tool_name == "prompt_shield":
-        return prompt_shield(
-            text=args.get("text", ""),
-            path=args.get("path", ""),
-            redact_secrets=bool(args.get("redact_secrets", True)),
-            include_sanitized=bool(args.get("include_sanitized", True)),
-            max_findings=int(args.get("max_findings", 40)),
-        )
+        return prompt_shield(**_kw("prompt_shield", args))
     if tool_name == "error_diagnose":
-        return error_diagnose(
-            error_text=args.get("error_text", ""),
-            root=args.get("root", ""),
-            max_frames=int(args.get("max_frames", 8)),
-            context_lines=int(args.get("context_lines", 3)),
-        )
+        return error_diagnose(**_kw("error_diagnose", args))
     if tool_name == "code_audit":
-        return code_audit(
-            code=args.get("code", ""),
-            path=args.get("path", ""),
-            language=args.get("language", ""),
-            min_severity=args.get("min_severity", "low"),
-            max_findings=int(args.get("max_findings", 60)),
-        )
+        return code_audit(**_kw("code_audit", args))
     if tool_name == "data_transform":
-        return data_transform(
-            action=args.get("action", "convert"),
-            data=args.get("data", ""),
-            path=args.get("path", ""),
-            input_format=args.get("input_format", "auto"),
-            output_format=args.get("output_format", "json"),
-            expression=args.get("expression", ""),
-            encoding=args.get("encoding", "base64"),
-            limit=int(args.get("limit", 50)),
-        )
+        return data_transform(**_kw("data_transform", args))
     if tool_name == "learn_tool":
-        return learn_tool(
-            tool=args.get("tool", ""),
-            goal=args.get("goal", ""),
-            subcommand=args.get("subcommand", ""),
-            probe_cli=bool(args.get("probe_cli", True)),
-            research_web=bool(args.get("research_web", False)) and bool(allow_web),
-            save_note=bool(args.get("save_note", False)) and not bool(read_only),
-            timeout=float(args.get("timeout", 6.0)),
-        )
+        return learn_tool(**_kw("learn_tool", args, allow_web=allow_web, read_only=read_only))
     if tool_name == "ground_artifact":
         return ground_artifact(
             args.get("artifact", ""),
             json.dumps(args.get("checks_json", args.get("checks", []))),
         )
     if tool_name == "task_create":
-        return task_create(
-            title=args.get("title", ""),
-            detail=args.get("detail", ""),
-            priority=args.get("priority", 2),
-            project=args.get("project", ""),
-            owner=args.get("owner", ""),
-            parent_id=args.get("parent_id", ""),
-        )
+        return task_create(**_kw("task_create", args))
     if tool_name == "task_list":
-        return task_list(
-            status=args.get("status", ""),
-            project=args.get("project", ""),
-            owner=args.get("owner", ""),
-            include_done=args.get("include_done", False),
-            limit=args.get("limit", 50),
-        )
+        return task_list(**_kw("task_list", args))
     if tool_name == "task_update":
-        return task_update(
-            task_id=args.get("task_id", args.get("id", "")),
-            status=args.get("status", ""),
-            title=args.get("title", ""),
-            detail=args.get("detail", ""),
-            priority=args.get("priority", ""),
-            project=args.get("project", ""),
-            owner=args.get("owner", ""),
-            note=args.get("note", ""),
-        )
+        return task_update(**_kw("task_update", args))
     if tool_name == "task_show":
         return task_show(args.get("task_id", args.get("id", "")))
     if tool_name == "task_delete":
         return task_delete(args.get("task_id", args.get("id", "")))
     if tool_name == "task_plan":
-        steps = args.get("steps", args.get("items", []))
-        return task_plan(
-            title=args.get("title", "Work plan"),
-            steps=json.dumps(steps) if not isinstance(steps, str) else steps,
-            project=args.get("project", ""),
-            owner=args.get("owner", "agent"),
-            priority=args.get("priority", 2),
-            sequential=args.get("sequential", True),
-        )
+        return task_plan(**_kw("task_plan", args))
     if tool_name == "task_progress":
-        return task_progress(project=args.get("project", ""))
+        return task_progress(**_kw("task_progress", args))
     if tool_name == "task_ledger":
-        return task_ledger(
-            goal_id=args.get("goal_id", args.get("id", "")),
-            replan_count=args.get("replan_count", 0),
-            last_replan_reason=args.get("last_replan_reason", ""),
-        )
+        return task_ledger(**_kw("task_ledger", args))
     if tool_name == "task_depend":
-        return task_depend(
-            task_id=args.get("task_id", args.get("id", "")),
-            depends_on=args.get("depends_on", ""),
-            remove=args.get("remove", False),
-        )
+        return task_depend(**_kw("task_depend", args))
     if tool_name == "checklist_create":
-        items = args.get("items_json", args.get("items", []))
-        return checklist_create(
-            title=args.get("title", "Work checklist"),
-            items_json=json.dumps(items) if not isinstance(items, str) else items,
-            project=args.get("project", ""),
-            owner=args.get("owner", "agent"),
-            priority=args.get("priority", 1),
-        )
+        return checklist_create(**_kw("checklist_create", args))
     if tool_name == "checklist_update":
-        return checklist_update(
-            checklist_id=args.get("checklist_id", args.get("id", "")),
-            item=str(args.get("item", args.get("item_id", ""))),
-            status=args.get("status", ""),
-            note=args.get("note", ""),
-        )
+        return checklist_update(**_kw("checklist_update", args))
     if tool_name == "checklist_show":
-        return checklist_show(args.get("checklist_id", args.get("id", "")))
+        return checklist_show(**_kw("checklist_show", args))
     if tool_name == "command_registry_list":
         return command_registry_list(args.get("filter_text", args.get("filter", "")))
     if tool_name == "activity_status":
-        # Agent tool observations return to the model.  Do not route this
-        # through the operator-facing global status function: it would expose
-        # concurrent responses and the latest unrelated result to this run.
         return _agent_activity_status(include_events=args.get("include_events", True))
     if tool_name == "permission_policy":
         return permission_policy(args.get("tool_name", args.get("tool", "")))
     if tool_name == "context_compaction_plan":
-        return context_compaction_plan(
-            session=args.get("session", ""),
-            project=args.get("project", ""),
-        )
+        return context_compaction_plan(**_kw("context_compaction_plan", args))
     if tool_name == "apply_learned":
         return apply_learned(args.get("task", ""), args.get("limit", 5))
     if tool_name == "workflow_run":
@@ -20869,66 +17528,35 @@ def _agent_dispatch(
     if tool_name == "diagnostics":
         return diagnostics()
     if tool_name == "context_health":
-        return context_health(
-            session=args.get("session", ""),
-            project=args.get("project", ""),
-        )
+        return context_health(**_kw("context_health", args))
     if tool_name == "learning_health_status":
         return learning_health_status()
     if tool_name == "evaluation_history_status":
-        return evaluation_history_status(
-            model=args.get("model", ""),
-            model_digest=args.get("model_digest", ""),
-            suite=args.get("suite", ""),
-            suite_version=args.get("suite_version", ""),
-            suite_digest=args.get("suite_digest", ""),
-            tolerance=args.get("tolerance", 0.0),
-            max_records=args.get("max_records", 10000),
-        )
+        return evaluation_history_status(**_kw("evaluation_history_status", args))
     if tool_name == "context_policy_status":
         return context_policy_status(args.get("context_size", ""))
     if tool_name == "set_context_size":
         return set_context_size(args.get("context_size", ""))
     if tool_name == "memory_quality_report":
-        return memory_quality_report(sample_limit=args.get("sample_limit", 5))
+        return memory_quality_report(**_kw("memory_quality_report", args))
     if tool_name == "memory_quality_repair":
-        return memory_quality_repair(apply=args.get("apply") is True)
+        return memory_quality_repair(**_kw("memory_quality_repair", args))
     if tool_name == "memory_privacy_review":
-        return memory_privacy_review(sample_limit=args.get("sample_limit", 20))
+        return memory_privacy_review(**_kw("memory_privacy_review", args))
     if tool_name == "memory_privacy_repair":
-        return memory_privacy_repair(
-            lesson_ids_json=args.get("lesson_ids_json", args.get("lesson_ids", [])),
-            apply=args.get("apply") is True,
-        )
+        return memory_privacy_repair(**_kw("memory_privacy_repair", args))
     if tool_name == "memory_embedding_backfill":
-        return memory_embedding_backfill(
-            limit=args.get("limit", 25), apply=args.get("apply") is True,
-        )
+        return memory_embedding_backfill(**_kw("memory_embedding_backfill", args))
     if tool_name == "memory_interaction_embedding_backfill":
-        return memory_interaction_embedding_backfill(
-            limit=args.get("limit", 25), apply=args.get("apply") is True,
-        )
+        return memory_interaction_embedding_backfill(**_kw("memory_interaction_embedding_backfill", args))
     if tool_name in ("system_improvement_report", "improvement_report"):
-        return system_improvement_report(
-            session=args.get("session", ""),
-            project=args.get("project", ""),
-        )
+        return system_improvement_report(**_kw("system_improvement_report", args))
     if tool_name in ("master_status", "agent_status"):
-        return master_status(
-            include_finished=args.get("include_finished", True),
-            limit=args.get("limit", 20),
-        )
+        return master_status(**_kw("master_status", args))
     if tool_name in ("master_capacity", "agent_capacity"):
-        capacity_args = {
-            "requested_agents": args.get("requested_agents", args.get("agents", 0)),
-        }
-        if "worker_cap" in args:
-            capacity_args["worker_cap"] = args.get("worker_cap")
-        return master_capacity(**capacity_args)
+        return master_capacity(**_kw("master_capacity", args))
     if tool_name in ("master_cancel", "agent_cancel"):
-        return master_cancel(
-            agent_id=args.get("agent_id", args.get("selector", "")),
-        )
+        return master_cancel(**_kw("master_cancel", args))
     if tool_name in ("master_retry", "agent_retry"):
         if not _delegation_can_delegate():
             refusal = (
@@ -20936,10 +17564,7 @@ def _agent_dispatch(
                 "only allowed at depth 0." % tool_name
             )
             return refusal
-        return master_retry(
-            agent_id=args.get("agent_id", args.get("selector", "")),
-            tier=args.get("tier", ""),
-        )
+        return master_retry(**_kw("master_retry", args))
     if tool_name in ("master_orchestrate", "master"):
         if not _delegation_can_delegate():
             refusal = (
@@ -20949,36 +17574,16 @@ def _agent_dispatch(
             return refusal
         requested_project = str(args.get("project", "") or "").strip()
         if repository_extra_roots:
-            if not requested_project:
-                requested_project = repository_extra_roots
-            else:
-                try:
-                    raw_root = file_ops._reject_network_path(
-                        str(repository_extra_roots).strip()
-                    )
-                    bound_root = Path(raw_root).expanduser().resolve(strict=True)
-                    if not bound_root.is_dir():
-                        raise ValueError("project root is not a directory")
-                    raw_req = file_ops._reject_network_path(requested_project)
-                    if file_ops._foreign_absolute(raw_req):
-                        raise PermissionError(
-                            "drive-relative or foreign absolute project path"
-                        )
-                    req_path = Path(raw_req).expanduser()
-                    if not req_path.is_absolute():
-                        req_path = bound_root / req_path
-                    req_resolved = req_path.resolve(strict=False)
-                    req_resolved.relative_to(bound_root)
-                    requested_project = str(req_resolved)
-                except (OSError, PermissionError, ValueError) as exc:
-                    refusal = (
-                        "ERROR: agent project path rejected: master_orchestrate "
-                        "project is outside the host-selected project root (%s)"
-                        % exc
-                    )
-                    return refusal
+            requested_project, reject_detail = _adh.resolve_bound_master_project(
+                requested_project,
+                repository_extra_roots,
+                reject_network_path=file_ops._reject_network_path,
+                is_foreign_absolute=file_ops._foreign_absolute,
+            )
+            if reject_detail:
+                refusal = "ERROR: " + reject_detail
+                return refusal
         else:
-            # The agent model chose this project: it must stay inside the file roots.
             project_refusal = served_project_refusal(requested_project)
             if project_refusal:
                 return project_refusal
@@ -20994,7 +17599,7 @@ def _agent_dispatch(
     if tool_name == "self_heal_check":
         return self_heal_check()
     if tool_name == "self_heal_repair":
-        return self_heal_repair(apply=args.get("apply") is True)
+        return self_heal_repair(**_kw("self_heal_repair", args))
     if tool_name == "status":
         return status()
     if tool_name == "system_profile_text":
@@ -21008,346 +17613,98 @@ def _agent_dispatch(
             mode=args.get("mode", "merge"),
         )
     if tool_name == "tune_emotion_vectors":
-        return tune_emotion_vectors(
-            feedback_text=args.get("feedback_text", args.get("text", "")),
-            step=args.get("step", 0.1),
-        )
+        return tune_emotion_vectors(**_kw("tune_emotion_vectors", args))
     if tool_name == "learn_preference":
-        return learn_preference(
-            text=args.get("text", ""),
-            scope=args.get("scope", "global"),
-        )
+        return learn_preference(**_kw("learn_preference", args))
     if tool_name == "preferences_status":
         if repository_extra_roots:
-            # A project-bound run lists only global and its own project's
-            # preferences; no fallback to the unscoped list.
             _maybe_live_reload()
             from sonder_runtime.adapters.preference_adapters import (
                 preferences_status_scoped,
             )
-
             return preferences_status_scoped(
                 _application(),
                 include_disabled=args.get("include_disabled", False),
                 limit=args.get("limit", 50),
                 bound_project=repository_extra_roots,
             )
-        return preferences_status(
-            include_disabled=args.get("include_disabled", False),
-            limit=args.get("limit", 50),
-        )
+        return preferences_status(**_kw("preferences_status", args))
     if tool_name == "tool_manifest":
         return tool_manifest()
     if tool_name == "offload":
-        return offload(
-            prompt=args.get("prompt", ""),
-            tier=args.get("tier", "fast"),
-            system=args.get("system", ""),
-            temperature=args.get("temperature", 0.2),
-            num_predict=args.get("num_predict", 1024),
-            num_ctx=args.get("num_ctx", 4096),
-            learn=args.get("learn", False),
-        )
-    # ── Developer-workflow tools (harness_tools.py) ──────────────────────
-    # Every tool below hands `root` to a child process as its working
-    # directory, and secret_scan prints what it finds there.  Confinement
-    # lives in harness_tools._resolve_root; this scope is the only channel
-    # that adds the HOST-selected project root to the authorized set, and
-    # it is an in-process scope rather than a tool argument precisely so a
-    # model cannot grant itself one.  Outside it these tools are confined
-    # to file_roots.local / SONDER_FILE_ROOTS, so a missed call site fails
-    # closed.
+        return offload(**_kw("offload", args))
     with harness_tools.authorized_root_scope(repository_extra_roots):
         if tool_name == "test_discover":
             if read_only:
                 _td_token = _TEST_DISCOVER_STATIC_ONLY.set(True)
                 try:
-                    return test_discover(
-                        root=args.get("root", "."),
-                        framework=args.get("framework", "auto"),
-                    )
+                    return test_discover(**_kw("test_discover", args))
                 finally:
                     _TEST_DISCOVER_STATIC_ONLY.reset(_td_token)
-            return test_discover(
-                root=args.get("root", "."),
-                framework=args.get("framework", "auto"),
-            )
+            return test_discover(**_kw("test_discover", args))
         if tool_name == "test_run":
-            return test_run(
-                root=args.get("root", "."),
-                framework=args.get("framework", "auto"),
-                path=args.get("path", ""),
-                pattern=args.get("pattern", ""),
-                verbose=args.get("verbose", False),
-                coverage=args.get("coverage", False),
-                timeout=args.get("timeout", 120),
-                # Retired: forwarded only so a caller still sending it is
-                # refused by name instead of silently dropped.
-                extra_args_json=args.get("extra_args_json", ""),
-            )
+            return test_run(**_kw("test_run", args))
         if tool_name == "lint_run":
-            return lint_run(
-                root=args.get("root", "."),
-                tool=args.get("tool", "auto"),
-                path=args.get("path", ""),
-                fix=args.get("fix", False),
-                timeout=args.get("timeout", 60),
-            )
+            return lint_run(**_kw("lint_run", args))
         if tool_name == "format_code":
-            return format_code(
-                root=args.get("root", "."),
-                tool=args.get("tool", "auto"),
-                path=args.get("path", ""),
-                check_only=args.get("check_only", False),
-                timeout=args.get("timeout", 60),
-            )
+            return format_code(**_kw("format_code", args))
         if tool_name == "typecheck_run":
-            return typecheck_run(
-                root=args.get("root", "."),
-                tool=args.get("tool", "auto"),
-                path=args.get("path", ""),
-                timeout=args.get("timeout", 120),
-            )
+            return typecheck_run(**_kw("typecheck_run", args))
         if tool_name == "dependency_add":
-            return dependency_add(
-                root=args.get("root", "."),
-                packages_json=args.get("packages_json", "[]"),
-                dev=args.get("dev", False),
-                timeout=args.get("timeout", 60),
-            )
+            return dependency_add(**_kw("dependency_add", args))
         if tool_name == "dependency_remove":
-            return dependency_remove(
-                root=args.get("root", "."),
-                packages_json=args.get("packages_json", "[]"),
-                timeout=args.get("timeout", 60),
-            )
+            return dependency_remove(**_kw("dependency_remove", args))
         if tool_name == "dependency_update":
-            return dependency_update(
-                root=args.get("root", "."),
-                packages_json=args.get("packages_json", "[]"),
-                timeout=args.get("timeout", 120),
-            )
+            return dependency_update(**_kw("dependency_update", args))
         if tool_name == "dependency_audit":
-            return dependency_audit(
-                root=args.get("root", "."),
-                timeout=args.get("timeout", 60),
-            )
+            return dependency_audit(**_kw("dependency_audit", args))
         if tool_name == "git_commit":
-            return git_commit(
-                root=args.get("root", "."),
-                message=args.get("message", ""),
-                paths_json=args.get("paths_json", "[]"),
-                all_tracked=args.get("all_tracked", False),
-                timeout=args.get("timeout", 30),
-            )
+            return git_commit(**_kw("git_commit", args))
         if tool_name == "git_branch":
-            return git_branch(
-                root=args.get("root", "."),
-                name=args.get("name", ""),
-                checkout=args.get("checkout", True),
-                base=args.get("base", ""),
-                timeout=args.get("timeout", 10),
-            )
+            return git_branch(**_kw("git_branch", args))
         if tool_name == "git_checkout":
-            return git_checkout(
-                root=args.get("root", "."),
-                ref=args.get("ref", ""),
-                timeout=args.get("timeout", 10),
-            )
+            return git_checkout(**_kw("git_checkout", args))
         if tool_name == "git_stash":
-            return git_stash(
-                root=args.get("root", "."),
-                action=args.get("action", "push"),
-                message=args.get("message", ""),
-                include_untracked=args.get("include_untracked", True),
-                timeout=args.get("timeout", 10),
-            )
+            return git_stash(**_kw("git_stash", args))
         if tool_name == "git_tag":
-            return git_tag(
-                root=args.get("root", "."),
-                name=args.get("name", ""),
-                message=args.get("message", ""),
-                delete=args.get("delete", False),
-                timeout=args.get("timeout", 10),
-            )
+            return git_tag(**_kw("git_tag", args))
         if tool_name == "git_merge":
-            return git_merge(
-                root=args.get("root", "."),
-                branch=args.get("branch", ""),
-                no_ff=args.get("no_ff", True),
-                message=args.get("message", ""),
-                timeout=args.get("timeout", 30),
-            )
+            return git_merge(**_kw("git_merge", args))
         if tool_name == "git_cherry_pick":
-            return git_cherry_pick(
-                root=args.get("root", "."),
-                commits_json=args.get("commits_json", "[]"),
-                timeout=args.get("timeout", 30),
-            )
+            return git_cherry_pick(**_kw("git_cherry_pick", args))
         if tool_name == "build_run":
-            return build_run(
-                root=args.get("root", "."),
-                command=args.get("command", ""),
-                timeout=args.get("timeout", 120),
-            )
+            return build_run(**_kw("build_run", args))
         if tool_name == "ensemble_codegen_build_loop":
-            # The project root is host-selected by _agent_dispatch_observed.
-            # The public wrapper intentionally has no ``extra_roots`` argument:
-            # exposing one would let a model turn its tool JSON into a new
-            # filesystem grant.  Thread it only through this internal helper,
-            # where ``repository_extra_roots`` is already the dispatcher's
-            # trusted project scope.
-            return _ensemble_codegen_build_loop(
-                project_dir=args.get("project_dir", "."),
-                files_json=args.get("files_json", ""),
-                build_program=args.get("build_program", ""),
-                build_args_json=args.get("build_args_json", "[]"),
-                error_regex=args.get("error_regex", ""),
-                slips_json=args.get("slips_json", ""),
-                timeout=args.get("timeout", 120),
-                extra_roots=repository_extra_roots,
-            )
+            return _ensemble_codegen_build_loop(**_kw(
+                "ensemble_codegen_build_loop", args,
+                repository_extra_roots=repository_extra_roots,
+            ))
         if tool_name == "build_clean":
-            return build_clean(
-                root=args.get("root", "."),
-                timeout=args.get("timeout", 30),
-            )
+            return build_clean(**_kw("build_clean", args))
         if tool_name == "rename_symbol":
-            return rename_symbol(
-                root=args.get("root", "."),
-                old_name=args.get("old_name", ""),
-                new_name=args.get("new_name", ""),
-                glob=args.get("glob", "**/*.py"),
-                dry_run=args.get("dry_run", True),
-            )
+            return rename_symbol(**_kw("rename_symbol", args))
         if tool_name == "find_references":
-            return find_references(
-                root=args.get("root", "."),
-                symbol=args.get("symbol", ""),
-                glob=args.get("glob", "**/*.py"),
-            )
+            return find_references(**_kw("find_references", args))
         if tool_name == "diff_files":
-            return diff_files(
-                root=args.get("root", "."),
-                left=args.get("left", ""),
-                right=args.get("right", ""),
-                context=args.get("context", 3),
-            )
+            return diff_files(**_kw("diff_files", args))
         if tool_name == "apply_patch":
-            return apply_patch(
-                root=args.get("root", "."),
-                patch_text=args.get("patch_text", ""),
-                check_only=args.get("check_only", False),
-            )
+            return apply_patch(**_kw("apply_patch", args))
         if tool_name == "secret_scan":
-            return secret_scan(
-                root=args.get("root", "."),
-                timeout=args.get("timeout", 30),
-            )
+            return secret_scan(**_kw("secret_scan", args))
     return _generic_agent_dispatch.dispatch(tool_name, args, mcp, _AGENT_SYSTEM_OPERATOR_TOOLS, run_refusal=_agent_run_tool_refusal, read_only=read_only, project_bound=bool(repository_extra_roots), allow_web=allow_web, allow_location=allow_location, unsafe=unsafe)
 
 
 
-_PROJECT_SCOPED_PATH_TOOLS = frozenset({
-    "file_check",
-    "file_read", "file_digest", "directory_digest", "file_read_range", "context_pack", "workspace_compare",
-    "repo_log", "repo_show", "repo_blame",
-    "data_inspect", "data_query", "data_convert", "sqlite_mutate", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "log_inspect", "file_write", "file_batch_write", "json_patch", "file_edit", "text_patch",
-    "archive_list", "archive_extract",
-    "file_delete", "directory_create", "workspace_inventory", "dependency_inventory", "directory_tree",
-    "file_find", "repository_symbol_index", "text_search", "script_search", "artifact_verify",
-    "fetch_artifact", "verify_artifact",
-    "artifact_ground", "artifact_risk_inspect", "scaffold_project", "archive_create", "repo_status", "repo_diff", "project_detect", "file_copy", "file_move",
-    "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
-    "dependency_add", "dependency_remove", "dependency_update", "dependency_audit",
-    "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag", "git_merge", "git_cherry_pick",
-    "build_run", "build_clean",
-    "ensemble_codegen_build_loop",
-    "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
-    "output_digest",
-})
-_PROJECT_SCOPED_EXECUTION_TOOLS = frozenset({"workspace_run", "script_run"})
-# The developer-workflow tools (harness_tools.py).  Every OTHER project-scoped
-# tool resolves its path through file_ops -- `_repository_read_only_error`'s
-# resolver chain calls `resolve_repository_read_path(..., extra_roots=trusted)`
-# for each of them -- so with no project bound they are still confined to
-# `allowed_roots("")`.  These 23 have no such branch: they hand `root` to a
-# child process.  Confinement for them now lives in `harness_tools._resolve_root`;
-# this set is the second lock on the same door, and it is a set rather than a
-# check against `_PROJECT_SCOPED_PATH_TOOLS` because refusing that whole set on
-# a rootless read-only run also refuses tools that were never unconfined
-# (`artifact_ground` on a workspace-relative path, measured).
-_DEVELOPER_WORKFLOW_TOOLS = frozenset({
-    "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
-    "dependency_add", "dependency_remove", "dependency_update", "dependency_audit",
-    "git_commit", "git_branch", "git_checkout", "git_stash", "git_tag",
-    "git_merge", "git_cherry_pick",
-    "build_run", "build_clean",
-    "rename_symbol", "find_references", "diff_files", "apply_patch", "secret_scan",
-})
-# Developer-workflow tools that take BOTH `root` and a second `path` argument
-# which harness_tools appends straight to the child argv (harness_tools.py:233,
-# 353, 366, 394).  Containing `root` alone leaves `path` checked by nothing, so
-# lint_run(path="../../x", fix=True) would write outside the project.
-_PROJECT_SCOPED_ROOT_AND_PATH_TOOLS = frozenset({
-    "test_run", "lint_run", "format_code", "typecheck_run",
-})
-# Tools that forward a caller-supplied command string to a child process.  They
-# need the same inline-interpreter argv guard as the execution tools, but they
-# are not execution tools for scoping purposes -- their working directory is
-# `root`, not `cwd`.
-_PROJECT_SCOPED_COMMAND_TOOLS = frozenset({"build_run"})
-_PROJECT_BOUND_AGENT_TOOLS = (
-    _PROJECT_SCOPED_PATH_TOOLS
-    | _PROJECT_SCOPED_EXECUTION_TOOLS
-    | frozenset({
-        "agent_lane", "ground_artifact", "program_search", "tool_help",
-        "web_search", "web_fetch",
-        "weather_lookup", "approximate_location_lookup", "memory_search",
-        "file_policy", "task_create", "task_list", "task_update", "task_show",
-        "task_delete", "task_plan", "task_progress", "task_ledger", "task_depend",
-        "checklist_create", "checklist_update", "checklist_show",
-        "command_registry_list", "tool_manifest", "activity_status",
-        "permission_policy", "context_compaction_plan", "diagnostics",
-        "context_health", "learning_health_status", "memory_quality_report",
-        "memory_privacy_review", "evaluation_history_status",
-        "system_improvement_report", "master_status",
-        "master_capacity", "self_heal_check", "status", "system_profile_text",
-        "emotion_vector_status", "preferences_status", "context_policy_status",
-        "delegate_task", "spawn_agents", "report_progress", "post_to_board", "read_board",
-        "environment_status", "toolchain_status", "hardware_profile",
-        "tool_inventory", "output_digest", "language_matrix",
-        "math_eval", "logic_verify", "regex_lab", "reasoning_board",
-        "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "learn_tool",
-        "process_list", "process_memory_risk_inspect",
-    })
-)
-_CLOUD_AGENT_NESTED_MODEL_TOOLS = frozenset({
-    "offload", "master_orchestrate", "master_retry", "workflow_run",
-    "delegate_task", "spawn_agents",
-    "game_reference_suite", "game_generate_and_test", "game_generation_campaign",
-    "ensemble_codegen_build_loop",
-})
-_CLOUD_AGENT_LOCAL_ONLY_TOOLS = frozenset({
-    "file_check",
-    "agent_lane",
-    "environment_status", "toolchain_status", "hardware_profile", "file_policy",
-    "tool_inventory", "output_digest",
-    "workspace_inventory", "directory_tree", "file_find", "file_read",
-    "file_read_range", "file_digest", "text_search", "repo_status",
-    "repo_diff", "artifact_risk_inspect", "process_list",
-    "process_memory_risk_inspect", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "learn_tool",
-})
-# ``_agent_dispatch`` checks these two flags *inside* the matched tool branch,
-# so every name here is dispatchable and a dispatch-only drift check reports it
-# as fine.  The refusal is name-unconditional all the same: on a run with the
-# flag off the tool can never do anything.  Kept as declared sets so the help
-# filter is cheap; tests/test_advertised_surface_drift.py AST-extracts the real
-# branch guards and asserts these two constants match them exactly.
-_AGENT_WEB_GATED_TOOLS = frozenset({
-    "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
-})
-_AGENT_LOCATION_GATED_TOOLS = frozenset({"approximate_location_lookup"})
+_PROJECT_SCOPED_PATH_TOOLS = _agent_prompts_core.PROJECT_SCOPED_PATH_TOOLS
+_PROJECT_SCOPED_EXECUTION_TOOLS = _agent_prompts_core.PROJECT_SCOPED_EXECUTION_TOOLS
+_DEVELOPER_WORKFLOW_TOOLS = _agent_prompts_core.DEVELOPER_WORKFLOW_TOOLS
+_PROJECT_SCOPED_ROOT_AND_PATH_TOOLS = _agent_prompts_core.PROJECT_SCOPED_ROOT_AND_PATH_TOOLS
+_PROJECT_SCOPED_COMMAND_TOOLS = _agent_prompts_core.PROJECT_SCOPED_COMMAND_TOOLS
+_PROJECT_BOUND_AGENT_TOOLS = _agent_prompts_core.PROJECT_BOUND_AGENT_TOOLS
+_CLOUD_AGENT_NESTED_MODEL_TOOLS = _agent_prompts_core.CLOUD_AGENT_NESTED_MODEL_TOOLS
+_CLOUD_AGENT_LOCAL_ONLY_TOOLS = _agent_prompts_core.CLOUD_AGENT_LOCAL_ONLY_TOOLS
+_AGENT_WEB_GATED_TOOLS = _agent_prompts_core.AGENT_WEB_GATED_TOOLS
+_AGENT_LOCATION_GATED_TOOLS = _agent_prompts_core.AGENT_LOCATION_GATED_TOOLS
 
 
 def _agent_run_tool_refusal(
@@ -21437,202 +17794,29 @@ def _scope_arg_is_rooted(raw):
 
 
 def _project_scope_args(tool_name, args, project):
-    """Scope an agent file/inspection tool call to the run's project directory.
-
-    When a caller passes project=<dir> to the agent/workbench surface, its file
-    tools must actually inspect that directory. Previously `project` was wired
-    only to the checklist namespace, so relative paths (".", "VERSIONS.txt")
-    resolved against Sonder's own workspace and the agent returned confidently
-    wrong "not found"/"empty" answers for the real project. Here we (1) authorize
-    the project dir for the call and (2) rebase a relative or omitted path/root
-    onto it. The guard (allowed_roots / resolve_*) still validates the final
-    path, so this grants nothing outside the authorized project root.
-    """
-    if (
-        not project
-        or not isinstance(args, dict)
-        or tool_name not in (
-            _PROJECT_SCOPED_PATH_TOOLS | _PROJECT_SCOPED_EXECUTION_TOOLS
-        )
-    ):
-        return args
-    scoped = dict(args)
-    if tool_name == "file_read":
-        scoped["path"] = scoped.get("path") or scoped.get("file") or scoped.get("filename") or scoped.get("file_path") or ""
-    # Never compose a model-supplied root with the trusted host root.  This is
-    # the host-resolved path boundary; child processes remain user-level code,
-    # not an operating-system sandbox.
-    scoped["extra_roots"] = project
-    if tool_name == "text_patch":
-        # This sentinel is injected only after the host binds the call to its
-        # selected project. A model-supplied approval never reaches this path.
-        scoped["approval"] = _TRUSTED_REPOSITORY_APPROVAL
-
-    if tool_name == "data_convert":
-        for key in ("input_path", "output_path"):
-            raw_path = str(scoped.get(key) or "").strip()
-            is_abs = _scope_arg_is_rooted(raw_path)
-            if raw_path and not is_abs:
-                scoped[key] = os.path.normpath(os.path.join(project, raw_path))
-        return scoped
-
-    if tool_name == "schema_validate":
-        for key in ("path", "schema_path"):
-            raw_path = str(scoped.get(key) or "").strip()
-            is_abs = _scope_arg_is_rooted(raw_path)
-            if raw_path and not is_abs:
-                scoped[key] = os.path.normpath(os.path.join(project, raw_path))
-        return scoped
-
-    if tool_name == "diff_semantic":
-        for key in ("path_a", "path_b"):
-            raw_path = str(scoped.get(key) or "").strip()
-            is_abs = _scope_arg_is_rooted(raw_path)
-            if raw_path and not is_abs:
-                scoped[key] = os.path.normpath(os.path.join(project, raw_path))
-        return scoped
-
-    if tool_name == "file_batch_write":
-        operations = _batch_agent_operations(scoped)
-        if operations is None:
-            return scoped
-        rebased = []
-        for operation in operations:
-            if not isinstance(operation, dict):
-                rebased.append(operation)
-                continue
-            item = dict(operation)
-            raw_path = str(item.get("path") or "").strip()
-            is_abs = _scope_arg_is_rooted(raw_path)
-            if raw_path and not is_abs:
-                item["path"] = os.path.normpath(os.path.join(project, raw_path))
-            rebased.append(item)
-        scoped["operations_json"] = json.dumps(rebased, ensure_ascii=False)
-        scoped.pop("operations", None)
-        return scoped
-
-    if tool_name == "context_pack":
-        try:
-            paths = _context_pack_paths(
-                scoped.get("paths_json", scoped.get("paths", []))
-            )
-        except ValueError:
-            # Let the repository policy produce the normal structured error;
-            # project rebasing must not turn malformed model output into an
-            # uncaught agent-loop exception.
-            return scoped
-        rebased = []
-        for raw_path in paths:
-            is_abs = _scope_arg_is_rooted(raw_path)
-            rebased.append(raw_path if is_abs else os.path.join(project, raw_path))
-        scoped["paths_json"] = rebased
-        scoped.pop("paths", None)
-        return scoped
-
-    if tool_name in {"file_copy", "file_move", "archive_extract"}:
-        for key in ("source", "destination"):
-            raw_path = str(scoped.get(key) or "").strip()
-            is_abs = _scope_arg_is_rooted(raw_path)
-            if raw_path and not is_abs:
-                scoped[key] = os.path.join(project, raw_path)
-        return scoped
-
-    if tool_name == "workspace_compare":
-        for key in ("left", "right"):
-            raw_path = str(scoped.get(key) or "").strip()
-            is_abs = _scope_arg_is_rooted(raw_path)
-            if raw_path and not is_abs:
-                scoped[key] = os.path.join(project, raw_path)
-        return scoped
-
-    if tool_name == "workspace_run":
-        raw_cwd = str(scoped.get("cwd") or ".").strip()
-        is_abs = _scope_arg_is_rooted(raw_cwd)
-        scoped["cwd"] = raw_cwd if is_abs else os.path.join(project, raw_cwd)
-        return scoped
-
-    if tool_name == "script_run":
-        raw_path = str(scoped.get("path") or "").strip()
-        path_is_abs = _scope_arg_is_rooted(raw_path)
-        if raw_path and not path_is_abs:
-            scoped["path"] = os.path.join(project, raw_path)
-        raw_cwd = str(scoped.get("cwd") or "").strip()
-        cwd_is_abs = _scope_arg_is_rooted(raw_cwd)
-        if raw_cwd and not cwd_is_abs:
-            scoped["cwd"] = os.path.join(project, raw_cwd)
-        return scoped
-
-    if tool_name == "output_digest":
-        # ``path`` is optional (a job digest names ``job_id`` instead), so an
-        # omitted path must stay omitted rather than becoming the project dir.
-        raw_path = str(scoped.get("path") or "").strip()
-        is_abs = _scope_arg_is_rooted(raw_path)
-        if raw_path and not is_abs:
-            scoped["path"] = os.path.normpath(os.path.join(project, raw_path))
-        return scoped
-
-    if tool_name == "ensemble_codegen_build_loop":
-        raw_project = str(scoped.get("project_dir") or ".").strip()
-        is_abs = _scope_arg_is_rooted(raw_project)
-        scoped["project_dir"] = (
-            raw_project if is_abs else os.path.join(project, raw_project)
-        )
-        return scoped
-
-    key = _project_scoped_path_key(tool_name)
-    raw = str(scoped.get(key) or "").strip()
-    is_abs = _scope_arg_is_rooted(raw)
-    if raw == ".":
-        scoped[key] = project
-    elif not raw:
-        # Only directory-taking tools default an omitted/empty path to the
-        # project root. Single-file tools (file_read, file_write, file_delete,
-        # etc.) keep an empty path so downstream validation reports "path is
-        # required" instead of targeting the project root directory.
-        if key == "root" or tool_name in {
-            "directory_digest", "repo_log", "repo_show", "repo_blame",
-            "code_metrics", "code_graph", "workspace_inventory", "dependency_inventory",
-            "directory_tree", "repository_symbol_index", "project_detect",
-            "artifact_ground",
-        }:
-            scoped[key] = project
-    elif not is_abs:
-        scoped[key] = os.path.join(project, raw)
-    return scoped
+    """Scope an agent file/inspection tool call to the run's project directory."""
+    from sonder_runtime.application.server_core.agent_guards import scope_project_tool_args
+    dedicated = tool_name in {
+        "data_convert", "schema_validate", "diff_semantic", "file_batch_write",
+        "context_pack", "file_copy", "file_move", "archive_extract",
+        "workspace_compare", "workspace_run", "script_run", "output_digest",
+        "ensemble_codegen_build_loop", "text_patch",
+    }
+    return scope_project_tool_args(
+        tool_name,
+        args,
+        project,
+        dedicated=dedicated,
+        scoped_tools=_PROJECT_SCOPED_PATH_TOOLS | _PROJECT_SCOPED_EXECUTION_TOOLS,
+        is_rooted=_scope_arg_is_rooted,
+        path_key_for=_project_scoped_path_key,
+        batch_operations=globals().get("_batch_agent_operations", lambda _a: None),
+        context_pack_paths=globals().get("_context_pack_paths", lambda _p: []),
+        trusted_approval=globals().get("_TRUSTED_REPOSITORY_APPROVAL"),
+    )
 
 
-# Dispatchable tools whose observation text THIS server rendered, in one of the
-# shapes `grounded_outcomes.rendered_verdict` reads. Membership is what makes it
-# safe to believe a verdict line: the text is ours, not the tool's subject.
-#
-# Scoped rather than applied to every observation, because measured, that
-# over-reaches -- `file_read` of a 23-byte YAML whose first line is `ok: false`
-# makes `rendered_verdict` return False, and filing a successful read as a
-# failure is the same defect pointing the other way, driven by file content the
-# caller supplies. `test_tool_content_cannot_flip_the_verdict` pins that case.
-#
-# Derived from the renderer call sites, intersected with
-# `tool_capabilities.dispatch_names(_agent_dispatch)`:
-#   _format_run_result                -> the 20 run-and-report tools below
-#   code_runner.format_result         -> run_code (script_run uses both)
-#   code_runner.format_project_result -> run_project
-#   artifact_grounding.format_result  -> ground_artifact, artifact_ground
-#   artifact_verify                   -> renders its verdict line inline
-# `archive_create`, `archive_extract` and `artifact_risk_inspect` also call a
-# `format_result`, but theirs is a `json.dumps`, whose `"ok": false` key keeps
-# its quotes and so is not a verdict line. They are deliberately absent.
-#
-# `test_every_format_run_result_tool_is_covered` re-derives the first group by
-# AST, so a new tool using the main renderer cannot quietly miss this.
-_RENDERED_VERDICT_TOOLS = frozenset({
-    "apply_patch", "build_clean", "build_run", "dependency_add",
-    "dependency_audit", "dependency_remove", "dependency_update", "format_code",
-    "git_branch", "git_checkout", "git_cherry_pick", "git_commit", "git_merge",
-    "git_stash", "git_tag", "lint_run", "script_run", "test_run",
-    "typecheck_run", "workspace_run",
-    "run_code", "run_project",
-    "ground_artifact", "artifact_ground", "artifact_verify",
-})
+_RENDERED_VERDICT_TOOLS = _agent_prompts_core.RENDERED_VERDICT_TOOLS
 
 
 def _agent_dispatch_observed(
@@ -21755,20 +17939,8 @@ def _agent_dispatch_observed(
             )
 
 
-# Read-only tools whose default (empty-args) invocation is meaningful, so a
-# name-only branch prediction yields a deterministic call signature that can
-# be speculatively executed and reliably matched against the real decision.
-_SPECULATABLE_ARGFREE_TOOLS = frozenset({
-    "workspace_inventory", "dependency_inventory", "directory_tree", "status", "activity_status",
-    "context_health", "command_registry_list",
-})
-_WORK_VALIDATION_TOOLS = frozenset({
-    "workspace_run", "script_run", "run_code", "run_project", "ground_artifact", "artifact_ground",
-    "artifact_verify", "game_reference_suite", "game_generate_and_test",
-    "game_generation_campaign", "self_heal_check", "workspace_inventory", "directory_tree", "file_find",
-    "repository_symbol_index", "file_read", "file_read_range", "archive_extract", "archive_create", "text_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "prompt_shield", "error_diagnose", "code_audit", "data_transform",
-    "memory_quality_report", "memory_privacy_review", "learning_health_status",
-})
+_SPECULATABLE_ARGFREE_TOOLS = _agent_prompts_core.SPECULATABLE_ARGFREE_TOOLS
+_WORK_VALIDATION_TOOLS = _agent_prompts_core.WORK_VALIDATION_TOOLS
 # Leads an end report that claims completion the record says must be earned.
 # A statement of standing, not a failure: deliberately absent from
 # autopilot_controller.FAILURE_PREFIXES.
@@ -21940,92 +18112,12 @@ def _agent_call_signature(tool_name, args):
 
 
 
-_WORK_INSPECTION_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
-    "dependency_inventory",
-    "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
-    "text_search", "script_search", "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "learn_tool", "repo_status", "repo_diff",
-    "repo_log", "repo_show", "repo_blame",
-    "data_inspect", "data_query", "project_detect", "archive_list", "artifact_risk_inspect",
-    "verify_artifact",
-    "memory_search", "learning_health_status", "evaluation_history_status",
-    "memory_quality_report", "memory_privacy_review", "artifact_ground",
-    "web_search", "web_fetch", "weather_lookup", "approximate_location_lookup",
-    "status", "diagnostics", "toolchain_status", "process_list", "process_memory_risk_inspect",
-    "tool_inventory", "output_digest",
-    "test_discover", "test_run", "lint_run", "format_code", "typecheck_run",
-    "dependency_audit", "find_references", "diff_files", "secret_scan",
-    "build_run",
-    "task_progress", "task_ledger",
-})
-
-# Tools that only observe the running runtime: no filesystem root, no host
-# process, no outbound socket, no row written. They are in neither
-# REPOSITORY_READ_ONLY_TOOLS nor _WORK_INSPECTION_TOOLS, because both of those
-# sets are about *repository* work -- so command_catalog._risk_for fell through
-# to "ask" for all sixteen, and `plan`, a mode whose entire promise is reads,
-# refused every one of them.
-#
-# Membership was established by running each tool in a cold interpreter against
-# traps on file writes, process spawns, outbound sockets and non-DDL SQL, on its
-# SUCCESS path. Candidates that look read-only and failed that check are
-# deliberately absent: debug_inspect and npu_status spawn PowerShell, and
-# apply_learned writes the embedding cache and calls the model endpoint.
-# runtime_policy_status used to call the model endpoint too; it now renders
-# cached readiness (the live probe moved to `/runtime status refresh`) and was
-# re-verified by tests/test_runtime_policy_status_trap_check.py, which runs it
-# under audit-hook traps in a fresh interpreter. admin_accounts is absent
-# because it answers "login required" and its success path could not be
-# exercised -- unverified is not the same as verified-safe. permission_mode is
-# absent because with a mode argument it rewrites the saved mode, which would
-# let a plan-mode run leave plan mode.
-#
-# Do not add a name here from its docstring. Run it.
-_RUNTIME_OBSERVATION_TOOLS = frozenset({
-    "task_list", "task_show", "checklist_show",
-    "admin_status", "admin_whoami",
-    "autopilot_status", "calibration_status",
-    "learn_tiers", "live_reload_status", "mcp_runtime_status",
-    "reasoning_show", "sonder_sessions", "sonder_stats",
-    "turn_inspect", "workflow_list", "memory_export",
-    "runtime_policy_status",
-})
-
-# Tools that resolve a caller-supplied root through harness_tools._resolve_root,
-# which does `Path(root).resolve()` and no allowed-roots check at all.
-#
-# All four are in _WORK_INSPECTION_TOOLS, so _risk_for called them "safe" and
-# `plan` allowed them. Verified by execution: under that classification
-# `secret_scan(root=...)` reads a directory on another drive entirely and prints
-# the credential material it finds there. `b8a15ef` removed exactly these four
-# from REPOSITORY_READ_ONLY_TOOLS for this reason; the removal never reached the
-# risk classification, so the hole stayed open on the one mode that promises
-# reads only. They stay refused until _resolve_root confines -- adding that
-# confinement is what lets them back, not deleting this set.
-_UNCONFINED_ROOT_TOOLS = frozenset({
-    "diff_files", "find_references", "secret_scan",
-})
-
-_AGENT_FILE_EVIDENCE_TOOLS = frozenset({
-    "workspace_inventory", "workspace_compare", "directory_tree", "file_read", "file_read_range",
-    "file_digest", "directory_digest", "file_find", "text_search",
-    "script_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "log_inspect", "data_inspect", "data_query", "project_detect",
-    "context_pack", "repo_log", "repo_show", "repo_blame", "archive_list",
-    "dependency_inventory", "artifact_risk_inspect",
-})
-_AGENT_DEDUPLICATED_INSPECTION_TOOLS = frozenset({
-    "file_policy", "workspace_inventory", "workspace_compare", "directory_tree", "directory_digest", "file_find",
-    "dependency_inventory",
-    "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "context_pack",
-    "data_inspect", "data_query", "text_search", "script_search",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "learn_tool", "environment_status", "toolchain_status", "hardware_profile", "repo_status", "repo_diff", "project_detect",
-    "tool_inventory", "output_digest",
-    "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "process_list", "process_memory_risk_inspect",
-})
-_AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = frozenset({
-    "workspace_run", "script_run", "run_code", "run_project", "workflow_run",
-})
+_WORK_INSPECTION_TOOLS = _agent_prompts_core.WORK_INSPECTION_TOOLS
+_RUNTIME_OBSERVATION_TOOLS = _agent_prompts_core.RUNTIME_OBSERVATION_TOOLS
+_UNCONFINED_ROOT_TOOLS = _agent_prompts_core.UNCONFINED_ROOT_TOOLS
+_AGENT_FILE_EVIDENCE_TOOLS = _agent_prompts_core.AGENT_FILE_EVIDENCE_TOOLS
+_AGENT_DEDUPLICATED_INSPECTION_TOOLS = _agent_prompts_core.AGENT_DEDUPLICATED_INSPECTION_TOOLS
+_AGENT_EXECUTION_STATE_INVALIDATION_TOOLS = _agent_prompts_core.AGENT_EXECUTION_STATE_INVALIDATION_TOOLS
 
 
 # Hard ceiling on one agent turn's steps.  The batching guard's threshold
@@ -22486,25 +18578,13 @@ def _agent_turn(
             total_budget=_CLOUD_AGENT_OUTPUT_BUDGET,
             budget_state=cloud_budget_state,
         )
-    observations = []
-    file_evidence = False
-    used_tool = False
-    inspected = False
-    mutated = False
-    parent_effect_dirty = False
+    state = _agent_turn_core.AgentTurnState()
+    _err_prefix = "ERROR:"
     host_controller = _standalone_lanes.current()
     if host_controller is not None:
         from sonder_runtime.adapters.agent_terminal_evidence import HostObservationLedger
 
         host_controller.begin_host_turn(HostObservationLedger(project_scope=project_scope))
-    validation_attempted = False
-    validation_ok = False
-    # A currently-valid citation for the completion claim. Same discipline as
-    # validation_ok -- latest verifier wins, any mutation or execution clears
-    # it -- because a monotonic "a verifier ran at some point" signal can never
-    # un-verify and would report the majority of real runs as verified.
-    verification_ok = False
-    mutations = []
     required_tools = frozenset(
         _canonical_agent_tool_name(name) for name in required_tool_names if name
     )
@@ -22520,22 +18600,7 @@ def _agent_turn(
         )
     )
     artifact_gate = AgentArtifactGate(project_scope, prompt, allowed_tools, enabled=auto_checklist and not (read_only or cloud or unsafe))
-    used_tool_names = set()
-    successful_web_calls = set()
-    successful_inspection_results = {}
-    repeated_inspection_counts = {}
-    failed_call_counts = {}
-    # Exact call signatures catch literal retries, but a model can evade that
-    # fence by changing an otherwise irrelevant path/query on every attempt.
-    # Keep only a small window of host-known failed/empty outcomes so those
-    # semantic retries cannot consume the whole agent budget.
-    semantic_no_progress = collections.deque(maxlen=6)
-    # Issue #510 s6 batching/coalescing guard: one window per turn over
-    # distinct single-target read-only calls that have a registered batch
-    # form.  A tool this run must use by name keeps its single form, and the
-    # batch tool must pass every run gate the dispatcher will apply; an
-    # argument-aware ``tool_policy`` cannot be consulted without charging its
-    # budget, so such runs never get steered to a tool it might refuse.
+
     def _batch_admissible(counterpart, _target):
         if tool_policy is not None:
             return False
@@ -22559,27 +18624,6 @@ def _agent_turn(
         resolve_target=_agent_batch_target_identity,
         view_chars=_AGENT_MODEL_OBSERVATION_CHARS,
     )
-    # A later unrelated success must not turn a failed required/evidence call
-    # into a host-approved completion. Key by the canonical call signature so
-    # only a successful retry of that exact host observation can recover it.
-    # Values retain the tool name for the bounded final diagnostic.
-    completion_blocking_failures = {}
-    # Paths this run itself created via file_write mode=create. Re-creating one
-    # of them is unambiguous intent to replace the run's own file, so the host
-    # promotes the retry to mode=overwrite deterministically instead of letting
-    # the model burn steps on the "file exists" error (measured: 5 of 12 steps
-    # lost to that loop). Pre-existing files are never auto-overwritten.
-    run_created_paths = set()
-    claim_review_requests = 0
-    # A claim-review action that host policy refused proves nothing.  Track it
-    # separately from a tool that simply found no match, so an ``accept`` that
-    # follows only refusals cannot pass an unchecked negative claim off as
-    # verified.  ``claim_review_verified`` is the release valve: once any
-    # claim-review tool has actually produced evidence, a later accept is real.
-    claim_review_policy_refused = False
-    claim_review_verified = False
-    # Branch prediction + speculative execution (advisory; a mispredict costs
-    # at most one wasted read-only call and never touches durable state).
     _predictor = sonder_speculation.default_predictor()
     _spec_enabled = (
         sonder_speculation.speculation_enabled()
@@ -22599,25 +18643,16 @@ def _agent_turn(
     _spec_engine = sonder_speculation.SpeculationEngine(
         _predictor, _spec_dispatch, enabled=_spec_enabled,
     )
-    # Argument-level prediction: a stream prefetcher over observed listings
-    # lets the host speculate concrete file_read calls, not just arg-free
-    # inspections (see sonder_speculation.FilePrefetcher).
     _spec_prefetcher = sonder_speculation.FilePrefetcher()
-    _last_tool_name = None
     from sonder_runtime.bootstrap import delegation_wiring as _dw
     _delegation_bridge = _dw.open_agent_run(sys.modules[__name__], prompt=prompt, model=model, max_steps=max_steps, cloud=cloud, read_only=read_only, project_scope=project_scope)
     checklist_id, checklist_states = (
         _start_agent_checklist(prompt, project, read_only)
         if auto_checklist else ("", {})
     )
-    # Entry-point and named-default writing runs have a real root; see prepare_loop_project.
-    transcript = "Task:\n%s\n\n%s" % (
-        prompt,
-        # Every gate this run will actually apply, not just the three that
-        # used to be modelled here.  project_scope/allow_web/allow_location
-        # refuse name-unconditionally further down; advertising through them
-        # spent steps on calls that could never run.
-        _agent_tool_help(
+    transcript = _agent_prompts_core.build_turn_transcript(
+        prompt=prompt,
+        tool_help=_agent_tool_help(
             read_only=read_only,
             cloud=cloud,
             unsafe=unsafe,
@@ -22627,30 +18662,19 @@ def _agent_turn(
             allowlist=allowed_tools, kind=tool_help_kind,
             num_ctx=agent_num_ctx or (0 if cloud or provider is not None else _auto_model_context(model)),
         ),
+        unsafe=unsafe,
+        unsafe_warning=unsafe_lab.WARNING,
+        project_scope=project_scope,
+        standing_notice=_agent_verification_standing_notice(),
+        delegation_preamble="",
     )
-    if unsafe:
-        transcript = "%s\n\n%s" % (unsafe_lab.WARNING, transcript)
-    if project_scope:
-        transcript += (
-            "\n\nPROJECT ROOT: %s\nYour file/inspection tools are rooted at this "
-            "directory: a relative path or '.' inspects the PROJECT, not Sonder's "
-            "own workspace. Use paths relative to the project root." % project_scope
-        )
-    transcript += "\n\n" + _agent_verification_standing_notice()
     if _preamble := _delegation_bridge.maybe_preamble(transcript_chars=len(transcript), num_ctx=agent_num_ctx or 0):
         transcript += "\n\n" + _preamble
-    pre_model_context_rendered = False
-    pre_model_context_response_observed = False
-    model_failure: dict = {}  # typed kind on a ModelCallError exit, for fleet workers
     if pre_model_context is not None:
-        # The pre-model callback runs after route, project scope, system text,
-        # and visible tools are resolved, but before the first provider call.
-        # Any persistent reference selection must be bound to the text actually
-        # appended here, never to an earlier guess at the eventual prompt.
         context_text = pre_model_context(
             model, cloud, system, transcript, agent_num_predict, agent_num_ctx,
         )
-        pre_model_context_rendered = bool(context_text)
+        state.pre_model_context_rendered = bool(context_text)
         transcript += context_text
     transcript, _ = playbook_context.augment(transcript, prompt, cloud=cloud or restricted is not None or _provider_bridge.hosted_rung_active())
 
@@ -22662,8 +18686,6 @@ def _agent_turn(
                 "cancelled", "agent call cancelled before another model/tool action", attempts=0, cloud=cloud)
 
     def _teardown_speculation(*, ok: bool = True, summary: str = ""):
-        # Squash anything in flight and persist the learned predictor so it
-        # warms across runs. Never fatal to the agent result.
         try:
             _spec_engine.discard()
             _predictor.save()
@@ -22672,37 +18694,22 @@ def _agent_turn(
         _delegation_bridge.close(ok=ok, summary=summary)
 
     def _attach_tool_evidence(text):
-        """Append exactly one host-owned evidence section.
-
-        Model text may quote or fabricate the public marker. Neutralize those
-        occurrences before adding the host ledger so downstream validation can
-        require one structural marker instead of trusting model-controlled
-        prose.
-        """
-        text = str(text or "")
-        marker = "=== TOOL EVIDENCE ==="
-        if include_evidence and observations:
-            text = text.replace(marker, "=== UNTRUSTED TOOL EVIDENCE MARKER ===")
-            text += "\n\n%s\n%s" % (marker, "\n\n".join(observations))
-        return text
-
-    delegated_verdict = None
+        return _agent_turn_core.attach_turn_evidence(
+            text, state.observations, include_evidence=include_evidence,
+        )
 
     def _work_validated():
-        """Current, covering host evidence; delegated work retains its certificate gate."""
-        nonlocal delegated_verdict
         controller = _standalone_lanes.current()
         if controller is not None and controller.delegated_work:
-            delegated_verdict = controller.verify_delegated(
+            state.delegated_verdict = controller.verify_delegated(
                 _approve_standalone_verification,
                 verifier_factory=_standalone_verifier_factory,
             )
-            return (delegated_verdict.valid is True
-                    and (not parent_effect_dirty or validation_ok or verification_ok))
-        return validation_ok or verification_ok or artifact_gate.assess()["passed"]
+            return (state.delegated_verdict.valid is True
+                    and (not state.parent_effect_dirty or state.validation_ok or state.verification_ok))
+        return state.validation_ok or state.verification_ok or artifact_gate.assess()["passed"]
 
     def finish_final(final, *, failed=False):
-        nonlocal validation_attempted, mutated, parent_effect_dirty, validation_ok, verification_ok
         _teardown_speculation(ok=not failed, summary=str(final or ""))
         final = str(final or "")
         controller = _standalone_lanes.current()
@@ -22717,44 +18724,30 @@ def _agent_turn(
                     success=not failed and not final.lstrip().startswith(autopilot_controller.FAILURE_PREFIXES),
                 )
             evidence = controller.parent_effect_evidence()
-            parent_effect_dirty = evidence.dirty
-            mutated = mutated or evidence.dirty
-            validation_attempted = evidence.validation_attempted
-            validation_ok, verification_ok = evidence.validation_ok, evidence.verification_ok
+            state.parent_effect_dirty = evidence.dirty
+            state.mutated = state.mutated or evidence.dirty
+            state.validation_attempted = evidence.validation_attempted
+            state.validation_ok, state.verification_ok = evidence.validation_ok, evidence.verification_ok
             if managed_plan.finalizing and managed_plan.blockers:
                 failed = True
                 final = 'EVIDENCE_REQUIRED: earlier rung host evidence remains unresolved.\n\n' + final
         delegated = controller is not None and controller.delegated_work
-        if final.lstrip().startswith(autopilot_controller.FAILURE_PREFIXES):
-            final = final.lstrip()
-            failed = True
-        if completion_blocking_failures:
-            failures = "; ".join(
-                "%s: %s" % (name, detail[:240])
-                for _signature, (name, detail) in sorted(
-                    completion_blocking_failures.items()
-                )
-            )
-            evidence_failure = any(
-                name in _AGENT_FILE_EVIDENCE_TOOLS
-                for name, _detail in completion_blocking_failures.values()
-            )
-            prefix = "EVIDENCE_REQUIRED" if evidence_failure else "ERROR"
-            final = "%s: required host evidence did not recover (%s)." % (
-                prefix, failures,
-            )
-            failed = True
+        final, failed = _agent_turn_core.prepare_evidence_attached_final(
+            final,
+            failed=failed,
+            state=state,
+            failure_prefixes=autopilot_controller.FAILURE_PREFIXES,
+            include_evidence=include_evidence,
+        )
         agent_outcomes.mark_failure_incomplete(activity_tracker, final, failed)
         final = _attach_tool_evidence(final)
         if controller is not None:
-            terminal_class = "ERROR" if failed else "NORMAL"
-            for marker in autopilot_controller.FAILURE_PREFIXES:
-                if final.lstrip().startswith(marker):
-                    terminal_class = marker.rstrip(":")
-                    break
+            terminal_class = _agent_turn_core.classify_terminal_marker(
+                final, autopilot_controller.FAILURE_PREFIXES, "ERROR" if failed else "NORMAL",
+            )
             captured = controller.freeze_host_terminal(
                 final, terminal_class=terminal_class,
-                blockers=tuple(sorted(set(completion_blocking_failures) |
+                blockers=tuple(sorted(set(state.completion_blocking_failures) |
                     (managed_plan.blockers if managed_plan is not None else set()))),
             )
             if delegated and not captured:
@@ -22762,136 +18755,73 @@ def _agent_turn(
                 failed = True
         validated = False if failed else _work_validated()
         artifact_assessment = artifact_gate.assess()
-        deferred = not (failed or delegated or validated) and artifact_assessment["deferred"]
-        validation_attempted |= artifact_assessment["attempted"]
-        if delegated and delegated_verdict is not None:
-            validation_attempted = True
-        if auto_checklist:
-            _agent_checklist_mark(
-                checklist_id, checklist_states, 1, "done", "workspace evidence inspected",
-            )
-            _agent_checklist_mark(
-                checklist_id, checklist_states, 2, "blocked" if failed else "done",
-                "requested work completed" if mutated else "analysis completed without file mutation",
-            )
-            validation_status = "done" if (not failed and (validated or not (mutated or delegated))) else "blocked"
-            _agent_checklist_mark(
-                checklist_id, checklist_states, 3, validation_status,
-                "grounded validation passed" if validated else (
-                    "no mutation required" if not mutated else "needs approval for execution" if deferred else "validation did not pass"
-                ),
-            )
-            _agent_checklist_mark(
-                checklist_id, checklist_states, 4, "done", "end report prepared",
-            )
-        # The model's own first line, captured before anything leads the report,
-        # so the activity feed keeps naming the work rather than the standing.
-        model_summary = final.splitlines()[0] if final else "agent completed"
-
-        validation_failed = bool(auto_checklist and (mutated or delegated) and not (validated or deferred))
-        standing = ""
-        # Only where a verifier was actually callable. Elsewhere the sentence
-        # names tools the lane is forbidden from using and has no OFF state --
-        # see _agent_verifier_reachable.
-        if not deferred and not validated and not verification_ok and _agent_verifier_reachable(
-            read_only, allowed_tools,
-        ):
-            demanded, reason = _agent_verification_standing()
-            if demanded:
-                # Every word here is either a fixed host sentence or
-                # should_verify's own projection of the counts. Nothing is
-                # generated by the model or about how it feels.
-                standing = reason
-        if validation_failed and not failed:
-            # Compose, never stack. Prefixing the standing in front of
-            # VALIDATION_FAILED would push that marker off position 0, and
-            # _task_passed / _agent_observation_ok would stop seeing a failed
-            # validation -- a mechanism for honesty blinding a failure gate.
-            # The failure keeps line one, byte for byte; the standing becomes
-            # the second line of the same block.
-            block = _AGENT_VALIDATION_FAILED_LINE
-            if standing:
-                block += "\nThis run also claimed completion without %s - %s" % (
-                    _AGENT_VERIFIERS_PHRASE, standing,
-                )
-            final = block + "\n\n" + final
-        elif standing and not failed:
-            if mutated or delegated:
-                final = agent_outcomes.unverified_banner(
-                    final, standing, _AGENT_UNVERIFIED_PREFIX, _AGENT_VERIFIERS_PHRASE, activity_tracker)
-            if not mutated and not validation_attempted:
-                # Measured 2026-09-03: a 1.5B "completed" a fix request after twelve
-                # calls that changed nothing; the escalating runner treats that as a failure.
-                _note_agent_model_failure(
-                    tier_escalation.REASON_FAILED, key=escalation_key, step=0,
-                    detail="claimed completion without a change or a validation",
-                    vacuous=True,
-                )
-        activity_tracker.set_result_summary(
-            _AGENT_VALIDATION_FAILED_LINE if validation_failed else model_summary
+        assembled = _agent_turn_core.assemble_final_report(
+            final=final,
+            failed=failed,
+            state=state,
+            delegated=delegated,
+            validated=validated,
+            artifact_assessment=artifact_assessment,
+            auto_checklist=auto_checklist,
+            read_only=read_only,
+            allowed_tools=allowed_tools,
+            verifier_reachable_fn=_agent_verifier_reachable,
+            verification_standing_fn=_agent_verification_standing,
+            unverified_banner_fn=lambda text, standing: agent_outcomes.unverified_banner(
+                text, standing, _AGENT_UNVERIFIED_PREFIX, _AGENT_VERIFIERS_PHRASE, activity_tracker,
+            ),
+            report_delegated_outcome_fn=(
+                controller.report_outcome if delegated and controller is not None else (lambda text: text)
+            ),
+            failure_prefixes=autopilot_controller.FAILURE_PREFIXES,
+            validation_failed_line=_AGENT_VALIDATION_FAILED_LINE,
+            verifiers_phrase=_AGENT_VERIFIERS_PHRASE,
+            unverified_prefix=_AGENT_UNVERIFIED_PREFIX,
         )
-        if deferred:
-            final = "written, not executed: needs %s to verify\n\n%s" % (artifact_assessment["required"], final)
-            activity_tracker.set_response_status("unverified", "written; execution needs approval")
-        elif validated and artifact_assessment["passed"]:
-            final = "Static checks passed; artifact not executed.\n\n" + final
-        certificate_fields = {}
-        if delegated:
-            if delegated_verdict is not None:
-                certificate_fields = {
-                    "verification_certificate_id": delegated_verdict.certificate_id,
-                    "verification_generation": delegated_verdict.generation,
-                    "verification_code": delegated_verdict.code,
-                }
-            if validated:
-                final = ("Delegated workspace certificate valid for generation %s.\n\n"
-                         "Model outcome:\n%s" % (delegated_verdict.generation, final))
-            else:
-                final = controller.report_outcome(final)
-                activity_tracker.set_response_status("unverified", "delegated work or parent effects lack current validation")
-                activity_tracker.set_result_summary("delegated work or parent effects lack current validation")
+        for item_no, item_status, item_note in assembled.checklist_marks:
+            _agent_checklist_mark(checklist_id, checklist_states, item_no, item_status, item_note)
+        if assembled.note_vacuous_completion:
+            _note_agent_model_failure(
+                tier_escalation.REASON_FAILED, key=escalation_key, step=0,
+                detail="claimed completion without a change or a validation",
+                vacuous=True,
+            )
+        activity_tracker.set_result_summary(assembled.result_summary)
+        if assembled.response_status is not None:
+            activity_tracker.set_response_status(*assembled.response_status)
+        if delegated and controller is not None:
             controller.terminal_projected = True
+        final = assembled.final_text
         if controller is not None:
             from sonder_runtime.application.ports.host_final import HostFinalFacts
-            final_class = 'ERROR' if failed else 'UNVERIFIED' if deferred else 'NORMAL'
-            for marker in (*autopilot_controller.FAILURE_PREFIXES, _AGENT_UNVERIFIED_PREFIX):
-                if final.lstrip().startswith(marker):
-                    final_class = marker.rstrip(':')
-                    break
             final_sink = controller.capture_host_final if return_host_receipt else controller.stage_host_final
             final_sink(final, HostFinalFacts(
-                tools=tuple(sorted(used_tool_names)), project_scope=project_scope,
-                mutation_observed=bool(mutated), validation_attempted=bool(validation_attempted),
-                validation_passed=bool(validated), terminal_class=final_class,
-                blockers=tuple(sorted(set(completion_blocking_failures) |
+                tools=tuple(sorted(state.used_tool_names)), project_scope=project_scope,
+                mutation_observed=bool(state.mutated), validation_attempted=bool(state.validation_attempted),
+                validation_passed=bool(assembled.validated), terminal_class=assembled.final_class,
+                blockers=tuple(sorted(set(state.completion_blocking_failures) |
                     (managed_plan.blockers if managed_plan is not None else set()))),
-                certificate_id=certificate_fields.get('verification_certificate_id', ''),
-                certificate_generation=certificate_fields.get('verification_generation', 0),
-                certificate_code=certificate_fields.get('verification_code', ''),
+                certificate_id=assembled.certificate_fields.get('verification_certificate_id', ''),
+                certificate_generation=assembled.certificate_fields.get('verification_generation', 0),
+                certificate_code=assembled.certificate_fields.get('verification_code', ''),
                 delegated_work=bool(delegated),
             ))
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
                 output=final,
-                tools=tuple(sorted(used_tool_names)),
-                mutation_observed=mutated,
-                validation_attempted=validation_attempted,
-                validation_passed=validated,
+                tools=tuple(sorted(state.used_tool_names)),
+                mutation_observed=state.mutated,
+                validation_attempted=state.validation_attempted,
+                validation_passed=assembled.validated,
                 project_scope=project_scope,
-                pre_model_context_response_observed=pre_model_context_response_observed, **model_failure,
-                **artifact_gate.receipt_fields(artifact_assessment) if not (failed or delegated) else {},
-                **certificate_fields,
+                pre_model_context_response_observed=state.pre_model_context_response_observed,
+                **state.model_failure,
+                **artifact_gate.receipt_fields(artifact_assessment) if not (assembled.failed or delegated) else {},
+                **assembled.certificate_fields,
             )
         return final
 
     def _early_exit(text: str):
-        """Wrap a pre-finalization exit (parse failure, EVIDENCE_REQUIRED,
-        max_steps abort) so a promised host receipt still carries the real
-        project scope instead of silently defaulting to an empty one -- a bare
-        string here previously read as ``actual=''`` in the caller's scope
-        check, misreporting a normal evidence/parse failure as a scope
-        mismatch.
-        """
         controller = _standalone_lanes.current()
         if controller is not None and (controller._managed_factory is not None
                 or controller.delegated_work or controller._escalation is not None):
@@ -22899,36 +18829,24 @@ def _agent_turn(
         _teardown_speculation(ok=False, summary=str(text or ""))
         text = str(text or "")
         agent_outcomes.mark_failure_incomplete(activity_tracker, text)
-        # Early exits are still auditable outcomes.  A worker may have already
-        # collected valid, host-observed repository evidence before the model
-        # exhausted its step budget, repeated a cached inspection, or failed
-        # final synthesis.  Preserve that ledger exactly as finish_final does;
-        # otherwise the orchestrator sees a receipt naming a real evidence tool
-        # but no evidence section and incorrectly downgrades the whole lane to
-        # EVIDENCE_REQUIRED.
         text = _attach_tool_evidence(text)
         if return_host_receipt:
             return autopilot_controller.HostTaskResult(
                 output=text,
-                tools=tuple(sorted(used_tool_names)),
-                mutation_observed=mutated,
-                validation_attempted=validation_attempted,
+                tools=tuple(sorted(state.used_tool_names)),
+                mutation_observed=state.mutated,
+                validation_attempted=state.validation_attempted,
                 validation_passed=_work_validated(),
                 project_scope=project_scope,
-                pre_model_context_response_observed=pre_model_context_response_observed, **model_failure,
+                pre_model_context_response_observed=state.pre_model_context_response_observed,
+                **state.model_failure,
             )
         return text
 
     def run_claim_review_action(review, review_number):
-        nonlocal file_evidence, inspected, used_tool
-        nonlocal claim_review_policy_refused, claim_review_verified
         tool_name = str(review.get("tool") or "")
         tool_args = review.get("args") or {}
-        # Callback policy checks model intent; repository guards and dispatch
-        # use host-scoped paths so injected authority is not a model bypass.
-        policy_tool_args = _project_scope_args(
-            tool_name, tool_args, project_scope,
-        )
+        policy_tool_args = _project_scope_args(tool_name, tool_args, project_scope)
         policy_error = ""
         if tool_name not in _AGENT_CLAIM_REVIEW_TOOLS:
             policy_error = "ERROR: HOST CLAIM REVIEW: no approved evidence tool was supplied."
@@ -22943,14 +18861,10 @@ def _agent_turn(
             policy_error = _cloud_agent_tool_policy_error(tool_name)
         if not policy_error:
             policy_error = _repository_read_only_error(
-                tool_name,
-                policy_tool_args,
-                trusted_extra_roots=project_scope,
+                tool_name, policy_tool_args, trusted_extra_roots=project_scope,
             )
         if policy_error:
-            # The verification mechanism was refused, not answered.  Record it
-            # so no later ``accept`` can be mistaken for a checked claim.
-            claim_review_policy_refused = True
+            state.claim_review_policy_refused = True
             observation_text = policy_error
         else:
             ensure_not_cancelled()
@@ -22958,19 +18872,15 @@ def _agent_turn(
                 tool_name, policy_tool_args, allow_web=False, read_only=True, project=project_scope,
                 **({"observation_filter": restricted.observation_filter(tool_name, policy_tool_args)} if restricted is not None else {}),
             ))
-        tool_ok = _agent_tool_observation_ok(tool_name, observation_text)
-        if tool_ok:
-            claim_review_verified = True
-            used_tool = True
-            used_tool_names.add(tool_name)
-            file_evidence = True
-            inspected = True
+        if _agent_tool_observation_ok(tool_name, observation_text):
+            state.claim_review_verified = True
+            state.used_tool = True
+            state.used_tool_names.add(tool_name)
+            state.file_evidence = True
+            state.inspected = True
             if auto_checklist:
                 _agent_checklist_mark(
-                    checklist_id,
-                    checklist_states,
-                    1,
-                    "done",
+                    checklist_id, checklist_states, 1, "done",
                     "%s completed for negative-claim review" % tool_name,
                 )
         return (
@@ -22983,54 +18893,17 @@ def _agent_turn(
             )
         )
 
-    def unverifiable_claim_review_exit():
-        """Refuse a confident verdict the claim reviewer could not support.
-
-        If every claim-review action this run attempted was refused by host
-        policy and none ever returned evidence, the negative existence claim
-        was never checked.  Accepting it here would let the mechanism whose
-        job is catching silent failures fail silently itself, which is exactly
-        what a hosted run did while its entire named vocabulary was denied.
-        """
-        if not claim_review_policy_refused or claim_review_verified:
-            return None
-        if auto_checklist:
-            _agent_checklist_fail(
-                checklist_id,
-                checklist_states,
-                "negative-claim review could not run: host policy refused "
-                "every evidence tool it was given",
-                1,
-            )
-        return _early_exit("%s: %s\n\n%s" % (
-            master_orchestrator.EVIDENCE_REQUIRED,
-            "the negative existence claim was never verified -- host policy "
-            "refused every claim-review evidence tool this run offered, so "
-            "the reviewer's acceptance carries no evidence",
-            "\n\n".join(observations),
-        ))
-
     for step in range(1, max_steps + 1):
-        # Squash any speculation left unretired by the previous step (the
-        # model went final, hit a cache, or committed to a different call).
         _spec_engine.discard()
         step_prompt = transcript
-        if observations:
-            step_prompt += "\n\n" + _agent_observation_prompt(observations)
+        if state.observations:
+            step_prompt += "\n\n" + _agent_observation_prompt(state.observations)
         step_prompt += "\n\nChoose the next tool call or final answer."
-        # Branch predict + speculatively execute a read-only call while the
-        # model generates its decision. Only argument-free read-only tools
-        # are speculated so the predicted call signature is deterministic;
-        # the buffered result is retired only if the model commits to the
-        # same call, otherwise it is squashed (see sonder_speculation).
         _spec_state = sonder_speculation.BranchPredictor.loop_state(
-            tuple(used_tool_names), _last_tool_name, step,
+            tuple(state.used_tool_names), state.last_tool_name, step,
         )
         _spec_prediction = _predictor.predict_next_tool(_spec_state)
         _spec_issued = False
-        # Cost-model gate: only speculate when the expected hidden wall time
-        # clears the floor on THIS machine (dormant on fast-tool CPUs, active
-        # on slow-model/slow-tool hardware). See sonder_speculation.
         if (
             _spec_enabled
             and _spec_prediction is not None
@@ -23039,9 +18912,7 @@ def _agent_turn(
             and _predictor.should_speculate(_spec_prediction[1])
         ):
             _predicted_tool = _spec_prediction[0]
-            _predicted_args = _project_scope_args(
-                _predicted_tool, {}, project_scope,
-            )
+            _predicted_args = _project_scope_args(_predicted_tool, {}, project_scope)
             _require_managed_agent_admission()
             _spec_issued = _spec_engine.begin(
                 _predicted_tool,
@@ -23054,14 +18925,9 @@ def _agent_turn(
             and (allowed_tools is None or "file_read" in allowed_tools)
             and _predictor.should_speculate(0.5)
         ):
-            # Fall back to the stream prefetcher: a concrete predicted
-            # file_read from the last observed listing (argument-level
-            # speculation, still strictly read-only).
             _prefetch_args = _spec_prefetcher.predict_read()
             if _prefetch_args is not None:
-                _prefetch_scoped = _project_scope_args(
-                    "file_read", _prefetch_args, project_scope,
-                )
+                _prefetch_scoped = _project_scope_args("file_read", _prefetch_args, project_scope)
                 _require_managed_agent_admission()
                 _spec_engine.begin(
                     "file_read",
@@ -23073,8 +18939,8 @@ def _agent_turn(
         if decision is not None:
             ensure_not_cancelled()
         _delegation_bridge.observe_decision(step, raw, decision)
-        if pre_model_context_rendered and raw:
-            pre_model_context_response_observed = True
+        if state.pre_model_context_rendered and raw:
+            state.pre_model_context_response_observed = True
         _predictor.observe_decision_latency(time.monotonic() - _spec_decision_t0)
         if decision is None:
             if isinstance(decision_error, ModelCallError):
@@ -23087,7 +18953,7 @@ def _agent_turn(
                     tier_escalation.failure_reason(error=decision_error),
                     key=escalation_key, step=step,
                 )
-                agent_outcomes.model_request_failed(activity_tracker, model_failure, decision_error)
+                agent_outcomes.model_request_failed(activity_tracker, state.model_failure, decision_error)
                 return _early_exit(render_model_error(decision_error))
             if auto_checklist:
                 _agent_checklist_fail(
@@ -23103,98 +18969,59 @@ def _agent_turn(
             )
         if "final" in decision:
             final = str(decision.get("final") or "")
-            if completion_blocking_failures:
-                if step < max_steps:
-                    observations.append(
-                        "HOST REQUIREMENT: retry and successfully complete the failed "
-                        "evidence tool(s): %s. An unrelated successful tool does not "
-                        "recover this failure."
-                        % ", ".join(sorted({
-                            name for name, _detail
-                            in completion_blocking_failures.values()
-                        }))
-                    )
-                    continue
-                return finish_final(final)
-            if required_tools and not (required_tools & used_tool_names):
-                if step < max_steps:
-                    observations.append(
-                        "HOST REQUIREMENT: use at least one successful tool from: %s."
-                        % ", ".join(sorted(required_tools))
-                    )
-                    continue
-                return _early_exit(
-                    "ERROR: agent reached max_steps=%d without using a required "
-                    "web tool (%s)." % (
-                        max_steps, ", ".join(sorted(required_tools)),
-                    )
-                )
-            if auto_checklist and not used_tool and step < max_steps:
-                observations.append(
-                    "HOST REQUIREMENT: use at least one relevant inspection or execution tool before final."
-                )
-                continue
-            if auto_checklist and mutated and not _work_validated() and not artifact_gate.assess()["deferred"] and step < max_steps:
-                _agent_checklist_mark(
-                    checklist_id, checklist_states, 2, "done", "mutations completed",
-                )
+            gate = _agent_turn_core.evaluate_final_decision_gate(
+                state,
+                step=step,
+                max_steps=max_steps,
+                required_tools=required_tools,
+                auto_checklist=auto_checklist,
+                work_validated=_work_validated,
+                artifact_deferred=lambda: bool(artifact_gate.assess()["deferred"]),
+                artifact_guidance=artifact_gate.guidance,
+                error_prefix=_err_prefix,
+            )
+            if gate.mark_mutation_done:
+                _agent_checklist_mark(checklist_id, checklist_states, 2, "done", "mutations completed")
+            if gate.mark_validation_in_progress:
                 _agent_checklist_mark(
                     checklist_id, checklist_states, 3, "in_progress", "validation required before final",
                 )
-                observations.append(
-                    "HOST REQUIREMENT: files changed but no grounded validation has passed. "
-                    + artifact_gate.guidance()
-                )
+            if gate.action == "continue":
+                state.observations.append(gate.observation)
                 continue
+            if gate.action == "finish":
+                return finish_final(final)
+            if gate.action == "early_exit":
+                return _early_exit(gate.exit_message)
             if not unsafe and _AGENT_NEGATIVE_CLAIM_RE.search(final):
                 claim_review = _agent_negative_claim_review(
-                    prompt, final, observations, model, cloud=cloud, tier=tier_label,
+                    prompt, final, state.observations, model, cloud=cloud, tier=tier_label,
                     cancel_check=cancel_check,
                     cloud_budget_state=cloud_budget_state,
                     session_id=capture_session,
                 )
-                if claim_review["decision"] == "error":
-                    if auto_checklist:
+                review_outcome = _agent_turn_core.apply_claim_review_decision(
+                    state,
+                    claim_review,
+                    run_claim_review_action=run_claim_review_action,
+                    evidence_required_marker=master_orchestrator.EVIDENCE_REQUIRED,
+                    is_finalization=False,
+                )
+                if review_outcome.action == "continue":
+                    continue
+                if review_outcome.action == "early_exit":
+                    if auto_checklist and review_outcome.checklist_failure_reason:
                         _agent_checklist_fail(
-                            checklist_id, checklist_states,
-                            "negative-claim reviewer model request failed", 1,
+                            checklist_id, checklist_states, review_outcome.checklist_failure_reason, 1,
                         )
-                    return _early_exit(claim_review["reason"])
-                if claim_review["decision"] == "continue":
-                    claim_review_requests += 1
-                    if claim_review_requests <= 2:
-                        observations.append(
-                            "HOST CLAIM REVIEW: %s\n%s"
-                            % (
-                                claim_review["reason"],
-                                run_claim_review_action(
-                                    claim_review, claim_review_requests,
-                                ),
-                            )
-                        )
-                        continue
-                    if auto_checklist:
-                        _agent_checklist_fail(
-                            checklist_id,
-                            checklist_states,
-                            "negative existence claim lacked exact evidence",
-                            1,
-                        )
-                    return _early_exit("%s: %s\n\n%s" % (
-                        master_orchestrator.EVIDENCE_REQUIRED,
-                        claim_review["reason"],
-                        "\n\n".join(observations),
-                    ))
-                unverifiable = unverifiable_claim_review_exit()
-                if unverifiable is not None:
-                    return unverifiable
-            if require_file_evidence and not file_evidence:
+                    return _early_exit(review_outcome.exit_message)
+            if require_file_evidence and not state.file_evidence:
                 if auto_checklist:
                     _agent_checklist_fail(
                         checklist_id, checklist_states,
                         "required workspace evidence was not collected", 1,
                     )
-                detail = "\n\n" + "\n\n".join(observations) if observations else ""
+                detail = "\n\n" + "\n\n".join(state.observations) if state.observations else ""
                 return _early_exit(master_orchestrator.EVIDENCE_REQUIRED + detail)
             return finish_final(final)
         tool_name = _canonical_agent_tool_name(decision.get("tool"))
@@ -23218,49 +19045,44 @@ def _agent_turn(
             return _early_exit(
                 "ERROR: agent tool arguments must be a JSON object"
             )
-        # Learn the branch: predictor conditions the next-tool table on the
-        # loop state that preceded this committed decision, and prediction
-        # accuracy is scored here at commit time — independent of whether a
-        # speculation was issued for it.
         if _spec_prediction is not None:
             if _spec_prediction[0] == tool_name:
                 _predictor.note_hit()
             else:
                 _predictor.note_miss()
         _predictor.record_transition(_spec_state, tool_name)
-        _last_tool_name = tool_name
-        # Keep repository guards and dispatch on one host-confined view of a
-        # tool call; callback policy sees model args. The read-only check saw raw
-        # model paths while dispatch later rebased them under ``project_scope``.
-        # Absolute in-project paths were therefore rejected before dispatch,
-        # causing fleet workers to exhaust max_steps without any file evidence.
-        policy_tool_args = _project_scope_args(
-            tool_name, tool_args, project_scope,
-        )
-        # HOST AUTO-PROMOTE: a mode=create write to a path this run already
-        # created is unambiguous intent to replace the run's own file. Promote
-        # it to overwrite deterministically -- the model otherwise loops on
-        # "file exists" errors until the no-progress guard kills the run.
-        auto_promoted_overwrite = False
-        if (
-            tool_name == "file_write"
-            and str(policy_tool_args.get("mode") or "create").lower() == "create"
-            and _agent_created_path_key(policy_tool_args.get("path"))
-            in run_created_paths
-        ):
-            policy_tool_args = dict(policy_tool_args)
-            policy_tool_args["mode"] = "overwrite"
-            auto_promoted_overwrite = True
-        call_signature = _agent_call_signature(tool_name, policy_tool_args)
-        cached_inspection = (
-            tool_name in _AGENT_DEDUPLICATED_INSPECTION_TOOLS
-            and call_signature in successful_inspection_results
-        )
-        prior_identical_failures = failed_call_counts.get(call_signature, 0)
+        state.last_tool_name = tool_name
+        policy_tool_args = _project_scope_args(tool_name, tool_args, project_scope)
         from sonder_runtime.domain.agents.policy_refusal_guard import repeated_policy_refusal
-        if refusal := repeated_policy_refusal(observations):
+        if refusal := repeated_policy_refusal(state.observations):
             return _early_exit("ERROR: host policy refused 3 consecutive calls: " + refusal)
-        if prior_identical_failures >= 3:
+        pre = _agent_turn_core.evaluate_pre_dispatch(
+            state,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            policy_tool_args=policy_tool_args,
+            allowed_tools=allowed_tools,
+            tool_policy=tool_policy,
+            cloud=cloud,
+            unsafe=unsafe,
+            project_scope=project_scope,
+            project_bound=project_bound,
+            read_only=read_only,
+            auto_checklist=auto_checklist,
+            created_path_key=_agent_created_path_key,
+            call_signature_fn=_agent_call_signature,
+            cloud_policy_error_fn=_cloud_agent_tool_policy_error,
+            scope_path_error_fn=_repository_scope_path_error,
+            execution_arg_error_fn=_agent_project_execution_argument_error,
+            read_only_error_fn=_repository_read_only_error,
+            tool_mutates_fn=_agent_tool_mutates,
+            batch_guard=batch_guard,
+            batch_telemetry_fn=_agent_batch_guard_telemetry,
+            error_prefix=_err_prefix,
+        )
+        policy_tool_args = pre.policy_tool_args
+        call_signature = pre.call_signature
+        if pre.prior_identical_failures >= 3:
             if auto_checklist:
                 _agent_checklist_fail(
                     checklist_id, checklist_states,
@@ -23270,118 +19092,34 @@ def _agent_turn(
                 "ERROR: agent repeated the same unsuccessful tool call %d times: %s. "
                 "Change the arguments, inspect the error, or choose a recovery tool.\n\n%s"
                 % (
-                    prior_identical_failures,
+                    pre.prior_identical_failures,
                     tool_name,
-                    "\n\n".join(observations),
+                    "\n\n".join(state.observations),
                 )
             )
-        policy_error = ""
-        if allowed_tools is not None and tool_name not in allowed_tools:
-            policy_error = (
-                "ERROR: HOST POLICY: tool '%s' is outside this autonomous run's allowlist."
-                % tool_name
-            )
-        if not policy_error and tool_policy is not None:
-            policy_error = str(tool_policy(tool_name, tool_args) or "")
-        if not policy_error and cloud:
-            policy_error = _cloud_agent_tool_policy_error(
-                tool_name, unsafe=unsafe,
-            )
-        if not policy_error and project_scope:
-            policy_error = _repository_scope_path_error(
-                tool_name, policy_tool_args, project_scope,
-            )
-        if not policy_error and project_bound and tool_name not in _PROJECT_BOUND_AGENT_TOOLS:
-            policy_error = (
-                "ERROR: HOST POLICY: tool '%s' has no project-bound execution "
-                "contract and is disabled for a project-bound agent."
-                % tool_name
-            )
-        if not policy_error and (project_scope or tool_name in _PROJECT_SCOPED_COMMAND_TOOLS):
-            policy_error = _agent_project_execution_argument_error(
-                tool_name, policy_tool_args, project_scope,
-            )
-        if not policy_error and read_only:
-            policy_error = _repository_read_only_error(
-                tool_name,
-                policy_tool_args,
-                trusted_extra_roots=project_scope,
-            )
-        if (
-            auto_checklist
-            and _agent_tool_mutates(tool_name, policy_tool_args)
-            and not inspected
-            and not policy_error
-        ):
-            policy_error = (
-                "ERROR: HOST REQUIREMENT: inspect relevant workspace evidence "
-                "before making a mutation."
-            )
         tool_dispatched = False
-        batch_refusal = None
-        # A retry the host itself demands (a completion-blocking failed
-        # evidence call) is never refused; the guard also exempts every
-        # previously attempted target on its own.
-        if (
-            prior_identical_failures < 2
-            and not policy_error
-            and not cached_inspection
-            and call_signature not in completion_blocking_failures
-        ):
-            batch_refusal = batch_guard.before_dispatch(tool_name, policy_tool_args)
-            if batch_refusal is not None:
-                _agent_batch_guard_telemetry(batch_refusal.telemetry())
-        if prior_identical_failures >= 2:
-            observation = (
-                "ERROR: HOST NO-PROGRESS: this exact tool call already failed twice. "
-                "It was not run again. Change its arguments, inspect/discover the "
-                "correct target, or choose a different recovery tool."
-            )
-        elif tool_name in {
-            "web_search", "web_fetch", "weather_lookup",
-            "approximate_location_lookup",
-        } and call_signature in successful_web_calls:
-            observation = (
-                "ERROR: HOST REQUIREMENT: this identical web tool call already "
-                "succeeded; use its existing observation or choose a different call."
-            )
-        elif policy_error:
-            observation = policy_error
-        elif batch_refusal is not None:
-            # Not dispatched: the typed refusal names the registered batch
-            # tool with this target already in its argument.
-            observation = batch_refusal.render()
-        elif cached_inspection:
-            repeated = repeated_inspection_counts.get(call_signature, 0) + 1
-            repeated_inspection_counts[call_signature] = repeated
+        if pre.blocked_observation is not None:
+            observation = pre.blocked_observation
+        elif pre.cached_inspection:
+            repeated = state.repeated_inspection_counts.get(call_signature, 0) + 1
+            state.repeated_inspection_counts[call_signature] = repeated
             if repeated >= 3:
-                # A read-only agent has already collected the exact current
-                # observation.  Let a local model turn that evidence into one
-                # final answer instead of converting a bounded no-progress
-                # guard into a synthetic task failure.  This is deliberately
-                # not an extra hosted request, and it never applies after a
-                # mutation where an invented completion would be unsafe.
                 if (
                     read_only
                     and not cloud
-                    and not mutated
+                    and not state.mutated
                     and not required_tools
                     and not require_file_evidence
                 ):
-                    finalize_prompt = transcript
-                    if observations:
-                        finalize_prompt += "\n\n" + _agent_observation_prompt(observations)
-                    finalize_prompt += (
-                        "\n\nHOST LOOP GUARD: the same successful inspection was "
-                        "requested repeatedly. Do not call another tool. Return a "
-                        "final answer now using only the host observations above; "
-                        "do not claim any unobserved mutation or validation."
+                    finalize_prompt = _agent_prompts_core.build_loop_guard_finalize_prompt(
+                        transcript,
+                        _agent_observation_prompt(state.observations) if state.observations else "",
                     )
                     forced, _forced_raw, _forced_error = _agent_generate_decision(
                         gen, finalize_prompt,
                     )
-                    if pre_model_context_rendered and _forced_raw:
-                        pre_model_context_response_observed = True
+                    if state.pre_model_context_rendered and _forced_raw:
+                        state.pre_model_context_response_observed = True
                     forced_final = str(forced.get("final") or "") if isinstance(forced, dict) else ""
                     if forced_final and not _AGENT_NEGATIVE_CLAIM_RE.search(forced_final):
                         return finish_final(forced_final)
@@ -23394,7 +19132,7 @@ def _agent_turn(
                     "ERROR: agent repeated the same already-successful inspection "
                     "%d times: %s. Use the existing evidence, change the arguments, "
                     "or make a relevant state change.\n\n%s"
-                    % (repeated, tool_name, "\n\n".join(observations))
+                    % (repeated, tool_name, "\n\n".join(state.observations))
                 )
             observation = (
                 "HOST CACHED INSPECTION: this identical call already succeeded; "
@@ -23402,11 +19140,9 @@ def _agent_turn(
                 "Read the cached hit below and either finalize from it now or "
                 "change the arguments to inspect different evidence; do not repeat "
                 "this identical call.\n"
-                + successful_inspection_results[call_signature]
+                + state.successful_inspection_results[call_signature]
             )
         elif cloud and tool_name == "tool_manifest":
-            # The direct/local manifest remains authoritative and complete,
-            # while a hosted model sees only the capabilities it may request.
             observation = _agent_tool_help(
                 read_only=read_only, cloud=True, unsafe=unsafe,
                 project_bound=bool(project_scope),
@@ -23420,13 +19156,10 @@ def _agent_turn(
             )
         else:
             ensure_not_cancelled()
-            # Retire a matching speculation (a non-read-only commit drops them all).
             _retired = _spec_engine.resolve(call_signature, tool_name)
             if _retired is not None:
                 tool_dispatched = True
                 observation = _retired.observation
-                # Feed the cost model: the tool's measured wall time, and the
-                # portion of it hidden behind this step's model decision.
                 _tool_wall = _retired.wall_seconds
                 _predictor.observe_tool_latency(_tool_wall)
                 _predictor.note_saved(
@@ -23445,341 +19178,85 @@ def _agent_turn(
                         tool_name, policy_tool_args, project=project_scope,
                         **dispatch_options,
                     )
-        observation_text = str(observation) + ("\nargument normalization: " + "; ".join(normalization_notes).replace("\n", " ").replace("\r", " ")[:600] if normalization_notes else "")
         tool_ok = _agent_tool_observation_ok(tool_name, observation)
-        _delegation_bridge.observe_tool_done(step, tool_name, ok=tool_ok, observation=observation_text)
-        abort_observation = None
-        if tool_ok:
-            failed_call_counts.pop(call_signature, None)
-            completion_blocking_failures.pop(call_signature, None)
-            if tool_name == "file_write":
-                run_created_paths.add(
-                    _agent_created_path_key(policy_tool_args.get("path"))
-                )
-                if auto_promoted_overwrite:
-                    observation_text += (
-                        "\nHOST AUTO-PROMOTE: mode=create was replaced with "
-                        "mode=overwrite because this run created the file."
-                    )
-            elif tool_name == "file_batch_write":
-                for item in _batch_agent_operations(policy_tool_args) or []:
-                    if (
-                        isinstance(item, dict)
-                        and str(item.get("mode") or "").lower() == "create"
-                    ):
-                        run_created_paths.add(
-                            _agent_created_path_key(item.get("path"))
-                        )
-            elif tool_name == "data_convert" and policy_tool_args.get("apply") is True:
-                run_created_paths.add(
-                    _agent_created_path_key(policy_tool_args.get("output_path"))
-                )
-        else:
-            failed_call_counts[call_signature] = prior_identical_failures + 1
-            # Certain narrow routes cannot answer honestly after a specific
-            # source fails. End immediately instead of consuming further
-            # model/tool turns and risking a prose-only completion.
-            if tool_dispatched and tool_name in abort_on_tool_failure:
-                if auto_checklist:
-                    _agent_checklist_fail(
-                        checklist_id, checklist_states,
-                        "%s failed: %s" % (tool_name, observation_text[:240]),
-                    )
-                # Preserve the original failure detail, but finish host effect
-                # accounting and observation before freezing the early result.
-                abort_observation = observation_text[:600]
-            # Multiple required tools are intentionally alternatives.  A
-            # singleton is a hard caller contract; evidence-required review
-            # likewise needs a successful evidence tool of the failed kind.
-            if (
-                tool_dispatched and (
-                    (len(required_tools) == 1 and tool_name in required_tools)
-                    or (read_only and require_file_evidence
-                        and tool_name in _AGENT_FILE_EVIDENCE_TOOLS)
-                )
-            ):
-                completion_blocking_failures[call_signature] = (
-                    tool_name, observation_text[:600],
-                )
-            if call_signature in completion_blocking_failures:
-                recovery = (
-                    "HOST RECOVERY: this required host observation blocks "
-                    "completion until you retry this exact call and it succeeds."
-                )
-            else:
-                recovery = (
-                    "HOST RECOVERY: do not repeat this exact failed call unchanged. "
-                    "Inspect the error and change the target, arguments, or tool."
-                )
-            if tool_name == "script_run":
-                recovery += (
-                    " Use script_search/file_find to locate a real script, or use "
-                    "workspace_run with an approved interpreter and explicit argv."
-                )
-            elif tool_name == "file_write" and "file exists" in observation_text.lower():
-                recovery += (
-                    " To replace the existing file, repeat the call with "
-                    "mode=overwrite."
-                )
-            elif tool_name == "file_edit" and "old text must not be empty" in observation_text.lower():
-                recovery += (
-                    " file_edit replaces a non-empty old text; read the file "
-                    "first, or use file_write with mode=overwrite to rewrite it."
-                )
-            observation_text += "\n" + recovery
-        used_tool = used_tool or tool_ok
-        # Train the stream prefetcher on what the model actually did (raw
-        # args: listing entries and model read paths share the same
-        # scope-relative form).
-        _spec_prefetcher.observe(
-            tool_name, tool_args, observation_text, ok=tool_ok,
+        step_outcome = _agent_turn_core.record_step_outcome(
+            state,
+            step=step,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            policy_tool_args=policy_tool_args,
+            call_signature=call_signature,
+            reason=decision.get("reason", ""),
+            observation=observation,
+            normalization_notes=normalization_notes,
+            tool_ok=tool_ok,
+            tool_dispatched=tool_dispatched,
+            cached_inspection=pre.cached_inspection,
+            auto_promoted_overwrite=pre.auto_promoted_overwrite,
+            prior_identical_failures=pre.prior_identical_failures,
+            batch_refusal=pre.batch_refusal,
+            read_only=read_only,
+            require_file_evidence=require_file_evidence,
+            auto_checklist=auto_checklist,
+            project_scope=project_scope,
+            required_tools=required_tools,
+            abort_on_tool_failure=abort_on_tool_failure,
+            verification_tools=_AGENT_VERIFICATION_TOOLS,
+            created_path_key=_agent_created_path_key,
+            batch_operations=_batch_agent_operations,
+            tool_mutates_fn=_agent_tool_mutates,
+            mutation_records_fn=_agent_mutation_records,
+            verification_covers_fn=_agent_verification_covers,
+            validation_covers_fn=_agent_validation_covers,
+            model_observation_view_fn=_agent_model_observation_view,
+            mark_checklist_fn=lambda item_no, st, note: _agent_checklist_mark(
+                checklist_id, checklist_states, item_no, st, note,
+            ),
+            fail_checklist_fn=lambda reason_text, item_no: _agent_checklist_fail(
+                checklist_id, checklist_states, reason_text, item_no,
+            ),
+            spec_prefetcher=_spec_prefetcher,
+            artifact_gate=artifact_gate,
+            batch_guard=batch_guard,
+            batch_telemetry_fn=_agent_batch_guard_telemetry,
+            host_controller=host_controller,
+            ledger_safe_args_fn=_ledger_safe_tool_arguments,
+            peer_updates=_delegation_bridge.drain_peer_updates() or "",
+            error_prefix=_err_prefix,
         )
-        if tool_ok:
-            used_tool_names.add(str(tool_name))
-            if tool_name in {
-                "web_search", "web_fetch", "weather_lookup",
-                "approximate_location_lookup",
-            }:
-                successful_web_calls.add(call_signature)
-            if (
-                tool_name in _AGENT_DEDUPLICATED_INSPECTION_TOOLS
-                and not cached_inspection
-            ):
-                successful_inspection_results[call_signature] = (
-                    _agent_model_observation_view(tool_name, observation_text)
-                )
-                repeated_inspection_counts.pop(call_signature, None)
-        if tool_name in _AGENT_FILE_EVIDENCE_TOOLS and tool_ok:
-            file_evidence = True
-        if auto_checklist and tool_name in _WORK_INSPECTION_TOOLS and tool_ok:
-            inspected = True
-            _agent_checklist_mark(
-                checklist_id, checklist_states, 1, "done", "%s completed" % tool_name,
+        _delegation_bridge.observe_tool_done(step, tool_name, ok=tool_ok, observation=step_outcome.observation_text)
+        if step_outcome.checklist_failure is not None and auto_checklist:
+            _agent_checklist_fail(
+                checklist_id, checklist_states,
+                step_outcome.checklist_failure[0], step_outcome.checklist_failure[1],
             )
-            _agent_checklist_mark(
-                checklist_id, checklist_states, 2, "in_progress", "working from inspected evidence",
-            )
-        mutation_happened = _agent_tool_mutates(
-            tool_name, policy_tool_args,
-        ) and tool_ok and tool_name != "agent_lane"
-        mutation_attempt_may_have_changed = (
-            tool_dispatched
-            and _agent_tool_mutates(tool_name, policy_tool_args)
-            and tool_name != "agent_lane"
-        )
-        if mutation_attempt_may_have_changed:
-            # A failed mutator can still leave directories or partial output.
-            # Treat the workspace as dirty until a grounded validator proves
-            # otherwise instead of reporting mutation_observed=False.
-            mutated = True
-        execution_may_have_changed = (
-            tool_dispatched
-            and tool_name in _AGENT_EXECUTION_STATE_INVALIDATION_TOOLS
-        )
-        if tool_dispatched:
-            artifact_gate.observe(tool_name, policy_tool_args, observation_text, success=tool_ok, mutation=mutation_attempt_may_have_changed, execution=execution_may_have_changed)
-        batch_advisory = None
-        if tool_dispatched and not (
-            mutation_attempt_may_have_changed or execution_may_have_changed
-        ):
-            batch_advisory = batch_guard.after_dispatch(
-                tool_name, policy_tool_args, ok=tool_ok,
-            )
-            if batch_advisory is not None:
-                _agent_batch_guard_telemetry(batch_advisory.telemetry())
-        if mutation_attempt_may_have_changed or execution_may_have_changed:
-            parent_effect_dirty = True
-            # Fresh reads after a state change are legitimate evidence, not
-            # a wasteful run of singles: start a new batching window.
-            batch_guard.reset()
-            # A real mutation or an execution-capable tool can make prior
-            # inspection results stale even when the command exits nonzero.
-            # Dry-run mutation tools do not reach here.
-            successful_inspection_results.clear()
-            repeated_inspection_counts.clear()
-            validation_attempted = False
-            validation_ok = False
-            # Tests that passed before this change no longer say anything about
-            # the tree that exists after it.
-            verification_ok = False
-            if mutation_happened or tool_ok:
-                failed_call_counts.clear()
-            else:
-                # The failing execution itself must remain bounded, while
-                # failures against the pre-execution workspace may be stale.
-                current_failure_count = failed_call_counts.get(call_signature, 0)
-                failed_call_counts.clear()
-                if current_failure_count:
-                    failed_call_counts[call_signature] = current_failure_count
-        if mutation_attempt_may_have_changed:
-            for record in _agent_mutation_records(tool_name, policy_tool_args):
-                if record not in mutations:
-                    mutations.append(record)
-            if auto_checklist and mutated:
-                _agent_checklist_mark(
-                    checklist_id, checklist_states, 1, "done", "inspection completed before mutation",
-                )
-                _agent_checklist_mark(
-                    checklist_id, checklist_states, 2, "in_progress", "%s changed workspace state" % tool_name,
-                )
-        if tool_name in _AGENT_VERIFICATION_TOOLS:
-            # A verifier is a validator by another route (see _work_validated),
-            # so a run that reached for one has attempted validation -- without
-            # this a "validate" task satisfied by test_run is rejected with
-            # "ran no host-observed validator", which would be false.
-            validation_attempted = True
-            # The latest host-observed verifier decides current standing: a
-            # later failing or out-of-scope check must invalidate an earlier
-            # pass, exactly as it does for validation_ok below.
-            verification_ok = tool_ok and _agent_verification_covers(
-                tool_name, policy_tool_args, mutations,
-                project_scope=project_scope,
-            )
-        if tool_name in _WORK_VALIDATION_TOOLS:
-            validation_attempted = True
-            validation_covered = tool_ok and _agent_validation_covers(
-                tool_name, policy_tool_args, mutations, observation_text,
-            )
-            # The latest host-observed validator decides current validity. A
-            # later failing/bad-coverage check must invalidate an earlier pass.
-            validation_ok = validation_covered
-            if mutated and tool_ok and not validation_covered:
-                observation_text += (
-                    "\nHOST VALIDATION: this check did not cover the changed on-disk path(s). "
-                    "Run the edited script, a workspace test/build, or a path-specific verifier."
-                )
-            if auto_checklist and mutated:
-                _agent_checklist_mark(
-                    checklist_id, checklist_states, 2, "done", "implementation phase complete",
-                )
-                _agent_checklist_mark(
-                    checklist_id, checklist_states, 3,
-                    "done" if validation_covered else "blocked",
-                    "%s %s" % (
-                        tool_name,
-                        "passed and covered changed paths"
-                        if validation_covered else "did not validate changed paths",
-                    ),
-                )
-        # A successful mutation or a validator that covers the current change
-        # is real progress; discard earlier failed/empty streaks. Classify
-        # only the structured host outcome (failure or empty), never by
-        # parsing model-controlled error prose.
-        semantic_stall = None
-        evidence_progress = (
-            tool_dispatched and tool_ok
-            and tool_name in _AGENT_FILE_EVIDENCE_TOOLS
-            and bool(str(observation).strip())
-        )
-        if mutation_happened or evidence_progress or (
-            tool_name in _WORK_VALIDATION_TOOLS and validation_covered
-        ):
-            semantic_no_progress.clear()
-        else:
-            outcome_class = (
-                "failed" if not tool_ok
-                else "empty" if not str(observation).strip()
-                else ""
-            )
-            if tool_dispatched and outcome_class:
-                semantic_no_progress.append((tool_name, outcome_class, call_signature))
-                matching = [
-                    item for item in semantic_no_progress
-                    if item[0] == tool_name and item[1] == outcome_class
-                ]
-                distinct_signatures = {item[2] for item in matching}
-                if len(matching) >= 4 and len(distinct_signatures) >= 3:
-                    semantic_stall = (tool_name, outcome_class, len(distinct_signatures))
-        if host_controller is not None:
-            host_controller.observe_host_tool(
-                tool=tool_name,
-                arguments=_ledger_safe_tool_arguments(policy_tool_args),
-                observation=observation_text, dispatched=bool(tool_dispatched),
-                success=bool(tool_ok),
-                dirty=bool(mutation_attempt_may_have_changed or execution_may_have_changed),
-                mutation_records=(
-                    _agent_mutation_records(tool_name, policy_tool_args)
-                    if mutation_attempt_may_have_changed else ()
-                ),
-                verifier=tool_name in _AGENT_VERIFICATION_TOOLS,
-                validator=tool_name in _WORK_VALIDATION_TOOLS,
-            )
-        # The advisory is steering for the model only: it is appended after
-        # the host ledger, inspection cache and evidence checks have seen the
-        # unchanged tool result.
-        model_observation = _agent_model_observation_view(tool_name, observation_text)
-        if batch_advisory is not None:
-            model_observation += "\n" + batch_advisory.render()
-        observations.append(
-            "step %d tool=%s reason=%s\n%s" % (
-                step,
-                tool_name,
-                decision.get("reason", ""),
-                model_observation,
-            )
-        )
-        if _peer_updates := _delegation_bridge.drain_peer_updates():
-            observations.append(_peer_updates)
-        if batch_refusal is not None and batch_refusal.exhausted:
-            if auto_checklist:
-                _agent_checklist_fail(
-                    checklist_id, checklist_states,
-                    "model ignored repeated batch-tool steering", 2,
-                )
-            return _early_exit(
-                "ERROR: agent kept issuing single %s calls after %d batch-guard "
-                "refusals; use %s for multi-target reads.\n\n%s"
-                % (
-                    batch_refusal.counterpart.single_tool,
-                    batch_refusal.refusals,
-                    batch_refusal.counterpart.batch_tool,
-                    "\n\n".join(observations),
-                )
-            )
-        if semantic_stall is not None:
-            stalled_tool, outcome_class, distinct_count = semantic_stall
-            return _early_exit(
-                "ERROR: agent made no semantic progress: %s produced %s outcomes "
-                "across %d distinct calls. Change the recovery strategy or make "
-                "a state-changing call."
-                % (stalled_tool, outcome_class, distinct_count)
-            )
-        if abort_observation is not None:
-            return _early_exit(
-                "ERROR: required %s failed; no answer was produced from "
-                "unverified sources (%s)." % (tool_name, abort_observation)
-            )
+        if step_outcome.early_exit_message is not None:
+            return _early_exit(step_outcome.early_exit_message)
     final = ""
     while True:
-        final_prompt = transcript
-        if observations:
-            final_prompt += "\n\n" + _agent_observation_prompt(observations)
-        final_prompt += (
-            "\n\nHOST FINALIZATION ONLY: the tool-step budget is exhausted. Do not call "
-            "another tool. Synthesize a concise grounded result from the observations, "
-            "disclose unresolved errors or checks, and return exactly "
-            '{"final":"answer"}.'
+        final_prompt = _agent_prompts_core.build_finalization_prompt(
+            transcript,
+            _agent_observation_prompt(state.observations) if state.observations else "",
         )
         final_decision, raw, final_error = _agent_generate_decision(
             gen, final_prompt, require_final=True,
         )
         if final_decision is not None:
             ensure_not_cancelled()  # a cancel during the call discards its answer
-        if pre_model_context_rendered and raw:
-            pre_model_context_response_observed = True
+        if state.pre_model_context_rendered and raw:
+            state.pre_model_context_response_observed = True
         if final_decision is None:
+            active_item = 3 if state.validation_attempted else 2 if state.mutated else 1
             if isinstance(final_error, ModelCallError):
                 if auto_checklist:
-                    active_item = 3 if validation_attempted else 2 if mutated else 1
                     _agent_checklist_fail(
                         checklist_id, checklist_states,
                         "model request failed during final synthesis",
                         active_item,
                     )
-                agent_outcomes.model_request_failed(activity_tracker, model_failure, final_error)
+                agent_outcomes.model_request_failed(activity_tracker, state.model_failure, final_error)
                 return _early_exit(render_model_error(final_error))
             if auto_checklist:
-                active_item = 3 if validation_attempted else 2 if mutated else 1
                 _agent_checklist_fail(
                     checklist_id, checklist_states,
                     "agent could not synthesize a final answer after max_steps",
@@ -23788,58 +19265,39 @@ def _agent_turn(
             return _early_exit(
                 "ERROR: agent reached max_steps=%d and finalization failed: %s\n"
                 "raw=%s\n\n%s"
-                % (max_steps, final_error, raw[:1000], "\n\n".join(observations))
+                % (max_steps, final_error, raw[:1000], "\n\n".join(state.observations))
             )
         final = str(final_decision.get("final") or "")
         if not _AGENT_NEGATIVE_CLAIM_RE.search(final):
             break
         claim_review = _agent_negative_claim_review(
-            prompt, final, observations, model, cloud=cloud, tier=tier_label,
+            prompt, final, state.observations, model, cloud=cloud, tier=tier_label,
             cancel_check=cancel_check,
             cloud_budget_state=cloud_budget_state,
             session_id=capture_session,
         )
-        if claim_review["decision"] == "error":
-            if auto_checklist:
-                _agent_checklist_fail(
-                    checklist_id, checklist_states,
-                    "negative-claim reviewer model request failed at finalization",
-                    1,
-                )
-            return _early_exit(claim_review["reason"])
-        if claim_review["decision"] == "accept":
-            unverifiable = unverifiable_claim_review_exit()
-            if unverifiable is not None:
-                return unverifiable
-            break
-        claim_review_requests += 1
-        if claim_review_requests <= 2:
-            observations.append(
-                "HOST CLAIM REVIEW: %s\n%s"
-                % (
-                    claim_review["reason"],
-                    run_claim_review_action(claim_review, claim_review_requests),
-                )
-            )
+        review_outcome = _agent_turn_core.apply_claim_review_decision(
+            state,
+            claim_review,
+            run_claim_review_action=run_claim_review_action,
+            evidence_required_marker=master_orchestrator.EVIDENCE_REQUIRED,
+            is_finalization=True,
+        )
+        if review_outcome.action == "continue":
             continue
-        if auto_checklist:
-            _agent_checklist_fail(
-                checklist_id,
-                checklist_states,
-                "negative existence claim lacked exact evidence at finalization",
-                1,
-            )
-        return _early_exit("%s: %s\n\n%s" % (
-            master_orchestrator.EVIDENCE_REQUIRED,
-            claim_review["reason"],
-            "\n\n".join(observations),
-        ))
-    if required_tools and not (required_tools & used_tool_names):
+        if review_outcome.action == "early_exit":
+            if auto_checklist and review_outcome.checklist_failure_reason:
+                _agent_checklist_fail(
+                    checklist_id, checklist_states, review_outcome.checklist_failure_reason, 1,
+                )
+            return _early_exit(review_outcome.exit_message)
+        break
+    if required_tools and not (required_tools & state.used_tool_names):
         return _early_exit(
             "ERROR: agent reached max_steps=%d without using a required tool (%s)."
             % (max_steps, ", ".join(sorted(required_tools)))
         )
-    if auto_checklist and not used_tool:
+    if auto_checklist and not state.used_tool:
         _agent_checklist_fail(
             checklist_id, checklist_states,
             "agent exhausted tool steps without successful evidence", 1,
@@ -23847,13 +19305,13 @@ def _agent_turn(
         return _early_exit(
             "ERROR: agent reached max_steps=%d without successful tool evidence." % max_steps
         )
-    if require_file_evidence and not file_evidence:
+    if require_file_evidence and not state.file_evidence:
         if auto_checklist:
             _agent_checklist_fail(
                 checklist_id, checklist_states,
                 "required workspace evidence was not collected", 1,
             )
-        detail = "\n\n" + "\n\n".join(observations) if observations else ""
+        detail = "\n\n" + "\n\n".join(state.observations) if state.observations else ""
         return _early_exit(master_orchestrator.EVIDENCE_REQUIRED + detail)
     return finish_final(final)
 
@@ -25109,32 +20567,11 @@ def _route_work_request(
             npu_decision = npu_service.route_decide(prompt)
         except Exception:
             npu_decision = None
-        validated_npu = None
-        if isinstance(npu_decision, dict):
-            candidate_mode = str(
-                npu_decision.get("mode") or ""
-            ).strip().lower()
-            candidate_tier = str(
-                npu_decision.get("tier") or ""
-            ).strip().lower()
-            candidate_reason = npu_decision.get("reason")
-            candidate_confidence = npu_decision.get("confidence")
-            if (
-                candidate_mode in npu_contract.ROUTE_MODES
-                # The accelerator pre-scores the same lane decision the mode
-                # router makes, so it is held to the same base-tier allowlist.
-                and candidate_tier in runtime_policy.BASE_LOCAL_TIERS
-                and isinstance(candidate_reason, str)
-                and bool(candidate_reason.strip())
-                and not isinstance(candidate_confidence, bool)
-                and isinstance(candidate_confidence, (int, float))
-                and 0.0 <= float(candidate_confidence) <= 1.0
-            ):
-                validated_npu = {
-                    "mode": candidate_mode,
-                    "reason": candidate_reason.strip()[:240],
-                    "confidence": float(candidate_confidence),
-                }
+        validated_npu = _orchestration_helpers_core.validate_npu_route_decision(
+            npu_decision,
+            valid_modes=npu_contract.ROUTE_MODES,
+            valid_tiers=runtime_policy.BASE_LOCAL_TIERS,
+        )
         npu_fallback_attempted = npu_prefer_active and not validated_npu
         if validated_npu:
             mode = validated_npu["mode"]
@@ -25227,7 +20664,6 @@ def _route_work_request(
                 if row.get("status") in autopilot_store.ACTIVE_STATUSES
             ]
         if active:
-            current = active[0]
             header = _execution_route_header(
                 "deferred",
                 source,
@@ -25235,12 +20671,8 @@ def _route_work_request(
                 confidence,
                 selected_tier,
             )
-            return "%s\n\nactive run: %s [%s] %s\nuse /autopilot status %s" % (
-                header,
-                current.get("id", "unknown"),
-                current.get("status", "unknown"),
-                current.get("objective", ""),
-                current.get("id", ""),
+            return _orchestration_helpers_core.format_deferred_autopilot_reply(
+                header=header, current_run=active[0],
             )
         _narration_reason(reason)
         output = autopilot_start(
@@ -25253,10 +20685,11 @@ def _route_work_request(
             plan_only=bool(decision.get("plan_only")),
             wait=False,
         )
-    return "%s%s\n\n%s" % (
-        _execution_route_header(mode, source, reason, confidence, selected_tier),
-        ("\nnote: " + ignored_worker_cue) if ignored_worker_cue and mode != "fleet" else "",
-        output,
+    return _orchestration_helpers_core.format_routed_work_reply(
+        header=_execution_route_header(mode, source, reason, confidence, selected_tier),
+        mode=mode,
+        ignored_worker_cue=ignored_worker_cue,
+        output=output,
     )
 
 
@@ -27711,34 +23144,14 @@ def codegen_build_loop(
     # Every attempt is at least one ensemble generation plus a full build;
     # an unbounded caller-supplied count is a runaway loop, not a knob.
     attempt_limit = verification_progress.bounded_attempts(attempts)
-    clamp_note = ""
-    # Compare integers after the same coercion bounded_attempts applies, so
-    # an equivalent value such as 2.0 or True is not reported as clamped.
-    if verification_progress.requested_attempts(attempts) != attempt_limit:
-        clamp_note = (
-            "NOTE: attempts clamped: requested %s, ran at most %d per file "
-            "(allowed range 1..%d)."
-            % (attempts, attempt_limit, verification_progress.MAX_VERIFICATION_ATTEMPTS)
-        )
-    # A distinct critic/alternate generator requires two explicitly selected,
-    # differently resolved models and enough of the *existing* attempt budget.
-    # Merely naming two tier aliases that resolve to one model does not qualify.
-    repair_tiers = ()
-    repair_models = ()
+    clamp_note = _codegen_helpers_core.format_attempt_clamp_note(
+        attempts, verification_progress.requested_attempts(attempts), attempt_limit,
+    )
     explicit_targets = ()
     if refusal := _tool_lane_guard.selector_refusal(tiers.strip() or ",".join(_configured_local_tiers()), TIERS, _RUNTIME_POLICY):
         return refusal  # no tiers: the ensemble polls every bound local tier
     if tiers.strip():
         explicit_targets, _unavailable = _ensemble_targets(tiers)
-        if attempt_limit >= 3 and len(explicit_targets) >= 2:
-            repair_tiers = (explicit_targets[0][0], explicit_targets[1][0])
-            repair_models = (explicit_targets[0][1], explicit_targets[1][1])
-    from sonder_runtime.application.context_planner import (
-        CONTEXT_SECTIONS,
-        ContextPlanner,
-        ModelContext,
-    )
-    from sonder_runtime.application.memory.strategy_memory import language_from_path
     from sonder_runtime.application.strategy.codegen_result import (
         CodegenCanaryStop,
         render_codegen_canary_stop,
@@ -27756,35 +23169,27 @@ def codegen_build_loop(
         codegen_objective_digest,
         observe_codegen_build,
     )
-    from sonder_runtime.domain.strategy.models import (
-        FailureClass,
-        StrategyAction,
-        StrategyBudget,
-        StrategyUsage,
-    )
 
     strategy_rollout = try_configured_strategy_rollout()
-    project_identity = os.path.normcase(os.path.realpath(project_dir))
-    scope_run_id = "codegen-scope-" + hashlib.sha256(
-        os.fsencode(project_identity),
-    ).hexdigest()
-    operation_id = "codegen-" + uuid.uuid4().hex
-    member_run_ids = tuple(
-        f"{operation_id}-file-{index}" for index in range(len(wanted))
+    plan = _codegen_helpers_core.build_codegen_operation_plan(
+        project_dir=project_dir,
+        wanted=wanted,
+        build_program=build_program,
+        build_args_json=build_args_json,
+        attempt_limit=attempt_limit,
+        num_predict=num_predict,
+        explicit_targets=explicit_targets,
+        is_cloud_target=_is_cloud_tier,
+        rollout_selected=strategy_rollout.selected,
     )
-    canary_route = bool(explicit_targets) and (
-        bool(repair_tiers) or len(explicit_targets) == 1
-    ) and all(not _is_cloud_tier(tier, model)
-              for tier, model in explicit_targets[:2])
-    canary_route = canary_route and type(num_predict) is int and 1 <= num_predict <= 8192
-    active_operation = strategy_rollout.selected(scope_run_id) and canary_route
+    active_operation = plan.active_operation
     if active_operation and any(_bridge_provider_for_tier(tier) for tier, _model in explicit_targets[:2]):
         return "codegen canary unavailable: sealed single-send canaries require Ollama-bound tiers"
     # A previous selected operation may have left uncertain project effects.
     # Read its sealed guard even after an operator changes rollout to off.
     try:
         prior_trace = existing_strategy_trace()
-        if prior_trace is not None and prior_trace.scope_guard(scope_run_id) is not None:
+        if prior_trace is not None and prior_trace.scope_guard(plan.scope_run_id) is not None:
             return render_codegen_canary_stop(CodegenCanaryStop.PRIOR_EFFECT)
     except Exception as error:  # noqa: BLE001 - absent seal cannot authorize a build
         logging.getLogger(__name__).warning(
@@ -27809,45 +23214,24 @@ def codegen_build_loop(
     if active_operation:
         try:
             strategy_trace.acquire_scope_guard(
-                scope_run_id, operation_id,
-                objective_digest=hashlib.sha256(json.dumps(
-                    [project_identity, wanted, build_program, build_args_json],
-                    sort_keys=True, ensure_ascii=True,
-                ).encode("ascii")).hexdigest(),
-                member_run_ids=member_run_ids,
+                plan.scope_run_id, plan.operation_id,
+                objective_digest=plan.objective_digest,
+                member_run_ids=plan.member_run_ids,
             )
         except Exception as error:  # noqa: BLE001 - no baseline build without a seal
             logging.getLogger(__name__).warning(
                 "codegen project guard reservation failed: %s", type(error).__name__,
             )
             return render_codegen_canary_stop(CodegenCanaryStop.RESERVATION)
-    # The host bounds both the project and each candidate's paid phase. The
-    # isolated runner contract must honor the remaining timeout it receives.
-    operation_deadline = time.monotonic() + 900 if active_operation else None
-    attempt_deadline = None
-    attempt_wall_ceiling = max(1, (900 - 2 * 120) // attempt_limit)
-
-    def remaining_canary_seconds():
-        deadlines = [value for value in (operation_deadline, attempt_deadline)
-                     if value is not None]
-        if not deadlines:
-            return None
-        remaining = min(deadlines) - time.monotonic()
-        if remaining < 1.0:
-            raise TimeoutError("codegen canary wall deadline exhausted")
-        return max(1, int(remaining))
-
-    # Set when a build fails to launch or is killed. Such a build says nothing
-    # about the code, so its error list must never be scored against a real
-    # candidate and must never be read as a pass. `exit_ok` is the build's own
-    # verdict: a build that ran and failed is not a pass either, however few of
-    # its lines the error regex happened to recognise.
+    clock = _codegen_helpers_core.CanaryClock(
+        operation_deadline=time.monotonic() + 900 if active_operation else None,
+    )
     build_state = {"ran": True, "exit_ok": True}
 
     def run_build():
         build = isolated_build.run if active_operation else _codegen_build
         build_timeout = timeout if not active_operation else min(
-            timeout, remaining_canary_seconds(),
+            timeout, clock.remaining_seconds(),
         )
         out, exit_ok = build(build_program, build_args_json, project_dir,
                              build_timeout, token, approval, extra_roots)
@@ -27855,16 +23239,8 @@ def codegen_build_loop(
         build_state["exit_ok"] = exit_ok
         errors = codegen_loop.count_errors(out, error_regex)
         if codegen_loop.output_truncated(out):
-            # This marker must reach `format_report` independently of the
-            # caller's diagnostic regex (for example a C#-only regex).  A
-            # partial compiler transcript is neither a clean build nor a
-            # measured failure.
             errors.append(_CODEGEN_TRUNCATED_OUTPUT_ERROR)
         if not exit_ok and not errors:
-            # The compiler said no and the regex heard nothing -- a restore
-            # failure under a CS-only regex, a non-English toolchain, a Gradle
-            # "FAILURE:" banner. An empty list here read as a clean compile, so
-            # say what the process actually reported instead of inventing a pass.
             errors = [_CODEGEN_UNMATCHED_FAILURE_ERROR]
         return errors
 
@@ -27874,20 +23250,13 @@ def codegen_build_loop(
                 os.path.join(project_dir, name), extra_roots=extra_roots,
                 bypass=_file_bypass_allowed(token, approval),
             )
-            # read_file returns {"path","bytes","truncated","text"} -- there is no
-            # "content" key, so reading one made `existing` unconditionally empty
-            # and silently disabled every guard that depends on knowing what is
-            # already on disk: the shrink floor could not fire (shrink_rejected
-            # returns False with no incumbent), a clean file was regenerated
-            # every run, the first attempt was accepted unscored, and siblings
-            # carried no API for the next file.
             return data.get("text", "") if isinstance(data, dict) else str(data)
         except Exception:
             return ""
 
     def write(name, content):
         if active_operation:
-            remaining_canary_seconds()
+            clock.remaining_seconds()
         return file_ops.write_file(
             os.path.join(project_dir, name), content, mode="overwrite",
             extra_roots=extra_roots,
@@ -27895,473 +23264,108 @@ def codegen_build_loop(
             developer_authorized=_file_developer_allowed(token),
         )
 
+    def run_critic(spec, prior_candidate, prior_diagnostics, file_name, dep_brief, critic_ctx, repair_tiers, repair_models):
+        import solver
+
+        critic_prompt = solver.scoped_critic_prompt(
+            spec, prior_candidate, prior_diagnostics,
+            language=file_name, constraints=dep_brief,
+        )
+        try:
+            critique = solver.scoped_critic_review(
+                critic_prompt,
+                lambda scoped: _codegen_critic_generation(
+                    scoped, tier=repair_tiers[1], model=repair_models[1],
+                    num_predict=num_predict,
+                    **({"num_ctx": critic_ctx} if active_operation else {}),
+                    single_send=active_operation,
+                    **({"timeout": clock.remaining_seconds()} if active_operation else {}),
+                ),
+            )
+        except ModelCallError as exc:
+            if exc.kind == "cancelled":
+                raise
+            critique = solver.ScopedCriticReview(solver.CriticStatus.UNAVAILABLE)
+        except Exception:  # noqa: BLE001 - a critic failure cannot authorize a repair
+            critique = solver.ScopedCriticReview(solver.CriticStatus.UNAVAILABLE)
+        return critique.status is solver.CriticStatus.ANSWERED, critique.diagnosis
+
+    hooks = _codegen_helpers_core.CodegenAttemptHooks(
+        read_file=read,
+        write_file=write,
+        run_build=run_build,
+        build_state=build_state,
+        auto_model_context=_auto_model_context,
+        is_local_ollama_route=lambda m_tier, m_model: (
+            not _is_cloud_tier(m_tier, m_model)
+            and _bridge_provider_for_tier(m_tier) is None
+        ),
+        local_num_ctx=lambda m_model: int(_platform_local_model_options(
+            0.2, max(64, num_predict), _auto_model_context(m_model),
+            native_context=context_policy.native, environ=os.environ,
+        )["num_ctx"]),
+        observe_build=observe_codegen_build,
+        run_critic=run_critic,
+        generate_pinned=lambda prompt_text, m_model, m_ctx: _codegen_pinned_generation(
+            prompt_text, model=m_model, num_predict=num_predict,
+            num_ctx=m_ctx, timeout=clock.remaining_seconds(),
+        ),
+        generate_observed=lambda prompt_text, m_model, m_tier, m_ctx: _codegen_observed_generation(
+            prompt_text, model=m_model, tier=m_tier,
+            num_predict=num_predict, num_ctx=m_ctx,
+        ),
+        generate_ensemble=lambda prompt_text, gen_tiers: ensemble_answer(
+            prompt_text, tiers=gen_tiers, num_predict=num_predict, mode="code",
+        ),
+        format_model_call_error=lambda err: _format_runtime_model_call_error_policy(
+            err, **_ollama_error_endpoint(),
+        ),
+        is_model_call_error=lambda err: isinstance(err, ModelCallError),
+        is_cancelled_error=lambda err: isinstance(err, ModelCallError) and err.kind == "cancelled",
+        dependency_brief=codegen_loop.dependency_brief,
+        repair_brief=codegen_loop.repair_brief,
+        strip_code=codegen_loop.strip_code,
+        apply_slips=codegen_loop.apply_slips,
+        shrink_rejected=codegen_loop.shrink_rejected,
+        count_unreliable=codegen_loop.count_unreliable,
+        score=codegen_loop.score,
+        describe_total=codegen_loop.describe_total,
+        outcome_comparable=_codegen_outcome_comparable,
+        attempt_id=codegen_attempt_id,
+        objective_digest_for=lambda file_spec: codegen_objective_digest(
+            project_dir, file_spec, build_program,
+        ),
+    )
+
     rows = []
     for file_index, (name, spec) in enumerate(wanted):
-        strategy_run_id = (
-            member_run_ids[file_index] if active_operation else "codegen-" + uuid.uuid4().hex
+        step_result = _codegen_helpers_core.run_codegen_file_attempts(
+            file_index=file_index,
+            name=name,
+            spec=spec,
+            wanted=wanted,
+            slips=slips,
+            project_dir=project_dir,
+            build_program=build_program,
+            tiers=tiers,
+            attempt_limit=attempt_limit,
+            num_predict=num_predict,
+            explicit_targets=explicit_targets,
+            plan=plan,
+            clock=clock,
+            strategy_trace=strategy_trace,
+            strategy_memory=strategy_memory,
+            hooks=hooks,
         )
-        # A live canary needs a known single-model generation route so a sealed
-        # reservation can cover every paid request before dispatch. The
-        # default multi-model ensemble has variable fanout and stays observed.
-        active_canary = active_operation
-        canary_budget = None
-        generation_context_window = critic_context_window = alternate_context_window = 0
-        generation_token_ceiling = critic_token_ceiling = alternate_token_ceiling = 0
-        if active_canary:
-            base_model = repair_models[0] if repair_models else explicit_targets[0][1]
-            generation_context_window = max(1, int(_auto_model_context(base_model)))
-            generation_token_ceiling = generation_context_window + max(64, num_predict)
-            if repair_models:
-                critic_context_window = max(1, int(_auto_model_context(repair_models[1])))
-                critic_token_ceiling = critic_context_window + max(64, min(num_predict, 512))
-                alternate_context_window = critic_context_window
-                alternate_token_ceiling = alternate_context_window + max(64, num_predict)
-            canary_budget = StrategyBudget(
-                attempts=attempt_limit, model_calls=2 * attempt_limit,
-                tool_calls=2 * attempt_limit, verifier_calls=attempt_limit,
-                tokens=attempt_limit * (
-                    max(generation_token_ceiling, alternate_token_ceiling)
-                    + critic_token_ceiling
-                ),
-                critic_calls=int(bool(repair_tiers)),
-                strategy_switches=int(bool(repair_tiers)),
-                top_tier_calls=2 * attempt_limit,
-                wall_seconds=attempt_wall_ceiling * attempt_limit,
-            )
-        canary_observation_failed = False
-
-        def canary_actions(number, *, comparable, rejected=False, unresolved=False,
-                           critic_used=False, selected=active_canary):
-            if not selected:
-                return None
-            if number >= attempt_limit or not comparable or rejected or unresolved:
-                return (StrategyAction.INSPECT,)
-            actions = [StrategyAction.REPAIR, StrategyAction.INSPECT]
-            if repair_tiers and number == 2:
-                actions.append(StrategyAction.CRITIC)
-            if repair_tiers and number == 3 and critic_used:
-                actions.append(StrategyAction.SWITCH_MODEL)
-            return tuple(actions)
-
-        def observe_candidate(attempt_number, candidate, before, after, *,
-                              before_complete, after_complete, route,
-                              critic_used=False, rotated=False, rejected=False,
-                              unresolved_effects=False, no_progress=False,
-                              reserved_usage=None, reserved_action=None,
-                              run_id=strategy_run_id, file_name=name, file_spec=spec,
-                              selected=active_canary, budget=canary_budget):
-            nonlocal canary_observation_failed
-            if strategy_trace is None:
-                canary_observation_failed = selected
-                return None
-            try:
-                return observe_codegen_build(
-                    strategy_trace, run_id=run_id, file_name=file_name,
-                    project_dir=project_dir, spec=file_spec, build_program=build_program,
-                    attempt_number=attempt_number, attempt_limit=attempt_limit,
-                    code=candidate, before_errors=before, after_errors=after,
-                    before_complete=before_complete, after_complete=after_complete,
-                    build_ran=build_state["ran"], exit_ok=build_state["exit_ok"],
-                    route=route, critic_used=critic_used, rotated=rotated,
-                    rejected=rejected,
-                    unresolved_effects=unresolved_effects,
-                    memory_service=strategy_memory,
-                    no_progress=no_progress,
-                    available_actions=canary_actions(
-                        attempt_number, comparable=after_complete,
-                        rejected=rejected, unresolved=unresolved_effects,
-                        critic_used=critic_used,
-                    ),
-                    reserved_usage=reserved_usage, reserved_budget=budget,
-                    reserved_action=reserved_action,
-                )
-            except Exception as error:  # noqa: BLE001 - optional observer cannot change the build
-                canary_observation_failed = selected
-                logging.getLogger(__name__).warning(
-                    "codegen strategy observation failed: %s", type(error).__name__,
-                )
-                return None
-
-        existing = read(name)
-        try:
-            errors = run_build()
-        except TimeoutError:
-            if not active_canary:
-                raise
-            return render_codegen_canary_stop(CodegenCanaryStop.BUILD_UNCERTAIN)
-        observed_errors = errors
-        observed_complete = build_state["ran"] and _codegen_outcome_comparable(errors)
-        if active_canary and not observed_complete:
-            return render_codegen_canary_stop(CodegenCanaryStop.BUILD_UNCERTAIN)
-        mine = [e for e in errors if name in e]
-        # "No errors named this file" only means "clean" if the compiler
-        # actually reached this file. Under a masked build it reached nothing,
-        # so EVERY file looks clean: measured, one parse error in one file made
-        # the loop skip all six remaining files and report FINAL: 1 error --
-        # a no-op run that read as near-success.
-        masked = codegen_loop.count_unreliable(errors)
-        # ...and only if the build itself succeeded: a failing build whose
-        # errors name some other file (or no file the regex recognises) is not
-        # evidence that this one is clean.
-        if existing and not mine and not masked and build_state["exit_ok"]:
-            rows.append({"name": name, "note": "already clean, not regenerated"})
-            continue
-
-        best_code = existing or None
-        best_total = codegen_loop.score(errors) if existing else None
-        note = "unchanged"
-        siblings = {n: read(n) for n, _ in wanted if n != name}
-        siblings = {n: t for n, t in siblings.items() if t.strip()}
-        # Issue #510 no-progress guard: identical failing builds on
-        # consecutive attempts mean the same prompt is not converging, so
-        # stop spending ensemble generations on this file.
-        progress_guard = verification_progress.VerificationProgressGuard()
-        prior_candidate = None
-        prior_diagnostics = None
-        prior_score = (
-            codegen_loop.score(errors)
-            if build_state["ran"] and _codegen_outcome_comparable(errors)
-            else None
-        )
-        prior_progress = "initial build"
-        repair_notes = []
-        critic_attempted = False
-        canary_next_action = StrategyAction.REPAIR
-
-        for attempt in range(1, attempt_limit + 1):
-            if active_canary:
-                attempt_deadline = min(
-                    operation_deadline, time.monotonic() + attempt_wall_ceiling,
-                )
-            prompt = "%s\n%s\nOutput only the contents of %s. Code only." % (
-                codegen_loop.dependency_brief(siblings), spec, name,
-            )
-            if prior_candidate is not None:
-                prompt += codegen_loop.repair_brief(
-                    prior_candidate, prior_diagnostics, prior_progress,
-                )
-            memory_exposed = False
-            memory_model = ""
-            memory_window = 0
-            critic_this_attempt = bool(
-                repair_tiers and prior_candidate is not None and prior_diagnostics
-                and _codegen_outcome_comparable(prior_diagnostics)
-                and ((active_canary and canary_next_action is StrategyAction.CRITIC)
-                     or (not active_canary and attempt == 3))
-            )
-            rotated_this_attempt = bool(
-                repair_tiers and
-                ((active_canary and canary_next_action is StrategyAction.SWITCH_MODEL)
-                 or (not active_canary and attempt == 4 and critic_attempted))
-            )
-            # Only a host-resolved single local route has a knowable input
-            # window. Count the full prompt in bytes as a conservative token
-            # ceiling, including sibling APIs and prior compiler evidence.
-            # Leave space for the bounded critic suggestion before requesting
-            # any advisory memory references.
-            if strategy_memory is not None and prior_candidate is not None and (
-                active_canary or len(explicit_targets) == 1
-            ) and prior_diagnostics and _codegen_outcome_comparable(prior_diagnostics):
-                memory_model = (
-                    repair_models[1] if rotated_this_attempt else
-                    repair_models[0] if repair_models else explicit_targets[0][1]
-                )
-                memory_tier = (
-                    repair_tiers[1] if rotated_this_attempt else
-                    repair_tiers[0] if repair_tiers else explicit_targets[0][0]
-                )
-                if not _is_cloud_tier(memory_tier, memory_model) and _bridge_provider_for_tier(memory_tier) is None:
-                    memory_window = int(_platform_local_model_options(
-                        0.2, max(64, num_predict), _auto_model_context(memory_model),
-                        native_context=context_policy.native, environ=os.environ,
-                    )["num_ctx"])
-                    output_reserve = max(64, num_predict)
-                    prompt_cost = len(prompt.encode("utf-8")) + (
-                        18150 if critic_this_attempt else 0
-                    )
-                    available_memory = memory_window - output_reserve - prompt_cost - 64
-                    if available_memory >= 320:
-                        # Recovery rendering may use two bytes per planned
-                        # memory token, so reserve that full byte envelope.
-                        memory_tokens = min(512, available_memory // 2)
-                        requests = dict.fromkeys(CONTEXT_SECTIONS, 0)
-                        requests["working_files"] = prompt_cost
-                        requests["memories"] = memory_tokens
-                        try:
-                            plan = ContextPlanner().plan(
-                                ModelContext(memory_model, memory_window, output_reserve),
-                                requests, requests,
-                            )
-                            recovery = strategy_memory.recovery_context(
-                                strategy_run_id, codegen_attempt_id(name, attempt),
-                                project_scope=project_dir, plan=plan,
-                                failure_class=FailureClass.BUILD_FAILURE,
-                                family="patch", language=language_from_path(name),
-                            )
-                            prompt += recovery.prompt_brief
-                            memory_exposed = bool(recovery.prompt_brief)
-                        except Exception as error:  # noqa: BLE001 - canary must not misattribute prior refs
-                            logging.getLogger(__name__).warning(
-                                "codegen memory selection failed: %s", type(error).__name__,
-                            )
-                            if active_canary:
-                                return render_codegen_canary_stop(CodegenCanaryStop.RESULT_UNSEALED)
-            if active_canary and (
-                canary_next_action not in {
-                    StrategyAction.REPAIR, StrategyAction.CRITIC,
-                    StrategyAction.SWITCH_MODEL,
-                }
-                or (canary_next_action is StrategyAction.CRITIC and not critic_this_attempt)
-                or (canary_next_action is StrategyAction.SWITCH_MODEL and not rotated_this_attempt)
-            ):
-                note += f"; strategy canary paused before attempt {attempt}"
-                break
-            generation_tiers = (
-                repair_tiers[1] if rotated_this_attempt else
-                repair_tiers[0] if repair_tiers else tiers
-            )
-            reserved_usage = None
-            if active_canary:
-                reserved_usage = StrategyUsage(
-                    attempts=1, model_calls=1 + int(critic_this_attempt),
-                    tool_calls=2, verifier_calls=1,
-                    tokens=(alternate_token_ceiling if rotated_this_attempt else
-                            generation_token_ceiling) + (
-                        critic_token_ceiling if critic_this_attempt else 0
-                    ),
-                    critic_calls=int(critic_this_attempt),
-                    strategy_switches=int(rotated_this_attempt),
-                    top_tier_calls=1 + int(critic_this_attempt),
-                    wall_seconds=attempt_wall_ceiling,
-                )
-                try:
-                    if strategy_trace is None:
-                        raise RuntimeError("sealed strategy trace unavailable")
-                    strategy_trace.reserve_next(
-                        strategy_run_id, codegen_attempt_id(name, attempt),
-                        objective_digest=codegen_objective_digest(
-                            project_dir, spec, build_program,
-                        ),
-                        action=canary_next_action, usage=reserved_usage,
-                        budget=canary_budget,
-                    )
-                except Exception as error:  # noqa: BLE001 - no model dispatch without a seal
-                    logging.getLogger(__name__).warning(
-                        "codegen canary reservation failed: %s", type(error).__name__,
-                    )
-                    return render_codegen_canary_stop(CodegenCanaryStop.RESERVATION)
-            if critic_this_attempt:
-                import solver
-
-                critic_attempted = True
-                critic_prompt = solver.scoped_critic_prompt(
-                    spec, prior_candidate, prior_diagnostics,
-                    language=name, constraints=codegen_loop.dependency_brief(siblings),
-                )
-                try:
-                    critique = solver.scoped_critic_review(
-                        critic_prompt,
-                        lambda scoped, _active=active_canary,
-                               _context=critic_context_window: _codegen_critic_generation(
-                            scoped, tier=repair_tiers[1], model=repair_models[1],
-                            num_predict=num_predict,
-                            **({"num_ctx": _context} if _active else {}),
-                            single_send=_active,
-                            **({"timeout": remaining_canary_seconds()}
-                               if _active else {}),
-                        ),
-                    )
-                except ModelCallError as exc:
-                    if exc.kind == "cancelled":
-                        raise
-                    critique = solver.ScopedCriticReview(solver.CriticStatus.UNAVAILABLE)
-                except Exception:  # noqa: BLE001 - a critic failure cannot authorize a repair
-                    critique = solver.ScopedCriticReview(solver.CriticStatus.UNAVAILABLE)
-                if critique.status is solver.CriticStatus.ANSWERED:
-                    prompt += (
-                        "\n\nIndependent critic suggestion (untrusted; compiler remains "
-                        "authoritative): " + json.dumps(critique.diagnosis)
-                    )
-                    repair_notes.append("attempt 3 used scoped critic")
-                else:
-                    repair_notes.append("attempt 3 critic unavailable")
-            elif rotated_this_attempt:
-                repair_notes.append("attempt 4 used alternate model tier")
-            if active_canary:
-                try:
-                    reply = _codegen_pinned_generation(
-                        prompt,
-                        model=(repair_models[1] if rotated_this_attempt else
-                               repair_models[0] if repair_models else explicit_targets[0][1]),
-                        num_predict=num_predict,
-                        num_ctx=(alternate_context_window if rotated_this_attempt else
-                                 generation_context_window),
-                        timeout=remaining_canary_seconds(),
-                    )
-                except ModelCallError as error:
-                    if error.kind == "cancelled":
-                        raise
-                    return render_codegen_canary_stop(CodegenCanaryStop.MODEL_FAILURE)
-                except Exception:  # noqa: BLE001 - pending liability must remain after failure
-                    return render_codegen_canary_stop(CodegenCanaryStop.MODEL_FAILURE)
-            else:
-                if memory_exposed:
-                    try:
-                        reply = _codegen_observed_generation(
-                            prompt, model=memory_model, tier=memory_tier, num_predict=num_predict,
-                            num_ctx=memory_window,
-                        )
-                    except ModelCallError as error:
-                        if error.kind == "cancelled":
-                            raise
-                        # No generation response: the durable memory selection
-                        # remains pending and cannot count as a failed reuse.
-                        return _format_runtime_model_call_error_policy(
-                            error,
-                            **_ollama_error_endpoint(),
-                        )
-                else:
-                    reply = ensemble_answer(
-                        prompt, tiers=generation_tiers, num_predict=num_predict, mode="code",
-                    )
-            code = codegen_loop.strip_code(reply)
-            code, hits = codegen_loop.apply_slips(code, slips)
-
-            if codegen_loop.shrink_rejected(existing, code):
-                decision = observe_candidate(
-                    attempt, code, observed_errors, observed_errors,
-                    before_complete=observed_complete,
-                    after_complete=observed_complete, route=generation_tiers,
-                    critic_used=critic_this_attempt, rotated=rotated_this_attempt,
-                    rejected=True, reserved_usage=reserved_usage,
-                    reserved_action=canary_next_action if active_canary else None,
-                )
-                if canary_observation_failed:
-                    return render_codegen_canary_stop(CodegenCanaryStop.RESULT_UNSEALED)
-                note = "attempt %d rejected: shrank to %d%% of the original" % (
-                    attempt, 100 * len(code) // max(1, len(existing)),
-                )
-                if active_canary and decision.action not in {
-                    StrategyAction.REPAIR, StrategyAction.CRITIC, StrategyAction.SWITCH_MODEL,
-                }:
-                    note += "; strategy canary paused"
-                    break
-                if active_canary:
-                    canary_next_action = decision.action
-                continue
-            try:
-                write(name, code)
-            except Exception as exc:
-                observe_candidate(
-                    attempt, code, observed_errors, observed_errors,
-                    before_complete=observed_complete,
-                    after_complete=False, route=generation_tiers,
-                    critic_used=critic_this_attempt, rotated=rotated_this_attempt,
-                    unresolved_effects=True, reserved_usage=reserved_usage,
-                    reserved_action=canary_next_action if active_canary else None,
-                )
+        if step_result.stop_reply is not None:
+            return step_result.stop_reply
+        if step_result.write_failure is not None:
+            verb, name, exc = step_result.write_failure
+            if verb == "write":
                 return "ERROR: could not write %s: %s" % (name, exc)
-
-            try:
-                attempt_errors = run_build()
-            except TimeoutError:
-                if not active_canary:
-                    raise
-                return render_codegen_canary_stop(CodegenCanaryStop.BUILD_UNCERTAIN)
-            after_complete = build_state["ran"] and _codegen_outcome_comparable(attempt_errors)
-            no_progress = bool(
-                attempt >= 2 and observed_complete and after_complete
-                and prior_diagnostics and
-                verification_progress.outcome_fingerprint(observed_errors)
-                == verification_progress.outcome_fingerprint(attempt_errors)
-            )
-            decision = observe_candidate(
-                attempt, code, observed_errors, attempt_errors,
-                before_complete=observed_complete,
-                after_complete=after_complete, route=generation_tiers,
-                critic_used=critic_this_attempt, rotated=rotated_this_attempt,
-                no_progress=no_progress, reserved_usage=reserved_usage,
-                reserved_action=canary_next_action if active_canary else None,
-            )
-            if canary_observation_failed:
-                return render_codegen_canary_stop(CodegenCanaryStop.RESULT_UNSEALED)
-            if active_canary and not after_complete:
-                return render_codegen_canary_stop(CodegenCanaryStop.BUILD_UNCERTAIN)
-            if active_canary:
-                canary_next_action = decision.action
-            observed_errors, observed_complete = attempt_errors, after_complete
-            if not build_state["ran"]:
-                # Nothing was compiled, so this attempt is not evidence about
-                # the code and must not be scored. Stop rather than keep
-                # generating against a build that cannot run.
-                note = "attempt %d abandoned: the build did not run" % attempt
-                break
-            attempt_score = codegen_loop.score(attempt_errors)
-            if best_total is None or attempt_score < best_total:
-                best_code, best_total = code, attempt_score
-                note = "attempt %d kept (%s%s)" % (
-                    attempt, codegen_loop.describe_total(attempt_errors),
-                    ", %d slip(s) rewritten" % hits if hits else "",
-                )
-            if not attempt_errors:
-                break
-            comparable = _codegen_outcome_comparable(attempt_errors)
-            if comparable and prior_score is not None:
-                prior_progress = (
-                    "improved" if attempt_score < prior_score else
-                    "regressed" if attempt_score > prior_score else "unchanged"
-                )
-            else:
-                prior_progress = "unmeasured (build diagnostics incomplete)"
-            prior_candidate = code
-            prior_diagnostics = attempt_errors
-            prior_score = attempt_score if comparable else None
-            if active_canary and canary_next_action not in {
-                StrategyAction.REPAIR, StrategyAction.CRITIC,
-                StrategyAction.SWITCH_MODEL,
-            }:
-                note += f"; strategy canary paused after attempt {attempt}"
-                break
-            if not comparable:
-                # A host placeholder, truncated output, or a masked count
-                # can look identical while the real errors change; it is not
-                # evidence of no progress, so it breaks the streak instead.
-                progress_guard.reset()
-            elif progress_guard.observe(attempt_errors, score=attempt_score):
-                if repair_tiers and attempt == 2 and attempt_limit >= 3:
-                    # The next attempt changes strategy to scoped criticism,
-                    # so this is not a blind repetition of the same request.
-                    progress_guard.reset()
-                    continue
-                note += (
-                    "; stopped after attempt %d: no progress (identical build "
-                    "errors on %d consecutive attempts, fingerprint %s) -- "
-                    "change the spec or approach instead of retrying"
-                    % (
-                        attempt, progress_guard.repeat_limit,
-                        progress_guard.stalled_fingerprint,
-                    )
-                )
-                break
-            if (
-                repair_tiers and attempt >= 4 and attempt < attempt_limit
-                and prior_progress != "improved"
-            ):
-                note += (
-                    f"; stopped after attempt {attempt}: alternate model showed no "
-                    "measured build improvement"
-                )
-                break
-
-        if best_code is not None:
-            try:
-                write(name, best_code)
-            except Exception as exc:
-                return "ERROR: could not restore %s: %s" % (name, exc)
-        attempt_deadline = None
-        if repair_notes:
-            note += "; " + "; ".join(repair_notes)
-        rows.append({"name": name, "note": note})
+            return "ERROR: could not restore %s: %s" % (name, exc)
+        if step_result.row is not None:
+            rows.append(step_result.row)
 
     try:
         final = run_build()
@@ -28374,7 +23378,7 @@ def codegen_build_loop(
             return render_codegen_canary_stop(CodegenCanaryStop.BUILD_UNCERTAIN)
         try:
             strategy_trace.release_scope_guard(
-                scope_run_id, operation_id, member_run_ids=member_run_ids,
+                plan.scope_run_id, plan.operation_id, member_run_ids=plan.member_run_ids,
             )
         except Exception as error:  # noqa: BLE001 - project completion remains pending
             logging.getLogger(__name__).warning(
@@ -28521,37 +23525,13 @@ def unload(tier: str = "all") -> str:
             tier == "all" and not residency_error and not resident
         ),
     )
-    lines = [
-        "Unload requested for: %s." % (", ".join(requested) if requested else "(none)"),
-    ]
-    if remaining:
-        lines.append("WARNING: still resident in Ollama: %s." % ", ".join(remaining))
-    elif residency_error:
-        lines.append("WARNING: residency could not be confirmed: %s." % residency_error)
-    elif requested:
-        lines.append("Ollama residency confirmed clear for the requested model(s).")
-    else:
-        lines.append("WARNING: no unload request was accepted by Ollama.")
-    if cleanup["terminated"]:
-        lines.append(
-            "Cleaned orphaned Ollama GPU-discovery probe PID(s): %s."
-            % ", ".join(str(pid) for pid in cleanup["terminated"])
-        )
-    if cleanup["terminated_model_runners"]:
-        lines.append(
-            "Cleaned verified orphaned Ollama model runner PID(s): %s."
-            % ", ".join(
-                str(pid) for pid in cleanup["terminated_model_runners"]
-            )
-        )
-    if cleanup["protected_model_runners"]:
-        lines.append(
-            "WARNING: orphaned model runner PID(s) were not terminated automatically: %s."
-            % ", ".join(str(pid) for pid in cleanup["protected_model_runners"])
-        )
-    for error in errors + cleanup["errors"]:
-        lines.append("WARNING: %s" % error)
-    return "\n".join(lines)
+    return _workspace_tools_core.format_unload_report(
+        requested=requested,
+        remaining=remaining,
+        residency_error=residency_error,
+        cleanup=cleanup,
+        errors=errors,
+    )
 
 
 # MCP is more than model-controlled tools. These small, passive resources let
