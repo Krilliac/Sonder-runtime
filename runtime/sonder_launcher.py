@@ -13,14 +13,8 @@ for _sonder_p in (str(_SONDER_REPO_ROOT / "scripts"), str(_SONDER_REPO_ROOT / "r
     if _sonder_p not in _sonder_sys.path:
         _sonder_sys.path.insert(0, _sonder_p)
 import argparse
-import errno
-import hashlib
-import hmac
-import ipaddress
 import json
 import os
-import re
-import secrets
 import signal
 import socket
 import sqlite3
@@ -32,11 +26,29 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from sonder_runtime.domain import launcher_health as sonder_health
 import command_recovery
+from sonder_runtime.adapters.launcher import (
+    process_inspection as _process_inspection,
+    state_store as _state_store,
+)
+from sonder_runtime.adapters.launcher.http_handler import (
+    LauncherHTTPHandler,
+    generate_token,
+    unauthenticated_loopback_warning,
+)
+from sonder_runtime.adapters.launcher.state_store import (
+    ACTIVE_PHASES,
+    ControlTreeNotStopped,
+    LauncherConflictError,
+    OPERATION_ID_PATTERN as _OPERATION_ID,
+    OPERATION_MIGRATIONS as _OPERATION_MIGRATIONS,
+    SCHEMA as _SCHEMA,
+    TERMINAL_PHASES,
+)
 from sonder_runtime.adapters.process_liveness import pid_alive as _process_pid_alive
 from sonder_runtime.adapters.launcher_idempotency import (
     _IDEMPOTENCY_KEY,
@@ -91,102 +103,35 @@ CONTROL_GATE_ENV = "SONDER_LAUNCHER_CONTROL_GATE"
 CONTROL_TERMINATE_GRACE_SECONDS = 2.0
 CONTROL_KILL_GRACE_SECONDS = 3.0
 FINALIZE_RETRY_DELAYS = (0.0, 0.05, 0.2)
-ACTIVE_PHASES = ("queued", "running")
-TERMINAL_PHASES = ("succeeded", "failed", "cancelled", "interrupted")
-_OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
 # Compatibility aliases for the historical private policy surface.
 _normalize_idempotency_key = normalize_idempotency_key
 _valid_command_replay = valid_command_replay
-# Compatibility aliases for the historical private policy surface.
 _output_text = output_text
 _bounded_seconds = bounded_seconds
 _retention_limit = retention_limit
 _BoundedOutputTail = BoundedOutputTail
 _drain_process_output = drain_process_output
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS sonder_launcher_operations (
-    id TEXT PRIMARY KEY,
-    action TEXT NOT NULL,
-    context_size TEXT NOT NULL,
-    phase TEXT NOT NULL,
-    idempotency_key TEXT UNIQUE,
-    created_ts REAL NOT NULL,
-    started_ts REAL,
-    updated_ts REAL NOT NULL,
-    finished_ts REAL,
-    owner_id TEXT NOT NULL,
-    owner_pid INTEGER NOT NULL,
-    owner_host TEXT NOT NULL,
-    lease_until REAL NOT NULL,
-    message TEXT NOT NULL DEFAULT '',
-    last_error TEXT NOT NULL DEFAULT '',
-    commands_json TEXT NOT NULL DEFAULT '[]',
-    hard_deadline REAL,
-    control_pid INTEGER,
-    control_identity TEXT,
-    control_group_id INTEGER,
-    control_platform TEXT,
-    control_started_ts REAL,
-    control_finished_ts REAL,
-    control_exit_code INTEGER
-);
-CREATE INDEX IF NOT EXISTS sonder_launcher_operations_phase_created
-    ON sonder_launcher_operations(phase, created_ts DESC);
-CREATE TABLE IF NOT EXISTS sonder_launcher_operation_lock (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    operation_id TEXT,
-    owner_id TEXT,
-    owner_pid INTEGER,
-    owner_host TEXT,
-    lease_until REAL
-);
-INSERT OR IGNORE INTO sonder_launcher_operation_lock(id) VALUES (1);
-"""
-
-_OPERATION_MIGRATIONS = {
-    "hard_deadline": "REAL",
-    "control_pid": "INTEGER",
-    "control_identity": "TEXT",
-    "control_group_id": "INTEGER",
-    "control_platform": "TEXT",
-    "control_started_ts": "REAL",
-    "control_finished_ts": "REAL",
-    "control_exit_code": "INTEGER",
-}
+# Preserve module-level re-exports referenced by callers/tests.
+_CONTEXT_SIZE = _CONTEXT_SIZE
+_IDEMPOTENCY_KEY = _IDEMPOTENCY_KEY
+_REPLAY_HEADER_NAME = _REPLAY_HEADER_NAME
+_REPLAY_HEADER_VALUE = _REPLAY_HEADER_VALUE
+MAX_CONTEXT_TOKENS = MAX_CONTEXT_TOKENS
+ACTIVE_PHASES = ACTIVE_PHASES
+TERMINAL_PHASES = TERMINAL_PHASES
+_SCHEMA = _SCHEMA
+_OPERATION_MIGRATIONS = _OPERATION_MIGRATIONS
 
 _LIVE_WORKERS_LOCK = threading.Lock()
 _LIVE_WORKERS = {}
 
 
-class LauncherConflictError(RuntimeError):
-    """A second operation or mismatched idempotent replay was rejected."""
-
-    def __init__(self, message, operation=None):
-        super().__init__(message)
-        self.operation = operation
-
-
-class ControlTreeNotStopped(RuntimeError):
-    """The launcher must retain its lock because owned control work survived."""
-
-
 def _loopback(host):
-    value = str(host or "").strip().strip("[]").lower()
-    if value == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(value).is_loopback
-    except ValueError:
-        return False
+    return _process_inspection.is_loopback(host)
 
 
 def _reachable(host="127.0.0.1", port=SERVER_PORT, timeout=0.4):
-    try:
-        with socket.create_connection((host, int(port)), timeout=timeout):
-            return True
-    except OSError:
-        return False
+    return _process_inspection.is_reachable(host, port, timeout)
 
 
 def _pid_alive(pid):
@@ -194,396 +139,75 @@ def _pid_alive(pid):
 
 
 def _windows_process_identity(pid):
-    try:
-        import ctypes
-
-        class FileTime(ctypes.Structure):
-            _fields_ = [
-                ("low", ctypes.c_uint32),
-                ("high", ctypes.c_uint32),
-            ]
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.OpenProcess.argtypes = (
-            ctypes.c_ulong,
-            ctypes.c_int,
-            ctypes.c_ulong,
-        )
-        kernel32.OpenProcess.restype = ctypes.c_void_p
-        kernel32.GetProcessTimes.argtypes = (
-            ctypes.c_void_p,
-            ctypes.POINTER(FileTime),
-            ctypes.POINTER(FileTime),
-            ctypes.POINTER(FileTime),
-            ctypes.POINTER(FileTime),
-        )
-        kernel32.GetProcessTimes.restype = ctypes.c_int
-        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
-        kernel32.CloseHandle.restype = ctypes.c_int
-        handle = kernel32.OpenProcess(0x1000, False, int(pid))
-        if not handle:
-            return ""
-        try:
-            creation = FileTime()
-            exit_time = FileTime()
-            kernel = FileTime()
-            user = FileTime()
-            if not kernel32.GetProcessTimes(
-                handle,
-                ctypes.byref(creation),
-                ctypes.byref(exit_time),
-                ctypes.byref(kernel),
-                ctypes.byref(user),
-            ):
-                return ""
-            value = (int(creation.high) << 32) | int(creation.low)
-            return "windows:%d" % value
-        finally:
-            kernel32.CloseHandle(handle)
-    except (AttributeError, ImportError, OSError, ValueError):
-        return ""
+    return _process_inspection.windows_process_identity(pid)
 
 
 def _linux_proc_path(pid):
-    """Resolve a namespace PID even when /proc is mounted from the host."""
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
-        return None
-    try:
-        namespace_inode = os.stat("/proc/self/ns/pid").st_ino
-        entries = Path("/proc").iterdir()
-    except OSError:
-        return None
-    direct = Path("/proc/%d" % pid)
-    candidates = ([direct] if direct.exists() else []) + list(entries)
-    seen = set()
-    for entry in candidates:
-        if not entry.name.isdigit():
-            continue
-        if entry.name in seen:
-            continue
-        seen.add(entry.name)
-        try:
-            if os.stat(entry / "ns/pid").st_ino != namespace_inode:
-                continue
-            status = (entry / "status").read_text(
-                encoding="ascii", errors="replace"
-            )
-        except OSError:
-            continue
-        for line in status.splitlines():
-            if line.startswith("NSpid:"):
-                values = line.split()[1:]
-                if values and int(values[-1]) == pid:
-                    return entry
-                break
-    return None
+    return _process_inspection.linux_proc_path(pid)
 
 
 def _linux_process_fields(pid):
-    try:
-        process_path = _linux_proc_path(pid)
-        if process_path is None:
-            return None
-        raw = (process_path / "stat").read_text(encoding="ascii")
-        status = (process_path / "status").read_text(
-            encoding="ascii", errors="replace"
-        )
-        end = raw.rfind(")")
-        if end < 0:
-            return None
-        fields = raw[end + 2:].split()
-        if len(fields) < 20:
-            return None
-        result = {
-            "state": fields[0],
-            "ppid": int(fields[1]),
-            "group": int(fields[2]),
-            "session": int(fields[3]),
-            "start_ticks": fields[19],
-        }
-        for line in status.splitlines():
-            if line.startswith("NSpgid:"):
-                values = line.split()[1:]
-                if values:
-                    result["group"] = int(values[-1])
-            elif line.startswith("NSsid:"):
-                values = line.split()[1:]
-                if values:
-                    result["session"] = int(values[-1])
-        return result
-    except (OSError, ValueError):
-        return None
+    return _process_inspection.linux_process_fields(pid, proc_path_fn=_linux_proc_path)
 
 
 def _process_start_identity(pid):
-    if os.name == "nt":
-        return _windows_process_identity(pid)
-    fields = _linux_process_fields(pid)
-    if fields:
-        try:
-            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
-                encoding="ascii"
-            ).strip()
-        except OSError:
-            boot_id = "unknown-boot"
-        return "linux:%s:%s" % (boot_id, fields["start_ticks"])
-    try:
-        result = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(int(pid))],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return ""
-    value = result.stdout.strip()
-    return "posix:%s" % value if result.returncode == 0 and value else ""
+    return _process_inspection.process_start_identity(
+        pid,
+        windows_identity_fn=_windows_process_identity,
+        linux_fields_fn=_linux_process_fields,
+    )
 
 
 def _process_matches(pid, identity):
-    return bool(identity) and _pid_alive(pid) and _process_start_identity(pid) == identity
+    return _process_inspection.process_matches(
+        pid,
+        identity,
+        pid_alive_fn=_pid_alive,
+        start_identity_fn=_process_start_identity,
+    )
 
 
 def _linux_group_has_non_zombie_member(group_id, proc_root=Path("/proc")):
-    """Return whether a Linux process group has a non-zombie member.
-
-    ``killpg(gid, 0)`` also succeeds when the only remaining members are
-    unreaped zombies.  That is useful existence information, but it must not
-    keep a control-tree operation alive forever under a PID 1 that does not
-    reap promptly.  ``None`` means procfs was unavailable or unreadable and
-    callers should retain the portable killpg fallback.
-    """
-    if not sys.platform.startswith("linux"):
-        return None
-    try:
-        entries = list(proc_root.iterdir())
-    except OSError:
-        return None
-    inspected = False
-    ambiguous = False
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
-        try:
-            raw = (entry / "stat").read_text(encoding="ascii")
-            end = raw.rfind(")")
-            fields = raw[end + 2:].split() if end >= 0 else []
-            if len(fields) < 3:
-                ambiguous = True
-                continue
-            state = fields[0]
-            process_group = int(fields[2])
-        except OSError as exc:
-            if isinstance(exc, FileNotFoundError) or exc.errno in (
-                errno.ENOENT, errno.ESRCH,
-            ):
-                continue
-            ambiguous = True
-            continue
-        except ValueError:
-            ambiguous = True
-            continue
-        inspected = True
-        if process_group == group_id and state not in ("Z", "X", "x"):
-            return True
-    if ambiguous or not inspected:
-        return None
-    return False
+    return _process_inspection.linux_group_has_non_zombie_member(group_id, proc_root)
 
 
 def _posix_group_alive(group_id):
-    try:
-        group_id = int(group_id)
-    except (TypeError, ValueError):
-        return False
-    if group_id <= 1:
-        return False
-    try:
-        os.killpg(group_id, 0)
-    except OSError as exc:
-        return exc.errno == errno.EPERM
-    linux_alive = _linux_group_has_non_zombie_member(group_id)
-    return True if linux_alive is None else linux_alive
+    return _process_inspection.posix_group_alive(
+        group_id,
+        linux_non_zombie_fn=_linux_group_has_non_zombie_member,
+    )
 
 
 def _wait_until(predicate, timeout, interval=0.05):
-    deadline = time.monotonic() + max(0.0, float(timeout))
-    while True:
-        if predicate():
-            return True
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        time.sleep(min(interval, remaining))
+    return _process_inspection.wait_until(predicate, timeout, interval)
 
 
 def _windows_process_table():
-    if os.name != "nt":
-        return {}
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        class ProcessEntry(ctypes.Structure):
-            _fields_ = [
-                ("dwSize", wintypes.DWORD),
-                ("cntUsage", wintypes.DWORD),
-                ("th32ProcessID", wintypes.DWORD),
-                ("th32DefaultHeapID", ctypes.c_size_t),
-                ("th32ModuleID", wintypes.DWORD),
-                ("cntThreads", wintypes.DWORD),
-                ("th32ParentProcessID", wintypes.DWORD),
-                ("pcPriClassBase", wintypes.LONG),
-                ("dwFlags", wintypes.DWORD),
-                ("szExeFile", wintypes.WCHAR * 260),
-            ]
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateToolhelp32Snapshot.argtypes = (
-            wintypes.DWORD,
-            wintypes.DWORD,
-        )
-        kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
-        kernel32.Process32FirstW.argtypes = (
-            ctypes.c_void_p,
-            ctypes.POINTER(ProcessEntry),
-        )
-        kernel32.Process32FirstW.restype = wintypes.BOOL
-        kernel32.Process32NextW.argtypes = (
-            ctypes.c_void_p,
-            ctypes.POINTER(ProcessEntry),
-        )
-        kernel32.Process32NextW.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
-        if snapshot == ctypes.c_void_p(-1).value:
-            return {}
-        try:
-            entry = ProcessEntry()
-            entry.dwSize = ctypes.sizeof(ProcessEntry)
-            processes = {}
-            more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
-            while more:
-                processes[int(entry.th32ProcessID)] = int(
-                    entry.th32ParentProcessID
-                )
-                more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
-            return processes
-        finally:
-            kernel32.CloseHandle(snapshot)
-    except (AttributeError, ImportError, OSError, ValueError):
-        return {}
+    return _process_inspection.windows_process_table()
 
 
 def _windows_descendants(root_pid):
-    table = _windows_process_table()
-    descendants = set()
-    frontier = {int(root_pid)}
-    while frontier:
-        children = {
-            pid for pid, parent in table.items()
-            if parent in frontier and pid not in descendants
-        }
-        descendants.update(children)
-        frontier = children
-    return descendants
+    return _process_inspection.windows_descendants(
+        root_pid, process_table_fn=_windows_process_table
+    )
 
 
 def _windows_terminate_pid(pid, identity=""):
-    if identity and not _process_matches(pid, identity):
-        return False
-    try:
-        import ctypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.OpenProcess.argtypes = (
-            ctypes.c_ulong,
-            ctypes.c_int,
-            ctypes.c_ulong,
-        )
-        kernel32.OpenProcess.restype = ctypes.c_void_p
-        kernel32.TerminateProcess.argtypes = (ctypes.c_void_p, ctypes.c_uint)
-        kernel32.TerminateProcess.restype = ctypes.c_int
-        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
-        kernel32.CloseHandle.restype = ctypes.c_int
-        handle = kernel32.OpenProcess(0x0001 | 0x1000, False, int(pid))
-        if not handle:
-            return not _pid_alive(pid)
-        try:
-            if identity and _windows_process_identity(pid) != identity:
-                return False
-            return bool(kernel32.TerminateProcess(handle, 1))
-        finally:
-            kernel32.CloseHandle(handle)
-    except (AttributeError, ImportError, OSError, ValueError):
-        return False
+    return _process_inspection.windows_terminate_pid(
+        pid,
+        identity,
+        process_matches_fn=_process_matches,
+        pid_alive_fn=_pid_alive,
+        windows_identity_fn=_windows_process_identity,
+    )
 
 
 def _write_private_file(path, value):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(path.parent, 0o700)
-    except OSError:
-        pass
-    temporary = path.with_name(".%s.%s.tmp" % (path.name, uuid.uuid4().hex))
-    descriptor = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="ascii") as stream:
-            stream.write(value + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+    _state_store.write_private_file(path, value)
 
 
 def _provision_health_token(path, configured=""):
-    configured = str(configured or "").strip()
-    if configured and len(configured) < sonder_health.MIN_TOKEN_LENGTH:
-        raise ValueError(
-            "%s must contain at least %s characters"
-            % (sonder_health.TOKEN_ENV, sonder_health.MIN_TOKEN_LENGTH)
-        )
-    token_path = Path(path)
-    if token_path.is_symlink():
-        raise ValueError("launcher health token path must not be a symbolic link")
-    exists = token_path.exists()
-    try:
-        existing = token_path.read_text(encoding="ascii").strip() if exists else ""
-    except (OSError, UnicodeError) as exc:
-        raise ValueError("persisted launcher health token could not be read") from exc
-    if exists and len(existing) < sonder_health.MIN_TOKEN_LENGTH:
-        raise ValueError("persisted launcher health token is invalid")
-    if configured:
-        if existing and existing != configured:
-            raise ValueError(
-                "configured launcher health token does not match the persisted token"
-            )
-        if not existing:
-            _write_private_file(token_path, configured)
-        return configured
-    if len(existing) >= sonder_health.MIN_TOKEN_LENGTH:
-        try:
-            os.chmod(token_path, 0o600)
-        except OSError:
-            pass
-        return existing
-    token = secrets.token_urlsafe(32)
-    _write_private_file(token_path, token)
-    return token
+    return _state_store.provision_health_token(path, configured)
 
 
 class LauncherController:
@@ -659,82 +283,22 @@ class LauncherController:
         self.recover_interrupted()
 
     def _connect(self):
-        connection = sqlite3.connect(
-            str(self.db_path), timeout=5, check_same_thread=False
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout=5000")
-        return connection
+        return _state_store.connect_database(self.db_path)
 
     def _initialize_database(self):
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = self._connect()
-        try:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA synchronous=FULL")
-            connection.executescript(_SCHEMA)
-            connection.execute("BEGIN IMMEDIATE")
-            columns = {
-                row["name"]
-                for row in connection.execute(
-                    "PRAGMA table_info(sonder_launcher_operations)"
-                ).fetchall()
-            }
-            for name, sql_type in _OPERATION_MIGRATIONS.items():
-                if name not in columns:
-                    connection.execute(
-                        "ALTER TABLE sonder_launcher_operations ADD COLUMN %s %s"
-                        % (name, sql_type)
-                    )
-            connection.commit()
-        finally:
-            connection.close()
-        try:
-            os.chmod(self.db_path, 0o600)
-        except OSError:
-            pass
+        _state_store.initialize_database(self.db_path, self._connect)
 
     def _provision_controller_health_token(self, configured):
-        # The SQLite write lock serializes first-run token creation across two
-        # launcher processes sharing the per-user state directory.
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            token = _provision_health_token(
-                self.health_token_path, configured
-            )
-            connection.commit()
-            return token
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        return _state_store.provision_controller_health_token(
+            self._connect,
+            self.health_token_path,
+            configured,
+            provision_fn=_provision_health_token,
+        )
 
     @staticmethod
     def _operation_from_row(row):
-        if row is None:
-            return None
-        try:
-            commands = json.loads(row["commands_json"] or "[]")
-        except (TypeError, ValueError):
-            commands = []
-        if not isinstance(commands, list):
-            commands = []
-        return {
-            "id": row["id"],
-            "action": row["action"],
-            "context_size": row["context_size"],
-            "phase": row["phase"],
-            "created_ts": row["created_ts"],
-            "started_ts": row["started_ts"],
-            "updated_ts": row["updated_ts"],
-            "finished_ts": row["finished_ts"],
-            "message": row["message"] or "",
-            "last_error": row["last_error"] or "",
-            "command": commands[-1] if commands else [],
-            "commands": commands,
-        }
+        return _state_store.operation_from_row(row)
 
     def _worker_key(self, operation_id, owner_id):
         return (str(self.db_path), str(operation_id), str(owner_id))
@@ -783,206 +347,34 @@ class LauncherController:
 
     @staticmethod
     def _control_metadata(operation):
-        return {
-            "pid": int(operation.get("control_pid") or 0),
-            "identity": operation.get("control_identity") or "",
-            "group": int(operation.get("control_group_id") or 0),
-            "platform": operation.get("control_platform") or "",
-            "exit_code": operation.get("control_exit_code"),
-            "owner_host": operation.get("owner_host") or "",
-        }
+        return _process_inspection.extract_control_metadata(operation)
 
     def _terminate_control_tree(self, operation, process=None):
-        metadata = self._control_metadata(operation)
-        pid = metadata["pid"]
-        identity = metadata["identity"]
-        group_id = metadata["group"]
-        if not pid:
-            return True
-
-        root_matches = bool(
-            process is not None
-            and process.pid == pid
-            and process.returncode is None
-        ) or _process_matches(pid, identity)
-        if (
-            process is None
-            and metadata["exit_code"] is not None
-            and not root_matches
-        ):
-            # Completion is persisted only after successful detach or after a
-            # failed/timeout tree was fully reconciled.
-            return True
-        if (
-            metadata["owner_host"]
-            and metadata["owner_host"] != socket.gethostname()
-        ):
-            # Process identifiers and group IDs are host-local. Never signal a
-            # coincidentally matching local process for a remote lease owner.
-            return False
-        if _pid_alive(pid) and not root_matches:
-            # PID reuse: never signal a process whose start identity differs.
-            return False
-
-        if os.name != "nt":
-            if group_id != pid or group_id <= 1 or group_id == os.getpgrp():
-                return not root_matches and not _posix_group_alive(group_id)
-            if not root_matches and not _posix_group_alive(group_id):
-                return True
-            try:
-                os.killpg(group_id, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            except OSError:
-                return False
-            if process is not None:
-                try:
-                    process.wait(timeout=CONTROL_TERMINATE_GRACE_SECONDS)
-                except subprocess.TimeoutExpired:
-                    pass
-            if not _wait_until(
-                lambda: not _posix_group_alive(group_id),
-                CONTROL_TERMINATE_GRACE_SECONDS,
-            ):
-                try:
-                    os.killpg(group_id, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                except OSError:
-                    return False
-            if process is not None:
-                try:
-                    process.wait(timeout=CONTROL_KILL_GRACE_SECONDS)
-                except subprocess.TimeoutExpired:
-                    return False
-            return _wait_until(
-                lambda: not _posix_group_alive(group_id),
-                CONTROL_KILL_GRACE_SECONDS,
-            )
-
-        descendants = _windows_descendants(pid)
-        if process is not None and root_matches:
-            try:
-                process.send_signal(signal.CTRL_BREAK_EVENT)
-                process.wait(timeout=CONTROL_TERMINATE_GRACE_SECONDS)
-            except (AttributeError, OSError, subprocess.TimeoutExpired):
-                pass
-        descendants.update(_windows_descendants(pid))
-        for child_pid in sorted(descendants, reverse=True):
-            child_identity = _process_start_identity(child_pid)
-            if child_identity:
-                _windows_terminate_pid(child_pid, child_identity)
-        if root_matches:
-            _windows_terminate_pid(pid, identity)
-        if process is not None:
-            try:
-                process.wait(timeout=CONTROL_KILL_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                return False
-        return _wait_until(
-            lambda: not _process_matches(pid, identity)
-            and not any(
-                _pid_alive(child)
-                for child in descendants.union(_windows_descendants(pid))
-            ),
-            CONTROL_KILL_GRACE_SECONDS,
+        hooks = _process_inspection.ControlTreeHooks(
+            pid_alive=_pid_alive,
+            process_matches=_process_matches,
+            process_start_identity=_process_start_identity,
+            posix_group_alive=_posix_group_alive,
+            windows_descendants=_windows_descendants,
+            windows_terminate_pid=_windows_terminate_pid,
+            terminate_grace_seconds=CONTROL_TERMINATE_GRACE_SECONDS,
+            kill_grace_seconds=CONTROL_KILL_GRACE_SECONDS,
+        )
+        return _process_inspection.terminate_control_tree(
+            operation, process=process, hooks=hooks
         )
 
     def _recovery_blocked(self, operation_id, owner_id):
-        connection = self._connect()
-        try:
-            with connection:
-                connection.execute(
-                    """
-                    UPDATE sonder_launcher_operations
-                    SET updated_ts=?, last_error=?, message=?
-                    WHERE id=? AND owner_id=? AND phase IN ('queued','running')
-                    """,
-                    (
-                        time.time(),
-                        "stale control process tree could not be proven stopped",
-                        "Recovery is blocked; the operation lock remains held.",
-                        operation_id,
-                        owner_id,
-                    ),
-                )
-        finally:
-            connection.close()
+        _state_store.mark_recovery_blocked(self._connect, operation_id, owner_id)
 
     def _interrupt_recovered_operation(self, lock, operation, reason):
-        now = time.time()
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            current_lock = connection.execute(
-                "SELECT * FROM sonder_launcher_operation_lock WHERE id=1"
-            ).fetchone()
-            current = connection.execute(
-                "SELECT * FROM sonder_launcher_operations WHERE id=?",
-                (operation["id"],),
-            ).fetchone()
-            if (
-                not current_lock
-                or current_lock["operation_id"] != operation["id"]
-                or current_lock["owner_id"] != lock.get("owner_id")
-                or not current
-                or current["owner_id"] != operation.get("owner_id")
-                or current["phase"] not in ACTIVE_PHASES
-                or current["control_pid"] != operation.get("control_pid")
-                or (current["control_identity"] or "")
-                != (operation.get("control_identity") or "")
-            ):
-                connection.rollback()
-                return False
-            connection.execute(
-                """
-                UPDATE sonder_launcher_operations
-                SET phase='interrupted', updated_ts=?, finished_ts=?,
-                    last_error=?, message=? WHERE id=?
-                """,
-                (
-                    now,
-                    now,
-                    reason,
-                    "Operation interrupted; inspect server status before retrying.",
-                    operation["id"],
-                ),
-            )
-            connection.execute(
-                """
-                UPDATE sonder_launcher_operation_lock
-                SET operation_id=NULL, owner_id=NULL, owner_pid=NULL,
-                    owner_host=NULL, lease_until=NULL
-                WHERE id=1 AND operation_id=? AND owner_id=?
-                """,
-                (operation["id"], lock.get("owner_id")),
-            )
-            connection.commit()
-            return True
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        return _state_store.interrupt_recovered_operation(
+            self._connect, lock, operation, reason
+        )
 
     def recover_interrupted(self):
         """Reconcile stale control work before releasing its singleton lock."""
-        connection = self._connect()
-        try:
-            lock_row = connection.execute(
-                "SELECT * FROM sonder_launcher_operation_lock WHERE id=1"
-            ).fetchone()
-            lock = dict(lock_row) if lock_row else {}
-            operation_row = None
-            if lock.get("operation_id"):
-                operation_row = connection.execute(
-                    "SELECT * FROM sonder_launcher_operations WHERE id=?",
-                    (lock["operation_id"],),
-                ).fetchone()
-            operation = dict(operation_row) if operation_row else None
-        finally:
-            connection.close()
-
+        lock, operation = _state_store.load_lock_and_operation(self._connect)
         if not lock.get("operation_id"):
             return
         if operation is None:
@@ -992,20 +384,9 @@ class LauncherController:
         if operation["phase"] not in ACTIVE_PHASES:
             if not self._terminate_control_tree(operation):
                 return
-            connection = self._connect()
-            try:
-                with connection:
-                    connection.execute(
-                        """
-                        UPDATE sonder_launcher_operation_lock
-                        SET operation_id=NULL, owner_id=NULL, owner_pid=NULL,
-                            owner_host=NULL, lease_until=NULL
-                        WHERE id=1 AND operation_id=? AND owner_id=?
-                        """,
-                        (operation["id"], lock.get("owner_id")),
-                    )
-            finally:
-                connection.close()
+            _state_store.clear_operation_lock(
+                self._connect, operation["id"], lock.get("owner_id")
+            )
             return
         if not self._operation_stale(lock, operation, time.time()):
             return
@@ -1032,58 +413,15 @@ class LauncherController:
         if context is None:
             return
         operation_id, owner_id = context
-        last_error = None
-        for delay in FINALIZE_RETRY_DELAYS:
-            if delay:
-                time.sleep(delay)
-            connection = None
-            try:
-                connection = self._connect()
-                connection.execute("BEGIN IMMEDIATE")
-                updated = connection.execute(
-                    """
-                    UPDATE sonder_launcher_operations
-                    SET control_pid=?, control_identity=?, control_group_id=?,
-                        control_platform=?, control_started_ts=?,
-                        control_finished_ts=NULL, control_exit_code=NULL,
-                        updated_ts=?
-                    WHERE id=? AND owner_id=? AND phase='running'
-                      AND EXISTS (
-                          SELECT 1 FROM sonder_launcher_operation_lock
-                          WHERE id=1 AND operation_id=? AND owner_id=?
-                      )
-                    """,
-                    (
-                        int(pid),
-                        identity,
-                        int(group_id),
-                        platform_name,
-                        time.time(),
-                        time.time(),
-                        operation_id,
-                        owner_id,
-                        operation_id,
-                        owner_id,
-                    ),
-                ).rowcount
-                if updated != 1:
-                    connection.rollback()
-                    raise LauncherConflictError(
-                        "launcher operation lost ownership before command start"
-                    )
-                connection.commit()
-                return
-            except LauncherConflictError:
-                raise
-            except sqlite3.Error as exc:
-                if connection is not None:
-                    connection.rollback()
-                last_error = exc
-            finally:
-                if connection is not None:
-                    connection.close()
-        raise last_error or sqlite3.OperationalError(
-            "control process metadata could not be persisted"
+        _state_store.persist_control_started(
+            self._connect,
+            operation_id,
+            owner_id,
+            pid,
+            identity,
+            group_id,
+            platform_name,
+            retry_delays=FINALIZE_RETRY_DELAYS,
         )
 
     def _persist_control_finished(self, pid, identity, return_code):
@@ -1091,55 +429,14 @@ class LauncherController:
         if context is None:
             return
         operation_id, owner_id = context
-        last_error = None
-        for delay in FINALIZE_RETRY_DELAYS:
-            if delay:
-                time.sleep(delay)
-            connection = None
-            try:
-                connection = self._connect()
-                connection.execute("BEGIN IMMEDIATE")
-                updated = connection.execute(
-                    """
-                    UPDATE sonder_launcher_operations
-                    SET control_finished_ts=?, control_exit_code=?, updated_ts=?
-                    WHERE id=? AND owner_id=? AND phase='running'
-                      AND control_pid=? AND control_identity=?
-                      AND EXISTS (
-                          SELECT 1 FROM sonder_launcher_operation_lock
-                          WHERE id=1 AND operation_id=? AND owner_id=?
-                      )
-                    """,
-                    (
-                        time.time(),
-                        int(return_code),
-                        time.time(),
-                        operation_id,
-                        owner_id,
-                        int(pid),
-                        identity,
-                        operation_id,
-                        owner_id,
-                    ),
-                ).rowcount
-                if updated != 1:
-                    connection.rollback()
-                    raise LauncherConflictError(
-                        "launcher operation lost ownership before command completion"
-                    )
-                connection.commit()
-                return
-            except LauncherConflictError:
-                raise
-            except sqlite3.Error as exc:
-                if connection is not None:
-                    connection.rollback()
-                last_error = exc
-            finally:
-                if connection is not None:
-                    connection.close()
-        raise last_error or sqlite3.OperationalError(
-            "control process completion could not be persisted"
+        _state_store.persist_control_finished(
+            self._connect,
+            operation_id,
+            owner_id,
+            pid,
+            identity,
+            return_code,
+            retry_delays=FINALIZE_RETRY_DELAYS,
         )
 
     @staticmethod
@@ -1295,10 +592,6 @@ class LauncherController:
 
     def _server_state(self):
         """Return healthy, stopped, foreign_listener or indeterminate (see launcher_probe)."""
-        # The managed runtime may deliberately bind IPv6 loopback.  Probe the
-        # controller's configured loopback host rather than silently checking
-        # the IPv4 default, otherwise a healthy ``::1`` runtime is treated as
-        # stopped and start/restart can make incorrect lifecycle decisions.
         if not _reachable(self.server_host, self.server_port):
             return "stopped"
         nonce = sonder_health.new_nonce()
@@ -1350,21 +643,7 @@ class LauncherController:
             time.sleep(min(POLL_INTERVAL_SECONDS, remaining))
 
     def _latest_operations(self):
-        connection = self._connect()
-        try:
-            active = connection.execute(
-                """
-                SELECT * FROM sonder_launcher_operations
-                WHERE phase IN ('queued','running')
-                ORDER BY created_ts DESC LIMIT 1
-                """
-            ).fetchone()
-            latest = connection.execute(
-                "SELECT * FROM sonder_launcher_operations ORDER BY created_ts DESC LIMIT 1"
-            ).fetchone()
-            return self._operation_from_row(active), self._operation_from_row(latest)
-        finally:
-            connection.close()
+        return _state_store.latest_operations(self._connect)
 
     def status(self):
         self.recover_interrupted()
@@ -1395,31 +674,12 @@ class LauncherController:
         if not _OPERATION_ID.fullmatch(operation_id):
             return None
         self.recover_interrupted()
-        connection = self._connect()
-        try:
-            row = connection.execute(
-                "SELECT * FROM sonder_launcher_operations WHERE id=?", (operation_id,)
-            ).fetchone()
-            return self._operation_from_row(row)
-        finally:
-            connection.close()
+        return _state_store.load_operation(self._connect, operation_id)
 
     def operation_payload(self, operation):
         if not operation:
             return None
-        payload = self.status()
-        phase = operation["phase"]
-        payload.update({
-            "ok": phase not in {"failed", "cancelled", "interrupted"},
-            "operation_id": operation["id"],
-            "operation_phase": phase,
-            "operation": operation,
-            "message": operation["message"],
-            "last_error": operation["last_error"],
-            "command": operation["command"],
-            "commands": operation["commands"],
-        })
-        return payload
+        return _state_store.build_operation_payload(self.status(), operation)
 
     def _timeout_for_action(self, action):
         return self.stop_timeout if action == "stop" else self.start_timeout
@@ -1436,94 +696,19 @@ class LauncherController:
         timeout = self._timeout_for_action(action)
         lease_until = now + timeout + LOCK_GRACE_SECONDS
         hard_deadline = lease_until
-        connection = self._connect()
-        created = False
-        worker_registered = False
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            if idempotency_key:
-                existing = connection.execute(
-                    "SELECT * FROM sonder_launcher_operations WHERE idempotency_key=?",
-                    (idempotency_key,),
-                ).fetchone()
-                if existing:
-                    operation = self._operation_from_row(existing)
-                    if (
-                        operation["action"] != action
-                        or operation["context_size"] != context_size
-                    ):
-                        raise LauncherConflictError(
-                            "Idempotency-Key was already used for a different request",
-                            operation,
-                        )
-                    connection.commit()
-                    return operation, False
-
-            lock = connection.execute(
-                "SELECT * FROM sonder_launcher_operation_lock WHERE id=1"
-            ).fetchone()
-            if lock and lock["operation_id"]:
-                active = connection.execute(
-                    "SELECT * FROM sonder_launcher_operations WHERE id=?",
-                    (lock["operation_id"],),
-                ).fetchone()
-                raise LauncherConflictError(
-                    "another launcher operation is already active",
-                    self._operation_from_row(active),
-                )
-
-            connection.execute(
-                """
-                INSERT INTO sonder_launcher_operations(
-                    id,action,context_size,phase,idempotency_key,created_ts,
-                    updated_ts,owner_id,owner_pid,owner_host,lease_until,
-                    hard_deadline
-                ) VALUES(?,?,?,'queued',?,?,?,?,?,?,?,?)
-                """,
-                (
-                    operation_id,
-                    action,
-                    context_size,
-                    idempotency_key or None,
-                    now,
-                    now,
-                    owner_id,
-                    os.getpid(),
-                    socket.gethostname(),
-                    lease_until,
-                    hard_deadline,
-                ),
-            )
-            connection.execute(
-                """
-                UPDATE sonder_launcher_operation_lock
-                SET operation_id=?, owner_id=?, owner_pid=?, owner_host=?,
-                    lease_until=? WHERE id=1
-                """,
-                (
-                    operation_id,
-                    owner_id,
-                    os.getpid(),
-                    socket.gethostname(),
-                    lease_until,
-                ),
-            )
-            row = connection.execute(
-                "SELECT * FROM sonder_launcher_operations WHERE id=?", (operation_id,)
-            ).fetchone()
-            self._register_worker(operation_id, owner_id)
-            worker_registered = True
-            connection.commit()
-            created = True
-        except Exception:
-            connection.rollback()
-            if worker_registered:
-                self._unregister_worker(operation_id, owner_id)
-            raise
-        finally:
-            connection.close()
-
-        operation = self._operation_from_row(row)
+        operation, created = _state_store.submit_operation_record(
+            self._connect,
+            operation_id=operation_id,
+            owner_id=owner_id,
+            action=action,
+            context_size=context_size,
+            idempotency_key=idempotency_key,
+            now=now,
+            lease_until=lease_until,
+            hard_deadline=hard_deadline,
+            register_worker_fn=self._register_worker,
+            unregister_worker_fn=self._unregister_worker,
+        )
         if created:
             try:
                 thread = threading.Thread(
@@ -1549,38 +734,15 @@ class LauncherController:
                 )
                 self._unregister_worker(operation_id, owner_id)
                 raise
-        return operation, True
+        return operation, created
 
     def _operation_worker(
         self, operation_id, owner_id, action, context_size, timeout
     ):
         try:
-            now = time.time()
-            connection = self._connect()
-            try:
-                with connection:
-                    updated = connection.execute(
-                        """
-                        UPDATE sonder_launcher_operations
-                        SET phase='running', started_ts=?, updated_ts=?
-                        WHERE id=? AND owner_id=? AND phase='queued'
-                          AND EXISTS (
-                              SELECT 1 FROM sonder_launcher_operation_lock
-                              WHERE id=1 AND operation_id=? AND owner_id=?
-                          )
-                        """,
-                        (
-                            now,
-                            now,
-                            operation_id,
-                            owner_id,
-                            operation_id,
-                            owner_id,
-                        ),
-                    ).rowcount
-            finally:
-                connection.close()
-            if updated != 1:
+            if not _state_store.mark_operation_running(
+                self._connect, operation_id, owner_id
+            ):
                 return
             self._operation_context.operation_id = operation_id
             self._operation_context.owner_id = owner_id
@@ -1617,160 +779,48 @@ class LauncherController:
     def _finish_operation_with_retry(
         self, operation_id, owner_id, phase, message, last_error, commands
     ):
-        error = None
-        for delay in FINALIZE_RETRY_DELAYS:
-            if delay:
-                time.sleep(delay)
-            try:
-                return self._finish_operation(
-                    operation_id,
-                    owner_id,
-                    phase,
-                    message,
-                    last_error,
-                    commands,
-                )
-            except (OSError, sqlite3.Error) as exc:
-                error = exc
-        try:
-            return self._emergency_finish_operation(
-                operation_id,
-                owner_id,
-                phase,
-                message,
-                last_error or ("finalization retry failed: %s" % error),
-                commands,
-            )
-        except (OSError, sqlite3.Error):
-            return False
+        return _state_store.finish_operation_with_retry(
+            operation_id=operation_id,
+            owner_id=owner_id,
+            phase=phase,
+            message=message,
+            last_error=last_error,
+            commands=commands,
+            retry_delays=FINALIZE_RETRY_DELAYS,
+            finish_fn=self._finish_operation,
+            emergency_finish_fn=self._emergency_finish_operation,
+        )
 
     def _emergency_finish_operation(
         self, operation_id, owner_id, phase, message, last_error, commands
     ):
-        """Minimal independent terminal transaction after normal retries fail."""
-        now = time.time()
-        commands_json = json.dumps(
-            commands if isinstance(commands, list) else [], separators=(",", ":")
+        return _state_store.emergency_finish_operation(
+            self.db_path,
+            operation_id,
+            owner_id,
+            phase,
+            message,
+            last_error,
+            commands,
+            max_operation_output=MAX_OPERATION_OUTPUT,
+            output_text_fn=_output_text,
         )
-        if len(commands_json) > MAX_OPERATION_OUTPUT:
-            commands_json = "[]"
-        connection = sqlite3.connect(str(self.db_path), timeout=30)
-        try:
-            connection.execute("PRAGMA busy_timeout=30000")
-            connection.execute("BEGIN IMMEDIATE")
-            updated = connection.execute(
-                """
-                UPDATE sonder_launcher_operations
-                SET phase=?, updated_ts=?, finished_ts=?, message=?,
-                    last_error=?, commands_json=?
-                WHERE id=? AND owner_id=? AND phase IN ('queued','running')
-                  AND EXISTS (
-                      SELECT 1 FROM sonder_launcher_operation_lock
-                      WHERE id=1 AND operation_id=? AND owner_id=?
-                  )
-                """,
-                (
-                    phase,
-                    now,
-                    now,
-                    _output_text(message),
-                    _output_text(last_error),
-                    commands_json,
-                    operation_id,
-                    owner_id,
-                    operation_id,
-                    owner_id,
-                ),
-            ).rowcount
-            if updated == 1:
-                connection.execute(
-                    """
-                    UPDATE sonder_launcher_operation_lock
-                    SET operation_id=NULL, owner_id=NULL, owner_pid=NULL,
-                        owner_host=NULL, lease_until=NULL
-                    WHERE id=1 AND operation_id=? AND owner_id=?
-                    """,
-                    (operation_id, owner_id),
-                )
-            connection.commit()
-            return updated == 1
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
 
     def _finish_operation(
         self, operation_id, owner_id, phase, message, last_error, commands
     ):
-        if phase not in TERMINAL_PHASES:
-            raise ValueError("invalid terminal launcher phase")
-        now = time.time()
-        safe_commands = commands if isinstance(commands, list) else []
-        commands_json = json.dumps(safe_commands, separators=(",", ":"))
-        if len(commands_json) > MAX_OPERATION_OUTPUT:
-            safe_commands = safe_commands[-2:]
-            commands_json = json.dumps(safe_commands, separators=(",", ":"))[
-                :MAX_OPERATION_OUTPUT
-            ]
-            try:
-                json.loads(commands_json)
-            except ValueError:
-                commands_json = "[]"
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            updated = connection.execute(
-                """
-                UPDATE sonder_launcher_operations
-                SET phase=?, updated_ts=?, finished_ts=?, message=?,
-                    last_error=?, commands_json=?
-                WHERE id=? AND owner_id=? AND phase IN ('queued','running')
-                  AND EXISTS (
-                      SELECT 1 FROM sonder_launcher_operation_lock
-                      WHERE id=1 AND operation_id=? AND owner_id=?
-                  )
-                """,
-                (
-                    phase,
-                    now,
-                    now,
-                    _output_text(message),
-                    _output_text(last_error),
-                    commands_json,
-                    operation_id,
-                    owner_id,
-                    operation_id,
-                    owner_id,
-                ),
-            ).rowcount
-            if updated == 1:
-                connection.execute(
-                    """
-                    UPDATE sonder_launcher_operation_lock
-                    SET operation_id=NULL, owner_id=NULL, owner_pid=NULL,
-                        owner_host=NULL, lease_until=NULL
-                    WHERE id=1 AND operation_id=? AND owner_id=?
-                    """,
-                    (operation_id, owner_id),
-                )
-            connection.execute(
-                """
-                DELETE FROM sonder_launcher_operations WHERE id IN (
-                    SELECT id FROM sonder_launcher_operations
-                    WHERE phase IN ('succeeded','failed','cancelled','interrupted')
-                    ORDER BY created_ts DESC LIMIT -1 OFFSET ?
-                )
-                """,
-                (self.retention,),
-            )
-            connection.commit()
-            return updated == 1
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        return _state_store.finish_operation(
+            self._connect,
+            operation_id,
+            owner_id,
+            phase,
+            message,
+            last_error,
+            commands,
+            retention=self.retention,
+            max_operation_output=MAX_OPERATION_OUTPUT,
+            output_text_fn=_output_text,
+        )
 
     def wait_operation(self, operation_id, timeout=5):
         deadline = time.monotonic() + max(0, float(timeout))
@@ -1952,397 +1002,32 @@ class LauncherServer(BoundedConnectionsMixin, deferred_tls.DeferredTLSHandshakeM
         self.command_journal = command_journal
 
 
-class LauncherHandler(BaseHTTPRequestHandler):
-    server_version = "SonderLauncher/1"
-    timeout = 10.0
+class LauncherHandler(LauncherHTTPHandler):
+    host_not_allowed_remedy = HOST_NOT_ALLOWED_REMEDY
+    command_conflict_type = command_recovery.CommandConflict
+    command_journal_error_type = command_recovery.CommandJournalError
+    conflict_error_type = LauncherConflictError
 
-    def log_message(self, fmt, *args):
-        if os.environ.get("SONDER_LAUNCHER_QUIET") != "1":
-            super().log_message(fmt, *args)
+    def _max_body(self):
+        return MAX_BODY
 
-    def _authorized(self):
-        expected = self.server.token
-        if not expected:
-            return _loopback(self.client_address[0])
-        supplied = self.headers.get("Authorization", "")
-        if supplied.lower().startswith("bearer "):
-            supplied = supplied[7:].strip()
-        else:
-            supplied = self.headers.get("X-Sonder-Launcher-Token", "").strip()
-        return bool(supplied) and hmac.compare_digest(supplied, expected)
+    def _body_read_timeout(self):
+        return BODY_READ_TIMEOUT_SECONDS
 
-    def _send(self, payload, status=200, headers=None):
-        body = json.dumps(payload, sort_keys=True).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        for name, value in (headers or {}).items():
-            self.send_header(name, value)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _host_refused(self):
-        """Answer 421 HOST_NOT_ALLOWED for a name a rebinding page could use."""
-        values = self.headers.get_all("Host") or []
-        if len(values) > 1:
-            decision = None
-        else:
-            decision = host_decision(
-                values[0] if values else None,
-                allowed_hosts=getattr(self.server, "allowed_hosts", ()),
-                local_names=getattr(self.server, "local_names", ()),
-                credentials_required=bool(self.server.token),
-            )
-        if decision is not None:
-            return False
-        self.close_connection = True
-        self._send({
-            "ok": False, "error": "host is not allowed for this launcher",
-            "code": "HOST_NOT_ALLOWED",
-            "remedy": HOST_NOT_ALLOWED_REMEDY.replace(
-                "[server].allowed_hosts / SONDER_ALLOWED_HOSTS",
-                "SONDER_LAUNCHER_ALLOWED_HOSTS",
-            ),
-        }, 421, headers={"Connection": "close"})
-        return True
-
-    def _auth(self):
-        if self._authorized():
-            return True
-        self._send({"ok": False, "error": "launcher authentication required"}, 401)
-        return False
-
-    def _command_identity(self, *, required=False):
-        client_id = self.headers.get("X-Sonder-Client-Id", "").strip()
-        command_id = self.headers.get("X-Sonder-Command-Id", "").strip()
-        if bool(client_id) != bool(command_id):
-            raise ValueError(
-                "X-Sonder-Client-Id and X-Sonder-Command-Id must be sent together"
-            )
-        if required and not client_id:
-            raise ValueError(
-                "X-Sonder-Client-Id and X-Sonder-Command-Id are required"
-            )
-        return client_id, command_id
-
-    @staticmethod
-    def _command_idempotency_key(client_id, command_id):
-        digest = hashlib.sha256(
-            (client_id + "\0" + command_id).encode("utf-8")
-        ).hexdigest()
-        return "command:" + digest
-
-    def do_GET(self):
-        if self._host_refused():
-            return
-        path = self.path.split("?", 1)[0].rstrip("/")
-        is_status = path in {"", "/v1/launcher/status"}
-        operation_id = ""
-        operation_prefix = "/v1/launcher/operations/"
-        if path.startswith(operation_prefix):
-            suffix = path[len(operation_prefix):]
-            if "/" not in suffix:
-                operation_id = suffix.lower()
-        if not is_status and not _OPERATION_ID.fullmatch(operation_id):
-            self._send({"ok": False, "error": "not found"}, 404)
-            return
-        if not self._auth():
-            return
-        if is_status:
-            self._send(self.server.controller.status())
-            return
-        operation = self.server.controller.operation(operation_id)
-        if not operation:
-            self._send({"ok": False, "error": "operation not found"}, 404)
-            return
-        self._send(self.server.controller.operation_payload(operation))
-
-    def do_POST(self):
-        if self._host_refused():
-            return
-        path = self.path.split("?", 1)[0].rstrip("/")
-        action = path.rsplit("/", 1)[-1]
-        is_ack = path == "/v1/launcher/commands/ack"
-        if not is_ack and path not in {
-            "/v1/launcher/start", "/v1/launcher/stop", "/v1/launcher/restart",
-        }:
-            self._send({"ok": False, "error": "not found"}, 404)
-            return
-        if not self._auth():
-            return
-        if self.headers.get("Transfer-Encoding"):
-            self._send({"ok": False, "error": "transfer encoding is not supported"}, 400)
-            return
-        content_type = self.headers.get("Content-Type", "")
-        if content_type.split(";", 1)[0].strip().lower() != "application/json":
-            self._send({"ok": False, "error": "Content-Type must be application/json"}, 415)
-            return
-        raw_length = self.headers.get("Content-Length")
-        if raw_length is None or not raw_length.isdigit():
-            self._send({"ok": False, "error": "valid Content-Length is required"}, 411)
-            return
-        try:
-            length = int(raw_length)
-        except ValueError:
-            self._send({"ok": False, "error": "invalid content length"}, 400)
-            return
-        if length < 0 or length > MAX_BODY:
-            self._send({"ok": False, "error": "request too large"}, 413)
-            return
-        previous_timeout = self.connection.gettimeout()
-        try:
-            self.connection.settimeout(BODY_READ_TIMEOUT_SECONDS)
-            raw_body = self.rfile.read(length)
-        except (OSError, TimeoutError):
-            self._send({"ok": False, "error": "request body is incomplete"}, 400)
-            return
-        finally:
-            try:
-                self.connection.settimeout(previous_timeout)
-            except OSError:
-                pass
-        if len(raw_body) != length:
-            self._send({"ok": False, "error": "request body is incomplete"}, 400)
-            return
-        try:
-            body = json.loads(raw_body or b"{}")
-        except (ValueError, UnicodeDecodeError):
-            self._send({"ok": False, "error": "invalid JSON"}, 400)
-            return
-        if not isinstance(body, dict):
-            self._send({"ok": False, "error": "JSON body must be an object"}, 400)
-            return
-        unexpected = sorted(set(body) - (set() if is_ack else {"context_size"}))
-        if unexpected:
-            self._send(
-                {
-                    "ok": False,
-                    "error": "unsupported request field(s): %s"
-                    % ", ".join(unexpected),
-                },
-                400,
-            )
-            return
-        try:
-            client_id, command_id = self._command_identity(required=is_ack)
-            context_size = normalize_context_size(body.get("context_size") or "8192")
-            idempotency_key = _normalize_idempotency_key(
-                self.headers.get("Idempotency-Key", "")
-            )
-            if client_id and idempotency_key:
-                raise ValueError(
-                    "tracked commands must not also send Idempotency-Key"
-                )
-        except ValueError as exc:
-            self._send({"ok": False, "error": str(exc)}, 400)
-            return
-        journal = self.server.command_journal
-        if is_ack:
-            if journal is None:
-                self._send(
-                    {"ok": False, "error": "command recovery is unavailable"},
-                    503,
-                )
-                return
-            try:
-                acknowledged = journal.acknowledge(client_id, command_id)
-            except (ValueError, OSError, command_recovery.CommandJournalError) as exc:
-                self._send({"ok": False, "error": str(exc)}, 409)
-                return
-            self._send({"ok": True, **acknowledged})
-            return
-
-        command_tracked = bool(client_id)
-        if command_tracked:
-            if journal is None:
-                self._send(
-                    {"ok": False, "error": "command recovery is unavailable"},
-                    503,
-                )
-                return
-            try:
-                receipt = journal.receive(
-                    client_id,
-                    command_id,
-                    {"action": action, "context_size": context_size},
-                )
-            except command_recovery.CommandConflict as exc:
-                self._send({"ok": False, "error": str(exc)}, 409)
-                return
-            except (ValueError, OSError, command_recovery.CommandJournalError) as exc:
-                self._send(
-                    {"ok": False, "error": "command was not dispatched: %s" % exc},
-                    503,
-                )
-                return
-            if receipt["state"] == "completed":
-                replay = receipt["result"]
-                if not _valid_command_replay(replay):
-                    self._send(
-                        {
-                            "ok": False,
-                            "command_state": "completed",
-                            "dispatch_allowed": False,
-                            "error": "stored command result is invalid",
-                        },
-                        503,
-                    )
-                    return
-                self._send(
-                    replay["payload"], replay["status"], replay.get("headers")
-                )
-                return
-            if not receipt["dispatch"]:
-                uncertain = receipt["state"] == "uncertain"
-                acknowledged = receipt["state"] == "acknowledged"
-                self._send(
-                    {
-                        "ok": False,
-                        "command_state": receipt["state"],
-                        "dispatch_allowed": False,
-                        "error": (
-                            "command outcome is uncertain after recovery; inspect the "
-                            "launcher operation ledger before issuing a new command"
-                            if uncertain
-                            else (
-                                "command result was already acknowledged"
-                                if acknowledged
-                                else "command is already pending"
-                            )
-                        ),
-                    },
-                    409 if uncertain or acknowledged else 202,
-                    {"Retry-After": "1"},
-                )
-                return
-            if not idempotency_key:
-                idempotency_key = self._command_idempotency_key(
-                    client_id, command_id
-                )
-        try:
-            operation, created = self.server.controller.submit(
-                action, context_size, idempotency_key
-            )
-        except LauncherConflictError as exc:
-            payload = self.server.controller.status()
-            payload.update({"ok": False, "error": str(exc)})
-            if exc.operation:
-                payload.update({
-                    "operation_id": exc.operation["id"],
-                    "operation_phase": exc.operation["phase"],
-                    "operation": exc.operation,
-                })
-            if command_tracked:
-                try:
-                    journal.complete(
-                        client_id,
-                        command_id,
-                        {"status": 409, "payload": payload, "headers": {}},
-                    )
-                except (ValueError, OSError, command_recovery.CommandJournalError):
-                    # Dispatch is known not to have happened, but retaining an
-                    # uncertain receipt still prevents an unsafe automatic
-                    # retry if the replay result itself could not be stored.
-                    try:
-                        journal.mark_uncertain(client_id, command_id)
-                    except (ValueError, OSError, command_recovery.CommandJournalError):
-                        pass
-                    self._send(
-                        {
-                            "ok": False,
-                            "command_state": "uncertain",
-                            "dispatch_allowed": False,
-                            "error": (
-                                "launcher conflict was not dispatched, but its "
-                                "replay result could not be made durable"
-                            ),
-                        },
-                        503,
-                    )
-                    return
-            self._send(payload, 409)
-            return
-        except (OSError, RuntimeError, sqlite3.Error) as exc:
-            if command_tracked:
-                try:
-                    journal.mark_uncertain(client_id, command_id)
-                except (ValueError, OSError, command_recovery.CommandJournalError):
-                    pass
-            self._send(
-                {"ok": False, "error": "launcher operation could not be queued: %s" % exc},
-                503,
-            )
-            return
-        try:
-            payload = self.server.controller.operation_payload(operation)
-            payload.update({
-                "accepted": created,
-                "idempotent_replay": not created,
-            })
-        except (OSError, RuntimeError, sqlite3.Error):
-            if command_tracked:
-                try:
-                    journal.mark_uncertain(client_id, command_id)
-                except (ValueError, OSError, command_recovery.CommandJournalError):
-                    pass
-            self._send(
-                {
-                    "ok": False,
-                    "operation_id": operation.get("id", ""),
-                    "command_state": "uncertain" if command_tracked else "untracked",
-                    "dispatch_allowed": False,
-                    "error": (
-                        "launcher operation was queued but its response could not "
-                        "be constructed"
-                    ),
-                },
-                503,
-            )
-            return
-        terminal = operation["phase"] in TERMINAL_PHASES
-        status_code = 200 if terminal else 202
-        response_headers = {
-            "Location": "/v1/launcher/operations/%s" % operation["id"]
-        }
-        if command_tracked:
-            try:
-                journal.complete(
-                    client_id,
-                    command_id,
-                    {
-                        "status": status_code,
-                        "payload": payload,
-                        "headers": response_headers,
-                    },
-                )
-            except (ValueError, OSError, command_recovery.CommandJournalError) as exc:
-                try:
-                    journal.mark_uncertain(client_id, command_id)
-                except (ValueError, OSError, command_recovery.CommandJournalError):
-                    pass
-                self._send(
-                    {
-                        "ok": False,
-                        "operation_id": operation["id"],
-                        "operation_phase": operation["phase"],
-                        "command_state": "uncertain",
-                        "dispatch_allowed": False,
-                        "error": (
-                            "launcher operation was queued but its replay result could "
-                            "not be made durable: %s" % exc
-                        ),
-                    },
-                    503,
-                    response_headers,
-                )
-                return
-        self._send(payload, status_code, response_headers)
-
-
-def generate_token():
-    return secrets.token_urlsafe(32)
+    def _host_decision(
+        self,
+        host_header,
+        *,
+        allowed_hosts,
+        local_names,
+        credentials_required,
+    ):
+        return host_decision(
+            host_header,
+            allowed_hosts=allowed_hosts,
+            local_names=local_names,
+            credentials_required=credentials_required,
+        )
 
 
 def validate_configuration(
@@ -2350,7 +1035,9 @@ def validate_configuration(
 ):
     loopback = _loopback(host)
     if not loopback and len(token) < 24:
-        raise ValueError("LAN launcher binding requires SONDER_LAUNCHER_TOKEN with at least 24 characters")
+        raise ValueError(
+            "LAN launcher binding requires SONDER_LAUNCHER_TOKEN with at least 24 characters"
+        )
     if bool(cert) != bool(key):
         raise ValueError("both TLS certificate and key are required")
     if (
@@ -2362,24 +1049,6 @@ def validate_configuration(
             "non-loopback launcher binding requires TLS; use --cert and --key "
             "or the explicit development-only insecure HTTP override"
         )
-
-
-def unauthenticated_loopback_warning(host, token):
-    """Return the startup warning for a token-less loopback launcher, or ``""``.
-
-    A loopback launcher without a token stays allowed (the operator decision
-    for single-user desktops), but every local process and user on the machine
-    can then start, stop and restart Sonder through it. That must be visible
-    at startup, not only in the docs.
-    """
-    if token or not _loopback(host):
-        return ""
-    return (
-        "WARNING: the Sonder launcher is running WITHOUT authentication "
-        "(no SONDER_LAUNCHER_TOKEN). Any local process or user on this machine "
-        "can control Sonder through %s. Set SONDER_LAUNCHER_TOKEN (see "
-        "--generate-token) unless this is a single-user machine." % host
-    )
 
 
 def serve(
@@ -2455,6 +1124,23 @@ def main(argv=None):
         print("ERROR: %s" % exc, file=sys.stderr)
         return 2
     return 0
+
+
+__all__ = [
+    "LauncherConflictError",
+    "ControlTreeNotStopped",
+    "LauncherController",
+    "LauncherServer",
+    "LauncherHandler",
+    "generate_token",
+    "validate_configuration",
+    "unauthenticated_loopback_warning",
+    "serve",
+    "main",
+    "launcher_machine_names",
+    "parse_launcher_allowed_hosts",
+    "signal",
+]
 
 
 if __name__ == "__main__":
