@@ -15416,23 +15416,18 @@ def learn_tool(
     try:
         import sonder_runtime.adapters.inspection.learn_tool as _learn_tool
 
+        in_plan_mode = permission_modes.current_mode() == "plan"
         data = _learn_tool.learn_tool(
-            tool=tool,
-            goal=goal,
-            subcommand=subcommand,
-            probe_cli=bool(probe_cli),
-            research_web=bool(research_web),
-            timeout=float(timeout),
+            tool=tool, goal=goal, subcommand=subcommand,
+            probe_cli=bool(probe_cli) and not in_plan_mode,
+            research_web=bool(research_web), timeout=float(timeout),
             web_search_fn=_web_cb if research_web else None,
             memory_search_fn=_mem_recall,
         )
-        if save_note and data.get("ok") and data.get("playbook_summary"):
-            try:
-                sonder_remember_fact(text=str(data["playbook_summary"]))
-                data["saved_to_memory"] = True
-            except Exception as exc:
-                data["saved_to_memory"] = False
-                data["save_note_error"] = str(exc)[:160]
+        _learn_tool.maybe_save_playbook_note(
+            data, save_note=bool(save_note), in_plan_mode=in_plan_mode,
+            decide_fn=permission_modes.decide, remember_fn=sonder_remember_fact,
+        )
     except Exception as exc:
         _record_direct_tool("learn_tool", args, ok=False, started=started, summary=str(exc))
         return "learn_tool refused: %s" % exc
@@ -18660,7 +18655,7 @@ REPOSITORY_READ_ONLY_TOOLS = frozenset({
     "verify_artifact",
     "text_search", "script_search", "program_search", "image_inspect",
     "document_extract", "media_inspect", "code_metrics", "schema_validate",
-    "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "learn_tool", "command_registry_list",
+    "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "command_registry_list",
     "activity_status", "permission_policy", "context_compaction_plan",
     "diagnostics", "context_health", "learning_health_status", "context_policy_status", "artifact_ground",
     "evaluation_history_status",
@@ -18737,7 +18732,6 @@ an exact symbol named by the task; do not default to Python or server.py.
 - error_diagnose: {"error_text": "<traceback or compiler error>", "root": ".", "max_frames": 8, "context_lines": 3}
 - code_audit: {"code": "", "path": "<task-relevant source file>", "language": "", "min_severity": "low"}
 - data_transform: {"action": "convert|profile|query|encode|decode|timestamp|cron", "data": "", "path": "", "output_format": "json", "expression": ""}
-- learn_tool: {"tool": "<external tool/program name>", "goal": "<task>", "subcommand": "", "research_web": false}
 - data_inspect: {"path": "<task-relevant data file>", "max_bytes": 256000}
 - data_query: {"path": "<task-relevant SQLite, JSON, JSONL, CSV, or TSV file>", "sql": "<SQLite SELECT/CTE only, otherwise empty>", "projection_json": ["<field or JSON pointer>"], "filters_json": {"<field or JSON pointer>": "<exact value>"}, "max_rows": 100, "max_columns": 50, "max_output_bytes": 256000, "max_scan_bytes": 4000000, "timeout": 5}
 - memory_search: {"query": "...", "limit": 10}
@@ -19176,13 +19170,18 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
         | _PROJECT_SCOPED_COMMAND_TOOLS
         | _PROJECT_EXECUTION_GUARDED_TOOLS
     )
-    if not project_root or tool_name not in guarded or not isinstance(args, dict):
+    if tool_name not in guarded or not isinstance(args, dict):
         return ""
-    try:
-        root = Path(str(project_root)).expanduser().resolve(strict=True)
-    except (OSError, ValueError) as exc:
-        refusal = "ERROR: agent project scope is invalid: %s" % exc
-        return refusal
+    has_project_root = bool(str(project_root or "").strip())
+    if not has_project_root and tool_name not in _PROJECT_SCOPED_COMMAND_TOOLS:
+        return ""
+    root = None
+    if has_project_root:
+        try:
+            root = Path(str(project_root)).expanduser().resolve(strict=True)
+        except (OSError, ValueError) as exc:
+            refusal = "ERROR: agent project scope is invalid: %s" % exc
+            return refusal
     stdin_present = bool(str(args.get("stdin") or ""))
     is_windows = os.name == "nt"
     program_tokens = []
@@ -19236,7 +19235,7 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
     except (OSError, ValueError) as exc:
         refusal = "ERROR: agent project execution rejected: working directory: %s" % exc
         return refusal
-    check_prog_outside = tool_name in _PROJECT_SCOPED_COMMAND_TOOLS
+    check_prog_outside = (tool_name in _PROJECT_SCOPED_COMMAND_TOOLS) and (root is not None)
     for prog_tok in program_tokens:
         prog_err = _program_token_escape_error(
             prog_tok, base, root, check_outside=check_prog_outside,
@@ -19249,7 +19248,7 @@ def _agent_project_execution_argument_error(tool_name, args, project_root):
         )
         if net_bad:
             return _NETWORK_EXEC_PATH_REFUSAL % "an argv path"
-        if any(_argv_value_outside_root(value, base, root) for value in candidates):
+        if root is not None and any(_argv_value_outside_root(value, base, root) for value in candidates):
             return _ARGV_OUTSIDE_ROOT_REFUSAL
     return ""
 
@@ -19877,7 +19876,7 @@ def _agent_dispatch(
     )
     if scope_error:
         return scope_error
-    if repository_extra_roots:
+    if repository_extra_roots or tool_name in _PROJECT_SCOPED_COMMAND_TOOLS:
         exec_error = _agent_project_execution_argument_error(
             tool_name, args, repository_extra_roots,
         )
@@ -23298,7 +23297,7 @@ def _agent_turn(
                 "contract and is disabled for a project-bound agent."
                 % tool_name
             )
-        if not policy_error and project_scope:
+        if not policy_error and (project_scope or tool_name in _PROJECT_SCOPED_COMMAND_TOOLS):
             policy_error = _agent_project_execution_argument_error(
                 tool_name, policy_tool_args, project_scope,
             )
@@ -24110,7 +24109,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "learn_tool", "memory_search", "web_search", "toolchain_status",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "memory_search", "web_search", "toolchain_status",
     "tool_inventory", "output_digest",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
@@ -24134,7 +24133,7 @@ _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     # a reachable, host-observed way to satisfy its verification standing.
     "test_run", "build_run", "lint_run", "typecheck_run",
     "ensemble_codegen_build_loop",
-    "process_list", "process_memory_risk_inspect", "task_progress", "task_ledger",
+    "process_list", "process_memory_risk_inspect", "learn_tool", "task_progress", "task_ledger",
     "task_delete", "task_plan", "task_depend",
     # Other developer-workflow tools remain absent until their agent dispatch
     # and project-root guards are admitted to this autonomous lane.

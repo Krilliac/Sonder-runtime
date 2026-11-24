@@ -94,6 +94,27 @@ def parse_name(raw: str) -> str:
     assert res["finding_count"] == 0
 
 
+def test_code_audit_masks_matched_secrets_in_returned_snippets():
+    fake_aws = "AKIA" + "IOSFODNN7EXAMPLE"
+    fake_ghp = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1L2M3N4"
+    fake_sk = "sk-" + "liveSecretTokenValue1234567890"
+    src = (
+        f'AWS_KEY = "{fake_aws}"\n'
+        f'GH_TOKEN = "{fake_ghp}"\n'
+        f'OPENAI_KEY = "{fake_sk}"\n'
+        'PEM = "-----BEGIN RSA PRIVATE KEY-----"\n'
+    )
+    res = audit_source(src, filename="secrets_demo.py")
+    assert res["ok"] is True
+    assert res["clean"] is False
+    gen301 = [f for f in res["findings"] if f["rule_id"] == "GEN301"]
+    assert len(gen301) >= 4
+    serialized = json.dumps(res)
+    for raw_secret in (fake_aws, fake_ghp, fake_sk, "BEGIN RSA PRIVATE KEY"):
+        assert raw_secret not in serialized
+    assert "<redacted:len=" in serialized
+
+
 # --- 3. Multi-Language Error Diagnosis ---------------------------------------
 
 def test_error_diagnose_parses_python_msvc_rust_and_resolves_repo_frame(tmp_path: Path, monkeypatch):

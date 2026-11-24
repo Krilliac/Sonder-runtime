@@ -727,3 +727,290 @@ def test_client_tool_schema_excludes_unsupported_cpp_and_csharp():
     assert "csharp" not in run_code_def.description.lower()
     plan = resolve_client_slash_command("/run ```cpp\nint main(){}\n```")
     assert plan is not None and plan.args["language"] == "python"
+
+
+# ---------------------------------------------------------------------------
+# 6. H-08: Companion single-use approval challenge bound to (call_id, tool, args_digest)
+# ---------------------------------------------------------------------------
+
+def test_h08_approval_challenge_binding_replay_tamper_and_ttl(tmp_path: Path):
+    now = {"t": 1000.0}
+    srv = create_client_agent_server(
+        host="127.0.0.1",
+        port=0,
+        workspace_root=tmp_path,
+        mode="manual",
+        token="tok-h08",
+        approval_ttl_seconds=300.0,
+        clock=lambda: now["t"],
+    )
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    auth = {"X-Sonder-Client-Agent-Token": "tok-h08"}
+    try:
+        # 1. Bare approved=True without a companion token never executes.
+        st, _, ch1 = _req(
+            port,
+            "POST",
+            "/v1/client-agent/execute",
+            body={
+                "call_id": "cid-1",
+                "tool": "file_write",
+                "args": {"path": "note.txt", "content": "hello"},
+                "approved": True,
+            },
+            headers=auth,
+        )
+        assert st == 200
+        assert ch1["ok"] is False and ch1["needs_approval"] is True
+        assert ch1["approval_token"] and len(ch1["args_digest"]) == 64
+        assert not (tmp_path / "note.txt").exists()
+
+        # 2. Tampering with args, tool, call_id, or args_digest fails closed and burns the token.
+        for label, tampered_body in [
+            (
+                "args",
+                {
+                    "call_id": "cid-1",
+                    "tool": "file_write",
+                    "args": {"path": "note.txt", "content": "EVIL"},
+                    "approved": True,
+                    "approval_token": ch1["approval_token"],
+                    "args_digest": ch1["args_digest"],
+                },
+            ),
+        ]:
+            st_t, _, res_t = _req(port, "POST", "/v1/client-agent/execute", body=tampered_body, headers=auth)
+            assert st_t == 200, label
+            assert res_t["ok"] is False and res_t["denied"] is True, (label, res_t)
+            assert not (tmp_path / "note.txt").exists()
+
+        # Token burned on tamper cannot be used even with the original args.
+        st_burned, _, res_burned = _req(
+            port,
+            "POST",
+            "/v1/client-agent/execute",
+            body={
+                "call_id": "cid-1",
+                "tool": "file_write",
+                "args": {"path": "note.txt", "content": "hello"},
+                "approved": True,
+                "approval_token": ch1["approval_token"],
+                "args_digest": ch1["args_digest"],
+            },
+            headers=auth,
+        )
+        assert st_burned == 200 and res_burned["ok"] is False and res_burned["needs_approval"] is True
+        assert not (tmp_path / "note.txt").exists()
+
+        # Test call_id, tool, and args_digest tamper individually.
+        for field_name, override in [
+            ("call_id", {"call_id": "cid-other"}),
+            ("tool", {"tool": "file_delete"}),
+            ("args_digest", {"args_digest": "0" * 64}),
+        ]:
+            _, _, ch = _req(
+                port,
+                "POST",
+                "/v1/client-agent/execute",
+                body={"call_id": "cid-2", "tool": "file_write", "args": {"path": "t.txt", "content": "ok"}},
+                headers=auth,
+            )
+            bad_req = {
+                "call_id": "cid-2",
+                "tool": "file_write",
+                "args": {"path": "t.txt", "content": "ok"},
+                "approved": True,
+                "approval_token": ch["approval_token"],
+                "args_digest": ch["args_digest"],
+                **override,
+            }
+            _, _, res_bad = _req(port, "POST", "/v1/client-agent/execute", body=bad_req, headers=auth)
+            assert res_bad["ok"] is False and res_bad["denied"] is True, (field_name, res_bad)
+            assert not (tmp_path / "t.txt").exists()
+
+        # 3. Canonical key-order match succeeds once, and single-use replay fails.
+        _, _, ch_ok = _req(
+            port,
+            "POST",
+            "/v1/client-agent/execute",
+            body={"call_id": "cid-3", "tool": "file_write", "args": {"path": "ok.txt", "content": "v1"}},
+            headers=auth,
+        )
+        st_exec, _, res_exec = _req(
+            port,
+            "POST",
+            "/v1/client-agent/execute",
+            body={
+                "call_id": "cid-3",
+                "tool": "file_write",
+                # Reordered keys produce the identical canonical SHA-256 digest.
+                "args": {"content": "v1", "path": "ok.txt"},
+                "approved": True,
+                "approval_token": ch_ok["approval_token"],
+                "args_digest": ch_ok["args_digest"],
+            },
+            headers=auth,
+        )
+        assert st_exec == 200 and res_exec["ok"] is True
+        assert (tmp_path / "ok.txt").read_text(encoding="utf-8") == "v1"
+
+        # Replay the same approval_token -> refused.
+        (tmp_path / "ok.txt").write_text("modified", encoding="utf-8")
+        st_rep, _, res_rep = _req(
+            port,
+            "POST",
+            "/v1/client-agent/execute",
+            body={
+                "call_id": "cid-3",
+                "tool": "file_write",
+                "args": {"path": "ok.txt", "content": "v1"},
+                "approved": True,
+                "approval_token": ch_ok["approval_token"],
+                "args_digest": ch_ok["args_digest"],
+            },
+            headers=auth,
+        )
+        assert st_rep == 200 and res_rep["ok"] is False and res_rep["needs_approval"] is True
+        assert (tmp_path / "ok.txt").read_text(encoding="utf-8") == "modified"
+
+        # 4. Expired challenge fails closed after TTL.
+        _, _, ch_exp = _req(
+            port,
+            "POST",
+            "/v1/client-agent/execute",
+            body={"call_id": "cid-4", "tool": "file_write", "args": {"path": "late.txt", "content": "x"}},
+            headers=auth,
+        )
+        now["t"] += 301.0
+        st_late, _, res_late = _req(
+            port,
+            "POST",
+            "/v1/client-agent/execute",
+            body={
+                "call_id": "cid-4",
+                "tool": "file_write",
+                "args": {"path": "late.txt", "content": "x"},
+                "approved": True,
+                "approval_token": ch_exp["approval_token"],
+                "args_digest": ch_exp["args_digest"],
+            },
+            headers=auth,
+        )
+        assert st_late == 200 and res_late["ok"] is False and res_late["needs_approval"] is True
+        assert not (tmp_path / "late.txt").exists()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=2)
+
+
+# ---------------------------------------------------------------------------
+# 7. M-07: Symlink / junction traversal & post-open TOCTOU hardening
+# ---------------------------------------------------------------------------
+
+def test_m07_intra_workspace_junction_and_symlink_refused_for_read_write_edit(tmp_path: Path):
+    ws = tmp_path / "ws"
+    real_dir = ws / "real"
+    real_dir.mkdir(parents=True)
+    target_file = real_dir / "data.txt"
+    target_file.write_text("original\n", encoding="utf-8")
+    policy = ClientAgentPolicy(workspace_root=ws, mode="acceptEdits")
+
+    link_dir = ws / "link_dir"
+    if os.name == "nt":
+        proc = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link_dir), str(real_dir)],
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            pytest.skip("NTFS junction creation unavailable")
+    else:
+        os.symlink(real_dir, link_dir)
+
+    for tool, args in [
+        ("file_read", {"path": "link_dir/data.txt"}),
+        ("file_write", {"path": "link_dir/data.txt", "content": "pwned"}),
+        ("file_edit", {"path": "link_dir/data.txt", "old": "original", "new": "pwned"}),
+        ("directory_create", {"path": "link_dir/new_sub"}),
+    ]:
+        res = execute_client_tool(tool, args, policy=policy)
+        assert res.ok is False, (tool, res)
+        assert "symlink" in res.error.lower() or "junction" in res.error.lower(), (tool, res.error)
+    assert target_file.read_text(encoding="utf-8") == "original\n"
+    assert not (real_dir / "new_sub").exists()
+
+
+def test_m07_post_open_toctou_escape_aborts_before_truncation(monkeypatch, tmp_path: Path):
+    ws = tmp_path / "ws"
+    outside = tmp_path / "outside"
+    ws.mkdir()
+    outside.mkdir()
+    victim = ws / "doc.txt"
+    victim.write_text("keep-intact\n", encoding="utf-8")
+    outside_target = outside / "escaped.txt"
+    outside_target.write_text("outside-secret\n", encoding="utf-8")
+
+    policy = ClientAgentPolicy(workspace_root=ws, mode="acceptEdits")
+
+    if os.name == "nt":
+        # Simulate a post-open handle whose kernel final path escaped the workspace.
+        monkeypatch.setattr(executor_mod, "_windows_final_path_for_fd", lambda _fd: outside_target)
+    else:
+        # Simulate a post-open inode swap detected by samestat.
+        monkeypatch.setattr(os.path, "samestat", lambda _a, _b: False)
+
+    res_write = execute_client_tool("file_write", {"path": "doc.txt", "content": "OVERWRITTEN"}, policy=policy)
+    assert res_write.ok is False
+    # Overwrite must not truncate before post-open verification passes.
+    assert victim.read_text(encoding="utf-8") == "keep-intact\n"
+
+    res_read = execute_client_tool("file_read", {"path": "doc.txt"}, policy=policy)
+    assert res_read.ok is False
+    assert "keep-intact" not in res_read.output
+
+    res_edit = execute_client_tool("file_edit", {"path": "doc.txt", "old": "keep", "new": "hack"}, policy=policy)
+    assert res_edit.ok is False
+    assert victim.read_text(encoding="utf-8") == "keep-intact\n"
+
+
+# ---------------------------------------------------------------------------
+# 8. M-08: Companion CLI redacts bearer token on stdout unless --print-token
+# ---------------------------------------------------------------------------
+
+def test_m08_cli_redacts_token_by_default_and_prints_only_with_flag(monkeypatch, tmp_path: Path, capsys):
+    from sonder_runtime.interfaces.client_agent import __main__ as cli_mod
+
+    class _FakeServer:
+        def __init__(self, *, token: str, workspace_root: Path):
+            self.token = token
+            self.policy = ClientAgentPolicy(workspace_root=workspace_root, mode="manual")
+            self.allowed_origins = frozenset()
+            self.server_address = ("127.0.0.1", 11439)
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt
+
+        def server_close(self) -> None:
+            return
+
+    raw_secret = "super-secret-companion-bearer-9999"
+
+    def _fake_create(**kwargs):
+        return _FakeServer(token=kwargs.get("token") or raw_secret, workspace_root=kwargs["workspace_root"])
+
+    monkeypatch.setattr(cli_mod, "create_client_agent_server", _fake_create)
+
+    rc_default = cli_main(["--workspace", str(tmp_path), "--token", raw_secret])
+    out_default = capsys.readouterr().out
+    assert rc_default == 0
+    assert raw_secret not in out_default
+    assert "[redacted]" in out_default
+    assert "--print-token" in out_default
+
+    rc_explicit = cli_main(["--workspace", str(tmp_path), "--token", raw_secret, "--print-token"])
+    out_explicit = capsys.readouterr().out
+    assert rc_explicit == 0
+    assert raw_secret in out_explicit

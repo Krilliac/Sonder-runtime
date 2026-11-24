@@ -1163,6 +1163,19 @@ def test_try_reserve_counts_inflight_plus_amount_against_the_cap(ledger):
     assert ledger.try_reserve(Decimal(3), Decimal(5))[0] is not None  # 2 + 3 == cap
 
 
+def test_try_reserve_fails_closed_when_persistence_raises_oserror(ledger, monkeypatch):
+    import sonder_runtime.adapters.inference.anthropic_spend as spend_mod
+
+    monkeypatch.setattr(
+        spend_mod,
+        "write_json_atomic",
+        lambda *_a, **_kw: (_ for _ in ()).throw(OSError("disk read-only")),
+    )
+    with pytest.raises(spend_mod.SpendLedgerUnreadable, match="failing closed"):
+        ledger.try_reserve(Decimal("1.00"), Decimal("5.00"))
+    assert ledger._inflight == {}
+
+
 def test_a_call_whose_worst_case_exceeds_the_whole_cap_is_refused_with_that_reason(ledger):
     sdk = FakeSdk()
     gateway = _gateway(sdk, ledger, _settings(daily_usd=Decimal("0.01")))

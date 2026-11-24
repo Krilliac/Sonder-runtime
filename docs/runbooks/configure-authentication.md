@@ -81,6 +81,20 @@ not intend it, set a key (next section).
    On Linux the loader refuses a secrets file that is group/world accessible
    (`chmod 0600`; `config.py:2523-2529`).
 
+   On Windows, `chmod 0600` has no effect on NTFS; enforce an owner-only DACL
+   with `icacls` on `sonder.env` and `<home>\secrets` (removing inherited
+   `BUILTIN\Users`, `Authenticated Users`, and `Everyone` ACEs):
+
+   ```powershell
+   $envFile = "$env:LOCALAPPDATA\sonder\sonder.env"
+   $secretsDir = "$env:LOCALAPPDATA\sonder\secrets"
+   icacls $envFile /inheritance:r /grant:r "$($env:USERDOMAIN)\$($env:USERNAME):(R,W)" "NT AUTHORITY\SYSTEM:(F)"
+   icacls $secretsDir /inheritance:r /grant:r "$($env:USERDOMAIN)\$($env:USERNAME):(OI)(CI)F" "NT AUTHORITY\SYSTEM:(OI)(CI)F"
+   # Verify only the owner (and SYSTEM) appear in the output:
+   icacls $envFile
+   icacls $secretsDir
+   ```
+
 3. Length: at least 24 characters is **required** when `[server].host` is not
    loopback or `profile = "server-private"`; shorter fails configuration
    (`config.py:128`, `:1974-1995`). Use the 43-character generated value
@@ -114,7 +128,9 @@ Accounts give per-person sign-in, roles and rate limits.
 2. `SONDER_AUTH_SECRET` keys the session tokens. Rules:
    - It must not be `sonder-local-dev-secret` (`config.py:2002-2014`).
    - If unset, a random per-install secret is created on first use at
-     `<home>/secrets/auth_secret` (mode 0600) and reused (`admin_auth.py:34-73`).
+     `<home>/secrets/auth_secret` (mode 0600 on Linux/macOS; on Windows, lock
+     down `<home>\secrets` and `auth_secret` with owner-only `icacls` DACLs as
+     shown above) and reused (`admin_auth.py:34-73`).
      The packaged installer instead writes `SONDER_AUTH_SECRET` into `sonder.env`.
    - Non-loopback bind: at least 32 characters, otherwise startup is refused
      (`serve.py:913`, `:2378`, `:2381-2382`).
@@ -307,7 +323,7 @@ and unknown tokens answer identically, so retrying is safe.
 | 403 `registration is disabled` | An account exists and `SONDER_ALLOW_REGISTRATION` is off (`admin_auth.py:232-235`). Enable it and restart. |
 | 403 `login required` / `admin role required` | Registration is on but the actor is missing or not an admin (`admin_auth.py:232-235`): no valid admin account token, **or the deployment key is missing** in `api-key`/`both` mode (the actor is dropped when the request is not authorised, `adapters/web/login_throttle_http.py:58`). Send the key and `X-Sonder-Account-Token`. On `/v1/sonder/admin/account` a missing key gives 401 `authentication required` instead. |
 | 400 `username must be 3..128 printable characters` / `password must be 8..1024 characters` | Input rules above. |
-| 409 `account already exists` | Pick another username (names are case-insensitive). |
+| 409 `account already exists` | Private/admin registration only: pick another username (names are case-insensitive). In `public_hosting=true` (or when `SONDER_GENERIC_REGISTER_ERRORS=1`), duplicate registration returns generic `400 registration could not be completed` and counts against the per-IP auth throttle to prevent username enumeration. |
 | 401 `invalid username or password` | Wrong credentials or unknown user (same answer by design). |
 | 429 `AUTH_RATE_LIMITED`, header `Retry-After` | Too many failed attempts from this address or for this username. Wait the number of seconds in `Retry-After` (default 2) before retrying (`login_throttle_http.py:20-30`). |
 | 401 `authentication required` (`UNAUTHENTICATED`) on normal calls | Missing/wrong key or token for the effective mode, an expired (14-day) or revoked session, a banned account, or a role row written by an older version that is not one of the three roles. |

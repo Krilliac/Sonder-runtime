@@ -366,6 +366,8 @@ class ClientToolExecResult {
   final bool denied;
   final bool needsApproval;
   final bool companionUnavailable;
+  final String approvalToken;
+  final String argsDigest;
 
   const ClientToolExecResult({
     required this.ok,
@@ -374,5 +376,7 @@ class ClientToolExecResult {
     this.denied = false,
     this.needsApproval = false,
     this.companionUnavailable = false,
+    this.approvalToken = '',
+    this.argsDigest = '',
   });
 }

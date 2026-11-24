@@ -85,6 +85,15 @@ def test_existing_binary_read_capabilities_keep_host_authority():
             assert builtin_traits(capability.name).is_read_only
 
 
+def test_learn_tool_not_read_only_and_symbol_verify_not_parallel_safe():
+    # H-07 & M-06: learn_tool spawns external subprocesses / optional writes;
+    # symbol_verify must not be scheduled concurrently in _PARALLEL_READS.
+    assert not builtin_traits("learn_tool").is_read_only
+    sv = builtin_traits("symbol_verify")
+    assert sv.is_read_only
+    assert not sv.can_parallelize
+
+
 def test_native_and_typed_catalogs_keep_traits_and_wire_schemas():
     from sonder_runtime.bootstrap.native_mcp import native_tool_registry
     from sonder_runtime.bootstrap.typed_tools import READ_ONLY_TOOLS, typed_tool_registry

@@ -160,3 +160,52 @@ def test_end_to_end_install_from_signed_bundle(published, monkeypatch, tmp_path)
     )
     plan = manager.import_offline(bundle, allow_unverified=False)
     assert plan["status"] == "available", plan
+
+
+@pytest.mark.parametrize("bad_name", [
+    "../escape.tar.gz",
+    "sub/archive.tar.gz",
+    "sub\\archive.tar.gz",
+    "C:archive.tar.gz",
+    "archive\x00.tar.gz",
+    "",
+    "..",
+    "CON.tar.gz",
+])
+def test_publish_target_and_bundle_reject_unsafe_target_names(tmp_path, bad_name):
+    tuf_repo.init_repo(tmp_path / "repo")
+    src_file = tmp_path / "good.tar.gz"
+    src_file.write_bytes(b"payload")
+    with pytest.raises(ValueError):
+        tuf_repo.publish_target(tmp_path / "repo", src_file, bad_name)
+
+    built = tmp_path / "built"
+    built.mkdir()
+    (built / "manifest.json").write_text(
+        json.dumps({"archive": {"name": bad_name}}), encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        tuf_repo.build_offline_bundle(tmp_path / "repo", built, tmp_path / "out")
+
+
+def test_tuf_keystore_passphrase_encrypts_and_requires_passphrase_to_load(tmp_path, monkeypatch):
+    monkeypatch.setenv("SONDER_TUF_KEYSTORE_PASSPHRASE", "test-ceremony-passphrase-123")
+    tuf_repo.init_repo(tmp_path / "repo")
+    key_file = tmp_path / "repo" / "keystore" / "root_0.json"
+    stored = json.loads(key_file.read_text(encoding="utf-8"))
+    assert stored["encrypted"] is True
+    assert "BEGIN ENCRYPTED PRIVATE KEY" in stored["private_pem"]
+
+    # Loading with the right passphrase succeeds.
+    loaded = tuf_repo._load_signers(tmp_path / "repo", "root")
+    assert len(loaded) == 3
+
+    # Missing passphrase fails clearly.
+    monkeypatch.delenv("SONDER_TUF_KEYSTORE_PASSPHRASE", raising=False)
+    with pytest.raises(ValueError, match="SONDER_TUF_KEYSTORE_PASSPHRASE"):
+        tuf_repo._load_signers(tmp_path / "repo", "root")
+
+    # Wrong passphrase fails clearly.
+    monkeypatch.setenv("SONDER_TUF_KEYSTORE_PASSPHRASE", "wrong-passphrase")
+    with pytest.raises(ValueError, match="invalid SONDER_TUF_KEYSTORE_PASSPHRASE"):
+        tuf_repo._load_signers(tmp_path / "repo", "root")

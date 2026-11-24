@@ -65,6 +65,7 @@ class FakeChatBackend implements ChatBackend {
   final List<(String, Duration)> approvals = [];
   final List<(String, String, String)> denials = [];
   final List<(String, Map<String, dynamic>, bool, String)> clientToolExecs = [];
+  final List<(String, String)> clientApprovalTokens = [];
   final List<(String, bool, String, String, bool, String)> clientToolResults = [];
 
   ServerCapabilities? capabilities;
@@ -280,10 +281,13 @@ class FakeChatBackend implements ChatBackend {
     String mode = 'manual',
     String workspaceRoot = '',
     bool approved = false,
+    String approvalToken = '',
+    String argsDigest = '',
     String companionUrl = Settings.defaultClientAgentUrl,
     String companionToken = '',
   }) async {
     clientToolExecs.add((tool, args, approved, mode));
+    clientApprovalTokens.add((approvalToken, argsDigest));
     final handler = clientExecHandler;
     if (handler != null) {
       return handler(callId, tool, args, risk, mode, approved);

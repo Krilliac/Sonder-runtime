@@ -12,7 +12,11 @@ MAX_INLINE_PREVIEW_BYTES = 1_400_000  # well under Flutter's 2 MiB inline markdo
 DEFAULT_3D_STEPS = 5
 DEFAULT_3D_OCTREE_RESOLUTION = 256
 DEFAULT_3D_FACE_COUNT = 40_000
+HIGH_DETAIL_3D_STEPS = 10
+HIGH_DETAIL_3D_OCTREE_RESOLUTION = 320
+HIGH_DETAIL_3D_FACE_COUNT = 60_000
 DEFAULT_3D_TIMEOUT_SECONDS = 300
+CREATIVE_DEFAULT_3D_SUBJECT = "ornate brass astrolabe clockwork compass"
 
 _SAFE_MODEL_FILENAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,120}\.(?:glb|obj|png)$")
 _NOTEX_FLAG_RE = re.compile(
@@ -21,6 +25,37 @@ _NOTEX_FLAG_RE = re.compile(
 )
 _TEX_FLAG_RE = re.compile(r"(?:^|\s)(?:--tex(?:ture)?|textured)\b", re.IGNORECASE)
 _KV_OPTION_KEYS = frozenset({"image", "steps", "octree", "faces", "seed", "format"})
+_NL_3D_WRAPPER_RE = re.compile(
+    r"^(?:(?:please|can\s+you|could\s+you|would\s+you|will\s+you)\s+)*"
+    r"(?:generate|create|make|render|produce|design|build|sculpt|craft|give|model)"
+    r"(?:\s+(?:me|us))?\s+"
+    r"(?:(?:a|an|the|some|one)\s+)?"
+    r"(?P<mod>(?:(?:highly|ultra|very|super|extremely|intricately)\s+)?(?:high[\s-]detail(?:ed)?|detailed|realistic|stylized|custom|cool|nice)\s+)*"
+    r"(?:(?:3d|3-d|hunyuan\s*3d)\s+(?:model|mesh|asset|object|figurine|prop|sculpture|glb|character|item)s?"
+    r"|hunyuan\s*3d|glb\s+(?:model|mesh|asset|file))\b"
+    r"(?:\s+(?:of|for|about|showing|depicting))?\s*(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_HIGH_DETAIL_MODIFIER_RE = re.compile(
+    r"\b(?:(?:highly|ultra|very|super|extremely|intricately)[\s-]+detailed|"
+    r"high[\s-]+detail(?:ed)?|ultra[\s-]+detail(?:ed)?|fine[\s-]+detail(?:ed)?)\b",
+    re.IGNORECASE,
+)
+_GENERIC_DETAIL_WORD_RE = re.compile(r"\bdetailed\b", re.IGNORECASE)
+_DANGLING_INTENSIFIER_RE = re.compile(
+    r"^(?:highly|ultra|very|super|extremely)\s+(?=(?:a|an|the|of|your|anything|whatever|something|surprise|random|up\s+to\s+you|dealer'?s\s+choice|you\s+(?:choose|pick)|pick\s+one)\b|$)",
+    re.IGNORECASE,
+)
+_OPEN_ENDED_SUBJECT_RE = re.compile(
+    r"^(?:(?:of|for|about)\s+)?"
+    r"(?:your\s+(?:choosing|choice|pick|selection)|"
+    r"whatever(?:\s+you\s+(?:want|like|prefer|choose|pick))?|"
+    r"anything(?:\s+(?:you\s+(?:want|like|prefer|choose|pick)|cool|neat|awesome|interesting|random))?|"
+    r"something(?:\s+(?:cool|neat|awesome|interesting|random|fun|nice|detailed))?|"
+    r"surprise\s+me|up\s+to\s+you|dealer'?s\s+choice|you\s+(?:choose|pick|decide)|pick\s+one|random|"
+    r"it|this|that|one|a\s+model|an?\s+object|3d\s+model)?$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -211,10 +246,46 @@ def parse_model3d_prompt(raw: str) -> Model3DRequestOptions:
                 file_format = candidate
 
     clean_prompt = re.sub(r"\s+", " ", text).strip(" ,;-")
+
+    # Strip full natural-language wrappers (e.g. "generate a highly detailed 3d model of ...")
+    high_detail_requested = bool(_HIGH_DETAIL_MODIFIER_RE.search(clean_prompt))
+    wrapper_match = _NL_3D_WRAPPER_RE.match(clean_prompt)
+    if wrapper_match:
+        mod_text = (wrapper_match.group("mod") or "").strip()
+        if _HIGH_DETAIL_MODIFIER_RE.search(mod_text) or _GENERIC_DETAIL_WORD_RE.search(mod_text):
+            high_detail_requested = True
+        clean_prompt = (wrapper_match.group("rest") or "").strip(" ,;:-.!?")
+
+    # Strip quality modifiers and any dangling leading intensifiers left by upstream extractors
+    # (e.g. "highly your choosing" -> "your choosing", "highly detailed dragon" -> "dragon").
+    if _HIGH_DETAIL_MODIFIER_RE.search(clean_prompt):
+        high_detail_requested = True
+        clean_prompt = _HIGH_DETAIL_MODIFIER_RE.sub(" ", clean_prompt)
+    if _DANGLING_INTENSIFIER_RE.search(clean_prompt):
+        high_detail_requested = True
+        clean_prompt = _DANGLING_INTENSIFIER_RE.sub("", clean_prompt)
+    if _GENERIC_DETAIL_WORD_RE.search(clean_prompt):
+        clean_prompt = _GENERIC_DETAIL_WORD_RE.sub(" ", clean_prompt)
+
+    clean_prompt = re.sub(r"\s+", " ", clean_prompt).strip(" ,;:-.!?")
+    # Collapse doubled articles left after stripping modifiers (e.g. "a  dragon" -> "a dragon")
+    clean_prompt = re.sub(r"^(?:of|for)\s+", "", clean_prompt, flags=re.IGNORECASE).strip(" ,;:-.!?")
+
+    if high_detail_requested:
+        if steps is None:
+            steps = HIGH_DETAIL_3D_STEPS
+        if octree is None:
+            octree = HIGH_DETAIL_3D_OCTREE_RESOLUTION
+        if faces is None:
+            faces = HIGH_DETAIL_3D_FACE_COUNT
+
+    if not clean_prompt or _OPEN_ENDED_SUBJECT_RE.fullmatch(clean_prompt):
+        clean_prompt = "image to 3d model" if image_path else CREATIVE_DEFAULT_3D_SUBJECT
+
     if len(clean_prompt) > MAX_3D_PROMPT_CHARS:
         clean_prompt = clean_prompt[:MAX_3D_PROMPT_CHARS].rstrip()
     return Model3DRequestOptions(
-        prompt=clean_prompt or ("image to 3d model" if image_path else "a stylized 3d object"),
+        prompt=clean_prompt,
         texture=texture,
         image_path=image_path,
         steps=steps,

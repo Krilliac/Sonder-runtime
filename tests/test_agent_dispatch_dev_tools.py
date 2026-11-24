@@ -494,14 +494,30 @@ def test_build_run_allows_ordinary_build_commands(tmp_path, command):
     ) == ""
 
 
-def test_build_run_command_guard_is_project_bound_only():
-    # Documented residual: like workspace_run, this guard only engages when the
-    # host has bound the agent to a project. An unbound agent's build_run is
-    # governed by permission_modes.risk_of("build_run") == "execution", not by
-    # this argument guard.
-    assert server._agent_project_execution_argument_error(
-        "build_run", {"command": "powershell -Command x"}, "",
-    ) == ""
+@pytest.mark.parametrize("command", [
+    "powershell -Command x",
+    "python -c import os",
+    "cmd /c whoami",
+    "p^y -Ic print(1)",
+    'make "all"',
+    r"make \\evil.example\share\Makefile",
+    "echo ok & py -Ic print(1)",
+    "echo print(1) | py",
+])
+def test_build_run_command_guard_also_enforces_unbound_agents(command):
+    # H-01: unbound agents must not bypass analyze_build_command or network path
+    # checks on build_run even when project_root is empty.
+    error = server._agent_project_execution_argument_error(
+        "build_run", {"command": command}, "",
+    )
+    assert error.startswith("ERROR:"), error
+
+
+def test_build_run_unbound_allows_ordinary_build_commands():
+    for command in ("", "make", "cmake --build build", "cargo build --release"):
+        assert server._agent_project_execution_argument_error(
+            "build_run", {"command": command}, "",
+        ) == ""
 
 
 def test_project_scoped_test_discover_rebases_and_dispatches_read_only(tmp_path):

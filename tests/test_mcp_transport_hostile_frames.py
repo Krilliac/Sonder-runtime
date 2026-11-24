@@ -92,3 +92,35 @@ def test_max_json_depth_is_configurable():
 def test_max_json_depth_must_be_a_positive_int(bad):
     with pytest.raises(ValueError):
         McpTransportLimits(max_json_depth=bad)
+
+
+@pytest.mark.parametrize("bad", [0, -1, True])
+def test_max_discard_bytes_must_be_a_positive_int(bad):
+    with pytest.raises(ValueError):
+        McpTransportLimits(max_discard_bytes=bad)
+
+
+def test_oversized_frame_exceeding_max_discard_bytes_aborts_stream():
+    class _InfiniteNoNewlineStream:
+        def __init__(self):
+            self.reads = 0
+
+        def readline(self, size: int = -1) -> str:
+            self.reads += 1
+            return "A" * (size if size and size > 0 else 1024)
+
+    stream = _InfiniteNoNewlineStream()
+    output = io.StringIO()
+    limits = McpTransportLimits(max_frame_bytes=256, max_discard_bytes=1024)
+    transport = StdioMcpTransport(
+        stream, output,
+        compatibility=McpCompatibility(), tool_catalog=(), tool_handler=lambda *_: {},
+        limits=limits,
+    )
+    handled = transport.serve()
+    assert handled == 1
+    assert stream.reads <= 10
+    replies = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert len(replies) == 1
+    assert replies[0]["error"]["code"] == -32700
+    assert "max_discard_bytes" in replies[0]["error"]["message"]

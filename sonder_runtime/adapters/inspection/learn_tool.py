@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import importlib.metadata as _metadata
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,6 +36,115 @@ from sonder_runtime.domain.tool_learning import (
 MAX_PROBE_BYTES = 65_536
 MAX_DOC_BYTES = 32_768
 DEFAULT_PROBE_TIMEOUT = 6.0
+
+# Closed allowlist of well-known CLI tools safe to probe with fixed --version/--help
+# flags. Arbitrary untrusted binaries on PATH are never spawned automatically.
+_SAFE_PROBE_BINARIES = frozenset({
+    "python", "python3", "py", "pytest", "pip", "pip3", "uv", "ruff", "mypy", "flake8", "black",
+    "git", "gh", "cmake", "ctest", "ninja", "make", "meson", "bazel", "scons",
+    "cargo", "rustc", "rustfmt", "clippy-driver", "go", "gofmt", "zig",
+    "node", "npm", "npx", "pnpm", "yarn", "deno", "bun", "tsc",
+    "clang", "clang++", "clang-format", "clang-tidy", "gcc", "g++", "gdb", "lldb",
+    "dotnet", "dart", "flutter", "java", "javac", "mvn", "gradle", "swift", "mix",
+    "docker", "podman", "kubectl", "helm", "terraform", "sqlite3", "duckdb",
+    "rg", "ripgrep", "fd", "jq", "yq", "curl", "tar", "7z", "7za",
+    "blender", "inkscape", "krita", "krita_cli", "audacity", "ffmpeg", "ffprobe",
+    "magick", "godot", "godot4", "gimp", "gimp-console", "pandoc",
+    "soffice", "libreoffice", "code", "dot", "neato", "yt-dlp",
+})
+_DENIED_PROBE_BINARIES = frozenset({
+    "cmd", "powershell", "pwsh", "sh", "bash", "zsh", "fish", "csh", "tcsh", "ksh", "wsl",
+    "shutdown", "reboot", "halt", "poweroff", "format", "diskpart", "bcdedit",
+    "reg", "regedit", "net", "net1", "netsh", "sc", "schtasks", "wmic", "certutil",
+    "mshta", "rundll32", "regsvr32", "cscript", "wscript", "msiexec", "taskkill",
+    "rm", "rmdir", "del", "erase", "dd", "mkfs", "sudo", "su", "chmod", "chown",
+    "kill", "pkill", "killall", "convert",  # Windows System32\convert.exe converts filesystems
+})
+_DISALLOWED_PROBE_SCRIPT_SUFFIXES = frozenset({
+    ".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".scr",
+})
+_PROBE_ENV_ALLOWLIST = frozenset({
+    "PATH", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "PATHEXT", "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS", "OS", "LANG", "LC_ALL", "TEMP", "TMP", "TMPDIR",
+})
+
+
+def _safe_search_path() -> str:
+    """Return PATH with empty / relative / CWD entries stripped so CWD binaries are never shadowed."""
+    raw = os.environ.get("PATH", "")
+    try:
+        cwd_norm = os.path.normcase(str(Path.cwd().resolve()))
+    except OSError:
+        cwd_norm = ""
+    kept: list[str] = []
+    for entry in raw.split(os.pathsep):
+        cleaned = entry.strip().strip('"')
+        if not cleaned or cleaned in (".", "./", ".\\"):
+            continue
+        p = Path(cleaned)
+        if not p.is_absolute():
+            continue
+        try:
+            resolved = os.path.normcase(str(p.resolve()))
+        except OSError:
+            continue
+        if cwd_norm and resolved == cwd_norm:
+            continue
+        kept.append(cleaned)
+    return os.pathsep.join(kept)
+
+
+def _canonical_binary_stem(path: Path) -> str:
+    stem = path.stem.lower()
+    # Strip trailing version suffixes like python3.12 -> python3, gimp-console-2.10 -> gimp-console
+    base = re.sub(r"[-_]?v?\d+(?:\.\d+)*$", "", stem)
+    return base or stem
+
+
+def _is_safe_probe_binary(binary_path: str) -> tuple[bool, str]:
+    """Verify *binary_path* is an allowlisted, non-CWD executable safe for --help probing.
+
+    Standard OS PATH symlinks (e.g. ``/usr/bin/python -> python3.14`` on Linux/macOS)
+    are permitted only when BOTH the link name and its resolved target are regular
+    files outside CWD, not script wrappers, not denied, and on the safe allowlist.
+    """
+    p = Path(binary_path)
+    try:
+        resolved = p.resolve(strict=True)
+    except OSError:
+        return False, "symlink_or_missing"
+    if not resolved.is_file():
+        return False, "symlink_or_missing"
+    if (
+        p.suffix.lower() in _DISALLOWED_PROBE_SCRIPT_SUFFIXES
+        or resolved.suffix.lower() in _DISALLOWED_PROBE_SCRIPT_SUFFIXES
+    ):
+        return False, "script_wrapper_refused"
+    try:
+        cwd_resolved = Path.cwd().resolve()
+        if resolved.is_relative_to(cwd_resolved):
+            return False, "cwd_binary_refused"
+        if p.is_symlink() and p.parent.resolve().is_relative_to(cwd_resolved):
+            return False, "cwd_binary_refused"
+    except OSError:
+        return False, "unresolvable_path"
+    for candidate in (p, resolved):
+        stem = candidate.stem.lower()
+        base_stem = _canonical_binary_stem(candidate)
+        if stem in _DENIED_PROBE_BINARIES or base_stem in _DENIED_PROBE_BINARIES:
+            return False, "denied_binary"
+        if stem not in _SAFE_PROBE_BINARIES and base_stem not in _SAFE_PROBE_BINARIES:
+            return False, "unlisted_binary"
+    return True, ""
+
+
+def _sanitized_probe_env() -> dict[str, str]:
+    env: dict[str, str] = {}
+    for key, val in os.environ.items():
+        if key.upper() in _PROBE_ENV_ALLOWLIST:
+            env[key.upper() if os.name == "nt" else key] = val
+    env["PATH"] = _safe_search_path()
+    return env
 
 
 def _discover_windows_app_paths(candidates: tuple[str, ...]) -> list[dict[str, str]]:
@@ -132,12 +243,19 @@ def discover_tool_binaries(query: NormalizedToolQuery) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
     seen: set[str] = set()
 
+    safe_path = _safe_search_path()
     for cand in query.candidate_binaries:
-        hit = shutil.which(cand)
+        hit = shutil.which(cand, path=safe_path)
         if hit:
             p = Path(hit)
-            norm = str(p).lower()
-            if norm not in seen and p.is_file():
+            try:
+                resolved = p.resolve(strict=True)
+            except OSError:
+                continue
+            if not resolved.is_file():
+                continue
+            norm = str(resolved).lower()
+            if norm not in seen:
                 seen.add(norm)
                 results.append({"name": p.name, "path": str(p), "source": "PATH"})
 
@@ -168,6 +286,8 @@ def _run_fixed_probe(binary_path: str, argv: list[str], *, timeout: float) -> tu
         "stderr": subprocess.PIPE,
         "timeout": max(1.0, min(12.0, float(timeout))),
         "shell": False,
+        "cwd": tempfile.gettempdir(),
+        "env": _sanitized_probe_env(),
     }
     if sys.platform == "win32":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
@@ -298,12 +418,16 @@ def learn_tool(
 
     if discovered and probe_cli:
         primary_path = discovered[0]["path"]
-        probe_status, raw_ver, raw_help = _probe_binary_cli(
-            primary_path, subcommand=clean_sub, timeout=timeout,
-        )
-        # Sanitize all third-party CLI output against secrets & indirect prompt injection
-        version_text = str(scan_untrusted_text(raw_ver, redact_secrets=True)["sanitized_text"]) if raw_ver else ""
-        help_text = str(scan_untrusted_text(raw_help, redact_secrets=True)["sanitized_text"]) if raw_help else ""
+        safe_ok, refuse_reason = _is_safe_probe_binary(primary_path)
+        if safe_ok:
+            probe_status, raw_ver, raw_help = _probe_binary_cli(
+                primary_path, subcommand=clean_sub, timeout=timeout,
+            )
+            # Sanitize all third-party CLI output against secrets & indirect prompt injection
+            version_text = str(scan_untrusted_text(raw_ver, redact_secrets=True)["sanitized_text"]) if raw_ver else ""
+            help_text = str(scan_untrusted_text(raw_help, redact_secrets=True)["sanitized_text"]) if raw_help else ""
+        else:
+            probe_status = f"probe_refused:{refuse_reason}"
         local_docs = _read_local_install_docs(primary_path)
     elif discovered:
         probe_status = "skipped_probe"
@@ -354,3 +478,33 @@ def learn_tool(
         memory_notes=memory_notes,
         web_research=web_results,
     )
+
+
+def maybe_save_playbook_note(
+    data: dict[str, Any],
+    *,
+    save_note: bool,
+    in_plan_mode: bool,
+    decide_fn: Callable[[str, dict[str, Any]], Any],
+    remember_fn: Callable[..., Any],
+) -> None:
+    """Persist ``playbook_summary`` only when permitted outside read-only plan mode."""
+    if not (save_note and data.get("ok") and data.get("playbook_summary")):
+        return
+    if in_plan_mode:
+        data["saved_to_memory"] = False
+        data["save_note_error"] = "refused save_note in read-only plan mode"
+        return
+    decision = decide_fn("sonder_remember_fact", {"text": str(data["playbook_summary"])})
+    if not decision.allowed:
+        data["saved_to_memory"] = False
+        data["save_note_error"] = "refused save_note by permission policy: %s" % (
+            decision.reason or decision.action
+        )
+        return
+    try:
+        remember_fn(text=str(data["playbook_summary"]))
+        data["saved_to_memory"] = True
+    except Exception as exc:
+        data["saved_to_memory"] = False
+        data["save_note_error"] = str(exc)[:160]
