@@ -205,7 +205,7 @@ def test_learn_tool_wired_across_chat_and_control_commands():
     import server
 
     names = [t.name for t in CORE_CHAT_TOOL_DEFINITIONS]
-    assert len(names) == 35
+    assert len(names) == 37
     assert "learn_tool" in names
 
     res = json.loads(server.control_command("/learntool python | run module"))

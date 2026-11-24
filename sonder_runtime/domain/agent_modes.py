@@ -109,10 +109,7 @@ def parse_agent_mode_arg(raw: str, *, default_steps: int = 12, mode_steps: int =
             task="",
             prompt="",
             max_steps=default_steps,
-            usage_error=(
-                "usage: /work [ensemble|consult|fanout|fleet] <task>  "
-                "(plain /work <task> stays single-model)"
-            ),
+            usage_error="usage: /work <task>",
         )
     head, _, rest = text.partition(" ")
     canonical = normalize_agent_mode(head)

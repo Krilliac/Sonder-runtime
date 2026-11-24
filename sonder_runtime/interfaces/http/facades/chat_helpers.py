@@ -799,6 +799,7 @@ def run_http_work_slash(
     fanout_owner: Callable[[Any], str],
     fanout_role: Callable[[Any], str],
     developer_authorized: Callable[[Any], bool],
+    invoke: Callable[[str, int, str], Any],
 ) -> Any:
     """Handle HTTP ``/work`` and ``/agent`` with optional secondary multi-model/fleet modes."""
     from sonder_runtime.application.agents.delegation import rejected_project_refusal
@@ -817,18 +818,13 @@ def run_http_work_slash(
     def _run() -> Any:
         prepared, prep_err = server._prepare_agent_mode_run(
             arg,
-            request_owner=fanout_owner(context),
-            request_role=fanout_role(context),
-            allow_fanout=developer_authorized(context),
+            request_owner="" if context is None else fanout_owner(context),
+            request_role="" if context is None else fanout_role(context),
+            allow_fanout=False if context is None else developer_authorized(context),
         )
         if prep_err:
             return prep_err
-        return server.workbench_agent(
-            prompt=prepared.prompt,
-            tier="auto",
-            max_steps=prepared.max_steps,
-            project=work_project,
-        )
+        return invoke(prepared.prompt, prepared.max_steps, work_project)
 
     return idempotent_action(
         context,

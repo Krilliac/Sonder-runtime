@@ -1789,6 +1789,9 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             idempotent_action=_idempotent_http_action, narrate_command=_narrate_http_command,
             fanout_owner=_fanout_request_owner, fanout_role=_fanout_request_role,
             developer_authorized=_developer_authorized,
+            invoke=lambda prompt, max_steps, work_project: server.workbench_agent(
+                prompt=prompt, tier="auto", max_steps=max_steps, project=work_project,
+            ),
         )
     if cmd == "/mkdir":
         return _control()
