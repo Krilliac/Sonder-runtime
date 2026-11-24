@@ -246,6 +246,8 @@ class LocalManager {
     String mode = 'manual',
     String workspaceRoot = '',
     bool approved = false,
+    String approvalToken = '',
+    String argsDigest = '',
     String companionUrl = defaultClientAgentUrl,
     String companionToken = '',
   }) async {
@@ -277,6 +279,8 @@ class LocalManager {
             '${clientCompanionLaunchCommand()}',
       );
     }
+    final cleanApprovalToken = approvalToken.trim();
+    final cleanArgsDigest = argsDigest.trim().toLowerCase();
     http.Response resp;
     try {
       resp = await requestPost(
@@ -291,6 +295,9 @@ class LocalManager {
           'args': args,
           'approved': approved,
           'mode': mode,
+          if (cleanApprovalToken.isNotEmpty)
+            'approval_token': cleanApprovalToken,
+          if (cleanArgsDigest.isNotEmpty) 'args_digest': cleanArgsDigest,
         }),
         timeout: const Duration(seconds: 120),
       );
@@ -331,6 +338,8 @@ class LocalManager {
       error: obj['error']?.toString() ?? '',
       denied: obj['denied'] == true,
       needsApproval: obj['needs_approval'] == true,
+      approvalToken: obj['approval_token']?.toString() ?? '',
+      argsDigest: obj['args_digest']?.toString() ?? '',
     );
   }
 }

@@ -36,6 +36,7 @@ flowchart TB
         SonderInfer["Sonder Inference Gateway (:11437)"]
         Ollama["Ollama (:11434, models, vision, embeddings)"]
         SDServer["Image & GIF Server (:11440, /v1/images/generations)"]
+        Hunyuan3D["Hunyuan3D-2 Mesh Server (:8081, Bearer SONDER_3D_API_KEY)"]
     end
 
     subgraph Observability["Observability (Read-Only, Optional)"]
@@ -58,6 +59,7 @@ flowchart TB
     API -- "reasoning & security tiers (sonder-inference)" --> SonderInfer
     API -- "embeddings, vision, schema/tool fallback" --> Ollama
     API -- "image prompts, /image & /gif" --> SDServer
+    API -- "3D mesh synthesis (generate_3d_model / /3d)" --> Hunyuan3D
 
     SonderInfer -- "local Ollama models" --> Ollama
     SonderInfer -- "pooled worker models" --> WInfer
@@ -84,6 +86,7 @@ All local services bind to `127.0.0.1` by default. Only an explicit TLS reverse 
 | `127.0.0.1:11438` | **Single-Model Fast `llama-server`** *(optional fallback)* | `llama-server` | High-throughput single-model OpenAI-compatible server when not using a multi-model router | Primary discrete GPU |
 | `127.0.0.1:11439` | **Sonder Client Companion** *(optional)* | `python -m sonder_runtime.interfaces.client_agent` | Browser-delegated local workspace tool execution (`X-Sonder-Client-Exec: 1`) | CPU |
 | `127.0.0.1:11440` | **Local Image Server** *(optional)* | `sd-server` (`stable-diffusion.cpp`) or any OpenAI-compatible `/v1/images/generations` server | Local diffusion synthesis for `/image` and animated `/gif` keyframes routed into inline chat cards | Secondary GPU / integrated GPU (Vulkan) or CPU offload |
+| `127.0.0.1:8081` | **Local Hunyuan3D-2 Server** *(optional)* | Hunyuan3D-2 API server (`D:\Applications\Hunyuan3D`, launched with `-NoText` when `:11440` handles concept synthesis) | Local 3D mesh (`.glb`/`.obj`) generation for `generate_3d_model` (authenticated with `SONDER_3D_API_KEY`, no wildcard CORS, bounded input & queue caps) | Primary discrete GPU (yields LLM VRAM during synthesis) |
 | `127.0.0.1:5173` | **Sonder Observatory UI** *(optional)* | Static production bundle or Vite dev/preview server | Live read-only telemetry visualizer for Runtime and Inference producers | CPU (lightweight static server) |
 | `127.0.0.1:5174`, `:5175` | **Observatory Telemetry Bridge** *(optional)* | Loopback GET-only telemetry forwarder | Injects server-side auth / pinned CA TLS for browser Observatory connections (`:5174` -> Runtime, `:5175` -> Worker) without exposing tokens to the browser | CPU |
 | `<lan-ip>:8443` | **LAN TLS Reverse Proxy** *(optional)* | TLS proxy (e.g. Caddy or local TLS forwarder) | Terminates HTTPS for phone/tablet access to `:11435` | CPU |
@@ -324,7 +327,25 @@ export SONDER_IMAGE_MODEL="sdxl-turbo"
 - Streamed responses slice large content payloads into `64 KiB` SSE frames (`sonder_runtime/interfaces/http/live_stream.py`) so inline base64 PNGs/GIFs never exceed the client's `1 MiB` SSE line-length guard.
 - The Flutter UI renders inline `data:image/...` Markdown inside a framed card with click-to-zoom lightbox and one-click Copy for pasting into chat.
 
-### 3.7 Connecting Sonder Observatory (`127.0.0.1:5173`, optional)
+### 3.7 Local Hunyuan3D-2 Mesh Server (`127.0.0.1:8081`, optional)
+
+Sonder's `generate_3d_model` tool (`sonder_runtime/adapters/model3d_generation.py`) delegates 3D mesh generation (`.glb`/`.obj`) to a loopback Hunyuan3D-2 API server on `127.0.0.1:8081` and renders 2x2 turnaround previews in headless Blender.
+
+**Threat model & required hardening:**
+- **Loopback bind only:** Bind strictly to `127.0.0.1:8081`; never bind `0.0.0.0`.
+- **Mandatory Bearer authentication:** Require `Authorization: Bearer <token>` on every generation endpoint using a high-entropy shared secret exported as `SONDER_3D_API_KEY` to both the Hunyuan3D service and Sonder Runtime.
+- **No wildcard CORS:** Never emit `Access-Control-Allow-Origin: *`. Browser clients reach generated meshes only through Sonder Runtime's signed single-file download tickets (`/v1/generated-models/<filename>?dl=<ticket>`), never directly on `:8081`.
+- **Input & queue caps:** Enforce bounded request body sizes, image dimensions, step/face/octree ceilings, and a bounded inference queue/concurrency cap so untrusted prompts or runaway callers cannot exhaust GPU VRAM or disk. Sonder Runtime enforces a `128 MiB` response cap on returned mesh payloads.
+- **Use `-NoText` alongside SDXL-Turbo (`:11440`):** When `sd-server` (`127.0.0.1:11440`, `SONDER_IMAGE_API_URL`) is active to synthesize studio concept images, launch Hunyuan3D with `-NoText` (disabling its built-in text-to-image model load) so VRAM stays bounded and only the image-to-3D pipeline loads on demand.
+- **Directory permissions:** Lock down the Hunyuan3D service directory (`D:\Applications\Hunyuan3D`) and its token/config files with owner-only Windows DACLs (see Section 8).
+
+Wire Sonder Runtime to it via:
+```bash
+export SONDER_3D_API_URL="http://127.0.0.1:8081"
+export SONDER_3D_API_KEY="<high-entropy-3d-api-key>"
+```
+
+### 3.8 Connecting Sonder Observatory (`127.0.0.1:5173`, optional)
 
 **Sonder Observatory** is a standalone read-only telemetry visualizer that connects directly to live Sonder producers over loopback HTTP/SSE/NDJSON without coupling Runtime and Inference together.
 
@@ -417,10 +438,11 @@ Start dependencies from the bottom up so Sonder detects live multi-model, infere
 3. **Sonder Inference Gateway** (`http://127.0.0.1:11437/v1/sonder/health` -> `status: ready`)
 4. **Private Worker Inference** *(optional, remote read-only check)* (`https://<worker-ip>:8443/sonder-inference/v1/sonder/health` with pinned CA bundle + bearer token)
 5. **Local Image Server** *(optional)* (`http://127.0.0.1:11440/v1/models` -> HTTP `200`; note `sd-server` returns `404` on `/health`)
-6. **Sonder Runtime HTTP + Web UI** (`http://127.0.0.1:11435/live`, `/health`, authenticated `/v1/models`, and `/v1/sonder/ecosystem`; UI at `http://127.0.0.1:11435/app/`)
-7. **Client Companion** *(optional, for Web UI local tools)* (`http://127.0.0.1:11439/health`)
-8. **Sonder Observatory + Bridge** *(optional)* (`http://127.0.0.1:5173/` -> HTTP `200`; `/.well-known/sonder-telemetry` on `:5174`, `:5175`, and `:11437`)
-9. **LAN TLS Proxy** *(optional)* (`https://<lan-ip>:8443/app/`)
+6. **Local Hunyuan3D-2 Mesh Server** *(optional)* (`http://127.0.0.1:8081`, launched with `-NoText` when `:11440` handles concept synthesis and authenticated with `SONDER_3D_API_KEY`)
+7. **Sonder Runtime HTTP + Web UI** (`http://127.0.0.1:11435/live`, `/health`, authenticated `/v1/models`, and `/v1/sonder/ecosystem`; UI at `http://127.0.0.1:11435/app/`)
+8. **Client Companion** *(optional, for Web UI local tools)* (`http://127.0.0.1:11439/health`)
+9. **Sonder Observatory + Bridge** *(optional)* (`http://127.0.0.1:5173/` -> HTTP `200`; `/.well-known/sonder-telemetry` on `:5174`, `:5175`, and `:11437`)
+10. **LAN TLS Proxy** *(optional)* (`https://<lan-ip>:8443/app/`)
 
 Run the built-in read-only runtime health check at any time:
 ```bash
@@ -472,8 +494,40 @@ export SONDER_ALLOW_SECURITY_MODEL_TOOLS="I_ACCEPT_SECURITY_MODEL_TOOL_RISK"
 export SONDER_SECURITY="<security-model>"
 ```
 
+On Windows deployments using the production launcher `start-sonder-production.ps1`, pass the explicit `-AllowSecurityModelTools` opt-in switch (off by default — never enabled implicitly or persisted in config):
+
+```powershell
+powershell -NoProfile -File "$env:LOCALAPPDATA\sonder\deployment\start-sonder-production.ps1" -ServeHttp -AllowSecurityModelTools
+```
+
 **Guardrails that remain in force:**
-- **Off by default and fail-closed:** Unset values and casual truthy shorthand (`1`, `true`, `yes`) are rejected and logged; only the exact acknowledgement string activates relaxation.
+- **Off by default and fail-closed:** Unset values and casual truthy shorthand (`1`, `true`, `yes`) are rejected and logged; only the exact acknowledgement string (or `-AllowSecurityModelTools` on `start-sonder-production.ps1`) activates relaxation.
 - **Host-environment only:** Cannot be set from `runtime_policy.json`, HTTP APIs, MCP tools, or chat.
 - **Narrow scope:** Relaxes *only* the shipped `security-advisers` model-name floor. Permission modes (`manual`/`auto`), approval prompts, workspace containment, secret redaction, shipped policy SHA-256 tamper pinning, `undetermined_served_models`, other shipped floors, and any explicit operator overlay denials all remain enforced.
 - **Never silent:** Logs a `WARNING` at activation, reports `model_tool_policy.security_floor_relaxed: true` in `GET /v1/sonder/ecosystem`, and displays an explicit `WARNING` line in `/runtime status` and `/runtime tools`.
+
+---
+
+## 8. Windows Owner-Only DACL (`icacls`) Hardening
+
+POSIX `chmod 0600` / `0700` checks do not restrict access on NTFS. On Windows workstations and servers, every secrets file, bearer token file, and local service directory (including `<sonder-home>\secrets`, `sonder.env`, client companion token storage, and `D:\Applications\Hunyuan3D`) must use an **owner-only NTFS DACL** with inheritance disabled so other local accounts (`BUILTIN\Users`, `Authenticated Users`, `Everyone`) cannot read secrets or tamper with executable service files:
+
+```powershell
+# 1. Harden a secrets file (e.g. sonder.env or a bearer token file):
+$secretFile = "$env:LOCALAPPDATA\sonder\sonder.env"
+icacls $secretFile /inheritance:r /grant:r "$($env:USERDOMAIN)\$($env:USERNAME):(R,W)" "NT AUTHORITY\SYSTEM:(F)"
+
+# 2. Harden a secrets directory (owner-only full control, inherited to children):
+$secretsDir = "$env:LOCALAPPDATA\sonder\secrets"
+icacls $secretsDir /inheritance:r /grant:r "$($env:USERDOMAIN)\$($env:USERNAME):(OI)(CI)F" "NT AUTHORITY\SYSTEM:(OI)(CI)F"
+
+# 3. Harden local service directories such as Hunyuan3D (remove Users/Everyone write/read):
+icacls "D:\Applications\Hunyuan3D" /inheritance:r /grant:r "$($env:USERDOMAIN)\$($env:USERNAME):(OI)(CI)F" "NT AUTHORITY\SYSTEM:(OI)(CI)F" "BUILTIN\Administrators:(OI)(CI)F"
+
+# 4. Verify effective ACLs (confirm no BUILTIN\Users, Authenticated Users, or Everyone ACEs remain):
+icacls $secretFile
+icacls $secretsDir
+icacls "D:\Applications\Hunyuan3D"
+```
+
+When running Sonder under a dedicated Windows service account rather than an interactive user, replace `$($env:USERDOMAIN)\$($env:USERNAME)` with that exact service principal.

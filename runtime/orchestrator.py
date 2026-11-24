@@ -5,6 +5,7 @@ recalls (similar past solutions), then answered. `history` (prior conversation t
 is passed to the model as real chat messages, not folded into the prompt text.
 """
 import sonder_runtime.adapters.memory_store as memory_store
+from sonder_runtime.platform.logging import Redactor
 import retriever
 
 MEMORY_HEADER = "# Relevant lessons from past work (may help):"
@@ -447,8 +448,14 @@ def _run(conn, task, tier, generate_fn, retrieve_fn=None,
     tokens_in, tokens_out, token_source = _token_usage(
         generate_fn, augmented, history, response)
     interaction_id = id_fn()
+    redactor = Redactor()
+    safe_task = redactor.redact(str(task)) if task else task
+    safe_lessons = "\n".join(
+        redactor.redact(str(item)) if item else "" for item in lessons
+    )
+    safe_response = redactor.redact(str(response)) if response else response
     memory_store.log_interaction(
-        conn, interaction_id, task, "\n".join(lessons), response, tier,
+        conn, interaction_id, safe_task, safe_lessons, safe_response, tier,
         session_id=session_id, task_embedding=task_embedding,
         tokens_in=tokens_in, tokens_out=tokens_out, token_source=token_source,
         project=project,
@@ -459,7 +466,7 @@ def _run(conn, task, tier, generate_fn, retrieve_fn=None,
     )
     if lesson_rows:
         memory_store.log_lesson_usage(
-            conn, [r["id"] for r in lesson_rows], interaction_id, task)
+            conn, [r["id"] for r in lesson_rows], interaction_id, safe_task)
     return response, interaction_id, lessons, augmented, facts_omitted
 
 

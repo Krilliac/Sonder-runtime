@@ -35,6 +35,8 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
+from sonder_runtime.platform.logging import Redactor
+
 _MATCH_FUNCTION = "sonder_bound_project"
 
 
@@ -82,32 +84,58 @@ def search_memory(
             _MATCH_FUNCTION, 1, bound_project_matcher(bound_project),
             deterministic=True,
         )
+    redactor = Redactor()
+    safe_query = redactor.redact(query)
+    query_cf = query.casefold()
+    query_contained_secret = safe_query != query
+
+    def _redact(value: object) -> str:
+        text = str(value or "")
+        return redactor.redact(text) if text else ""
+
     lesson_ids = store.fts_search(conn, query, limit=limit)
     lessons: list[dict[str, Any]] = []
     for lesson_id in lesson_ids:
         text = store.get_lesson_text(conn, lesson_id)
         if text:
-            lessons.append({"id": lesson_id, "text": text})
+            safe_text = _redact(text)
+            if query_contained_secret and query_cf not in safe_text.casefold():
+                continue
+            lessons.append({"id": lesson_id, "text": safe_text})
     current, instants = store.current_fact_params()  # expired facts stay out
     fact_scope = " AND %s(project)" % _MATCH_FUNCTION if bound else ""
-    facts = [dict(r) for r in conn.execute(
+    facts = []
+    for row in conn.execute(
         "SELECT id, project, text FROM facts WHERE text LIKE ? ESCAPE '\\' AND "
         + current + fact_scope + " ORDER BY ts DESC, rowid DESC LIMIT ?",
         (like, *instants, limit),
-    ).fetchall()]
+    ).fetchall():
+        item = dict(row)
+        safe_text = _redact(item.get("text"))
+        if query_cf and query_cf not in safe_text.casefold():
+            continue
+        item["text"] = safe_text
+        facts.append(item)
     preference_scope = (
         " AND (scope='global' OR %s(scope) OR (substr(scope, 1, 8)='project:' "
         "AND %s(substr(scope, 9))))" % (_MATCH_FUNCTION, _MATCH_FUNCTION)
         if bound else ""
     )
-    preferences = [dict(r) for r in conn.execute(
+    preferences = []
+    for row in conn.execute(
         "SELECT id, scope, key, text, confidence, evidence_count FROM preferences "
         "WHERE text LIKE ? ESCAPE '\\' AND enabled=1" + preference_scope + " "
         "ORDER BY confidence DESC, evidence_count DESC, updated_ts DESC LIMIT ?",
         (like, limit),
-    ).fetchall()]
+    ).fetchall():
+        item = dict(row)
+        safe_text = _redact(item.get("text"))
+        if query_cf and query_cf not in safe_text.casefold():
+            continue
+        item["text"] = safe_text
+        preferences.append(item)
     if bound:
-        sessions = [dict(r) for r in conn.execute(
+        raw_sessions = conn.execute(
             "SELECT s.session_id, s.title, ps.summary, s.project FROM sessions s "
             "LEFT JOIN session_project_summaries ps ON ps.session_id=s.session_id "
             "AND ps.project_key='project:' || s.project "
@@ -115,25 +143,50 @@ def search_memory(
             "(s.title LIKE ? ESCAPE '\\' OR ps.summary LIKE ? ESCAPE '\\') "
             "ORDER BY s.updated_ts DESC, s.rowid DESC LIMIT ?",
             (like, like, limit),
-        ).fetchall()]
+        ).fetchall()
     else:
-        sessions = [dict(r) for r in conn.execute(
+        raw_sessions = conn.execute(
             "SELECT session_id, title, summary, project FROM sessions "
             "WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' "
             "ORDER BY updated_ts DESC, rowid DESC LIMIT ?",
             (like, like, limit),
-        ).fetchall()]
+        ).fetchall()
+    sessions = []
+    for row in raw_sessions:
+        item = dict(row)
+        safe_title = _redact(item.get("title"))
+        safe_summary = _redact(item.get("summary"))
+        if query_cf and (
+            query_cf not in safe_title.casefold()
+            and query_cf not in safe_summary.casefold()
+        ):
+            continue
+        item["title"] = safe_title
+        item["summary"] = safe_summary
+        sessions.append(item)
     interaction_scope = (
         " AND %s(project) AND project_explicit=1" % _MATCH_FUNCTION if bound else ""
     )
-    interactions = [dict(r) for r in conn.execute(
+    interactions = []
+    for row in conn.execute(
         "SELECT id, task, response, tier, session_id, ts FROM interactions "
         "WHERE (task LIKE ? ESCAPE '\\' OR response LIKE ? ESCAPE '\\')"
         + interaction_scope + " ORDER BY ts DESC, rowid DESC LIMIT ?",
         (like, like, limit),
-    ).fetchall()]
+    ).fetchall():
+        item = dict(row)
+        safe_task = _redact(item.get("task"))
+        safe_response = _redact(item.get("response"))
+        if query_cf and (
+            query_cf not in safe_task.casefold()
+            and query_cf not in safe_response.casefold()
+        ):
+            continue
+        item["task"] = safe_task
+        item["response"] = safe_response
+        interactions.append(item)
 
-    lines = ["memory search: %r" % query]
+    lines = ["memory search: %r" % safe_query]
     lines.append("lessons (%d):" % len(lessons))
     lines.extend(
         "  - %s: %s" % (lesson["id"], lesson["text"][:220])

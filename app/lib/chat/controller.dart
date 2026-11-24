@@ -1477,7 +1477,15 @@ class ChatController extends ChangeNotifier {
     }
     if (execRes.needsApproval) {
       _upsertLiveTool(
-        tool.copyWith(state: 'awaiting_client_approval'),
+        tool.copyWith(
+          state: 'awaiting_client_approval',
+          error: execRes.error.isEmpty ? null : execRes.error,
+          companionApprovalToken: execRes.approvalToken.isNotEmpty
+              ? execRes.approvalToken
+              : null,
+          companionArgsDigest:
+              execRes.argsDigest.isNotEmpty ? execRes.argsDigest : null,
+        ),
         awaiting: true,
       );
       return execRes;
@@ -1573,16 +1581,43 @@ class ChatController extends ChangeNotifier {
       return const ApprovalOutcome(ApprovalStatus.failed,
           message: 'Client tool call is no longer active.');
     }
+    final expectedTool = ev.tool.trim();
+    final suppliedTool = toolName.trim();
+    if (suppliedTool.isNotEmpty && expectedTool != suppliedTool) {
+      return ApprovalOutcome(
+        ApprovalStatus.failed,
+        message: 'Client tool approval mismatch: expected tool '
+            "'$expectedTool', got '$suppliedTool'.",
+      );
+    }
+    if (expectedTool.isEmpty && suppliedTool.isEmpty) {
+      return const ApprovalOutcome(
+        ApprovalStatus.failed,
+        message: 'Client tool approval mismatch: missing tool name.',
+      );
+    }
+    final expectedDigest = ev.digest.trim().toLowerCase();
+    final suppliedDigest = digest.trim().toLowerCase();
+    if (expectedDigest != suppliedDigest) {
+      return const ApprovalOutcome(
+        ApprovalStatus.failed,
+        message: 'Client tool approval mismatch: digest does not match '
+            'the approved payload.',
+      );
+    }
+    final verifiedTool = expectedTool.isNotEmpty ? expectedTool : suppliedTool;
     final generation = _backendGeneration;
     final backend = _backend;
-    final execRes = await backend.executeClientTool(
+    var execRes = await backend.executeClientTool(
       callId: callId,
-      tool: ev.tool.isNotEmpty ? ev.tool : toolName,
+      tool: verifiedTool,
       args: ev.rawArgs,
       risk: ev.risk,
       mode: clientPermissionMode,
       workspaceRoot: clientWorkspaceRoot,
       approved: true,
+      approvalToken: ev.companionApprovalToken,
+      argsDigest: ev.companionArgsDigest,
       companionUrl: clientAgentUrl,
       companionToken: clientAgentToken,
     );
@@ -1590,16 +1625,45 @@ class ChatController extends ChangeNotifier {
       return const ApprovalOutcome(ApprovalStatus.failed,
           message: 'Server or account changed.');
     }
-    if (execRes.companionUnavailable) {
-      _upsertLiveTool(
-        ev.copyWith(state: 'awaiting_client_approval', error: execRes.error),
-        awaiting: true,
+    if (execRes.needsApproval &&
+        ev.companionApprovalToken.isEmpty &&
+        execRes.approvalToken.isNotEmpty) {
+      execRes = await backend.executeClientTool(
+        callId: callId,
+        tool: verifiedTool,
+        args: ev.rawArgs,
+        risk: ev.risk,
+        mode: clientPermissionMode,
+        workspaceRoot: clientWorkspaceRoot,
+        approved: true,
+        approvalToken: execRes.approvalToken,
+        argsDigest: execRes.argsDigest,
+        companionUrl: clientAgentUrl,
+        companionToken: clientAgentToken,
       );
-      _updateEntryTool(
-        callId,
-        (t) => t.copyWith(state: 'awaiting_client_approval', error: execRes.error),
+      if (_disposed || generation != _backendGeneration) {
+        return const ApprovalOutcome(ApprovalStatus.failed,
+            message: 'Server or account changed.');
+      }
+    }
+    if (execRes.companionUnavailable || execRes.needsApproval) {
+      final refreshed = ev.copyWith(
+        state: 'awaiting_client_approval',
+        error: execRes.error.isEmpty ? null : execRes.error,
+        companionApprovalToken: execRes.approvalToken.isNotEmpty
+            ? execRes.approvalToken
+            : null,
+        companionArgsDigest:
+            execRes.argsDigest.isNotEmpty ? execRes.argsDigest : null,
       );
-      return ApprovalOutcome(ApprovalStatus.failed, message: execRes.error);
+      _upsertLiveTool(refreshed, awaiting: true);
+      _updateEntryTool(callId, (_) => refreshed);
+      return ApprovalOutcome(
+        ApprovalStatus.failed,
+        message: execRes.error.isNotEmpty
+            ? execRes.error
+            : 'Approval required on client companion.',
+      );
     }
     final session = ev.session.isNotEmpty
         ? ev.session
@@ -1938,6 +2002,11 @@ class ChatController extends ChangeNotifier {
         (t) => t.copyWith(
           state: 'awaiting_client_approval',
           error: execRes.error.isEmpty ? null : execRes.error,
+          companionApprovalToken: execRes.approvalToken.isNotEmpty
+              ? execRes.approvalToken
+              : null,
+          companionArgsDigest:
+              execRes.argsDigest.isNotEmpty ? execRes.argsDigest : null,
         ),
       );
       return;

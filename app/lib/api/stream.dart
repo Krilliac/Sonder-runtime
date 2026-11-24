@@ -210,6 +210,12 @@ class ChatStreamToolEvent extends ChatStreamEvent {
   final String? error;
   final ToolRunResult? result;
 
+  /// Single-use approval challenge minted by the local client companion and
+  /// bound to `(callId, tool, canonical_args_sha256)`. Never parsed from
+  /// server SSE frames.
+  final String companionApprovalToken;
+  final String companionArgsDigest;
+
   const ChatStreamToolEvent({
     required this.id,
     this.callId = '',
@@ -237,6 +243,8 @@ class ChatStreamToolEvent extends ChatStreamEvent {
     required this.state,
     this.error,
     this.result,
+    this.companionApprovalToken = '',
+    this.companionArgsDigest = '',
   });
 
   bool get isClientTarget => executionTarget == 'client' || backend == 'client';
@@ -266,6 +274,8 @@ class ChatStreamToolEvent extends ChatStreamEvent {
     String? error,
     bool clearError = false,
     ToolRunResult? result,
+    String? companionApprovalToken,
+    String? companionArgsDigest,
   }) =>
       ChatStreamToolEvent(
         id: id,
@@ -294,31 +304,76 @@ class ChatStreamToolEvent extends ChatStreamEvent {
         state: state ?? this.state,
         error: clearError ? null : (error ?? this.error),
         result: result ?? this.result,
+        companionApprovalToken:
+            companionApprovalToken ?? this.companionApprovalToken,
+        companionArgsDigest: companionArgsDigest ?? this.companionArgsDigest,
       );
 
   /// This frame laid over the [previous] frame of the same call: what this
   /// frame states wins, and what it leaves out (the arguments, the code, the
   /// risk) is kept from [previous] instead of being lost. The risk is never
-  /// lowered by a later frame: the stricter of the two stays. A terminal
+  /// lowered by a later frame: the stricter of the two stays. Once a client
+  /// call is awaiting approval (or has a frozen client tool/digest payload),
+  /// later stream frames for the same call may never overwrite `tool`,
+  /// `args`, `rawArgs`, `digest`, `code`, `detail`, or `preview`. A terminal
   /// outcome (`ok`, `error`, `result`) is the one this frame states, so a
   /// later `ok: true` frame does not keep an earlier error.
   ChatStreamToolEvent mergedOnto(ChatStreamToolEvent previous) {
     String pick(String now, String before) => now.isNotEmpty ? now : before;
     final hasArgs = args.isNotEmpty || argumentsReported;
+    final frozenAtClientApproval = previous.state == 'awaiting_client_approval';
+    final freezeClientPayload = frozenAtClientApproval ||
+        (previous.isClientTarget &&
+            (previous.tool.isNotEmpty || previous.digest.isNotEmpty));
+    final mergedTool = (frozenAtClientApproval ||
+            (freezeClientPayload && previous.tool.isNotEmpty))
+        ? previous.tool
+        : pick(tool, previous.tool);
+    final mergedDigest = (frozenAtClientApproval ||
+            (freezeClientPayload && previous.digest.isNotEmpty))
+        ? previous.digest
+        : pick(digest, previous.digest);
+    final keepPreviousArgs = frozenAtClientApproval ||
+        (freezeClientPayload &&
+            (previous.argumentsReported ||
+                previous.args.isNotEmpty ||
+                previous.rawArgs.isNotEmpty));
+    final mergedArgs = keepPreviousArgs
+        ? previous.args
+        : (hasArgs ? args : previous.args);
+    final mergedRawArgs = keepPreviousArgs
+        ? previous.rawArgs
+        : (hasArgs ? rawArgs : previous.rawArgs);
+    final mergedCode = (frozenAtClientApproval ||
+            (freezeClientPayload && previous.code.isNotEmpty))
+        ? previous.code
+        : pick(code, previous.code);
+    final mergedPreview = (frozenAtClientApproval ||
+            (freezeClientPayload && previous.preview.isNotEmpty))
+        ? previous.preview
+        : pick(preview, previous.preview);
+    final keepPreviousDetail = frozenAtClientApproval ||
+        (freezeClientPayload && previous.detail.isNotEmpty);
+    final useNewDetail = !keepPreviousDetail && detail.isNotEmpty;
     return ChatStreamToolEvent(
       id: pick(id, previous.id),
       callId: pick(callId, previous.callId),
-      digest: pick(digest, previous.digest),
-      tool: pick(tool, previous.tool),
-      language: pick(language, previous.language),
-      code: pick(code, previous.code),
-      args: hasArgs ? args : previous.args,
-      rawArgs: hasArgs ? rawArgs : previous.rawArgs,
-      preview: pick(preview, previous.preview),
-      detail: detail.isNotEmpty ? detail : previous.detail,
-      detailTruncated: detail.isNotEmpty ? detailTruncated : previous.detailTruncated,
-      detailChars: detail.isNotEmpty ? detailChars : previous.detailChars,
-      argumentsReported: argumentsReported || previous.argumentsReported,
+      digest: mergedDigest,
+      tool: mergedTool,
+      language: (frozenAtClientApproval ||
+              (freezeClientPayload && previous.language.isNotEmpty))
+          ? previous.language
+          : pick(language, previous.language),
+      code: mergedCode,
+      args: mergedArgs,
+      rawArgs: mergedRawArgs,
+      preview: mergedPreview,
+      detail: useNewDetail ? detail : previous.detail,
+      detailTruncated:
+          useNewDetail ? detailTruncated : previous.detailTruncated,
+      detailChars: useNewDetail ? detailChars : previous.detailChars,
+      argumentsReported:
+          keepPreviousArgs ? previous.argumentsReported : (argumentsReported || previous.argumentsReported),
       timeout: timeout ?? previous.timeout,
       backend: pick(backend, previous.backend),
       executionTarget: pick(executionTarget, previous.executionTarget),
@@ -332,6 +387,10 @@ class ChatStreamToolEvent extends ChatStreamEvent {
       state: pick(state, previous.state),
       error: ok != null ? error : (error ?? previous.error),
       result: result ?? previous.result,
+      companionApprovalToken:
+          pick(companionApprovalToken, previous.companionApprovalToken),
+      companionArgsDigest:
+          pick(companionArgsDigest, previous.companionArgsDigest),
     );
   }
 

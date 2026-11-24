@@ -2118,6 +2118,8 @@ class LocalManager {
     String mode = 'manual',
     String workspaceRoot = '',
     bool approved = false,
+    String approvalToken = '',
+    String argsDigest = '',
     String companionUrl = '',
     String companionToken = '',
   }) async {
