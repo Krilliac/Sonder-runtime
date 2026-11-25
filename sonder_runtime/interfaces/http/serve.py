@@ -3500,8 +3500,9 @@ class Handler(BaseHTTPRequestHandler):
                 run_natural_ensemble=lambda natural_model, storage_project: server.ensemble_answer(
                     natural_model["prompt"],
                     tiers=natural_model["tiers"],
+                    mode=natural_model.get("mode", "prose"),
                     project=storage_project,
-                    require_all_tiers=True,
+                    require_all_tiers=bool(natural_model.get("require_all_tiers", True)),
                 ),
             ),
         )
