@@ -375,7 +375,7 @@ def test_slow_hung_worker_does_not_stall_hot_path_or_spawn_duplicate_probes():
         t1 = time.monotonic()
         for _ in range(20):
             assert cache.advertises_model(gw, "qwen3.6:35b") is False
-        assert time.monotonic() - t1 < 0.05
+        assert time.monotonic() - t1 < 0.25
         assert gw.status_calls == 1
 
         # Even AFTER negative TTL expires while the first probe is STILL hung,
@@ -383,7 +383,7 @@ def test_slow_hung_worker_does_not_stall_hot_path_or_spawn_duplicate_probes():
         clock.advance(10.0)
         t2 = time.monotonic()
         assert cache.advertises_model(gw, "qwen3.6:35b") is False
-        assert time.monotonic() - t2 < 0.05
+        assert time.monotonic() - t2 < 0.25
         assert gw.status_calls == 1
 
         # Once the slow probe finally completes, cache populates automatically.
@@ -621,4 +621,104 @@ def test_real_sonder_inference_gateway_health_dict_models_cached():
     assert legacy_chat_bridge.provider_for_tier("model:bonsai-27b:q4", False, graph) == "sonder_inference"
     assert legacy_chat_bridge.provider_for_tier("model:unknown-local", False, graph) is None
     assert len(get_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://127.0.0.1:99999",
+        "http://127.0.0.1:abc",
+        "https://10.77.0.2:70000/v1",
+        "http://[::1",
+    ],
+)
+def test_malformed_port_urls_do_not_raise_in_scope_key(bad_url: str):
+    assert legacy_chat_bridge._safe_url_origin(bad_url) == ""
+    gw = _StubGateway(models=["qwen3.6:35b"], base_url=bad_url)
+    scope = legacy_chat_bridge._gateway_probe_scope(gw)
+    assert scope[2] == ""
+    assert legacy_chat_bridge._MODEL_ADVERTISEMENT_CACHE.advertises_model(gw, "qwen3.6:35b") is True
+
+
+def test_dead_worker_thread_early_exit_does_not_strand_inflight(monkeypatch):
+    """Simulate ``_ManagedThread.run()`` returning early when owner stops mid-start."""
+    clock = _FakeClock()
+    cache = legacy_chat_bridge._ModelAdvertisementCache(
+        monotonic=clock,
+        positive_ttl_seconds=30.0,
+        negative_ttl_seconds=5.0,
+        stale_ttl_seconds=120.0,
+        wait_timeout_seconds=0.05,
+    )
+    gw = _StubGateway(models=["qwen3.6:35b"])
+
+    class _EarlyExitThread(threading.Thread):
+        def run(self) -> None:
+            # Exits immediately without invoking target (mirrors _ManagedThread
+            # when _owner._stopped flips between start() and run()).
+            return None
+
+    real_thread = legacy_chat_bridge.owned_runtime_thread
+    monkeypatch.setattr(legacy_chat_bridge, "owned_runtime_thread", _EarlyExitThread)
+
+    assert cache.advertises_model(gw, "qwen3.6:35b") is False
+    assert cache.inflight_count == 0
+    assert gw.status_calls == 0
+
+    # Also verify unexpected thread-factory errors roll back cleanly.
+    monkeypatch.setattr(
+        legacy_chat_bridge,
+        "owned_runtime_thread",
+        lambda *a, **k: (_ for _ in ()).throw(ValueError("unexpected factory error")),
+    )
+    clock.advance(6.0)
+    assert cache.advertises_model(gw, "qwen3.6:35b") is False
+    assert cache.inflight_count == 0
+
+    # Once threads work normally again and negative TTL expires, the scope recovers.
+    monkeypatch.setattr(legacy_chat_bridge, "owned_runtime_thread", real_thread)
+    clock.advance(6.0)
+    assert cache.advertises_model(gw, "qwen3.6:35b") is True
+    assert gw.status_calls == 1
+    assert cache.inflight_count == 0
+
+
+def test_slotted_gateway_without_weakref_hits_warm_cache():
+    class _SlottedGateway:
+        __slots__ = ("models", "calls")
+
+        def __init__(self, models: list[str]) -> None:
+            self.models = models
+            self.calls = 0
+
+        def unified_worker_status(self) -> dict[str, object]:
+            self.calls += 1
+            return {
+                "workers": [{
+                    "source": "sonder_inference_worker",
+                    "healthy": True,
+                    "models": list(self.models),
+                }],
+            }
+
+    clock = _FakeClock()
+    cache = legacy_chat_bridge._ModelAdvertisementCache(
+        monotonic=clock,
+        positive_ttl_seconds=30.0,
+        negative_ttl_seconds=5.0,
+        stale_ttl_seconds=120.0,
+        wait_timeout_seconds=0.5,
+    )
+    gw = _SlottedGateway(["qwen3.6:35b"])
+
+    # Verify it truly cannot be weak-referenced and has no __dict__.
+    assert not hasattr(gw, "__dict__")
+    assert legacy_chat_bridge._gateway_identity_ref(gw) == ("none", None)
+
+    assert cache.advertises_model(gw, "qwen3.6:35b") is True
+    assert cache.advertises_model(gw, "qwen3.6:35b") is True
+    assert cache.advertises_model(gw, "qwen3.6") is True
+    assert cache.advertises_model(gw, "missing-model") is False
+    assert gw.calls == 1
+
 

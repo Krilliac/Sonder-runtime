@@ -30,10 +30,7 @@ from sonder_runtime.application.context import (
     local_owner_context,
 )
 from sonder_runtime.domain.common.errors import SonderError
-from sonder_runtime.platform.runtime_threads import (
-    Thread as owned_runtime_thread,
-    ThreadOwnershipRefused,
-)
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 
 _logger = logging.getLogger("sonder.server")
 
@@ -64,6 +61,7 @@ def _safe_url_origin(raw: object) -> str:
         return ""
     try:
         parts = urlsplit(text)
+        port = parts.port
     except ValueError:
         return ""
     if parts.scheme not in ("http", "https") or not parts.hostname:
@@ -71,8 +69,8 @@ def _safe_url_origin(raw: object) -> str:
     host = parts.hostname.lower()
     if ":" in host:
         host = "[%s]" % host
-    if parts.port is not None:
-        host = "%s:%d" % (host, parts.port)
+    if port is not None:
+        host = "%s:%d" % (host, port)
     return urlunsplit((parts.scheme.lower(), host, "", "", ""))
 
 
@@ -135,14 +133,19 @@ def _gateway_identity_ref(
     except TypeError:
         pass
     # Non-weakrefable test doubles (e.g. SimpleNamespace) often attach a unique
-    # callable as ``unified_worker_status``; track that callable weakly when
-    # possible so GC'd namespaces cannot alias fresh ones at the same address.
-    unified = getattr(gw, "unified_worker_status", None)
-    if callable(unified):
-        try:
-            return ("unified", weakref.ref(unified))
-        except TypeError:
-            pass
+    # callable directly on their instance ``__dict__``; track that callable
+    # weakly so GC'd namespaces cannot alias fresh ones at the same address.
+    # For ``__slots__`` classes with normal methods, ``getattr`` allocates an
+    # ephemeral bound ``MethodType`` whose weakref dies immediately — fall back
+    # to ``("none", None)`` so cache hits remain effective.
+    instance_dict = getattr(gw, "__dict__", None)
+    if isinstance(instance_dict, Mapping) and "unified_worker_status" in instance_dict:
+        unified = instance_dict["unified_worker_status"]
+        if callable(unified):
+            try:
+                return ("unified", weakref.ref(unified))
+            except TypeError:
+                pass
     return ("none", None)
 
 
@@ -202,7 +205,7 @@ def _build_catalog_entry(
 
 
 class _InFlightProbe:
-    __slots__ = ("done", "generation", "deadline", "timed_out", "entry")
+    __slots__ = ("done", "generation", "deadline", "timed_out", "entry", "worker")
 
     def __init__(self, generation: int, deadline: float) -> None:
         self.done = threading.Event()
@@ -210,6 +213,7 @@ class _InFlightProbe:
         self.deadline = deadline
         self.timed_out = False
         self.entry: _CatalogEntry | None = None
+        self.worker: threading.Thread | None = None
 
 
 def _probe_gateway_models(gw: object) -> tuple[tuple[str, ...], bool]:
@@ -319,7 +323,24 @@ class _ModelAdvertisementCache:
     @property
     def inflight_count(self) -> int:
         with self._lock:
+            self._reap_dead_inflight_locked()
             return len(self._inflight)
+
+    def _reap_dead_inflight_locked(self) -> None:
+        """Evict flights whose started thread exited without invoking ``_run_probe``.
+
+        ``_ManagedThread.run()`` returns early without calling ``target`` if its
+        ``OwnedRuntimeThreads`` owner stops between ``start()`` and ``run()``.
+        """
+        dead_keys = [
+            key
+            for key, fl in self._inflight.items()
+            if fl.worker is not None and not fl.worker.is_alive() and not fl.done.is_set()
+        ]
+        for key in dead_keys:
+            fl = self._inflight.pop(key, None)
+            if fl is not None:
+                fl.done.set()
 
     def reset(self) -> None:
         """Clear all cached entries and detach any in-flight probes."""
@@ -423,8 +444,10 @@ class _ModelAdvertisementCache:
                 daemon=True,
             )
             worker.start()
+            with self._lock:
+                flight.worker = worker
             return True
-        except (ThreadOwnershipRefused, RuntimeError, OSError) as exc:
+        except Exception as exc:  # noqa: BLE001 - thread startup failure degrades cleanly
             _logger.debug(
                 "sonder_inference background model probe start refused: %s",
                 type(exc).__name__,
@@ -453,6 +476,7 @@ class _ModelAdvertisementCache:
         start_new = False
 
         with self._lock:
+            self._reap_dead_inflight_locked()
             now = self._monotonic()
             entry = self._entries.get(scope_key)
             if entry is not None and not entry.matches_gateway(gw):
@@ -532,6 +556,14 @@ class _ModelAdvertisementCache:
         with self._lock:
             if flight.done.is_set() and flight.entry is not None:
                 return flight.entry.matches_model(wanted)
+            if (
+                flight.worker is not None
+                and not flight.worker.is_alive()
+                and not flight.done.is_set()
+            ):
+                if self._inflight.get(scope_key) is flight:
+                    self._inflight.pop(scope_key, None)
+                flight.done.set()
             flight.timed_out = True
             if flight.generation == self._generation:
                 timeout_now = self._monotonic()
