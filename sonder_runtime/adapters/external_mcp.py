@@ -9,15 +9,18 @@ boundary that can be audited before remote MCP is enabled.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+import inspect
 import ipaddress
 import json
 import logging
 import re
 import socket
+import threading
 import time
 import urllib.parse
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from ..application.context import OperationContext
@@ -42,7 +45,62 @@ _MAX_CONTENT_BLOCKS = 256
 _MAX_SANITIZE_DEPTH = 64
 _MAX_SANITIZE_NODES = 10_000
 _NUMERIC_HOST_PART = re.compile(r"^(?:0[xX][0-9A-Fa-f]+|0[0-7]*|[0-9]+)$")
+_NAT64_WELL_KNOWN = ipaddress.IPv6Network("64:ff9b::/96")
+_NAT64_LOCAL = ipaddress.IPv6Network("64:ff9b:1::/48")
 _UNSET = object()
+_RESULT_ATTRS = ("structuredContent", "structured_content", "content", "isError", "is_error")
+
+
+class _AsyncCallGate:
+    """Loop-agnostic, thread-safe, cancellation-safe async mutual-exclusion gate."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._held = False
+        self._waiters: deque[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = deque()
+
+    async def acquire(self) -> None:
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            if not self._held:
+                self._held = True
+                return
+            waiter: asyncio.Future[None] = loop.create_future()
+            entry = (loop, waiter)
+            self._waiters.append(entry)
+        try:
+            await waiter
+        except BaseException:
+            handed_off = False
+            with self._lock:
+                try:
+                    self._waiters.remove(entry)
+                except ValueError:
+                    handed_off = waiter.done() and not waiter.cancelled()
+            if handed_off:
+                self.release()
+            raise
+
+    def _deliver(self, waiter: asyncio.Future[None]) -> None:
+        if waiter.done():
+            self.release()
+            return
+        waiter.set_result(None)
+
+    def release(self) -> None:
+        while True:
+            with self._lock:
+                if not self._waiters:
+                    self._held = False
+                    return
+                loop, waiter = self._waiters.popleft()
+            if waiter.done() or loop.is_closed():
+                continue
+            try:
+                loop.call_soon_threadsafe(self._deliver, waiter)
+                return
+            except RuntimeError:
+                continue
 
 
 class ExternalMcpError(RuntimeError):
@@ -205,7 +263,8 @@ class ExternalMcpBridge:
         self._enabled_capabilities = enabled_capabilities
         self._discovered_traits: dict[tuple[str, str], ToolTraits] = {}
         self._discovered_advisory: dict[tuple[str, str], ToolTraits] = {}
-        self._invoke_lock = asyncio.Lock()
+        self._traits_lock = threading.Lock()
+        self._invoke_gate = _AsyncCallGate()
         logger.debug(
             f"ExternalMcpBridge initialized servers={sorted(self._servers)} "
             f"capabilities={sorted(self._enabled_capabilities)}"
@@ -250,11 +309,13 @@ class ExternalMcpBridge:
         policy = next((item for item in server.tools if item.name == tool_name), None)
         if policy is None:
             return None
-        return self._discovered_traits.get((server_name, tool_name), _host_traits(policy))
+        with self._traits_lock:
+            return self._discovered_traits.get((server_name, tool_name), _host_traits(policy))
 
     def tool_annotation_traits(self, server_name: str, tool_name: str) -> ToolTraits | None:
         """Return raw annotation traits for audit/UI, before host merging."""
-        return self._discovered_advisory.get((server_name, tool_name))
+        with self._traits_lock:
+            return self._discovered_advisory.get((server_name, tool_name))
 
     def ingest_tool_list(self, server_name: str, response: Any) -> int:
         """Ingest ``tools/list`` metadata for configured tools only.
@@ -274,6 +335,8 @@ class ExternalMcpBridge:
         except TypeError as exc:
             raise ExternalMcpError("INVALID_METADATA", "external MCP tool metadata is invalid") from exc
         configured = {tool.name: tool for tool in server.tools}
+        staged_advisory: dict[tuple[str, str], ToolTraits] = {}
+        staged_traits: dict[tuple[str, str], ToolTraits] = {}
         count = 0
         for index, row in enumerate(rows):
             if index >= _MAX_TOOL_LIST_ROWS:
@@ -289,11 +352,14 @@ class ExternalMcpBridge:
                 trusted=server.trust_annotations,
                 max_result_bytes=server.max_result_bytes,
             )
-            self._discovered_advisory[(server_name, name)] = traits
-            self._discovered_traits[(server_name, name)] = _merge_host_authority(
+            staged_advisory[(server_name, name)] = traits
+            staged_traits[(server_name, name)] = _merge_host_authority(
                 _host_traits(configured[name]), traits, trusted=server.trust_annotations,
             )
             count += 1
+        with self._traits_lock:
+            self._discovered_advisory.update(staged_advisory)
+            self._discovered_traits.update(staged_traits)
         return count
 
     async def call(
@@ -389,7 +455,7 @@ class ExternalMcpBridge:
                 if not isinstance(credential, str) or not credential:
                     logger.warning(
                         f"external MCP credential resolved to empty/invalid value, "
-                        f"server={server_name!r} env_var={server.credential_env!r}"
+                        f"server={server_name!r}"
                     )
                     raise ExternalMcpError(
                         "CREDENTIAL_UNAVAILABLE", "external MCP credential is unavailable"
@@ -429,7 +495,9 @@ class ExternalMcpBridge:
                 raise ExternalMcpError("TRANSPORT_ERROR", "external MCP transport failed") from None
 
             try:
-                value, structured, is_error = _normalise_result(raw_result)
+                value, structured, is_error = _normalise_result(
+                    raw_result, max_result_bytes=server.max_result_bytes,
+                )
             except ExternalMcpError:
                 raise
             except Exception:
@@ -465,18 +533,20 @@ class ExternalMcpBridge:
                 value=value, receipt=receipt,
                 traits=self.tool_traits(server_name, tool_name),
             )
+        except asyncio.CancelledError:
+            logger.info(
+                f"external MCP call cancelled server={audit_server!r}, "
+                f"elapsed_ms={int((time.monotonic() - started) * 1000)}"
+            )
+            self._receipt(
+                receipt_id, audit_server, policy, False, started, result_bytes, structured,
+                "CANCELLED", context,
+            )
+            raise
         except ExternalMcpError as exc:
             logger.error(
-                f"external MCP call failed server={server_name!r} tool={tool_name!r} "
+                f"external MCP call failed server={audit_server!r} "
                 f"error_code={exc.code!r} elapsed_ms={int((time.monotonic() - started) * 1000)}",
-            )
-            logger.debug(
-                f"external MCP call failed server={server_name!r} tool={tool_name!r} "
-                f"error_code={exc.code!r}"
-            )
-            logger.info(
-                f"external MCP call failed server={server_name!r}, tool={tool_name!r}, "
-                f"error_code={exc.code!r}"
             )
             self._receipt(
                 receipt_id, audit_server, policy, False, started, result_bytes, structured,
@@ -494,8 +564,17 @@ class ExternalMcpBridge:
         # an unknown/unsafe call. Future host-declared concurrency metadata
         # can opt into a more permissive scheduler above this seam.
         async def guarded_invoke() -> Any:
-            async with self._invoke_lock:
-                return await self._transport.invoke(request)
+            await self._invoke_gate.acquire()
+            try:
+                if context.cancellation.cancelled:
+                    raise ExternalMcpError("CONTEXT_EXPIRED", "operation is cancelled or expired")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ExternalMcpError("TIMEOUT", "external MCP call timed out")
+                scoped_request = replace(request, timeout_seconds=remaining)
+                return await self._transport.invoke(scoped_request)
+            finally:
+                self._invoke_gate.release()
 
         return await _await_stage(guarded_invoke(), context=context, deadline=deadline)
 
@@ -683,6 +762,23 @@ def _annotation_state(value: Any, *names: str) -> TriState:
     return TriState.UNKNOWN
 
 
+def _close_if_coroutine(awaitable: Awaitable[Any]) -> None:
+    if inspect.iscoroutine(awaitable):
+        awaitable.close()
+
+
+async def _drain_tasks(*tasks: asyncio.Task[Any]) -> None:
+    """Cancel and wait for child tasks even if the outer task is being cancelled."""
+    for item in tasks:
+        if not item.done():
+            item.cancel()
+    while any(not item.done() for item in tasks):
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            continue
+
+
 async def _await_stage(
     awaitable: Awaitable[Any],
     *,
@@ -697,39 +793,45 @@ async def _await_stage(
     request and event loop immediately. Transports are required to be ordinary
     cancellation-cooperative async implementations.
     """
-    task = asyncio.ensure_future(awaitable)
+    if context.cancellation.cancelled:
+        _close_if_coroutine(awaitable)
+        raise ExternalMcpError("CONTEXT_EXPIRED", "operation is cancelled or expired")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        _close_if_coroutine(awaitable)
+        raise ExternalMcpError("TIMEOUT", "external MCP call timed out")
+
+    task: asyncio.Task[Any] = asyncio.ensure_future(awaitable)
 
     async def watch_cancellation() -> None:
         while not context.cancellation.cancelled:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
                 return
-            await asyncio.sleep(min(0.01, remaining))
+            await asyncio.sleep(min(0.01, rem))
 
-    cancellation = asyncio.create_task(watch_cancellation())
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        task.cancel()
-        cancellation.cancel()
-        await asyncio.gather(task, cancellation, return_exceptions=True)
-        raise ExternalMcpError("TIMEOUT", "external MCP call timed out")
-    done, _pending = await asyncio.wait(
-        {task, cancellation}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED,
-    )
+    cancellation: asyncio.Task[None] = asyncio.create_task(watch_cancellation())
+    try:
+        done, _pending = await asyncio.wait(
+            {task, cancellation}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED,
+        )
+    except BaseException:
+        await _drain_tasks(task, cancellation)
+        raise
+
     if task in done:
-        cancellation.cancel()
-        await asyncio.gather(cancellation, return_exceptions=True)
+        await _drain_tasks(cancellation)
         if context.cancellation.cancelled:
             await asyncio.gather(task, return_exceptions=True)
             raise ExternalMcpError("CONTEXT_EXPIRED", "operation is cancelled or expired")
         if time.monotonic() >= deadline:
             await asyncio.gather(task, return_exceptions=True)
             raise ExternalMcpError("TIMEOUT", "external MCP call timed out")
+        if task.cancelled():
+            raise ExternalMcpError("TRANSPORT_ERROR", "external MCP transport cancelled")
         return await task
 
-    task.cancel()
-    cancellation.cancel()
-    await asyncio.gather(task, cancellation, return_exceptions=True)
+    await _drain_tasks(task, cancellation)
     if context.cancellation.cancelled:
         raise ExternalMcpError("CONTEXT_EXPIRED", "operation is cancelled or expired")
     raise ExternalMcpError("TIMEOUT", "external MCP call timed out")
@@ -830,9 +932,14 @@ def _resolve_addresses(host: str, port: int) -> tuple[str, ...]:
 
 
 def _is_public(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    mapped = getattr(address, "ipv4_mapped", None)
-    if mapped is not None:
-        address = mapped
+    if isinstance(address, ipaddress.IPv6Address):
+        if address in _NAT64_WELL_KNOWN or address in _NAT64_LOCAL:
+            return False
+        if address.sixtofour is not None or address.teredo is not None:
+            return False
+        mapped = address.ipv4_mapped
+        if mapped is not None:
+            address = mapped
     return (
         address.is_global
         and not address.is_private
@@ -850,7 +957,11 @@ def _sanitize_text(text: str) -> str:
 
 
 def _sanitize_untrusted(
-    value: Any, *, depth: int = 0, counter: list[int] | None = None,
+    value: Any,
+    *,
+    depth: int = 0,
+    counter: list[int] | None = None,
+    raw_bytes_budget: list[int] | None = None,
 ) -> Any:
     if counter is None:
         counter = [0]
@@ -860,29 +971,61 @@ def _sanitize_untrusted(
     if counter[0] > _MAX_SANITIZE_NODES:
         raise ExternalMcpError("RESULT_TOO_LARGE", "external MCP result exceeds node limit")
     if isinstance(value, str):
+        if raw_bytes_budget is not None:
+            raw_bytes_budget[0] -= len(value.encode("utf-8", errors="replace"))
+            if raw_bytes_budget[0] < 0:
+                raise ExternalMcpError("RESULT_TOO_LARGE", "external MCP result exceeds the limit")
         return _sanitize_text(value)
     if isinstance(value, Mapping):
-        return {
-            (_sanitize_text(k) if isinstance(k, str) else k): _sanitize_untrusted(
-                v, depth=depth + 1, counter=counter,
+        sanitized: dict[Any, Any] = {}
+        for k, v in value.items():
+            if isinstance(k, str):
+                if raw_bytes_budget is not None:
+                    raw_bytes_budget[0] -= len(k.encode("utf-8", errors="replace"))
+                    if raw_bytes_budget[0] < 0:
+                        raise ExternalMcpError(
+                            "RESULT_TOO_LARGE", "external MCP result exceeds the limit"
+                        )
+                clean_k: Any = _sanitize_text(k)
+            else:
+                clean_k = k
+            sanitized[clean_k] = _sanitize_untrusted(
+                v, depth=depth + 1, counter=counter, raw_bytes_budget=raw_bytes_budget,
             )
-            for k, v in value.items()
-        }
+        return sanitized
     if isinstance(value, (list, tuple)):
         return [
-            _sanitize_untrusted(item, depth=depth + 1, counter=counter)
+            _sanitize_untrusted(
+                item, depth=depth + 1, counter=counter, raw_bytes_budget=raw_bytes_budget,
+            )
             for item in value
         ]
     return value
 
 
-def _normalise_result(result: Any) -> tuple[Any, bool, bool]:
+def _normalise_result(
+    result: Any, *, max_result_bytes: int = _MAX_RESULT_BYTES,
+) -> tuple[Any, bool, bool]:
+    if result is None or isinstance(
+        result, (str, bytes, int, float, bool, list, tuple, set, frozenset)
+    ):
+        raise ExternalMcpError("INVALID_RESULT", "external MCP returned an invalid result")
+    if not isinstance(result, Mapping) and not any(
+        hasattr(result, attr) for attr in _RESULT_ATTRS
+    ):
+        raise ExternalMcpError("INVALID_RESULT", "external MCP returned an invalid result")
     structured = _field(result, "structuredContent", None)
     if structured is None:
         structured = _field(result, "structured_content", None)
-    is_error = bool(_field(result, "isError", _field(result, "is_error", False)))
+    raw_is_error = _field(result, "isError", _UNSET)
+    if raw_is_error is _UNSET or raw_is_error is None:
+        raw_is_error = _field(result, "is_error", False)
+    is_error = bool(raw_is_error)
+    # Cap raw pre-sanitization bytes so hostile multi-megabyte responses fail
+    # fast before regex sanitization while leaving ample headroom for escapes.
+    raw_budget = [max_result_bytes * 4 + 4096]
     if structured is not None:
-        return _sanitize_untrusted(structured), True, is_error
+        return _sanitize_untrusted(structured, raw_bytes_budget=raw_budget), True, is_error
     content = _field(result, "content", ()) or ()
     if isinstance(content, (str, bytes, Mapping)):
         raise ExternalMcpError("INVALID_RESULT", "external MCP result content must be a sequence")
@@ -895,6 +1038,9 @@ def _normalise_result(result: Any) -> tuple[Any, bool, bool]:
         block_type = _field(block, "type", None)
         text = _field(block, "text", None)
         if block_type == "text" and isinstance(text, str):
+            raw_budget[0] -= len(text.encode("utf-8", errors="replace"))
+            if raw_budget[0] < 0:
+                raise ExternalMcpError("RESULT_TOO_LARGE", "external MCP result exceeds the limit")
             text_parts.append(_sanitize_text(text))
     return {"text": "\n".join(text_parts)}, False, is_error
 
