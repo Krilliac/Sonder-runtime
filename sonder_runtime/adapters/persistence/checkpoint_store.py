@@ -60,8 +60,8 @@ class CheckpointStore:
         # serializes snapshot replacement; failed transactions retain old rows.
         with owned_sqlite_transaction(path) as conn:
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(self._SCHEMA)
             if path == ":memory:":
                 conn.executemany("INSERT INTO checkpoints VALUES (?,?,?,?,?,?)", self._memory_rows)
@@ -114,11 +114,12 @@ class CheckpointStore:
     def list_checkpoints(
         self, session_id: str, limit: int = 10,
     ) -> list[Checkpoint]:
+        bounded = max(1, min(int(limit), 1000))
         with self._lock, self._connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM checkpoints WHERE session_id=? "
                 "ORDER BY step_index DESC, created_at DESC LIMIT ?",
-                (session_id, limit),
+                (session_id, bounded),
             ).fetchall()
         return [self._row_to_checkpoint(r) for r in rows]
 
@@ -158,12 +159,27 @@ class CheckpointStore:
 
     @staticmethod
     def _row_to_checkpoint(row: sqlite3.Row) -> Checkpoint:
+        raw_context = row["context_json"]
+        try:
+            parsed = json.loads(raw_context)
+        except (TypeError, ValueError):
+            logger.warning(
+                "checkpoint %r has malformed context_json; degrading to empty context",
+                row["checkpoint_id"],
+            )
+            parsed = {}
+        if not isinstance(parsed, dict):
+            logger.warning(
+                "checkpoint %r context_json is not a JSON object; degrading to empty context",
+                row["checkpoint_id"],
+            )
+            parsed = {}
         return Checkpoint(
             checkpoint_id=row["checkpoint_id"],
             session_id=row["session_id"],
             step_index=row["step_index"],
             status=row["status"],
-            context=json.loads(row["context_json"]),
+            context=parsed,
             created_at=row["created_at"],
         )
 
