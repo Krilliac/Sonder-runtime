@@ -1678,10 +1678,13 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         if not text:
             return "usage: /ensemble [tiers=a,b] <question>"
         scope = _task_account_scope(context)
-        if scope is not None:
-            with server.scoped_task_account_boundary(scope):
-                return server.ensemble_answer(text, tiers=tiers)
-        return server.ensemble_answer(text, tiers=tiers)
+        boundary = (
+            server.scoped_task_account_boundary(scope)
+            if scope is not None
+            else contextlib.nullcontext()
+        )
+        with boundary:
+            return server.ensemble_answer(text, tiers=tiers)
     if cmd in ("/permissions", "/perms"):
         policy = server.permission_policy(arg.strip())
         return "%s\n\n%s" % (policy, _deployment_gating_summary())
