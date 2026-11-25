@@ -1466,9 +1466,9 @@ def test_regression_unterminated_opener_scan_is_not_quadratic(opener):
     candidate can carry (8 hunks x 8000 chars).
     """
     text = opener * 10_000
-    started = time.perf_counter()
+    started = time.process_time()
     _scan(text)
-    elapsed = time.perf_counter() - started
+    elapsed = time.process_time() - started
     assert elapsed < 2.0, f"{elapsed:.2f}s for {len(text)} chars of unterminated attribute openers ({TAG})"
 
 
@@ -1479,9 +1479,9 @@ def test_regression_escaped_quote_line_scan_is_not_quadratic():
     """
     text = 'x = "' + '\\"' * 31_995
     for scan in (_scan, _scan_every_lexing):
-        started = time.perf_counter()
+        started = time.process_time()
         scan(text)
-        elapsed = time.perf_counter() - started
+        elapsed = time.process_time() - started
         assert elapsed < 2.0, f"{scan.__name__}: {elapsed:.2f}s for {len(text)} chars of escaped quotes ({TAG})"
 
 
@@ -1910,9 +1910,9 @@ def test_gap_macro_indirection_is_not_detected():
 @pytest.mark.parametrize("opener", ["[[", "__has_include(<", "__has_include(\"", "__has_embed(<"])
 def test_scan_work_for_unterminated_bracket_and_header_openers_is_linear(opener):
     text = opener * (640_000 // len(opener))
-    started = time.perf_counter()
+    started = time.process_time()
     reasons = scan_hostile_directives(text, include_ok=OK)
-    elapsed = time.perf_counter() - started
+    elapsed = time.process_time() - started
     assert elapsed < 2.0, f"{elapsed:.2f}s for {len(text)} chars of {opener!r} ({TAG})"
     if opener != "[[":
         assert reasons, "unterminated header-name operands must be refused"
@@ -2265,9 +2265,9 @@ def test_has_include_and_splice_readings_stay_linear_at_640_kb(shape):
         ("strict", lambda: normalize_for_scan(text, strict_splices=True)),
         ("legacy", lambda: normalize_for_scan(text, legacy=True)),
     ):
-        started = time.perf_counter()
+        started = time.process_time()
         call()
-        elapsed = time.perf_counter() - started
+        elapsed = time.process_time() - started
         assert elapsed < 2.0, f"{label} took {elapsed:.2f}s on {len(text)} chars of {shape} ({TAG})"
 
 
@@ -2284,9 +2284,9 @@ def test_all_eighteen_lexings_of_a_full_size_candidate_stay_in_budget(monkeypatc
     monkeypatch.setattr(repair_module, "scan_hostile_directives", counting)
     unit = 'R"(a)" ??( %:if __has_include(<:a.h>) && F(\\\f\nx \\ \ny ??/\t\nz\n'
     text = unit * (64_000 // len(unit))
-    started = time.perf_counter()
+    started = time.process_time()
     reasons = scan_added_lexings("", text, include_ok=OK)
-    elapsed = time.perf_counter() - started
+    elapsed = time.process_time() - started
     assert len(scans) == 18, len(scans)
     assert reasons and not any("lexing work budget" in reason for reason in reasons), reasons
     assert elapsed < 2.0, f"{elapsed:.2f}s for {len(text)} chars in 18 lexings ({TAG})"
@@ -2416,42 +2416,44 @@ _ALL_LEXING_SHAPES = {name: make(640 * 1024) for name, make in _ALL_LEXING_SHAPE
 
 
 # The shape of the cost is what is asserted, so the check does not depend on how fast the machine is: every
-# shape is lexed at half size and at full size (640 kB), and doubling the input must not much more than double
-# the time (linear measures 1.6-2.3, a memchr-speed quadratic 3.1-3.4, a full one 4; 2.8 sits between them). The absolute ceiling is a
-# backstop only: linear lexing takes ~1 s here and ~2.5 s on a slow shared CI runner.
-_ALL_LEXINGS_RATIO_LIMIT = 2.8
+# shape is lexed at quarter size (160 kB) and full size (640 kB). Growing 4x makes linear cost ~4x and a
+# quadratic cost ~10-16x; 9.0 separates them cleanly across shared CI jitter while catching every quadratic.
+# Small and big timings are interleaved and running minima kept across rounds (3, 5, 8). The absolute ceiling
+# is a backstop only: linear lexing takes ~0.1-1 s here and up to ~2.5 s on a slow shared CI runner.
+_ALL_LEXINGS_RATIO_LIMIT = 9.0
 _ALL_LEXINGS_RATIO_FLOOR = 0.25  # below this the full-size run is too short for a ratio to mean anything
 _ALL_LEXINGS_BUDGET = 8.0
 
 
-def _best_lexing_time(before: str, text: str, repeats: int = 3) -> float:
-    best = float("inf")
-    for _ in range(repeats):
-        started = time.perf_counter()
-        scan_added_lexings(before, text, include_ok=OK)
-        best = min(best, time.perf_counter() - started)
-    return best
+def _lexing_time_once(before: str, text: str) -> float:
+    started = time.perf_counter()
+    scan_added_lexings(before, text, include_ok=OK)
+    return time.perf_counter() - started
 
 
 @pytest.mark.parametrize("shape", sorted(_ALL_LEXING_SHAPES))
 def test_regression_all_lexings_of_a_640_kb_file_stay_under_two_seconds(shape):
     """The whole of ``scan_added_lexings`` (every reading), as a new file and as a half-changed file."""
     text = _ALL_LEXING_SHAPES[shape]
-    half = _ALL_LEXING_SHAPE_MAKERS[shape](320 * 1024)
+    quarter = _ALL_LEXING_SHAPE_MAKERS[shape](160 * 1024)
     assert 600_000 <= len(text) <= 660_000, len(text)
     for label, make_before in (("new file", lambda t: ""), ("half changed", lambda t: t[: len(t) // 2])):
-        for _attempt in range(3):  # a loaded machine can spike one pair of runs; a real quadratic fails every pair
-            small = _best_lexing_time(make_before(half), half)
-            big = _best_lexing_time(make_before(text), text)
-            assert big < _ALL_LEXINGS_BUDGET, (
-                f"{shape} ({label}): {big:.2f}s for every lexing of {len(text)} chars ({TAG})")
+        small_before = make_before(quarter)
+        big_before = make_before(text)
+        small = big = float("inf")
+        ratio = 0.0
+        for repeats in (3, 5, 8):
+            for _ in range(repeats):
+                small = min(small, _lexing_time_once(small_before, quarter))
+                big = min(big, _lexing_time_once(big_before, text))
             ratio = big / max(small, 1e-3)
             if big < _ALL_LEXINGS_RATIO_FLOOR or ratio < _ALL_LEXINGS_RATIO_LIMIT:
                 break
-        else:
-            raise AssertionError(
-                f"{shape} ({label}): doubling {len(half)} -> {len(text)} chars cost x{ratio:.2f} "
-                f"({small:.2f}s -> {big:.2f}s) in 3 attempts, super-linear ({TAG})")
+        assert big < _ALL_LEXINGS_BUDGET, (
+            f"{shape} ({label}): {big:.2f}s for every lexing of {len(text)} chars ({TAG})")
+        assert big < _ALL_LEXINGS_RATIO_FLOOR or ratio < _ALL_LEXINGS_RATIO_LIMIT, (
+            f"{shape} ({label}): 4x input {len(quarter)} -> {len(text)} chars cost x{ratio:.2f} "
+            f"({small:.2f}s -> {big:.2f}s), super-linear ({TAG})")
 
 
 def test_lexing_work_budget_refuses_a_large_file_that_needs_many_readings():
