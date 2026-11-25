@@ -33,6 +33,7 @@ class LocalManager {
     Future<bool> Function()? reachabilityProbe,
     Future<void> Function(Duration)? delay,
     DateTime Function()? clock,
+    bool Function()? shouldAbort,
   }) async =>
       false;
   static Future<LocalInstallInfo> inspect() async => const LocalInstallInfo(
@@ -96,23 +97,6 @@ class LocalManager {
     );
   }
 
-  static bool _isStrictLoopbackHost(String host) {
-    final h = host.toLowerCase();
-    if (h == 'localhost' ||
-        h == '::1' ||
-        h == '[::1]' ||
-        h == '0:0:0:0:0:0:0:1') {
-      return true;
-    }
-    final octets = h.split('.');
-    return octets.length == 4 &&
-        octets.first == '127' &&
-        octets.every((part) {
-          final n = int.tryParse(part);
-          return n != null && n >= 0 && n <= 255 && n.toString() == part;
-        });
-  }
-
   static Uri? _companionUri(String companionUrl, String path) {
     final raw = companionUrl.trim().isEmpty
         ? defaultClientAgentUrl
@@ -121,7 +105,7 @@ class LocalManager {
     if (base == null ||
         !const {'http', 'https'}.contains(base.scheme.toLowerCase()) ||
         base.host.isEmpty ||
-        !_isStrictLoopbackHost(base.host) ||
+        !isLoopbackHost(base.host) ||
         base.userInfo.isNotEmpty ||
         base.hasQuery ||
         base.hasFragment ||
