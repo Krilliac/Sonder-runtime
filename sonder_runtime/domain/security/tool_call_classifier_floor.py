@@ -208,6 +208,7 @@ _DELETE_VERBS = frozenset({"rm", "del", "erase", "rd", "rmdir", "remove-item", "
 _SWITCH_VERBS = frozenset({"del", "erase", "rd", "rmdir"})
 # The names ``_is_delete_verb`` takes whole, longest first (a bundle's value, ``_runs_delete``).
 _SUFFIX_VERBS = tuple(sorted(_DELETE_VERBS | {"rmtree"}, key=len, reverse=True))
+_SUFFIX_LAST = frozenset(verb[-1] for verb in _SUFFIX_VERBS)
 _CD_VERBS = frozenset({"cd", "chdir", "pushd", "set-location", "sl"})
 # Reserved words that stand before a command (``then rm``, ``do rm``, ``! rm``).
 _KEYWORDS = frozenset({"if", "then", "else", "elif", "do", "while", "until", "!", "coproc"})
@@ -227,6 +228,7 @@ _RUN_FLAGS: Mapping[str, tuple[tuple[str, ...], str]] = MappingProxyType({
     "ack": (("--pager", "--ackrc"), ""),
     "printf": ((), "v"),
 })
+_RUNNER_OR_GIT = frozenset({"rg", "man", "ag", "ack", "printf", "git", "grep"})
 # What a flag word starts with (``-x``, ``--x``, Getopt::Long's ``+x``), and the
 # characters a shell removes from a word: quotes, bash's ``\``, PowerShell's
 # backtick and cmd's ``^``.  A flag word the shell assembles with one of them
@@ -242,6 +244,11 @@ _UNESCAPED = str.maketrans("", "", _ESCAPE_MARKS)
 _COMMAND_PIECES = re.compile(r"[=:+!]")
 # The characters ``shlex`` splits words at.
 _SHLEX_BLANKS = " \t\r\n"
+_SHLEX_PLAIN = re.compile(r"[^ \t\r\n]+")
+_SHLEX_NONPOSIX = re.compile(r'"[^"]*"?|\'[^\']*\'?|[^ \t\r\n]+')
+_SHLEX_POSIX_WORD = re.compile(r"""(?:[^ \t\r\n'"\\]+|\\[\s\S]?|'[^']*'?|"(?:[^"\\]|\\[\s\S]?)*"?)+""")
+_SHLEX_POSIX_PIECE = re.compile(r"""([^'"\\]+)|\\([\s\S]?)|'([^']*)'?|"((?:[^"\\]|\\[\s\S]?)*)"?""")
+_SHLEX_DQ_ESCAPE = re.compile(r"\\([\s\S]?)")
 # Dart's ``String.trim`` whitespace: Unicode White_Space and U+FEFF (every code unit
 # whose one-character string Dart 3.13.1 trims to empty).  The desktop client trims
 # ``command`` with it and splits at it (``_splitCommand``, ``ch.trim().isEmpty``).
@@ -476,65 +483,67 @@ def _check_argvs(arguments: Mapping[str, Any]) -> list[list[str]]:
             if isinstance(check, Mapping) and (check_argv := _strings(check.get("argv")))]
 
 
+def _dq_unescape(match: re.Match[str]) -> str:
+    """In POSIX double quotes, only ``\\`` and ``\"`` unescape; a trailing ``\\`` at EOF is dropped."""
+    ch = match.group(1)
+    if ch in ("\\", '"', ""):
+        return ch
+    return "\\" + ch
+
+
 def _shlex_words(text: str, posix: bool) -> list[str]:
     """``shlex.split(text, posix=posix)``, read in one linear pass, as the client splits ``command``.
 
     ``shlex`` grows each token one character at a time, which is quadratic in a
-    long token; this is the same state machine (``whitespace_split`` on, no
-    comment characters) building each token from a list.  Where ``shlex``
-    raises (an open quote or a last escape), the words read so far are
-    returned with the open token as the last one: the client then runs
-    nothing, and reading them anyway can only add a BLOCK.
+    long token; this implements the exact same state machine (``whitespace_split``
+    on, no comment characters) with deterministic, zero-backtracking regexes so
+    256 KB inputs run in C time.  Where ``shlex`` raises (an open quote or a
+    last escape), the words read so far are returned with the open token as the
+    last one: the client then runs nothing, and reading them anyway can only add
+    a BLOCK.
     """
+    if not posix:
+        return _SHLEX_NONPOSIX.findall(text)
+    if "'" not in text and '"' not in text and "\\" not in text:
+        return _SHLEX_PLAIN.findall(text)
     words: list[str] = []
-    token: list[str] = []
-    state = " "  # " " between tokens, "a" in a word, a quote character, or "\\" after an escape
-    escaped_from = "a"  # the state an escape returns to
-    quoted = False  # the token held a quote (posix: an empty ``""`` is a token)
-    for char in text:
-        if state == " ":
-            if char in _SHLEX_BLANKS:
+    for raw in _SHLEX_POSIX_WORD.findall(text):
+        if "'" not in raw and '"' not in raw and "\\" not in raw:
+            words.append(raw)
+            continue
+        raw_len = len(raw)
+        if raw_len >= 2:
+            first_ch = raw[0]
+            if first_ch == "'" and raw[-1] == "'" and raw.find("'", 1) == raw_len - 1:
+                words.append(raw[1:-1])
                 continue
-            if posix and char == "\\":
-                escaped_from, state = "a", char
-            elif char in "'\"":
-                if not posix:
-                    token.append(char)
-                state = char
+            if first_ch == '"' and raw[-1] == '"' and "\\" not in raw and raw.find('"', 1) == raw_len - 1:
+                words.append(raw[1:-1])
+                continue
+        parts: list[str] = []
+        quoted = False
+        for piece in _SHLEX_POSIX_PIECE.finditer(raw):
+            idx = piece.lastindex
+            if idx == 1:
+                parts.append(piece.group(1))
+            elif idx == 2:
+                escaped = piece.group(2)
+                if escaped:
+                    parts.append(escaped)
+            elif idx == 3:
+                if piece.end() - piece.start() >= 2:
+                    quoted = True
+                sq = piece.group(3)
+                if sq:
+                    parts.append(sq)
             else:
-                token.append(char)
-                state = "a"
-        elif state in "'\"":
-            quoted = True
-            if char == state:
-                if not posix:
-                    token.append(char)
-                    words.append("".join(token))
-                    token, quoted, state = [], False, " "
-                else:
-                    state = "a"
-            elif posix and char == "\\" and state == '"':
-                escaped_from, state = state, char
-            else:
-                token.append(char)
-        elif state == "\\":
-            # In a double quote only the quote and the escape character may be escaped.
-            if escaped_from in "'\"" and char != "\\" and char != escaped_from:
-                token.append("\\")
-            token.append(char)
-            state = escaped_from
-        elif char in _SHLEX_BLANKS:
-            if token or (posix and quoted):
-                words.append("".join(token))
-            token, quoted, state = [], False, " "
-        elif posix and char in "'\"":
-            state = char
-        elif posix and char == "\\":
-            escaped_from, state = "a", char
-        else:
-            token.append(char)
-    if token or (posix and quoted):
-        words.append("".join(token))
+                if piece.end() - piece.start() >= 2:
+                    quoted = True
+                dq = piece.group(4)
+                if dq:
+                    parts.append(_SHLEX_DQ_ESCAPE.sub(_dq_unescape, dq) if "\\" in dq else dq)
+        if parts or quoted:
+            words.append("".join(parts))
     return words
 
 
@@ -582,13 +591,18 @@ def _argv_readings(name: str, arguments: Mapping[str, Any]) -> list[list[str]]:
         if key == "stdin" and name == "run_code":
             continue
         for text in _strings(arguments.get(key)):
+            key_readings: list[list[str]] = []
             for reading in _client_texts(text):
                 # With no quote or escape character both ways split alike: read it once.
                 modes = (True, False) if any(mark in reading for mark in "'\"\\") else (True,)
-                readings.extend(_client_argv(_shlex_words(reading, posix)) for posix in modes)
+                for posix in modes:
+                    argv = _client_argv(_shlex_words(reading, posix))
+                    if argv not in key_readings:
+                        key_readings.append(argv)
             dart = _dart_words(text)
-            if dart != readings[-1]:
-                readings.append(dart)
+            if dart not in key_readings:
+                key_readings.append(dart)
+            readings.extend(key_readings)
     return readings
 
 
@@ -643,12 +657,17 @@ def _finder_at(words: list[str]) -> int:
     """
     first, finds, fds, running = -1, False, False, False
     for index, word in enumerate(words):
-        plain = _unescaped(word)
-        kind = _FINDERS.get(_program_name(plain[-_VERB_TAIL:]))
-        if kind:
-            first = index if first < 0 else first
-            finds, fds = finds or kind == "find", fds or kind == "fd"
+        if first < 0 and "f" not in word:
             continue
+        plain = _unescaped(word)
+        if first < 0 or "f" in plain:
+            tail = plain[-_VERB_TAIL:]
+            pname = _program_name(tail) if ("/" in tail or "\\" in tail or ("." in tail and tail.endswith(".exe"))) else tail
+            kind = _FINDERS.get(pname)
+            if kind:
+                first = index if first < 0 else first
+                finds, fds = finds or kind == "find", fds or kind == "fd"
+                continue
         if first < 0:
             continue
         if finds and plain == "-delete":
@@ -719,18 +738,27 @@ def _argv_blocked(
     runners: frozenset[str] = frozenset()
     after_git, after_run_flag = False, False
     for index, word in enumerate(words):
-        verb = _runs_delete(word, _bundle_runs(word, runners))
-        if verb:
-            if delete_at < 0:
-                delete_at, switches = index, verb in _SWITCH_VERBS
-            if _flag_like(word) or after_run_flag:
-                everywhere = True
-                break
-        after_run_flag = "=" not in word and _is_run_flag(word, runners)
-        name = _program_name(word[-_VERB_TAIL:])
-        if runner := _runner(name, after_git):
-            runners = runners | {runner}
-        after_git = after_git or name == "git"
+        flag_like = bool(word) and word[0] in _FLAG_OR_ESCAPE and _flag_like(word)
+        if delete_at < 0 or after_run_flag or flag_like:
+            verb = _runs_delete(word, bool(runners) and _bundle_runs(word, runners))
+            if verb:
+                if delete_at < 0:
+                    delete_at, switches = index, verb in _SWITCH_VERBS
+                if flag_like or after_run_flag:
+                    everywhere = True
+                    break
+        after_run_flag = bool(runners) and "=" not in word and _is_run_flag(word, runners)
+        if word in _RUNNER_OR_GIT:
+            name = word
+        elif "/" in word or "\\" in word or ("." in word and word.endswith(".exe")):
+            name = _program_name(word[-_VERB_TAIL:])
+        else:
+            name = ""
+        if name:
+            if runner := _runner(name, after_git):
+                runners = runners | {runner}
+            if name == "git":
+                after_git = True
     if delete_at < 0:
         return False
     operands = words[1:] if everywhere else words[delete_at + 1:]
@@ -857,8 +885,11 @@ def _strip_components(path: str) -> str:
 def _resolve(drive: str, target: str) -> tuple[str, str]:
     """``(drive, path)`` with stream suffixes, trailing dots, ``/*``, ``.`` and ``..`` resolved."""
     target = _strip_components(target)
-    while target.endswith("/*"):
-        target = target[:-2] or "/"
+    end = len(target)
+    while end >= 2 and target[end - 2:end] == "/*":
+        end -= 2
+    if end != len(target):
+        target = target[:end] or "/"
     if target.startswith("/"):
         target = posixpath.normpath("/" + target.lstrip("/"))
     elif target:
@@ -1075,7 +1106,7 @@ def _is_root_target(token: str, cwd: tuple[_Place, ...] = ()) -> bool:
 
 
 def _is_delete_verb(name: str) -> bool:
-    return name in _DELETE_VERBS or name == "rmtree" or name.endswith(".rmtree")
+    return name in _DELETE_VERBS or name == "rmtree" or ("." in name and name.endswith(".rmtree"))
 
 
 def _runs_delete(word: str, glued: bool = False) -> str:
@@ -1236,6 +1267,13 @@ def _fold_variables(text: str) -> list[str]:
     text = _BRACED_VARIABLE.sub(r"$\1", text)
     if "${" not in text:
         return [text]
+    first_var = _PARAMETER_EXPANSION.sub(_fold, text)
+    if "${" not in first_var:
+        # Every expansion folded in one pass with no nested or separator-bearing WORDs:
+        # the nested and bash-expansion readings are guaranteed identical to these two.
+        first_word = _PARAMETER_EXPANSION.sub(_fold_to_word, text)
+        if "${" not in first_word:
+            return [first_var] if first_word == first_var else [first_var, first_word]
     readings: list[str] = []
     for pattern, first, later in _FOLDINGS:
         reading = _fold_passes(text, pattern, first, later)
@@ -1263,19 +1301,23 @@ def _brace_words(word: str) -> tuple[list[str], bool]:
             if current:
                 done.append(current)
             continue
-        head, tail = current[:group.start()], current[group.end():]
-        pending.extend(head + choice + tail for choice in reversed(group.group(1).split(",")))
-        if len(done) + len(pending) > _MAX_BRACE_WORDS:
+        choices = group.group(1).split(",")
+        if len(done) + len(pending) + len(choices) > _MAX_BRACE_WORDS:
             return [piece for piece in _BRACE_MARKS.split(word) if piece], False
+        head, tail = current[:group.start()], current[group.end():]
+        pending.extend(head + choice + tail for choice in reversed(choices))
     return done, True
+
+
+_NO_RUNNERS: frozenset[str] = frozenset()
 
 
 class _Command:
     """One command's words, and what the scan has learned about them so far."""
 
     __slots__ = ("after_download", "after_git", "candidate_at", "carry", "comment_at", "comment_parens",
-                 "delete_at", "downloads", "flag_delete", "glue_head", "glue_len", "glue_tail", "gluing",
-                 "has_f", "interpreter_at", "parens", "piped", "prefixed",
+                 "delete_at", "downloads", "flag_delete", "glue_head", "glue_is_flag", "glue_len",
+                 "glue_tail", "gluing", "has_f", "interpreter_at", "parens", "piped", "prefixed",
                  "program_at", "quote", "quote_from", "redirect_target", "runners", "runs", "saves_urls",
                  "settled", "switches", "unsettled", "words")
 
@@ -1283,6 +1325,7 @@ class _Command:
         self.words: list[str] = []
         self.gluing: list[str] | None = None  # buffered pieces for words[-1] while gluing (O(N) join)
         self.glue_head = ""
+        self.glue_is_flag = False
         self.glue_tail = ""
         self.glue_len = 0
         self.has_f = False  # whether any word in this command contains ``f`` (every finder name does)
@@ -1306,9 +1349,50 @@ class _Command:
         self.runs = False  # it runs a command named by its later words (``bash -c``, ``find -exec``)
         self.candidate_at = -1  # the last word read where a command word may stand
         self.redirect_target = False  # the next word is the target of a redirection
-        self.runners: frozenset[str] = frozenset()  # the ``_RUN_FLAGS`` programs named so far
+        self.runners: frozenset[str] = _NO_RUNNERS  # the ``_RUN_FLAGS`` programs named so far
         self.after_git = False  # ``git`` is among its words (``git grep``)
         self.unsettled = False  # its last word, an operand of a delete, grew by gluing: read it when it ends
+
+    def reset(
+        self,
+        piped: bool,
+        after_download: bool,
+        quote: str,
+        parens: int,
+        carry: bool,
+        switches: bool,
+    ) -> None:
+        """Reset all command slots in place to avoid per-command allocations in tight loops."""
+        self.words.clear()
+        self.gluing = None
+        self.glue_head = ""
+        self.glue_is_flag = False
+        self.glue_tail = ""
+        self.glue_len = 0
+        self.has_f = False
+        self.piped = piped
+        self.after_download = after_download
+        self.settled = False
+        self.prefixed = False
+        self.program_at = -1
+        self.interpreter_at = -1
+        self.delete_at = -1
+        self.switches = switches
+        self.flag_delete = False
+        self.downloads = False
+        self.saves_urls = False
+        self.quote = quote
+        self.quote_from = 0
+        self.comment_at = -1
+        self.parens = parens
+        self.comment_parens = 0
+        self.carry = carry
+        self.runs = False
+        self.candidate_at = -1
+        self.redirect_target = False
+        self.runners = _NO_RUNNERS
+        self.after_git = False
+        self.unsettled = False
 
     def reopen(self) -> None:
         """A ``(``, ``{`` or a new command: the next word is not a redirection's target."""
@@ -1345,8 +1429,8 @@ class _Scan:
     bounded number of times, so the pass is linear in the text.
     """
 
-    def __init__(self, cwd: str) -> None:
-        self.cwd0 = _places(cwd)
+    def __init__(self, cwd: str | tuple[_Place, ...]) -> None:
+        self.cwd0 = _places(cwd) if isinstance(cwd, str) else cwd
         self.cwd = self.cwd0  # the directory a relative operand resolves against
         self.downloaded = False
         self.evaluated = False
@@ -1374,10 +1458,9 @@ class _Scan:
         quote_glued = False  # the open quote continues the word before it
         for match in _TOKEN.finditer(text):
             kind, token, context = match.lastgroup, match.group(), stack[-1]
-            start = match.start()
-            before = text[start - 1] if start else ""
             if kind == "word":
-                comment_ok = not before or before in _COMMENT_AFTER
+                start = match.start()
+                comment_ok = not start or text[start - 1] in _COMMENT_AFTER
                 if "{" in token:
                     if self._words(context, token, start == glue, comment_ok):
                         return True
@@ -1385,6 +1468,8 @@ class _Scan:
                     return True
                 word_end = match.end()
             elif kind == "nl":
+                start = match.start()
+                before = text[start - 1] if start else ""
                 continued = joins or before in ("\\", "^")
                 if token[0] == "`":
                     if ticks and context.kind == "tick":
@@ -1432,7 +1517,7 @@ class _Scan:
                     return True
                 if opening:
                     # ``r"m"``: a quote right after a word continues that word.
-                    quote_glued = bool(command.quote and command.words) and start in (glue, word_end)
+                    quote_glued = bool(command.quote and command.words) and match.start() in (glue, word_end)
                     if quote_glued:
                         glue = match.end()
                         command.quote_from -= 1  # the quoted words start with the word it continues
@@ -1443,7 +1528,7 @@ class _Scan:
                     # An escape character.  Next to a flag word (``--o`p=x``, ``-`-pre``,
                     # ``` `--pre ```) it may assemble any flag: a run flag (``_escaped_flag``).
                     command = context.command
-                    if ((start in (word_end, glue) and command.words and _flag_like(
+                    if ((match.start() in (word_end, glue) and command.words and _flag_like(
                             command.glue_head if command.gluing is not None else command.words[-1]))
                             or _flag_like(text[match.end():match.end() + _VERB_TAIL])):
                         command.runs = True
@@ -1459,34 +1544,37 @@ class _Scan:
                 command = context.command
                 if token == "{" and not command.quote and command.comment_at < 0:
                     command.reopen()  # ``{ rm -rf /; }``, ``ForEach-Object { Remove-Item ... }``
-            elif not self._paren(context.command, kind == "close",
-                                 before == "^" or (before == "`" and not ticks)):
-                # Escaped, quoted or commented out: not a parenthesis of the text.  A
-                # quoted one is text of its word, so a quoted operand joined at its
-                # closing quote (``_quote``) keeps it: ``"C:\\Program Files (x86)"``.
-                command = context.command
-                if self.shell and command.quote and command.comment_at < 0:
-                    command.flush_glued()
-                    if command.words and start == word_end and len(command.words[-1]) < _PAREN_GLUE:
-                        command.words[-1] += token
-                        command.unsettled = command.unsettled or context.operands
+            else:
+                start = match.start()
+                before = text[start - 1] if start else ""
+                if not self._paren(context.command, kind == "close",
+                                   before == "^" or (before == "`" and not ticks)):
+                    # Escaped, quoted or commented out: not a parenthesis of the text.  A
+                    # quoted one is text of its word, so a quoted operand joined at its
+                    # closing quote (``_quote``) keeps it: ``"C:\\Program Files (x86)"``.
+                    command = context.command
+                    if self.shell and command.quote and command.comment_at < 0:
+                        command.flush_glued()
+                        if command.words and start == word_end and len(command.words[-1]) < _PAREN_GLUE:
+                            command.words[-1] += token
+                            command.unsettled = command.unsettled or context.operands
+                        else:
+                            if self._settle(command):
+                                return True
+                            command.words.append(token)
+                        glue = word_end = match.end()
+                elif context.kind == "sub":
+                    # A plain parenthesis in a substitution, or past _MAX_DEPTH a
+                    # substitution read as part of the deepest one: only its closing
+                    # parenthesis is tracked.
+                    if kind != "close":
+                        context.parens += 1
+                    elif context.parens:
+                        context.parens -= 1
+                    elif self._close(stack):
+                        return True
                     else:
-                        if self._settle(command):
-                            return True
-                        command.words.append(token)
-                    glue = word_end = match.end()
-            elif context.kind == "sub":
-                # A plain parenthesis in a substitution, or past _MAX_DEPTH a
-                # substitution read as part of the deepest one: only its closing
-                # parenthesis is tracked.
-                if kind != "close":
-                    context.parens += 1
-                elif context.parens:
-                    context.parens -= 1
-                elif self._close(stack):
-                    return True
-                else:
-                    glue = match.end()
+                        glue = match.end()
             if kind == "nl" or stack[-1].command.comment_at < 0:
                 joins = kind == "pipe" or token == "&&"  # a comment after a pipe keeps it open
         while len(stack) > 1:
@@ -1583,9 +1671,11 @@ class _Scan:
         return False
 
     def _word(self, context: _Context, word: str, glued: bool, comment_ok: bool = False) -> bool:
-        name = _program_name(word) if ("/" in word or "\\" in word or word.endswith(".exe")) else word
-        if (word in _BLOCK_TOKENS or name in _BLOCK_TOKENS or word.startswith("mkfs")
-                or (name.startswith("mkfs") and _MKFS.fullmatch(name))):
+        has_path = "/" in word or "\\" in word or ("." in word and word.endswith(".exe"))
+        name = _program_name(word) if has_path else word
+        if word in _BLOCK_TOKENS or (word and word[0] == "m" and word.startswith("mkfs")):
+            return True
+        if has_path and (name in _BLOCK_TOKENS or (name and name[0] == "m" and name.startswith("mkfs") and _MKFS.fullmatch(name))):
             return True
         if self.previous == "format" and _is_drive_root(word):
             return True
@@ -1609,18 +1699,21 @@ class _Scan:
                 command.glue_len = len(base) + len(piece)
                 command.glue_head = (base + piece)[:_VERB_TAIL + 1] if len(base) <= _VERB_TAIL else base[:_VERB_TAIL + 1]
                 command.glue_tail = (base[-_VERB_TAIL:] + piece)[-_VERB_TAIL:]
+                command.glue_is_flag = _flag_like(command.glue_head)
             else:
                 command.gluing.append(piece)
                 command.glue_len += len(piece)
                 if len(command.glue_head) <= _VERB_TAIL:
                     command.glue_head = (command.glue_head + piece)[:_VERB_TAIL + 1]
+                    command.glue_is_flag = _flag_like(command.glue_head)
                 command.glue_tail = (command.glue_tail + piece)[-_VERB_TAIL:]
             at = len(command.words) - 1
             tail = command.glue_tail
             # ``"g"it grep -nOrm``; a name is short, so its tail is enough (and stays linear).
-            tail_name = _program_name(tail) if ("/" in tail or "\\" in tail or tail.endswith(".exe")) else tail
-            self._note_program(command, tail_name)
-            is_flag = _flag_like(command.glue_head)
+            tail_name = _program_name(tail) if ("/" in tail or "\\" in tail or ("." in tail and tail.endswith(".exe"))) else tail
+            if tail_name in _RUNNER_OR_GIT:
+                self._note_program(command, tail_name)
+            is_flag = command.glue_is_flag
             if is_flag:
                 # A flag word the shell assembles from quoted pieces (``-""O'x'``, ``-n"O"'x'``,
                 # ``--"pager"=x``) may be any flag: a run flag, whose value may be a command.
@@ -1634,9 +1727,9 @@ class _Scan:
                     verb = _runs_delete(tail, False)
                 if not verb and command.glue_len > 2 and command.glue_head[0] == "-" and command.glue_head[1] != "-":
                     bname = tail_name if command.glue_len > _VERB_TAIL else _program_name(tail[2:])
-                    if bname.endswith(".rmtree"):
+                    if "." in bname and bname.endswith(".rmtree"):
                         verb = bname
-                    elif bname.endswith(_SUFFIX_VERBS):
+                    elif bname and bname[-1] in _SUFFIX_LAST and bname.endswith(_SUFFIX_VERBS):
                         verb = next(v for v in _SUFFIX_VERBS if bname.endswith(v))
                 if not verb:
                     if _is_delete_verb(name):
@@ -1863,14 +1956,13 @@ class _Scan:
         quote, parens = (command.quote, command.parens) if carry else ("", 0)
         switches = carry and command.switches
         if command.words or piped != command.piped:
-            context.command = _Command(piped, piped and self.line_download)
+            command.reset(piped, piped and self.line_download, quote, parens, carry, switches)
         else:
             # An empty command is reused: newline floods allocate nothing.
             command.reopen()
             command.comment_parens = 0
-        following = context.command
-        following.quote, following.quote_from, following.parens = quote, 0, parens
-        following.carry, following.switches = carry, switches
+            command.quote, command.quote_from, command.parens = quote, 0, parens
+            command.carry, command.switches = carry, switches
         self.previous = ""
         return False
 
@@ -1905,7 +1997,7 @@ class _Scan:
             self._record_outputs(command)
         if self.shell and command.program_at >= 0:
             prog = words[command.program_at]
-            if prog in _CD_VERBS or (("/" in prog or "\\" in prog or prog.endswith(".exe"))
+            if prog in _CD_VERBS or (("/" in prog or "\\" in prog or ("." in prog and prog.endswith(".exe")))
                                      and _program_name(prog) in _CD_VERBS):
                 self._change_directory(words[command.program_at + 1:])
         return False
@@ -2039,7 +2131,7 @@ def _trailing_comma(text: str, end: int) -> bool:
     return index >= 0 and text[index] == ","
 
 
-def _blocked(parts: list[tuple[str, bool, bool]], cwd: str) -> bool:
+def _blocked(parts: list[tuple[str, bool, bool]], cwd: str | tuple[_Place, ...]) -> bool:
     """Whether the command texts ``parts`` delete a root, download and run, or hold a BLOCK token or text."""
     scan = _Scan(cwd)
     texts = [(reading, shell, ticks) for text, shell, ticks in parts for reading in _fold_variables(text)]
@@ -2065,14 +2157,14 @@ def _blocked(parts: list[tuple[str, bool, bool]], cwd: str) -> bool:
     return scan.downloaded and (scan.evaluated or _SCRIPTBLOCK in every)
 
 
-def _delete_target_blocked(arguments: Mapping[str, Any], cwd: str) -> bool:
+def _delete_target_blocked(arguments: Mapping[str, Any], cwd: str | tuple[_Place, ...]) -> bool:
     path = arguments.get("path")
     if not isinstance(path, str):
         raise _Unreadable("file_delete needs a path")
-    places = _places(cwd)
+    places = _places(cwd) if isinstance(cwd, str) else cwd
     # The desktop client trims the path with Dart's ``String.trim`` (``\ufeff/`` is ``/``).
     return any(_is_root_target(reading, places) for reading in {path, path.strip(_DART_BLANKS)}) or (
-        path.strip().strip(_DART_BLANKS).rstrip(" .") == "")
+        path.strip().strip(_DART_BLANKS).strip().rstrip(" .") == "")
 
 
 def _blocks(tool_name: str, arguments: Any) -> bool:
@@ -2085,19 +2177,19 @@ def _blocks(tool_name: str, arguments: Any) -> bool:
     cwd = cwd.lower() if isinstance(cwd, str) else ""
     if sum(len(text) for text, _shell, _ticks in parts) + len(cwd) > _MAX_TEXT:
         return True  # too long to read: fail closed (bypass skips an ASK)
-    parts = [(text.lower(), shell, ticks) for text, shell, ticks in parts]
-    if parts and _blocked(parts, cwd):
-        return True
-    # An argv has no shell: each element is one word (``["-rf", "#", "/"]`` deletes ``/``),
-    # and the client runs ``command`` as one (``rg -e x / ; echo --pre=rm``).
     places = _places(cwd)
     if (dart_cwd := cwd.strip(_DART_BLANKS)) != cwd:
         places += _places(dart_cwd)  # the desktop client trims ``cwd`` with Dart's ``String.trim``
+    parts = [(text.lower(), shell, ticks) for text, shell, ticks in parts]
+    if parts and _blocked(parts, places):
+        return True
+    # An argv has no shell: each element is one word (``["-rf", "#", "/"]`` deletes ``/``),
+    # and the client runs ``command`` as one (``rg -e x / ; echo --pre=rm``).
     root_cache: dict[str, bool] = {}
     relatives: dict[str, _Place] = {}
-    if any(_argv_blocked(argv, places, root_cache, relatives) for argv in _argv_readings(name, arguments)):
+    if any(argv and _argv_blocked(argv, places, root_cache, relatives) for argv in _argv_readings(name, arguments)):
         return True
-    return name in _DELETE_TOOLS and _delete_target_blocked(arguments, cwd)
+    return name in _DELETE_TOOLS and _delete_target_blocked(arguments, places)
 
 
 def carries_commands(arguments: Any) -> bool:
