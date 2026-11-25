@@ -50,6 +50,7 @@ from sonder_runtime.domain.security.redaction import (
     redact_text,
 )
 from sonder_runtime.platform import logging as platform_logging
+from tests._fuzz_timing import assert_scales_linearly, machine_unit
 
 SEED = int(os.environ.get("FUZZ_SEED", "20261116"))
 PLANT_ITERATIONS = 1500
@@ -188,15 +189,7 @@ def _leaks(output: str, secret: Secret) -> str | None:
 
 
 def _machine_unit() -> float:
-    """Seconds one fixed pure-Python loop takes on this machine: yardstick for machine-relative budgets."""
-    best = float("inf")
-    for _ in range(5):
-        started = time.perf_counter()
-        total = 0
-        for index in range(200_000):
-            total += index & 3
-        best = min(best, time.perf_counter() - started)
-    return best
+    return machine_unit()
 
 
 def _assert_scales_linearly(
@@ -210,25 +203,16 @@ def _assert_scales_linearly(
     floor_s: float = 1e-3,
 ) -> None:
     """Interleaved running-minima 4x scaling check: linear ~4x, quadratic ~16x."""
-    assert len(big_input) >= 3 * len(small_input), label
-    small = big = float("inf")
-    ratio = 0.0
-    for repeats in (3, 5, 8):
-        for _ in range(repeats):
-            t0 = time.perf_counter()
-            fn(small_input)
-            small = min(small, time.perf_counter() - t0)
-            t0 = time.perf_counter()
-            fn(big_input)
-            big = min(big, time.perf_counter() - t0)
-        ratio = big / max(small, floor_s)
-        if ratio < ratio_limit:
-            break
-    assert ratio < ratio_limit, (
-        f"{label}: x{len(big_input) / len(small_input):.1f} input cost x{ratio:.1f} "
-        f"({small * 1000:.1f} ms -> {big * 1000:.1f} ms), super-linear (seed={SEED})"
+    assert_scales_linearly(
+        fn,
+        small_input,
+        big_input,
+        label=label,
+        ratio_limit=ratio_limit,
+        ceiling_s=ceiling_s,
+        floor_s=floor_s,
+        context=f"seed={SEED}",
     )
-    assert big < ceiling_s, f"{label}: {big:.3f}s exceeded ceiling {ceiling_s:.3f}s (seed={SEED})"
 
 
 class Timer:
