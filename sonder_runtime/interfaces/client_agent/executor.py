@@ -1760,6 +1760,34 @@ def _exec_run_code(args: Mapping[str, Any], root: Path, *, bypass: bool) -> Clie
     return ClientToolExecutionResult(ok=False, error=f"unsupported language on client: {language}")
 
 
+def _extract_raw_executable_token(command: str) -> str:
+    """Extract the leading executable token without POSIX backslash unescaping.
+
+    On POSIX, ``shlex.split(..., posix=True)`` interprets backslashes as escape
+    characters (turning ``\\\\host\\share\\evil.exe`` into ``\\hostshareevil.exe``
+    and ``\\??\\C:\\cmd.exe`` into ``??C:cmd.exe``) before executable-path
+    validation runs. Stripping only quote delimiters up to the first unquoted
+    whitespace preserves backslash prefixes so ``_reject_unsafe_path_spelling``
+    rejects UNC, extended, device, and NT-namespace spellings consistently on
+    Linux, macOS, and Windows.
+    """
+    quote: str | None = None
+    chars: list[str] = []
+    for ch in command.strip():
+        if quote is None:
+            if ch.isspace():
+                break
+            if ch in ('"', "'"):
+                quote = ch
+            else:
+                chars.append(ch)
+        elif ch == quote:
+            quote = None
+        else:
+            chars.append(ch)
+    return "".join(chars)
+
+
 def _exec_run_program(args: Mapping[str, Any], root: Path, *, bypass: bool) -> ClientToolExecutionResult:
     command = str(args.get("command") or "").strip()
     if not command:
@@ -1776,6 +1804,9 @@ def _exec_run_program(args: Mapping[str, Any], root: Path, *, bypass: bool) -> C
         maximum=120,
         name="timeout",
     )
+    raw_exe = _extract_raw_executable_token(command)
+    if raw_exe:
+        _reject_unsafe_path_spelling(raw_exe)
     try:
         raw_tokens = shlex.split(command, posix=(os.name != "nt"))
     except ValueError as exc:
@@ -1784,7 +1815,7 @@ def _exec_run_program(args: Mapping[str, Any], root: Path, *, bypass: bool) -> C
         tok[1:-1] if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in {'"', "'"} else tok
         for tok in raw_tokens
     ]
-    if not argv:
+    if not argv or not argv[0].strip():
         return ClientToolExecutionResult(ok=False, error="command is required")
     _reject_unsafe_path_spelling(argv[0])
     rc, out, err = _run_process_sync(argv, cwd=cwd, timeout=timeout)

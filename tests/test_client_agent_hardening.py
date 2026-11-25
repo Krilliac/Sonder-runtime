@@ -363,16 +363,64 @@ def test_run_program_rejects_unc_and_nt_executable_paths(monkeypatch: pytest.Mon
         raise AssertionError("subprocess must not be launched for unsafe executable spelling")
 
     monkeypatch.setattr(executor_mod, "_run_process_sync", fail_if_called)
+    orig_split = executor_mod.shlex.split
     policy = ClientAgentPolicy(workspace_root=tmp_path, mode="auto")
-    for hostile in (
+    hostile_commands = (
         r"\\attacker.invalid\share\evil.exe",
         r"//attacker.invalid/share/evil.exe",
+        r"\\?\C:\Windows\System32\cmd.exe",
+        r"\\.\pipe\evil",
         r"\??\C:\Windows\System32\cmd.exe",
+        r"/??/C:/Windows/System32/cmd.exe",
+        r"\/attacker.invalid/share/evil.exe",
+        r"/\attacker.invalid/share/evil.exe",
+        r'"\\attacker.invalid\share\evil.exe" --flag',
+        r"'\\attacker.invalid\share\evil.exe' --flag",
+        r'""\\attacker.invalid\share\evil.exe',
+        r"C:evil.exe",
         "CON",
-    ):
-        res = execute_client_tool("run_program", {"command": hostile}, policy=policy)
-        assert res.ok is False, hostile
-        assert called == []
+    )
+    for use_posix in (True, False):
+        monkeypatch.setattr(
+            executor_mod.shlex,
+            "split",
+            lambda cmd, posix=True, _flag=use_posix: orig_split(cmd, posix=_flag),
+        )
+        for hostile in hostile_commands:
+            res = execute_client_tool("run_program", {"command": hostile}, policy=policy)
+            assert res.ok is False, (use_posix, hostile)
+            assert res.error != "internal tool execution error", (use_posix, hostile, res.error)
+            assert called == [], (use_posix, hostile, called)
+
+    # Legitimate quoted and POSIX-escaped commands still pass executable validation.
+    seen_argv: list[list[str]] = []
+
+    def record_call(argv: list[str], **kwargs: object) -> tuple[int, str, str]:
+        seen_argv.append(argv)
+        return 0, "ok", ""
+
+    monkeypatch.setattr(executor_mod, "_run_process_sync", record_call)
+    monkeypatch.setattr(
+        executor_mod.shlex,
+        "split",
+        lambda cmd, posix=True: orig_split(cmd, posix=True),
+    )
+    res_posix_escaped = execute_client_tool(
+        "run_program",
+        {"command": 'python -c "print(\\"it\'s\\")"'},
+        policy=policy,
+    )
+    assert res_posix_escaped.ok is True, res_posix_escaped
+    assert seen_argv[-1] == ["python", "-c", "print(\"it's\")"]
+
+    monkeypatch.setattr(executor_mod.shlex, "split", orig_split)
+    res_quoted_exe = execute_client_tool(
+        "run_program",
+        {"command": f'"{sys.executable}" -c "print(123)"'},
+        policy=policy,
+    )
+    assert res_quoted_exe.ok is True, res_quoted_exe
+    assert seen_argv[-1][0] == sys.executable
 
 
 def test_file_bounds_numeric_edge_cases_and_walk_depth(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
