@@ -50,6 +50,7 @@ from ..sse import KEEPALIVE_FRAME, SSEKeepAlive
 from ...orchestration_commands import reply_receipt_fields
 from .approvals import turn_refusal_receipt
 from .config_wiring import HTTPRequestError, LiveSessionCaptureFailure
+from .observatory_routes import is_legacy_error_reply
 from .saas_auth import rate_limit_and_meter
 
 
@@ -80,10 +81,6 @@ def _split_tier_labels(raw: object) -> list[str]:
     if isinstance(raw, (list, tuple)):
         return [str(part).strip() for part in raw if str(part).strip()]
     return []
-
-
-def _is_error_reply_text(reply: object) -> bool:
-    return isinstance(reply, str) and reply.lstrip().startswith(("ERROR:", "ERROR contacting "))
 
 
 def _run_observed_ensemble(
@@ -118,7 +115,7 @@ def _run_observed_ensemble(
         )
         raise
     elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
-    if _is_error_reply_text(result):
+    if is_legacy_error_reply(result):
         report_ensemble_event(
             "failed",
             {
@@ -167,7 +164,7 @@ def _run_observed_fanout(
         )
         raise
     elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
-    if _is_error_reply_text(result):
+    if is_legacy_error_reply(result):
         report_fanout_event(
             "failed",
             {
