@@ -1200,3 +1200,24 @@ def test_metered_remote_spend_reserves_tool_schema_bytes_and_accounts_tool_calls
     )
     assert len(resp.tool_calls) == 1
     assert ledger.today_usd() == Decimal("0.002000")
+
+
+def test_generate_accepts_minimal_duck_typed_request_without_stream_or_history():
+    captured: list[dict] = []
+
+    def transport(url, payload, headers, timeout):
+        captured.append(payload)
+        return {
+            "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        }
+
+    gw = OpenAICompatibleGateway(_local_cfg(), transport=transport)
+    stub = type("MinimalRequest", (), {"options": {}, "tier": "code", "prompt": "hello", "system": None})()
+    resp = gw.generate(stub, _ctx())
+    assert resp.text == "ok"
+    assert captured[0]["stream"] is False
+    assert captured[0]["messages"] == [{"role": "user", "content": "hello"}]
+
+    empty_stub = type("EmptyRequest", (), {"options": {}, "tier": "code", "prompt": "   ", "system": None})()
+    with pytest.raises(InvalidInput, match="prompt is empty"):
+        gw.generate(empty_stub, _ctx())

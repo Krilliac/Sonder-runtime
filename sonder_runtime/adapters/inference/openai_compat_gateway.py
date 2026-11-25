@@ -1769,7 +1769,9 @@ class OpenAICompatibleGateway:
     ) -> ModelResponse:
         self._openai_call.response_meta = {}
         has_prompt = bool((request.prompt or "").strip())
-        if not has_prompt and not _history_ends_with_tool_result(request.history):
+        if not has_prompt and not _history_ends_with_tool_result(
+            getattr(request, "history", ())
+        ):
             raise InvalidInput("model request prompt is empty")
         cfg = self._resolved_config()
         self._enforce_consent(cfg, context)
@@ -1777,7 +1779,7 @@ class OpenAICompatibleGateway:
 
         options = dict(request.options or {})
         live = stream_sink.call_stream()
-        use_stream = live is not None or bool(request.stream)
+        use_stream = live is not None or bool(getattr(request, "stream", False))
         model = str(options.get("model") or cfg.model_for_tier(request.tier) or request.tier or "default")
         logger.debug(f"OpenAICompatibleGateway.generate: model={model!r}, base_url={redact_url(cfg.base_url)!r}, timeout={timeout}")
         payload: dict[str, Any] = {
@@ -2173,7 +2175,8 @@ class OpenAICompatibleGateway:
         messages = []
         if request.system:
             messages.append({"role": "system", "content": request.system})
-        for entry in request.history or ():
+        history = getattr(request, "history", None) or ()
+        for entry in history:
             if isinstance(entry, Mapping) and entry.get("role"):
                 role = entry["role"]
                 if role == "assistant" and entry.get("tool_calls") is not None:
@@ -2211,7 +2214,7 @@ class OpenAICompatibleGateway:
                     messages.append({"role": role, "content": entry["content"]})
             elif isinstance(entry, (list, tuple)) and len(entry) == 2:
                 messages.append({"role": entry[0], "content": entry[1]})
-        if (request.prompt or "").strip() or not _history_ends_with_tool_result(request.history):
+        if (request.prompt or "").strip() or not _history_ends_with_tool_result(history):
             messages.append({"role": "user", "content": request.prompt})
         return messages
 
