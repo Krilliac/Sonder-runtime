@@ -7,7 +7,7 @@ over the application-owned registry and executor ports.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import time
 from typing import Any
@@ -37,7 +37,7 @@ class PortInvocationOutput:
     output: Any = ""
     error_code: str = ""
     error: str = ""
-    metadata: Mapping[str, Any] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 class _CancellationAdapter:

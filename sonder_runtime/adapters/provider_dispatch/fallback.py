@@ -22,6 +22,7 @@ import dataclasses
 import logging
 import threading
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from ...application.context import OperationContext
 from ...application.ports.model_gateway import (
@@ -82,25 +83,32 @@ class PreSendFallbackGateway:
     # Capability, admission and route metadata describe the primary: the
     # fallback is an outage path, not a second advertised provider.
     @property
-    def capabilities(self):
-        return getattr(self._primary, "capabilities", frozenset())
+    def capabilities(self) -> frozenset[str]:
+        raw: object = getattr(self._primary, "capabilities", frozenset())
+        if isinstance(raw, (frozenset, set, tuple, list)):
+            return frozenset(str(item) for item in raw)
+        return frozenset()
 
     @property
-    def request_admission(self):
-        return self._primary.request_admission
+    def request_admission(self) -> Any:
+        primary: Any = self._primary
+        return primary.request_admission
 
-    def resolve_route(self, request: ModelRequest, context: OperationContext):
+    def resolve_route(self, request: ModelRequest, context: OperationContext) -> Any:
         resolver = getattr(self._primary, "resolve_route", None)
         return resolver(request, context) if callable(resolver) else None
 
-    def capability_health(self):
-        return self._primary.capability_health()
+    def capability_health(self) -> Any:
+        primary: Any = self._primary
+        return primary.capability_health()
 
-    def backend_identity(self, model: str | None = None):
-        return self._primary.backend_identity(model)
+    def backend_identity(self, model: str | None = None) -> Any:
+        primary: Any = self._primary
+        return primary.backend_identity(model)
 
-    def routing_identity(self, model: str | None = None):
-        return self._primary.routing_identity(model)
+    def routing_identity(self, model: str | None = None) -> Any:
+        primary: Any = self._primary
+        return primary.routing_identity(model)
 
     def served_tier_models(self) -> Mapping[str, Mapping[str, str]]:
         reporter = getattr(self._primary, "served_tier_models", None)

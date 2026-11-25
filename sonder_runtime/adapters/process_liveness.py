@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from typing import SupportsIndex
 
 
 PROCESS_ALIVE = "alive"
@@ -27,7 +28,12 @@ def _parse_pid(pid: object) -> int | None:
     if isinstance(pid, bool):
         return None
     try:
-        parsed_pid = int(pid, 10) if isinstance(pid, str) else operator.index(pid)
+        if isinstance(pid, str):
+            parsed_pid = int(pid, 10)
+        elif isinstance(pid, SupportsIndex):
+            parsed_pid = operator.index(pid)
+        else:
+            return None
     except (TypeError, ValueError, OverflowError):
         return None
     if parsed_pid <= 0 or parsed_pid > 0xFFFFFFFF:
@@ -103,7 +109,7 @@ def pid_alive(pid: object) -> bool:
     return state != PROCESS_DEAD
 
 
-def _windows_native_process_probe(pid: int):
+def _windows_native_process_probe(pid: int) -> tuple[str, int | None]:
     """Return a raw Windows probe result and creation FILETIME integer."""
     try:
         import ctypes
@@ -121,7 +127,11 @@ def _windows_native_process_probe(pid: int):
         wait_object_0 = 0x00000000
         wait_timeout = 0x00000102
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        win_dll = getattr(ctypes, "WinDLL", None)
+        get_last_error = getattr(ctypes, "get_last_error", None)
+        if win_dll is None or get_last_error is None:
+            return _WINDOWS_API_UNAVAILABLE, None
+        kernel32 = win_dll("kernel32", use_last_error=True)
         kernel32.OpenProcess.argtypes = (
             ctypes.c_ulong,
             ctypes.c_int,
@@ -147,7 +157,7 @@ def _windows_native_process_probe(pid: int):
             pid,
         )
         if not handle:
-            error = ctypes.get_last_error()
+            error = get_last_error()
             if error == error_invalid_parameter:
                 return _WINDOWS_TERMINATED, None
             if error == error_access_denied:
@@ -180,7 +190,7 @@ def _windows_native_process_probe(pid: int):
         return _WINDOWS_API_UNAVAILABLE, None
 
 
-def _windows_probe_process(pid: int):
+def _windows_probe_process(pid: int) -> tuple[str, str | None]:
     outcome, creation_time = _windows_native_process_probe(pid)
     if outcome == _WINDOWS_TERMINATED:
         return PROCESS_DEAD, None
@@ -207,7 +217,7 @@ def _read_linux_boot_id() -> str:
     ).strip()
 
 
-def _parse_linux_stat(raw: str, expected_pid: int | None = None):
+def _parse_linux_stat(raw: str, expected_pid: int | None = None) -> dict[str, int | str] | None:
     """Extract state/starttime even when Linux's parenthesized comm has ``)``."""
     if not isinstance(raw, str):
         return None
@@ -231,7 +241,7 @@ def _parse_linux_stat(raw: str, expected_pid: int | None = None):
     return {"pid": stat_pid, "state": state, "starttime": starttime}
 
 
-def _linux_probe_process(pid: int):
+def _linux_probe_process(pid: int) -> tuple[str, str | None]:
     try:
         raw = _read_linux_stat(pid)
     except OSError as exc:
@@ -258,7 +268,7 @@ def _linux_probe_process(pid: int):
     return PROCESS_ALIVE, identity
 
 
-def _run_ps(pid: int):
+def _run_ps(pid: int) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["ps", "-o", "stat=", "-o", "lstart=", "-p", str(pid)],
         stdin=subprocess.DEVNULL,
@@ -270,7 +280,7 @@ def _run_ps(pid: int):
     )
 
 
-def _posix_probe_process(pid: int):
+def _posix_probe_process(pid: int) -> tuple[str, str | None]:
     try:
         result = _run_ps(pid)
     except (OSError, subprocess.SubprocessError, ValueError):

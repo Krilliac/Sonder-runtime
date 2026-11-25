@@ -35,7 +35,7 @@ class ModelCallError(urllib.error.URLError):
         served_origin: str | None = None,
         worker_id: str | None = None,
         pool_refusal: str | None = None,
-    ):
+    ) -> None:
         self.kind = str(kind or "unknown")
         self.detail = str(detail or self.kind)[:800]
         self.transient = bool(transient)
@@ -43,7 +43,7 @@ class ModelCallError(urllib.error.URLError):
         self.attempts = max(0, int(attempts if attempts is not None else 1))
         self.cloud = bool(cloud)
         try:
-            retry_after = float(retry_after_seconds)
+            retry_after = float(retry_after_seconds) if retry_after_seconds is not None else None
         except (TypeError, ValueError):
             retry_after = None
         self.retry_after_seconds = (

@@ -4,8 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 import numbers
-from collections.abc import Mapping
-from typing import Protocol, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any, Protocol
 
 from ..context import OperationContext
 from ...domain.common.errors import DependencyUnavailable, SonderError
@@ -26,8 +26,8 @@ class ModelRequest:
     prompt: str
     tier: str
     system: str = ""
-    history: tuple = ()
-    options: dict = field(default_factory=dict)
+    history: tuple[Any, ...] = ()
+    options: dict[str, Any] = field(default_factory=dict)
     # Durable route telemetry belongs beside the request, never in provider options.
     routing_metadata: Mapping[str, object] = field(default_factory=dict)
     stream: bool = False
@@ -163,24 +163,25 @@ def optional_token_count(value: object, field_name: str) -> int | None:
 
 def require_embedding_vector(value: object) -> tuple[float, ...]:
     """Normalize a non-empty, finite numeric embedding vector."""
-    if isinstance(value, (str, bytes)):
+    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
         raise DependencyUnavailable("model provider returned an invalid embedding")
     try:
-        items = tuple(value)  # type: ignore[arg-type]
+        items: tuple[object, ...] = tuple(value)
     except TypeError as exc:
         raise DependencyUnavailable(
             "model provider returned an invalid embedding"
         ) from exc
     if not items:
         raise DependencyUnavailable("model provider returned an empty embedding")
-    if any(
-        isinstance(item, bool)
-        or not isinstance(item, numbers.Real)
-        or not math.isfinite(float(item))
-        for item in items
-    ):
-        raise DependencyUnavailable("model provider returned an invalid embedding")
-    return tuple(float(item) for item in items)
+    floats: list[float] = []
+    for item in items:
+        if isinstance(item, bool) or not isinstance(item, numbers.Real):
+            raise DependencyUnavailable("model provider returned an invalid embedding")
+        numeric = float(item)
+        if not math.isfinite(numeric):
+            raise DependencyUnavailable("model provider returned an invalid embedding")
+        floats.append(numeric)
+    return tuple(floats)
 
 
 class ModelGateway(Protocol):
