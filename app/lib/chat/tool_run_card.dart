@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../api/stream.dart' show ChatStreamToolEvent, ToolRunResult;
 import '../theme.dart';
+import '../ui/status_line.dart' show compactCount;
 import '../ui/status_row.dart' show StatusMark;
 import '../ui/strings.dart';
 import '../workspace_ui.dart' show StatusKind, WorkspaceNotice;
@@ -48,12 +50,22 @@ class ToolRunCard extends StatefulWidget {
   final ToolDecisionCallback? onDeny;
   final VoidCallback? onChangeMode;
 
+  /// True once the enclosing turn is no longer streaming. Prevents synthetic
+  /// `delta.tool_calls` cards (which stream with `state: 'running'`) or
+  /// aborted SSE tool calls from staying stuck on a running indicator.
+  final bool turnEnded;
+
+  /// True when the enclosing turn ended with an error, timeout, or disconnect.
+  final bool turnFailed;
+
   const ToolRunCard({
     super.key,
     required this.event,
     this.onApprove,
     this.onDeny,
     this.onChangeMode,
+    this.turnEnded = false,
+    this.turnFailed = false,
   });
 
   @override
@@ -61,16 +73,27 @@ class ToolRunCard extends StatefulWidget {
 }
 
 class _ToolRunCardState extends State<ToolRunCard> {
+  final ScrollController _codeScroll = ScrollController();
+  bool _codeDetached = false;
+  bool _codeScrollScheduled = false;
   bool _busy = false;
   String _pendingAction = '';
   String _submittedNotice = '';
   ApprovalOutcome? _outcome;
 
   @override
+  void dispose() {
+    _codeScroll.dispose();
+    super.dispose();
+  }
+
+  @override
   void didUpdateWidget(covariant ToolRunCard oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.event.callId != widget.event.callId ||
-        oldWidget.event.state != widget.event.state) {
+        oldWidget.event.state != widget.event.state ||
+        oldWidget.turnEnded != widget.turnEnded ||
+        oldWidget.turnFailed != widget.turnFailed) {
       _busy = false;
       _pendingAction = '';
       if (!widget.event.isAwaitingApproval &&
@@ -79,6 +102,67 @@ class _ToolRunCardState extends State<ToolRunCard> {
         _outcome = null;
       }
     }
+    final oldTextLen =
+        oldWidget.event.code.length + oldWidget.event.detail.length;
+    final newTextLen = widget.event.code.length + widget.event.detail.length;
+    if (!widget.turnEnded &&
+        widget.event.state == 'running' &&
+        newTextLen > oldTextLen &&
+        !_codeDetached) {
+      _scrollCodeToEnd();
+    }
+  }
+
+  void _scrollCodeToEnd() {
+    if (_codeScrollScheduled) return;
+    _codeScrollScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _codeScrollScheduled = false;
+      if (!mounted || _codeDetached || !_codeScroll.hasClients) return;
+      final position = _codeScroll.position;
+      if (position.userScrollDirection == ScrollDirection.forward) {
+        _codeDetached = true;
+        return;
+      }
+      if (position.maxScrollExtent - position.pixels > 0.5) {
+        position.jumpTo(position.maxScrollExtent);
+      }
+    });
+  }
+
+  bool _onCodeScroll(ScrollNotification notification) {
+    final distance =
+        notification.metrics.maxScrollExtent - notification.metrics.pixels;
+    if (notification is UserScrollNotification) {
+      if (notification.direction == ScrollDirection.forward) {
+        _codeDetached = true;
+      } else if (notification.direction == ScrollDirection.reverse &&
+          distance <= 24) {
+        _codeDetached = false;
+      }
+    } else if (notification is ScrollUpdateNotification) {
+      final delta = notification.scrollDelta ?? 0;
+      if (delta < -0.5 && distance > 2) {
+        _codeDetached = true;
+      } else if (delta > 0 && distance <= 24) {
+        _codeDetached = false;
+      }
+    } else if (notification is ScrollEndNotification && distance <= 4) {
+      _codeDetached = false;
+    }
+    return false;
+  }
+
+  String _effectiveState(ChatStreamToolEvent e) {
+    if (!widget.turnEnded) return e.state;
+    final inProgress = e.state == 'running' ||
+        e.state == 'approved' ||
+        e.state == 'awaiting_approval' ||
+        (widget.turnFailed && e.state == 'awaiting_client_approval');
+    if (!inProgress) return e.state;
+    if (widget.turnFailed) return 'interrupted';
+    if (!e.isClientTarget) return 'done';
+    return e.state;
   }
 
   Future<void> _decide(
@@ -114,7 +198,7 @@ class _ToolRunCardState extends State<ToolRunCard> {
     });
   }
 
-  (StatusKind, String) _statusFor(ChatStreamToolEvent e) => switch (e.state) {
+  (StatusKind, String) _statusFor(String state) => switch (state) {
         'awaiting_approval' => (StatusKind.ask, 'approve?'),
         'awaiting_client_approval' => (StatusKind.ask, 'approve on PC?'),
         'approved' => (StatusKind.ok, 'approved'),
@@ -123,15 +207,17 @@ class _ToolRunCardState extends State<ToolRunCard> {
         'denied' => (StatusKind.refused, 'denied'),
         'expired' => (StatusKind.warn, 'expired'),
         'refused' => (StatusKind.refused, 'refused'),
+        'interrupted' => (StatusKind.fail, 'interrupted'),
         'error' => (StatusKind.fail, 'error'),
-        _ => (StatusKind.note, e.state.isEmpty ? 'tool' : e.state),
+        _ => (StatusKind.note, state.isEmpty ? 'tool' : state),
       };
 
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final e = widget.event;
-    final (kind, word) = _statusFor(e);
+    final effectiveState = _effectiveState(e);
+    final (kind, word) = _statusFor(effectiveState);
     final detectedChars = <String>{
       ...e.bidiChars,
       ...detectHiddenBidiChars(e.code),
@@ -140,8 +226,14 @@ class _ToolRunCardState extends State<ToolRunCard> {
       for (final val in e.args.values) ...detectHiddenBidiChars(val),
     }.toList(growable: false);
     final showBidi = e.bidiWarning || detectedChars.isNotEmpty;
-    final awaitingDecision =
-        e.isAwaitingApproval || e.isAwaitingClientApproval;
+    final awaitingDecision = effectiveState == 'awaiting_approval' ||
+        (e.isClientTarget && effectiveState == 'awaiting_client_approval');
+    final liveStreamingDelta = !widget.turnEnded &&
+        effectiveState == 'running' &&
+        e.result == null &&
+        e.error == null &&
+        e.code.isEmpty &&
+        e.detail.isNotEmpty;
     // Approve is offered only next to the payload it approves.
     final canAct = awaitingDecision &&
         e.hasPayload &&
@@ -157,7 +249,11 @@ class _ToolRunCardState extends State<ToolRunCard> {
         color: tokens.panel,
         borderRadius: BorderRadius.circular(SonderRadius.card),
         border: Border.all(
-          color: awaitingDecision ? tokens.warn : tokens.hairline,
+          color: awaitingDecision
+              ? tokens.warn
+              : (effectiveState == 'interrupted'
+                  ? tokens.danger
+                  : tokens.hairline),
         ),
       ),
       child: Column(
@@ -183,6 +279,12 @@ class _ToolRunCardState extends State<ToolRunCard> {
                 Text(
                   'call ${SonderStrings.shortCallId(e.callId)}',
                   style: tokens.mono(12, color: tokens.muted),
+                ),
+              if (liveStreamingDelta)
+                Text(
+                  'streaming · ${compactCount(e.detail.length)} chars',
+                  key: const Key('tool-run-live-delta'),
+                  style: tokens.mono(11, color: tokens.info),
                 ),
               if (e.backend.isNotEmpty) _BackendTrustBadge(backend: e.backend),
             ],
@@ -211,10 +313,14 @@ class _ToolRunCardState extends State<ToolRunCard> {
                 borderRadius: BorderRadius.circular(SonderRadius.control),
                 border: Border.all(color: tokens.hairline),
               ),
-              child: SingleChildScrollView(
-                child: SelectableText(
-                  e.code.isNotEmpty ? e.code : e.detail,
-                  style: tokens.mono(12, color: tokens.text),
+              child: NotificationListener<ScrollNotification>(
+                onNotification: _onCodeScroll,
+                child: SingleChildScrollView(
+                  controller: _codeScroll,
+                  child: SelectableText(
+                    e.code.isNotEmpty ? e.code : e.detail,
+                    style: tokens.mono(12, color: tokens.text),
+                  ),
                 ),
               ),
             ),
@@ -429,9 +535,13 @@ class _BackendTrustBadge extends StatelessWidget {
         children: [
           Icon(icon, size: 12, color: color),
           const SizedBox(width: SonderSpace.xs),
-          Text(
-            label,
-            style: tokens.mono(11, color: color, weight: FontWeight.w600),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: tokens.mono(11, color: color, weight: FontWeight.w600),
+            ),
           ),
         ],
       ),

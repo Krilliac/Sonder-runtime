@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/semantics.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../api.dart' show WorkRun;
@@ -12,13 +12,15 @@ import '../ui/kit.dart' show QuietAction, SonderReveal, showSonderToast;
 import '../ui/status_line.dart';
 import '../ui/status_vocab.dart' show statusGlyphs;
 import '../workspace_ui.dart'
-    show ConversationContent, StatusKind, WorkspaceNotice, conversationWidth;
+    show ConversationContent, StatusKind, conversationWidth;
 import 'backend.dart';
 import 'classify.dart';
 import 'controller.dart';
 import 'live_line.dart';
 import 'refusal.dart';
 import 'route_overflow_chip.dart';
+import 'streaming_error_banner.dart';
+import 'streaming_reasoning_panel.dart';
 import 'tool_run_card.dart';
 import 'work_run_card.dart';
 
@@ -109,20 +111,119 @@ class Transcript extends StatefulWidget {
 class _TranscriptState extends State<Transcript> {
   int? _firstId;
   int _maxSeen = 0;
+  int _lastPendingOutputLength = 0;
+  int _lastLiveToolsCount = 0;
+  bool _wasStreaming = false;
+  bool _detached = false;
 
   /// Entries that should enter with motion when their row is first built.
   final Set<int> _entering = <int>{};
+
+  int _pendingOutputLength(List<ChatEntry> entries) {
+    if (entries.isEmpty || !entries.last.message.pending) return 0;
+    final msg = entries.last.message;
+    return msg.content.length + msg.reasoning.length;
+  }
 
   @override
   void initState() {
     super.initState();
     _track(widget.entries, opening: true);
+    _lastPendingOutputLength = _pendingOutputLength(widget.entries);
+    _lastLiveToolsCount = widget.live.value?.toolCalls.length ?? 0;
+    _wasStreaming = widget.live.value != null;
+    widget.live.addListener(_onLiveChanged);
   }
 
   @override
   void didUpdateWidget(covariant Transcript oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.live, widget.live)) {
+      oldWidget.live.removeListener(_onLiveChanged);
+      widget.live.addListener(_onLiveChanged);
+      _lastLiveToolsCount = widget.live.value?.toolCalls.length ?? 0;
+      _wasStreaming = widget.live.value != null;
+    }
+    if (!identical(oldWidget.scroll, widget.scroll)) {
+      _detached = isTranscriptAutoScrollDetached(widget.scroll);
+    } else if (_detached && !isTranscriptAutoScrollDetached(widget.scroll)) {
+      _detached = false;
+    }
+    final prevFirst = _firstId;
     _track(widget.entries);
+    // Switched to another thread: clear detached state.
+    if (_firstId != prevFirst) {
+      _setDetached(false, syncController: true);
+    }
+    final pendingLen = _pendingOutputLength(widget.entries);
+    if (pendingLen > _lastPendingOutputLength && !_detached) {
+      scrollTranscriptToEnd(widget.scroll);
+    }
+    _lastPendingOutputLength = pendingLen;
+  }
+
+  @override
+  void dispose() {
+    widget.live.removeListener(_onLiveChanged);
+    super.dispose();
+  }
+
+  void _onLiveChanged() {
+    final isStreaming = widget.live.value != null;
+    final toolsCount = widget.live.value?.toolCalls.length ?? 0;
+    if (toolsCount > _lastLiveToolsCount && !_detached) {
+      scrollTranscriptToEnd(widget.scroll);
+    }
+    _lastLiveToolsCount = toolsCount;
+    if (isStreaming != _wasStreaming) {
+      _wasStreaming = isStreaming;
+      if (_detached && mounted) setState(() {});
+    }
+  }
+
+  void _setDetached(bool value, {bool syncController = false}) {
+    if (syncController) {
+      final state = _autoScrollState[widget.scroll] ??= _TranscriptAutoScroll();
+      state.userDetached = value;
+    }
+    if (_detached != value && mounted) {
+      setState(() => _detached = value);
+    }
+  }
+
+  bool _onScrollNotification(ScrollNotification notification) {
+    if (notification.depth != 0) return false;
+    final distance =
+        notification.metrics.maxScrollExtent - notification.metrics.pixels;
+    final state = _autoScrollState[widget.scroll] ??= _TranscriptAutoScroll();
+    if (notification is UserScrollNotification) {
+      if (notification.direction == ScrollDirection.forward && distance > 2) {
+        state.userDetached = true;
+        _setDetached(true);
+      } else if (notification.direction == ScrollDirection.reverse &&
+          distance <= 48) {
+        state.userDetached = false;
+        _setDetached(false);
+      }
+    } else if (notification is ScrollUpdateNotification) {
+      final delta = notification.scrollDelta ?? 0;
+      if (delta < -0.5 && distance > 2) {
+        state.userDetached = true;
+        _setDetached(true);
+      } else if (delta > 0 && distance <= 48) {
+        state.userDetached = false;
+        _setDetached(false);
+      }
+    } else if (notification is ScrollEndNotification && distance <= 4) {
+      state.userDetached = false;
+      _setDetached(false);
+    }
+    return false;
+  }
+
+  void _jumpToLatest() {
+    _setDetached(false, syncController: true);
+    scrollTranscriptToEnd(widget.scroll, force: true);
   }
 
   void _track(List<ChatEntry> entries, {bool opening = false}) {
@@ -164,37 +265,79 @@ class _TranscriptState extends State<Transcript> {
     final entries = widget.entries;
     final header = widget.header;
     final offset = header == null ? 0 : 1;
-    return ListView.builder(
-      key: const Key('chat-transcript'),
-      controller: widget.scroll,
-      padding: const EdgeInsets.fromLTRB(
-          SonderSpace.lg, SonderSpace.xxl, SonderSpace.lg, SonderSpace.lg),
-      itemCount: entries.length + offset,
-      findChildIndexCallback: (key) {
-        if (key is! ValueKey<int>) return null;
-        final i = entries.indexWhere((e) => e.id == key.value);
-        return i < 0 ? null : i + offset;
-      },
-      itemBuilder: (_, i) {
-        if (i < offset) return header!;
-        final index = i - offset;
-        final entry = entries[index];
-        return Center(
-          key: ValueKey<int>(entry.id),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: conversationWidth),
-            child: _EnterOnce(
-              animate: _entering.remove(entry.id),
-              child: TranscriptTurn(
-                entry: entry,
-                live: widget.live,
-                actions: widget.actions,
-                isLast: index == entries.length - 1,
+    final list = NotificationListener<ScrollNotification>(
+      onNotification: _onScrollNotification,
+      child: ListView.builder(
+        key: const Key('chat-transcript'),
+        controller: widget.scroll,
+        padding: const EdgeInsets.fromLTRB(
+            SonderSpace.lg, SonderSpace.xxl, SonderSpace.lg, SonderSpace.lg),
+        itemCount: entries.length + offset,
+        findChildIndexCallback: (key) {
+          if (key is! ValueKey<int>) return null;
+          final i = entries.indexWhere((e) => e.id == key.value);
+          return i < 0 ? null : i + offset;
+        },
+        itemBuilder: (_, i) {
+          if (i < offset) return header!;
+          final index = i - offset;
+          final entry = entries[index];
+          return Center(
+            key: ValueKey<int>(entry.id),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: conversationWidth),
+              child: _EnterOnce(
+                animate: _entering.remove(entry.id),
+                child: TranscriptTurn(
+                  entry: entry,
+                  live: widget.live,
+                  actions: widget.actions,
+                  isLast: index == entries.length - 1,
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+    final tokens = SonderTokens.of(context);
+    final streaming = widget.live.value != null;
+    // Keep Stack mounted unconditionally so toggling the floating jump button
+    // never reparents or resets ListView's ScrollPosition.
+    return Stack(
+      children: [
+        list,
+        if (_detached)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: SonderSpace.sm,
+            child: Center(
+              child: Semantics(
+                button: true,
+                label: streaming
+                    ? 'Jump to live streaming output'
+                    : 'Jump to latest message',
+                child: FilledButton.tonalIcon(
+                  key: const Key('transcript-jump-to-bottom'),
+                  onPressed: _jumpToLatest,
+                  icon: const Icon(Icons.arrow_downward_rounded, size: 16),
+                  label: Text(streaming ? 'Streaming' : 'Latest'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: tokens.raised,
+                    foregroundColor: tokens.text,
+                    side: BorderSide(color: tokens.hairlineStrong),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(SonderRadius.pill),
+                    ),
+                    minimumSize: const Size(0, 36),
+                    tapTargetSize: MaterialTapTargetSize.padded,
+                  ),
+                ),
               ),
             ),
           ),
-        );
-      },
+      ],
     );
   }
 }
@@ -224,17 +367,73 @@ class _EnterOnce extends StatelessWidget {
   }
 }
 
-/// Scroll to the end only when the reader is already near it, unless
-/// [force] (the reader just sent something). A reader scrolled up to an
-/// older answer is not yanked away by a streaming reply (P2-17).
+class _TranscriptAutoScroll {
+  bool userDetached = false;
+  bool callbackScheduled = false;
+  bool pendingForce = false;
+}
+
+final Expando<_TranscriptAutoScroll> _autoScrollState =
+    Expando<_TranscriptAutoScroll>('transcriptAutoScroll');
+
+/// Whether the reader scrolled away from the bottom of [scroll], pausing
+/// automatic scroll-to-bottom during streaming.
+bool isTranscriptAutoScrollDetached(ScrollController scroll) =>
+    _autoScrollState[scroll]?.userDetached ?? false;
+
+/// Scroll to the end only when the reader is attached to the bottom, unless
+/// [force] (the reader just sent a message, switched threads, or tapped
+/// "Latest"). Coalesces rapid streaming frames and never fights an active
+/// upward scroll gesture by the reader (P2-17).
 void scrollTranscriptToEnd(ScrollController scroll, {bool force = false}) {
+  final state = _autoScrollState[scroll] ??= _TranscriptAutoScroll();
+  if (force) {
+    state.userDetached = false;
+    state.pendingForce = true;
+  } else if (state.userDetached) {
+    return;
+  }
+  if (state.callbackScheduled) return;
+  state.callbackScheduled = true;
   WidgetsBinding.instance.addPostFrameCallback((_) {
+    state.callbackScheduled = false;
+    final forced = state.pendingForce;
+    state.pendingForce = false;
     if (!scroll.hasClients) return;
+    if (!forced && state.userDetached) return;
     final position = scroll.position;
-    final near = position.maxScrollExtent - position.pixels < 160;
-    if (!force && !near) return;
-    scroll.animateTo(position.maxScrollExtent,
-        duration: SonderMotion.medium, curve: SonderMotion.standard);
+    if (!forced && position.userScrollDirection == ScrollDirection.forward) {
+      state.userDetached = true;
+      return;
+    }
+    final distance = position.maxScrollExtent - position.pixels;
+    if (distance <= 0.5) return;
+    if (!forced && distance >= 160) {
+      state.userDetached = true;
+      return;
+    }
+    if (!forced) {
+      // Jump cleanly on high-frequency streaming deltas so we never restart a
+      // 220ms animation every frame or steal the first pixels of an upward drag.
+      position.jumpTo(position.maxScrollExtent);
+    } else {
+      final target = position.maxScrollExtent;
+      scroll
+          .animateTo(
+            target,
+            duration: SonderMotion.medium,
+            curve: SonderMotion.standard,
+          )
+          .then((_) {
+        if (!scroll.hasClients || state.userDetached) return;
+        // In a lazy ListView.builder, off-screen streaming items can expand
+        // maxScrollExtent as they scroll into view; settle flush at the end.
+        final pos = scroll.position;
+        if (pos.maxScrollExtent - pos.pixels > 1.0) {
+          pos.jumpTo(pos.maxScrollExtent);
+        }
+      });
+    }
   });
 }
 
@@ -600,54 +799,10 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
         if (message.reasoning.trim().isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(bottom: SonderSpace.sm),
-            child: Builder(builder: (context) {
-              final tokens = SonderTokens.of(context);
-              final thinkingActive = message.content.isEmpty;
-              return Container(
-                key: const Key('streaming-reasoning'),
-                padding: const EdgeInsets.fromLTRB(
-                    SonderSpace.md, SonderSpace.sm, SonderSpace.md, SonderSpace.sm),
-                decoration: BoxDecoration(
-                  color: tokens.panel,
-                  borderRadius: const BorderRadius.horizontal(
-                      right: Radius.circular(SonderRadius.row)),
-                  border: Border(
-                    left: BorderSide(
-                      color: thinkingActive ? tokens.accent : tokens.muted,
-                      width: 2,
-                    ),
-                  ),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.psychology_outlined,
-                          size: 14,
-                          color: thinkingActive ? tokens.accent : tokens.muted,
-                        ),
-                        const SizedBox(width: SonderSpace.xs),
-                        Text(
-                          thinkingActive ? 'Thinking…' : 'Reasoning',
-                          style: tokens.mono(
-                            11.5,
-                            color: thinkingActive ? tokens.text2 : tokens.muted,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: SonderSpace.xs),
-                    SelectableText(
-                      message.reasoning.trimRight(),
-                      style: tokens.mono(12, color: tokens.muted),
-                    ),
-                  ],
-                ),
-              );
-            }),
+            child: StreamingReasoningPanel(
+              reasoning: message.reasoning,
+              thinkingActive: message.content.isEmpty,
+            ),
           ),
         if (message.content.isNotEmpty)
           Padding(
@@ -696,60 +851,27 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
 
   Widget _errorContent(BuildContext context, SonderTokens tokens) {
     final message = entry.message;
-    final lines = message.content.trim().split('\n');
-    final title = lines.first.trim();
-    final detail = lines.skip(1).join('\n').trim();
     final footer = footerFor(entry, null);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        // Plain text, never Markdown: error text carries server URLs that
-        // must not become tappable links.
-        WorkspaceNotice(
-          framed: false,
-          key: const Key('error-notice'),
-          kind: StatusKind.fail,
-          liveRegion: true,
-          title: title,
-          detail: detail,
-          actions: [
-            if (isWorkCapacityMessage(message))
-              FilledButton.tonal(
-                key: const Key('error-running-work'),
-                onPressed: () => showRunningWork(
-                  context,
-                  list: actions.listWorkRuns,
-                  cancel: actions.cancelWorkRun,
-                ),
-                child: const Text('Show running work'),
-              ),
-            if (entry.retryable)
-              OutlinedButton(
-                key: const Key('error-retry'),
-                onPressed: () => actions.onRetry(entry.id),
-                child: const Text('Retry'),
-              ),
-            _CopyAction(
-              key: const Key('error-copy'),
-              text: message.content,
-              label: 'Copy error',
-              semanticLabel: 'Copy error',
-              toast: 'Error copied',
-            ),
-          ],
-        ),
-        if (footer != null) ...[
-          const SizedBox(height: SonderSpace.xs),
-          Text(footer, style: tokens.mono(11, color: tokens.muted)),
-        ],
-        if (message.diagnostic.trim().isNotEmpty) ...[
-          const SizedBox(height: SonderSpace.xs),
-          CollapsedDetail(
+    return StreamingErrorBanner(
+      entry: entry,
+      footer: footer,
+      onRetry: () => actions.onRetry(entry.id),
+      listWorkRuns: actions.listWorkRuns,
+      cancelWorkRun: actions.cancelWorkRun,
+      copyAction: _CopyAction(
+        key: const Key('error-copy'),
+        text: message.content,
+        label: 'Copy error',
+        semanticLabel: 'Copy error',
+        toast: 'Error copied',
+      ),
+      detailsWidget: message.diagnostic.trim().isEmpty
+          ? null
+          : CollapsedDetail(
               icon: Icons.error_outline,
               label: 'Error details',
-              body: message.diagnostic.trim()),
-        ],
-      ],
+              body: message.diagnostic.trim(),
+            ),
     );
   }
 
@@ -835,6 +957,7 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
           for (final tool in entry.toolCalls)
             ToolRunCard(
               event: tool,
+              turnEnded: true,
               onApprove:
                   tool.isClientTarget ? actions.onApproveClient : null,
               onDeny: tool.isClientTarget ? actions.onDenyClient : null,
@@ -1339,8 +1462,8 @@ class _ToolCallRows extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.symmetric(vertical: SonderSpace.xxs),
             child: Row(children: [
-              SizedBox(
-                width: 80,
+              ConstrainedBox(
+                constraints: const BoxConstraints(minWidth: 80),
                 child: Text(
                     call.ok
                         ? '${statusGlyphs['tool']} ran'
@@ -1348,6 +1471,7 @@ class _ToolCallRows extends StatelessWidget {
                     style: tokens.mono(11.5,
                         color: call.ok ? tokens.muted : tokens.danger)),
               ),
+              const SizedBox(width: SonderSpace.xs),
               Expanded(
                 child: Text(call.title,
                     overflow: TextOverflow.ellipsis,
