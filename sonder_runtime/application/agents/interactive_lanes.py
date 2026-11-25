@@ -8,7 +8,6 @@ Distributed takeover is deliberately absent from this local coordinator.
 from __future__ import annotations
 
 from sonder_runtime.application.ports.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, contextmanager
 from collections.abc import Mapping
 from dataclasses import replace
@@ -16,6 +15,7 @@ from functools import wraps
 import hashlib
 import json
 import logging
+import math
 import threading
 import time
 import uuid
@@ -161,6 +161,10 @@ _LANE_INLINE_TOOL_RESULT_BYTES = 2 * 1024
 # envelope; its complete output becomes a scoped, digest-verified artifact.
 _LANE_TOOL_RESULT_CEILING_BYTES = 65536
 _LANE_TOOL_RESULT_PREVIEW_BYTES = 16 * 1024
+_MAX_TOOL_OUTPUT_DEPTH = 32
+_MAX_DEFERRED_VERIFICATION = 256
+_MAX_CAPACITY_WAITERS = 256
+_MAX_STEERING_SEQUENCE_CACHE = 1024
 # Parent mailbox reports stay bounded; a longer report carries a labelled
 # preview plus a reference to its complete artifact.
 _LANE_REPORT_INLINE_CHARS = 8000
@@ -200,15 +204,70 @@ _HIDDEN = frozenset(
 
 
 def _text(value, name, maximum=8000):
-    if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > maximum
+        or "\x00" in value
+    ):
         raise ValueError(name + " must be nonempty bounded text")
     return value.strip()
+
+
+def _sanitize_json_output(value, *, _depth=0, _seen=None):
+    """Normalize arbitrary tool outputs into finite, acyclic JSON-safe data."""
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).decode("utf-8", errors="replace")
+    if isinstance(value, Mapping):
+        if _depth >= _MAX_TOOL_OUTPUT_DEPTH:
+            return "<max-depth>"
+        seen = set() if _seen is None else _seen
+        obj_id = id(value)
+        if obj_id in seen:
+            return "<cycle>"
+        seen.add(obj_id)
+        try:
+            return {
+                str(k): _sanitize_json_output(v, _depth=_depth + 1, _seen=seen)
+                for k, v in value.items()
+            }
+        finally:
+            seen.discard(obj_id)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        if _depth >= _MAX_TOOL_OUTPUT_DEPTH:
+            return "<max-depth>"
+        seen = set() if _seen is None else _seen
+        obj_id = id(value)
+        if obj_id in seen:
+            return "<cycle>"
+        seen.add(obj_id)
+        try:
+            items = (
+                sorted(value, key=lambda item: str(item))
+                if isinstance(value, (set, frozenset))
+                else value
+            )
+            return [
+                _sanitize_json_output(item, _depth=_depth + 1, _seen=seen)
+                for item in items
+            ]
+        finally:
+            seen.discard(obj_id)
+    return str(value)
 
 
 def _canonical_output(value):
     """Canonical JSON bytes of a tool output; the digest covers exactly these."""
     return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        _sanitize_json_output(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
 
 
@@ -274,7 +333,12 @@ class _LaneCancellation:
 
     @property
     def cancelled(self):
-        lane = self.service.store.read_lane(self.lane_id)
+        if getattr(self.service, "_closed", False):
+            return True
+        try:
+            lane = self.service.store.read_lane(self.lane_id)
+        except KeyError:
+            return True
         if (
             self.service.managed_authority is not None
             and getattr(self, "authority_context", None) is not None
@@ -307,7 +371,17 @@ class _LaneCancellation:
         }
 
     def wait(self, timeout=None):
-        end = time.monotonic() + (timeout or 0)
+        if timeout is None:
+            wait_seconds = 0.0
+        elif (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+        ):
+            raise ValueError("wait timeout must be a finite number")
+        else:
+            wait_seconds = max(0.0, float(timeout))
+        end = time.monotonic() + wait_seconds
         while not self.cancelled and time.monotonic() < end:
             time.sleep(min(0.05, max(0, end - time.monotonic())))
         return self.cancelled
@@ -375,6 +449,12 @@ class AgentLaneService:
         prompts: PromptRenderer | None = None,
         workspace_reality=None,
     ):
+        if loop is not None and loop_factory is not None:
+            raise ValueError("loop and loop_factory are mutually exclusive")
+        if loop is not None and not callable(getattr(loop, "admit_turn", None)):
+            raise TypeError("loop must provide the loop lifecycle facade")
+        if loop_factory is not None and not callable(loop_factory):
+            raise TypeError("loop_factory must be callable")
         self.store, self.sessions, self.gateway, self.tools = (
             store,
             sessions,
@@ -390,36 +470,44 @@ class AgentLaneService:
             _LANE_TOOLS if allowed_tools is None else allowed_tools
         ) & (_LANE_TOOLS | {"run_tests"})
         self.auto_start = auto_start
+        self._closed = False
         self.owner = "lane-owner-" + uuid.uuid4().hex
         self._lease = self.store.acquire_owner(self.owner)
-        self._pool = (
-            owned_runtime_pool(max_workers=4, thread_name_prefix="sonder-lane")
-            if auto_start
-            else None
-        )
-        self._deferred_verification = {}
-        self._condition = threading.Condition()
-        # A lane can be scheduled by several durable command paths (spawn,
-        # resume, and mailbox delivery).  Keep one in-flight submission per
-        # lane so repeated notifications do not fill the executor queue with
-        # no-op run_pending calls.  The marker is released by the wrapper even
-        # when the worker raises, allowing a later recovery/resume to retry.
-        self._scheduled_lanes = set()
-        self._running_scheduled = set()
-        self._scheduled_contexts = {}
-        self._scheduled_dirty = {}
-        self._capacity_waiters = {}
-        self._capture = SessionCaptureService(sessions)
-        self._archive = SessionContextArchiveService(sessions, max_items=10_000)
-        self._compaction = compaction_service or SessionCompactionService(
-            sessions, max_events=10_000, archive_service=self._archive,
-        )
-        if loop is not None and loop_factory is not None:
-            raise ValueError("loop and loop_factory are mutually exclusive")
-        if loop is not None and not callable(getattr(loop, "admit_turn", None)):
-            raise TypeError("loop must provide the loop lifecycle facade")
-        if loop_factory is not None and not callable(loop_factory):
-            raise TypeError("loop_factory must be callable")
+        self._pool = None
+        try:
+            self._pool = (
+                owned_runtime_pool(max_workers=4, thread_name_prefix="sonder-lane")
+                if auto_start
+                else None
+            )
+            self._deferred_verification = {}
+            self._condition = threading.Condition()
+            # A lane can be scheduled by several durable command paths (spawn,
+            # resume, and mailbox delivery).  Keep one in-flight submission per
+            # lane so repeated notifications do not fill the executor queue with
+            # no-op run_pending calls.  The marker is released by the wrapper even
+            # when the worker raises, allowing a later recovery/resume to retry.
+            self._scheduled_lanes = set()
+            self._running_scheduled = set()
+            self._scheduled_contexts = {}
+            self._scheduled_dirty = {}
+            self._capacity_waiters = {}
+            self._capture = SessionCaptureService(sessions)
+            self._archive = SessionContextArchiveService(sessions, max_items=10_000)
+            self._compaction = compaction_service or SessionCompactionService(
+                sessions, max_events=10_000, archive_service=self._archive,
+            )
+        except BaseException:
+            pool = self._pool
+            self._pool = None
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
+            lease = self._lease
+            self._lease = None
+            close_lease = getattr(lease, "close", None)
+            if callable(close_lease):
+                close_lease()
+            raise
         self._loop = loop
         self._loop_factory = loop_factory or (
             lambda: LoopSessionLifecycleFacade(sessions)
@@ -600,6 +688,7 @@ class AgentLaneService:
             pass
         if status in {"completed", "failed", "cancelled", "interrupted"}:
             with self._loop_lock:
+                self._loop_steering_sequence.pop(turn_id, None)
                 if self._loop is None:
                     self._loop_bindings.pop(lane["id"], None)
 
@@ -618,6 +707,11 @@ class AgentLaneService:
         with self._loop_lock:
             sequence = self._loop_steering_sequence.get(turn_id, 0) + 1
             self._loop_steering_sequence[turn_id] = sequence
+            if len(self._loop_steering_sequence) > _MAX_STEERING_SEQUENCE_CACHE:
+                active_turns = {entry[1] for entry in self._loop_bindings.values()}
+                for stale_turn in list(self._loop_steering_sequence):
+                    if stale_turn not in active_turns:
+                        self._loop_steering_sequence.pop(stale_turn, None)
         try:
             command = SteeringCommand.follow_up(command_id, sequence, content)
             facade.steer(command, turn_id=turn_id)
@@ -815,16 +909,71 @@ class AgentLaneService:
         except Exception as exc:
             _LOG.warning("lane workspace seal failed: %s", type(exc).__name__)
 
+    def _remember_deferred_verification(self, lane_id, context):
+        with self._condition:
+            if self._closed:
+                return
+            if (
+                len(self._deferred_verification) >= _MAX_DEFERRED_VERIFICATION
+                and lane_id not in self._deferred_verification
+            ):
+                oldest = next(iter(self._deferred_verification))
+                self._deferred_verification.pop(oldest, None)
+            self._deferred_verification[lane_id] = context
+
+    def _remember_capacity_waiter(self, lane_id, context):
+        if self._closed:
+            return
+        if (
+            len(self._capacity_waiters) >= _MAX_CAPACITY_WAITERS
+            and lane_id not in self._capacity_waiters
+        ):
+            oldest = next(iter(self._capacity_waiters))
+            self._capacity_waiters.pop(oldest, None)
+        self._capacity_waiters[lane_id] = context
+
+    def _evict_pending_lane(self, lane_id):
+        with self._condition:
+            self._capacity_waiters.pop(lane_id, None)
+            self._deferred_verification.pop(lane_id, None)
+            self._scheduled_dirty.pop(lane_id, None)
+
     def resume_after_verification(self, parent_session_id):
         """Resume only contexts retained from actual dispatch, never minted authority."""
-        for lane_id, context in list(self._deferred_verification.items()):
-            with self.store.transaction() as tx:
-                lane = tx.lane(lane_id)
-                if tx.verification_dispatch_blocked(lane):
+        with self._condition:
+            if self._closed:
+                return
+            candidates = tuple(self._deferred_verification.items())
+        for lane_id, context in candidates:
+            try:
+                with self.store.transaction() as tx:
+                    lane = tx.lane(lane_id)
+                    if lane["status"] != "queued" or lane["owner"]:
+                        with self._condition:
+                            if self._deferred_verification.get(lane_id) is context:
+                                self._deferred_verification.pop(lane_id, None)
+                        continue
+                    if tx.verification_dispatch_blocked(lane):
+                        continue
+            except KeyError:
+                with self._condition:
+                    if self._deferred_verification.get(lane_id) is context:
+                        self._deferred_verification.pop(lane_id, None)
+                continue
+            except Exception as exc:
+                _LOG.warning("deferred verification check failed: %s", type(exc).__name__)
+                continue
+            with self._condition:
+                if self._deferred_verification.get(lane_id) is not context:
                     continue
-            self._deferred_verification.pop(lane_id, None)
+                self._deferred_verification.pop(lane_id, None)
             if not context.expired and not context.cancellation.cancelled:
-                self._schedule(lane_id, context)
+                try:
+                    self._schedule(lane_id, context)
+                except Exception as exc:
+                    _LOG.warning(
+                        "deferred verification schedule failed: %s", type(exc).__name__
+                    )
 
     def open_model_parent(self, context):
         if context.expired or context.cancellation.cancelled:
@@ -924,6 +1073,8 @@ class AgentLaneService:
     def _wake_capacity_waiter(self):
         """Admit one queued lane after a worker releases an active slot."""
         with self._condition:
+            if self._closed:
+                return
             candidates = tuple(self._capacity_waiters.items())
         for lane_id, context in candidates:
             try:
@@ -945,6 +1096,8 @@ class AgentLaneService:
             if active >= 4:
                 continue
             with self._condition:
+                if self._closed:
+                    return
                 if self._capacity_waiters.get(lane_id) is not context:
                     continue
                 self._capacity_waiters.pop(lane_id, None)
@@ -955,22 +1108,29 @@ class AgentLaneService:
                 continue
             except Exception as exc:
                 with self._condition:
-                    self._capacity_waiters.setdefault(lane_id, context)
+                    if not self._closed:
+                        self._remember_capacity_waiter(lane_id, context)
                 _LOG.warning("lane capacity admission failed: %s", type(exc).__name__)
                 continue
             return
 
     def _schedule(self, lane_id, context, *, replay=False):
+        with self._condition:
+            if self._closed:
+                return
+            pool = self._pool
         managed = (
             self.managed_authority is not None and context.principal_id != LOCAL_OWNER
         )
-        if not self._pool:
+        if not pool:
             # Hosts that dispatch manually still need the exact admitted
             # context proof before they call run_pending. Auto-start controls
             # only executor submission, not managed authorization.
             if managed:
                 lane = self._fresh_execution(lane_id, context)
                 with self._condition:
+                    if self._closed:
+                        return
                     if (len(self._app_dispatch) >= 256
                             and lane_id not in self._app_dispatch):
                         raise CapacityExceeded("managed dispatch capacity unavailable")
@@ -980,6 +1140,9 @@ class AgentLaneService:
         # duplicate notification could replace the context proof belonging to
         # the already queued worker and make that valid worker fail closed.
         with self._condition:
+            if self._closed or self._pool is None:
+                return
+            pool = self._pool
             if lane_id in self._scheduled_lanes:
                 if replay:
                     # A newer notification won the gap after this wakeup was
@@ -1004,21 +1167,25 @@ class AgentLaneService:
                     self._scheduled_lanes.discard(lane_id)
                     self._scheduled_contexts.pop(lane_id, None)
                     replay_context = self._scheduled_dirty.pop(lane_id, None)
-                    if replay_context is not None:
-                        self._capacity_waiters[lane_id] = replay_context
+                    if replay_context is not None and not self._closed:
+                        self._remember_capacity_waiter(lane_id, replay_context)
                 raise
             with self._condition:
+                if self._closed:
+                    self._scheduled_lanes.discard(lane_id)
+                    self._scheduled_contexts.pop(lane_id, None)
+                    return
                 self._app_dispatch[lane_id] = (context, lane["attempt_id"])
         worker_context = context if managed else replace(context, deadline_monotonic=None)
         try:
-            self._pool.submit(self._run_scheduled, lane_id, worker_context)
+            pool.submit(self._run_scheduled, lane_id, worker_context)
         except Exception:
             with self._condition:
                 self._scheduled_lanes.discard(lane_id)
                 self._scheduled_contexts.pop(lane_id, None)
                 replay_context = self._scheduled_dirty.pop(lane_id, None)
-                if replay_context is not None:
-                    self._capacity_waiters[lane_id] = replay_context
+                if replay_context is not None and not self._closed:
+                    self._remember_capacity_waiter(lane_id, replay_context)
                 if managed and self._app_dispatch.get(lane_id) == (
                     context,
                     lane["attempt_id"],
@@ -1028,6 +1195,11 @@ class AgentLaneService:
 
     def _run_scheduled(self, lane_id, context):
         with self._condition:
+            if self._closed:
+                self._scheduled_lanes.discard(lane_id)
+                self._scheduled_contexts.pop(lane_id, None)
+                self._scheduled_dirty.pop(lane_id, None)
+                return
             self._running_scheduled.add(lane_id)
         try:
             self.run_pending(lane_id, context)
@@ -1036,8 +1208,11 @@ class AgentLaneService:
                 self._running_scheduled.discard(lane_id)
                 self._scheduled_lanes.discard(lane_id)
                 self._scheduled_contexts.pop(lane_id, None)
-                replay_context = self._scheduled_dirty.pop(lane_id, None)
-            if replay_context is not None:
+                closed = self._closed
+                replay_context = None if closed else self._scheduled_dirty.pop(lane_id, None)
+            if closed:
+                self._release_owner_lease()
+            elif replay_context is not None:
                 # The marker is clear before re-admission, so this is bounded
                 # to one follow-up per worker and cannot recurse through the
                 # executor submission path.
@@ -1045,7 +1220,8 @@ class AgentLaneService:
                     self._schedule(lane_id, replay_context, replay=True)
                 except Exception as exc:
                     with self._condition:
-                        self._capacity_waiters[lane_id] = replay_context
+                        if not self._closed:
+                            self._remember_capacity_waiter(lane_id, replay_context)
                     _LOG.warning("lane wakeup replay failed: %s", type(exc).__name__)
 
     @_recover_committed_command
@@ -1514,6 +1690,8 @@ class AgentLaneService:
             tx.save(lane)
             receipt = self._receipt(tx, lane, command_id)
             tx.record_receipt(context.principal_id, command_id, digest, receipt)
+        if action in {"cancel", "interrupt"}:
+            self._evict_pending_lane(lane_id)
         self._done()
         self._loop_control(lane, action, reason)
         if action == "resume":
@@ -1579,6 +1757,7 @@ class AgentLaneService:
             lane = tx.archive(lane)
             receipt = self._receipt(tx, lane, command_id)
             tx.record_receipt(context.principal_id, command_id, digest, receipt)
+        self._evict_pending_lane(lane_id)
         self._done()
         return receipt
 
@@ -1600,6 +1779,14 @@ class AgentLaneService:
         require_root_admission(tx, self.store, lane["parent_session_id"], context)
 
     def wait(self, lane_id, context, *, cursor=0, limit=100, timeout_seconds=25):
+        _bounds(cursor, limit)
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
+            or not 0 <= timeout_seconds <= 30
+        ):
+            raise ValueError("wait timeout outside bounded range")
         with _WAIT_LOCK:
             if (
                 sum(_WAIT_OWNERS.values()) >= 8
@@ -1627,21 +1814,33 @@ class AgentLaneService:
         self, lane_id, context, *, cursor=0, limit=100, timeout_seconds=25
     ):
         if (
-            not isinstance(timeout_seconds, (int, float))
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
             or not 0 <= timeout_seconds <= 30
         ):
             raise ValueError("wait timeout outside bounded range")
-        end = time.monotonic() + timeout_seconds
+        end = time.monotonic() + float(timeout_seconds)
+        deadline = getattr(context, "deadline_monotonic", None)
+        if isinstance(deadline, (int, float)) and not isinstance(deadline, bool) and math.isfinite(deadline):
+            end = min(end, float(deadline))
         while True:
             result = self.inspect(lane_id, context, cursor=cursor, limit=limit)
             if (
                 result["events"]
                 or time.monotonic() >= end
                 or context.cancellation.cancelled
+                or context.expired
+                or self._closed
             ):
                 return result
             with self._condition:
-                self._condition.wait(min(0.25, max(0, end - time.monotonic())))
+                if self._closed or context.cancellation.cancelled or context.expired:
+                    return result
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    return result
+                self._condition.wait(min(0.25, remaining))
 
     def _validated_compaction_replacements(self, lane, events):
         """Return validated summary views and the exact covered sequences."""
@@ -1795,6 +1994,7 @@ class AgentLaneService:
             for reference, placeholder in zip(
                 archived.references if archived is not None else (),
                 archived.placeholders if archived is not None else (),
+                strict=False,
             )
         }
         canonical_tool_calls = {
@@ -2274,6 +2474,8 @@ class AgentLaneService:
         ):
             raise ValueError("invalid bounded tool request")
         name = value["tool"]
+        if not isinstance(name, str) or not name:
+            raise ValueError("invalid bounded tool request")
         if name not in lane["allowed_tools"] or self.tools is None:
             raise PermissionError("tool is outside inherited lane grants")
         args = value["arguments"]
@@ -2348,7 +2550,7 @@ class AgentLaneService:
             if managed and proof[1] != lane["attempt_id"]:
                 raise PermissionError("managed dispatch attempt changed")
             if tx.verification_dispatch_blocked(lane):
-                self._deferred_verification[lane_id] = context
+                self._remember_deferred_verification(lane_id, context)
                 return
             if lane["status"] != "queued" or lane["owner"]:
                 return
@@ -2356,43 +2558,51 @@ class AgentLaneService:
             if active >= 4:
                 with self._condition:
                     if lane_id in self._scheduled_lanes:
-                        self._capacity_waiters[lane_id] = context
+                        self._remember_capacity_waiter(lane_id, context)
                 return
             self._remaining(lane)
             lane.update(status="running", owner=self.owner)
             tx.emit(lane, "lane.running", {"attempt_id": lane["attempt_id"]})
             tx.save(lane)
+        claimed_attempt_id = lane["attempt_id"]
         started = time.monotonic()
-        control = _LaneCancellation(self, lane_id, lane["attempt_id"])
-        barrier = self._resume_barrier(lane)
-        barrier_scope = bound_resume_barrier(barrier)
-        run_context = replace(
-            context,
-            source="worker",
-            workspace_roots=(Path(lane["workspace_root"]),),
-            auth_level=lane["auth_level"],
-            cloud_allowed=lane["cloud_allowed"],
-            remote_ollama_allowed=lane["remote_ollama_allowed"],
-            session_id=lane["session_id"],
-            cancellation=control,
-            deadline_monotonic=started
-            + min(
-                lane["max_wall_seconds"] - lane["used_wall"],
-                max(0, lane["grant_expires"] - time.time()),
-            ),
-        )
-        barrier_scope.__enter__()
+        barrier_scope = None
+        barrier_entered = False
+        run_context = None
+        worker_bound = False
         try:
+            control = _LaneCancellation(self, lane_id, claimed_attempt_id)
+            barrier = self._resume_barrier(lane)
+            barrier_scope = bound_resume_barrier(barrier)
+            run_context = replace(
+                context,
+                source="worker",
+                workspace_roots=(Path(lane["workspace_root"]),),
+                auth_level=lane["auth_level"],
+                cloud_allowed=lane["cloud_allowed"],
+                remote_ollama_allowed=lane["remote_ollama_allowed"],
+                session_id=lane["session_id"],
+                cancellation=control,
+                deadline_monotonic=started
+                + min(
+                    lane["max_wall_seconds"] - lane["used_wall"],
+                    max(0, lane["grant_expires"] - time.time()),
+                ),
+            )
+            barrier_scope.__enter__()
+            barrier_entered = True
             if managed:
-                run_context = replace(
-                    run_context,
-                    deadline_monotonic=min(
-                        run_context.deadline_monotonic, context.deadline_monotonic
-                    ),
-                )
+                if context.deadline_monotonic is not None:
+                    run_context = replace(
+                        run_context,
+                        deadline_monotonic=min(
+                            run_context.deadline_monotonic, context.deadline_monotonic
+                        ),
+                    )
                 self.managed_authority.bind_worker(
                     lane, context, run_context, issuer=self._worker_issuer
                 )
+                worker_bound = True
                 control.authority_context = run_context
             else:
                 control.authority_context = replace(context, deadline_monotonic=None)
@@ -2443,7 +2653,9 @@ class AgentLaneService:
                     self._seal_workspace_reality(lane_id)
                     break
                 if lane.get("pending_response"):
-                    if self._consume_response(lane_id, run_context, started):
+                    if self._consume_response(
+                        lane_id, run_context, started, dispatch_context=context
+                    ):
                         break
                     continue
                 request_id = "request-" + uuid.uuid4().hex
@@ -2600,21 +2812,29 @@ class AgentLaneService:
                     observed_lane = dict(lane)
             if observed_lane is not None:
                 self._observe_strategy(observed_lane)
-            self._loop_finish(lane, lane["status"], reason=str(exc))
-            if observed_lane is not None:
+                self._loop_finish(
+                    observed_lane, observed_lane["status"], reason=str(exc)
+                )
                 self._seal_workspace_reality(lane_id)
         finally:
-            barrier_scope.__exit__(None, None, None)
+            if barrier_entered and barrier_scope is not None:
+                barrier_scope.__exit__(None, None, None)
             if managed:
-                self.managed_authority.release_worker(
-                    run_context, issuer=self._worker_issuer
-                )
+                if worker_bound and run_context is not None:
+                    try:
+                        self.managed_authority.release_worker(
+                            run_context, issuer=self._worker_issuer
+                        )
+                    except Exception:
+                        _LOG.warning("managed worker release failed", exc_info=True)
                 with self._condition:
-                    if self._app_dispatch.get(lane_id) == (context, lane["attempt_id"]):
+                    if self._app_dispatch.get(lane_id) == (context, claimed_attempt_id):
                         self._app_dispatch.pop(lane_id, None)
             self._done()
 
-    def _consume_response(self, lane_id, context, started):
+    def _consume_response(
+        self, lane_id, context, started, *, dispatch_context=None,
+    ):
         lane = self.store.read_lane(lane_id)
         known = lane.get("pending_response")
         if not known:
@@ -2637,8 +2857,15 @@ class AgentLaneService:
                     tx.save(fresh)
             raise
         if tool is not None:
-            self._execute_tool(lane, tool, context)
-            return False
+            return bool(
+                self._execute_tool(
+                    lane,
+                    tool,
+                    context,
+                    started=started,
+                    dispatch_context=dispatch_context,
+                )
+            )
         barrier = current_resume_barrier()
         if barrier is not None and barrier.blocked and barrier.inspected:
             # A plain report is not a plan.  Only an explicitly labelled
@@ -2708,7 +2935,9 @@ class AgentLaneService:
         self._seal_workspace_reality(lane_id)
         return True
 
-    def _execute_tool(self, lane, tool, context):
+    def _execute_tool(
+        self, lane, tool, context, *, started=None, dispatch_context=None,
+    ):
         name, args, effects = tool
         barrier = current_resume_barrier()
         if barrier is not None and has_mutating_effects(effects):
@@ -2719,9 +2948,20 @@ class AgentLaneService:
         with self._transaction(context, lane_id=lane["id"]) as tx:
             fresh = tx.lane(lane["id"])
             if fresh["owner"] != self.owner or fresh["status"] != "running":
-                return
+                return False
             if tx.verification_dispatch_blocked(fresh):
-                return
+                # Yield ownership back to queued while retaining pending_response
+                # so the verification barrier does not busy-spin the worker loop.
+                fresh["status"] = "queued"
+                fresh["owner"] = ""
+                if started is not None:
+                    fresh["used_wall"] += max(0.0, time.monotonic() - started)
+                tx.save(fresh)
+                self._remember_deferred_verification(
+                    lane["id"],
+                    dispatch_context if dispatch_context is not None else context,
+                )
+                return True
             self._authorize(fresh, context, execute=True, tx=tx)
             fresh["pending_effect"] = True
             fresh["pending_response"] = None
@@ -2779,14 +3019,12 @@ class AgentLaneService:
         output = getattr(receipt, "output", None)
         if hasattr(output, "output"):
             output = output.output
-        if not isinstance(output, (dict, list, str, int, float, bool, type(None))):
-            output = str(output)
+        output = _sanitize_json_output(output)
+        full = _canonical_output(output)
         oversized = None
-        if (len(json.dumps(output, ensure_ascii=False).encode("utf-8"))
-                > _LANE_TOOL_RESULT_CEILING_BYTES):
+        if len(full) > _LANE_TOOL_RESULT_CEILING_BYTES:
             # The effect has already happened. Its receipt is committed with
             # a bounded envelope; the complete output becomes a lane artifact.
-            full = _canonical_output(output)
             oversized = (full, {
                 "preview": _utf8_prefix(full, _LANE_TOOL_RESULT_PREVIEW_BYTES),
                 "truncated": True,
@@ -2815,6 +3053,7 @@ class AgentLaneService:
             )
         self._done()
         self._loop_tool_completed(lane, loop_step, call_id, name, receipt)
+        return False
 
     def _commit_tool_result(self, lane, name, args, effects, call_id, receipt,
                             output, oversized, *, archive):
@@ -2861,6 +3100,32 @@ class AgentLaneService:
             )
             tx.save(fresh)
 
+    def _release_owner_lease(self):
+        with self._condition:
+            if self._running_scheduled:
+                return
+            lease = self._lease
+            self._lease = None
+        close_lease = getattr(lease, "close", None)
+        if callable(close_lease):
+            try:
+                close_lease()
+            except Exception:  # noqa: BLE001 - best-effort handle release on shutdown
+                _LOG.warning("lane owner lease close failed", exc_info=True)
+
     def close(self):
-        if self._pool:
-            self._pool.shutdown(wait=False, cancel_futures=True)
+        with self._condition:
+            self._closed = True
+            pool = self._pool
+            self._pool = None
+            self._capacity_waiters.clear()
+            self._deferred_verification.clear()
+            self._scheduled_dirty.clear()
+            self._scheduled_contexts.clear()
+            self._app_dispatch.clear()
+            self._condition.notify_all()
+        with self._loop_lock:
+            self._loop_steering_sequence.clear()
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+        self._release_owner_lease()
