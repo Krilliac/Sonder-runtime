@@ -9,6 +9,7 @@ import '../local_manager.dart';
 import '../models.dart';
 import '../runtime/model_routing.dart';
 import '../settings.dart';
+import '../settings/execution_mode_choice.dart' show normalizeExecutionMode;
 import '../settings/persona_choice.dart' show normalizePersona;
 import '../settings/reasoning_effort.dart' show normalizeEffort;
 import 'backend.dart';
@@ -1276,6 +1277,7 @@ class ChatController extends ChangeNotifier {
       sessionTemperature: tempSent,
       sessionReasoningEffort: effortSent,
       persona: personaSent,
+      executionMode: normalizeExecutionMode(executionMode),
       historyMode: _rotated(_currentThreadId) ? 'client' : null,
       clientExec: isClientExecActive,
     );
@@ -1823,6 +1825,27 @@ class ChatController extends ChangeNotifier {
       _personaSync.requestAuto(sessionFor(_currentThreadId));
     }
     persona = normalized;
+    _notify();
+  }
+
+  /// Execution mode override (`single`, `ensemble`, `fanout`), or null for
+  /// Auto (omitted from `/v1/chat/completions` so the difficulty router runs).
+  String? executionMode;
+  void Function(String? mode)? onExecutionModeChanged;
+
+  void selectExecutionMode(String? value) {
+    final normalized = normalizeExecutionMode(value);
+    if (normalized == executionMode) return;
+    executionMode = normalized;
+    onExecutionModeChanged?.call(normalized);
+    _notify();
+  }
+
+  /// Settings changed the execution mode underneath us.
+  void syncExecutionMode(String? value) {
+    final normalized = normalizeExecutionMode(value);
+    if (normalized == executionMode) return;
+    executionMode = normalized;
     _notify();
   }
 

@@ -15,6 +15,11 @@ import 'chat/permission_mode.dart';
 import 'chat/status_strip.dart';
 import 'chat/transcript.dart';
 import 'settings.dart';
+import 'settings/execution_mode_choice.dart'
+    show
+        executionModeDescription,
+        executionModeOptions,
+        executionModeShortLabel;
 import 'settings/persona_choice.dart'
     show
         personaDescription,
@@ -342,6 +347,20 @@ class _ChatScreenState extends State<ChatScreen>
         } else {
           await _openPersonaPicker();
         }
+      case ExecutionModeIntercept(
+          :final hasValue,
+          :final target,
+          :final invalidArg,
+        ):
+        if (invalidArg != null) {
+          _snack("Unknown execution mode '$invalidArg'. Use: auto, single, "
+              'ensemble, or fanout.');
+        } else if (hasValue) {
+          _selectExecutionMode(target);
+          _snack('Execution mode set to ${executionModeShortLabel(target)}.');
+        } else {
+          await _openExecutionModePicker();
+        }
     }
   }
 
@@ -415,6 +434,44 @@ class _ChatScreenState extends State<ChatScreen>
     final next = picked == 'auto' ? null : picked;
     _selectPersona(next);
     _snack('Persona set to ${personaLabel(next)}.');
+  }
+
+  void _selectExecutionMode(String? mode) {
+    _chat.selectExecutionMode(mode);
+    widget.settings.executionMode = _chat.executionMode;
+    widget.onSettingsChanged(widget.settings);
+  }
+
+  Future<void> _openExecutionModePicker() async {
+    final current = _chat.executionMode;
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        key: const Key('execution-mode-dialog'),
+        title: const Text('Execution mode'),
+        children: [
+          for (final opt in executionModeOptions)
+            SimpleDialogOption(
+              key: Key('execution-mode-dialog-${opt ?? 'auto'}'),
+              onPressed: () => Navigator.of(ctx).pop(opt ?? 'auto'),
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(
+                  opt == current ? Icons.check_circle : Icons.circle_outlined,
+                  size: 18,
+                ),
+                title: Text(executionModeShortLabel(opt)),
+                subtitle: Text(executionModeDescription(opt)),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (picked == null || !mounted) return;
+    final next = picked == 'auto' ? null : picked;
+    _selectExecutionMode(next);
+    _snack('Execution mode set to ${executionModeShortLabel(next)}.');
   }
 
   void _cancelSend() {
@@ -847,6 +904,13 @@ class _ChatScreenState extends State<ChatScreen>
                     label: 'Server conversations',
                     onSelected: () => unawaited(_openAppControl()),
                   ),
+                  ComposerAction(
+                    id: 'execution-mode',
+                    icon: Icons.alt_route_rounded,
+                    label:
+                        'Execution mode (${executionModeShortLabel(_chat.executionMode)})',
+                    onSelected: () => unawaited(_openExecutionModePicker()),
+                  ),
                 ],
                 desktop: desktop,
                 models: _chat.models,
@@ -857,6 +921,8 @@ class _ChatScreenState extends State<ChatScreen>
                 onReasoningEffortChanged: _selectReasoningEffort,
                 persona: _chat.persona,
                 onPersonaChanged: _selectPersona,
+                executionMode: _chat.executionMode,
+                onExecutionModeChanged: _selectExecutionMode,
                 status: _chat.status,
               ),
               ChatStatusStrip(

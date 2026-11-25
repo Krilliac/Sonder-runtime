@@ -14,6 +14,7 @@ import 'runtime/model_routing.dart';
 import 'settings.dart';
 import 'settings/connection.dart';
 import 'settings/context_size.dart';
+import 'settings/execution_mode_choice.dart';
 import 'settings/persona_choice.dart';
 import 'settings/reasoning_effort.dart';
 import 'settings/temperature.dart';
@@ -139,6 +140,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   /// Staged persona; null is Auto.
   String? _persona;
+
+  /// Staged execution mode; null is Auto.
+  String? _executionMode;
   late bool _keepServerRunning;
   late bool _allowApproximateLocation;
 
@@ -227,6 +231,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _temperature = s.temperature;
     _reasoningEffort = s.reasoningEffort;
     _persona = s.persona;
+    _executionMode = s.executionMode;
     _keepServerRunning = s.keepServerRunning;
     _allowApproximateLocation = s.allowApproximateLocation;
     _cleartextKeyHosts = {...s.cleartextKeyHosts};
@@ -371,6 +376,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (_persona == before.persona) {
       _persona = next.persona;
     }
+    if (_executionMode == before.executionMode) {
+      _executionMode = next.executionMode;
+    }
     if (_keepServerRunning == before.keepServerRunning) {
       _keepServerRunning = next.keepServerRunning;
     }
@@ -419,6 +427,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool get _temperatureChanged => _temperature != _saved.temperature;
   bool get _effortChanged => _reasoningEffort != _saved.reasoningEffort;
   bool get _personaChanged => _persona != _saved.persona;
+  bool get _executionModeChanged => _executionMode != _saved.executionMode;
   bool get _launcherUrlChanged =>
       _textChanged(_launcherUrl, _saved.launcherUrl);
   bool get _launcherTokenChanged =>
@@ -449,6 +458,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _temperatureChanged ||
             _effortChanged ||
             _personaChanged ||
+            _executionModeChanged ||
             _clientExecChanged,
         SettingsCategory.connection: _serverChanged ||
             _keyChanged ||
@@ -504,6 +514,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         temperature: _temperature,
         reasoningEffort: _reasoningEffort,
         persona: _persona,
+        executionMode: _executionMode,
         keepServerRunning: _keepServerRunning,
         allowApproximateLocation: _allowApproximateLocation,
         launcherUrl: _launcherUrl.text.trim(),
@@ -581,6 +592,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void _setPersona(String? value) =>
       _stage(() => _persona = normalizePersona(value));
 
+  void _setExecutionMode(String? value) =>
+      _stage(() => _executionMode = normalizeExecutionMode(value));
+
   void _discard() {
     _setText(_server, _saved.serverUrl);
     _setText(_key, _saved.apiKey);
@@ -598,6 +612,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _temperature = _saved.temperature;
       _reasoningEffort = _saved.reasoningEffort;
       _persona = _saved.persona;
+      _executionMode = _saved.executionMode;
       _keepServerRunning = _saved.keepServerRunning;
       _allowApproximateLocation = _saved.allowApproximateLocation;
       _cleartextKeyHosts = {..._saved.cleartextKeyHosts};

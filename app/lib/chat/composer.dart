@@ -4,6 +4,11 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../runtime/model_routing.dart';
 import '../safety_colors.dart';
+import '../settings/execution_mode_choice.dart'
+    show
+        ExecutionModePickerButton,
+        normalizeExecutionMode,
+        parseExecutionModeInput;
 import '../settings/persona_choice.dart'
     show PersonaPickerButton, parsePersonaInput;
 import '../settings/reasoning_effort.dart'
@@ -58,6 +63,16 @@ class PersonaIntercept extends ComposerIntercept {
   final String? target;
   final String? invalidArg;
   const PersonaIntercept({this.hasValue = false, this.target, this.invalidArg});
+}
+
+/// `/exec_mode` / `/execution_mode [auto|single|ensemble|fanout]`: updates the
+/// execution-mode override sent on `/v1/chat/completions` when non-default.
+class ExecutionModeIntercept extends ComposerIntercept {
+  final bool hasValue;
+  final String? target;
+  final String? invalidArg;
+  const ExecutionModeIntercept(
+      {this.hasValue = false, this.target, this.invalidArg});
 }
 
 const _accountCommands = {'/login', '/register', '/admin_login'};
@@ -220,6 +235,12 @@ ComposerIntercept? classifyIntercept(String text) {
     if (!ok) return PersonaIntercept(invalidArg: args.first);
     return PersonaIntercept(hasValue: true, target: parsed);
   }
+  if (command == '/exec_mode' || command == '/execution_mode') {
+    if (args.isEmpty) return const ExecutionModeIntercept();
+    final (ok, parsed) = parseExecutionModeInput(args.first);
+    if (!ok) return ExecutionModeIntercept(invalidArg: args.first);
+    return ExecutionModeIntercept(hasValue: true, target: parsed);
+  }
   return null;
 }
 
@@ -230,6 +251,9 @@ String? interceptLabel(String commandName) {
   if (_modeCommands.contains(name) || name == '/elevate') return 'opens mode';
   if (name == '/effort') return 'sets effort';
   if (name == '/persona') return 'sets persona';
+  if (name == '/exec_mode' || name == '/execution_mode') {
+    return 'sets execution mode';
+  }
   return null;
 }
 
@@ -292,6 +316,14 @@ class ChatComposer extends StatelessWidget {
   final String? persona;
   final ValueChanged<String?>? onPersonaChanged;
 
+  /// Execution mode override (`single`, `ensemble`, `fanout`), or null for
+  /// Auto (default). Shown inline when a non-default override is active (or
+  /// when [alwaysShowExecutionMode] is true) and accessible from the composer
+  /// actions menu.
+  final String? executionMode;
+  final ValueChanged<String?>? onExecutionModeChanged;
+  final bool alwaysShowExecutionMode;
+
   /// The status poll, for the context ring; null leaves the ring out.
   final ValueListenable<SystemInfo?>? status;
 
@@ -320,6 +352,9 @@ class ChatComposer extends StatelessWidget {
     this.onReasoningEffortChanged,
     this.persona,
     this.onPersonaChanged,
+    this.executionMode,
+    this.onExecutionModeChanged,
+    this.alwaysShowExecutionMode = false,
     this.status,
   });
 
@@ -487,10 +522,17 @@ class _ControlStrip extends StatelessWidget {
       // A very narrow strip leaves the ring out; the status line under the
       // composer still states the context.
       final status = constraints.maxWidth >= 320 ? c.status : null;
-      final showEffort =
-          c.onReasoningEffortChanged != null && constraints.maxWidth >= 380;
+      final showExecutionMode = c.onExecutionModeChanged != null &&
+          (c.alwaysShowExecutionMode ||
+              normalizeExecutionMode(c.executionMode) != null) &&
+          constraints.maxWidth >= 380;
+      final showEffort = c.onReasoningEffortChanged != null &&
+          constraints.maxWidth >= (showExecutionMode ? 460 : 380);
       final showPersona = c.onPersonaChanged != null &&
-          constraints.maxWidth >= (showEffort ? 452 : 380);
+          constraints.maxWidth >=
+              (showExecutionMode
+                  ? (showEffort ? 560 : 460)
+                  : (showEffort ? 452 : 380));
       final densePills = !c.desktop || constraints.maxWidth < 600;
       return SizedBox(
         height: 48,
@@ -533,6 +575,15 @@ class _ControlStrip extends StatelessWidget {
                   dense: densePills,
                 ),
               ),
+            if (showExecutionMode)
+              LayoutId(
+                id: _StripSlot.executionMode,
+                child: ExecutionModePickerButton(
+                  value: c.executionMode,
+                  onSelected: c.onExecutionModeChanged!,
+                  dense: densePills,
+                ),
+              ),
             if (status != null)
               LayoutId(
                 id: _StripSlot.ring,
@@ -556,18 +607,29 @@ class _ControlStrip extends StatelessWidget {
   }
 }
 
-enum _StripSlot { actions, mode, model, effort, persona, ring, hint, send }
+enum _StripSlot {
+  actions,
+  mode,
+  model,
+  effort,
+  persona,
+  executionMode,
+  ring,
+  hint,
+  send,
+}
 
 /// Lays the strip out in priority order: Send at the end and the "+" menu
 /// at the start; the mode chip at its natural width (it is the contract,
 /// and its label ellipsizes only when it must); the model picker in what
-/// the chip leaves; the effort and persona pickers beside it; the ring when
-/// there is still room; the hint in whatever is left between them.
+/// the chip leaves; the effort, persona, and execution-mode pickers beside it;
+/// the ring when there is still room; the hint in whatever is left between them.
 class _StripLayout extends MultiChildLayoutDelegate {
   static const _gap = SonderSpace.xs;
   static const _pickerMin = 96.0;
   static const _effortMin = 68.0;
   static const _personaMin = 68.0;
+  static const _executionModeMin = 68.0;
   static const _chipMin = 72.0;
 
   @override
@@ -595,13 +657,15 @@ class _StripLayout extends MultiChildLayoutDelegate {
     final hasModel = hasChild(_StripSlot.model);
     final hasEffort = hasChild(_StripSlot.effort);
     final hasPersona = hasChild(_StripSlot.persona);
+    final hasExecutionMode = hasChild(_StripSlot.executionMode);
     final ring = hasRing ? layout(_StripSlot.ring, room) : Size.zero;
     final ringWidth = ring.width;
 
     if (hasChild(_StripSlot.mode)) {
       final reserve = (hasModel ? _pickerMin + _gap : 0.0) +
           (hasEffort ? _effortMin + _gap : 0.0) +
-          (hasPersona ? _personaMin + _gap : 0.0);
+          (hasPersona ? _personaMin + _gap : 0.0) +
+          (hasExecutionMode ? _executionModeMin + _gap : 0.0);
       final max = (room - ringWidth - reserve).clamp(_chipMin, 260.0);
       final chip = layout(_StripSlot.mode, max);
       positionChild(_StripSlot.mode, Offset(left, centre(chip)));
@@ -610,28 +674,39 @@ class _StripLayout extends MultiChildLayoutDelegate {
     }
     if (hasModel) {
       final reserve = (hasEffort ? _effortMin + _gap : 0.0) +
-          (hasPersona ? _personaMin + _gap : 0.0);
+          (hasPersona ? _personaMin + _gap : 0.0) +
+          (hasExecutionMode ? _executionModeMin + _gap : 0.0);
       final max = (room - ringWidth - reserve).clamp(0.0, 260.0);
       final picker = layout(_StripSlot.model, max);
       positionChild(_StripSlot.model, Offset(left, centre(picker)));
-      final sep = (hasEffort || hasPersona) ? _gap : 0.0;
+      final sep =
+          (hasEffort || hasPersona || hasExecutionMode) ? _gap : 0.0;
       left += picker.width + sep;
       room -= picker.width + sep;
     }
     if (hasEffort) {
-      final reservePersona = hasPersona ? _personaMin + _gap : 0.0;
-      final max = (room - ringWidth - reservePersona).clamp(0.0, 180.0);
+      final reserveAfter = (hasPersona ? _personaMin + _gap : 0.0) +
+          (hasExecutionMode ? _executionModeMin + _gap : 0.0);
+      final max = (room - ringWidth - reserveAfter).clamp(0.0, 180.0);
       final effort = layout(_StripSlot.effort, max);
       positionChild(_StripSlot.effort, Offset(left, centre(effort)));
       left += effort.width + _gap;
       room -= effort.width + _gap;
     }
     if (hasPersona) {
-      final max = (room - ringWidth).clamp(0.0, 180.0);
+      final reserveExec = hasExecutionMode ? _executionModeMin + _gap : 0.0;
+      final max = (room - ringWidth - reserveExec).clamp(0.0, 180.0);
       final persona = layout(_StripSlot.persona, max);
       positionChild(_StripSlot.persona, Offset(left, centre(persona)));
       left += persona.width + _gap;
       room -= persona.width + _gap;
+    }
+    if (hasExecutionMode) {
+      final max = (room - ringWidth).clamp(0.0, 180.0);
+      final execMode = layout(_StripSlot.executionMode, max);
+      positionChild(_StripSlot.executionMode, Offset(left, centre(execMode)));
+      left += execMode.width + _gap;
+      room -= execMode.width + _gap;
     }
     if (hasRing) {
       positionChild(_StripSlot.ring, Offset(left, centre(ring)));

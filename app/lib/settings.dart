@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'account_session.dart';
 import 'api/transport.dart' show CleartextKeyPolicy;
 import 'local_manager.dart';
+import 'settings/execution_mode_choice.dart'
+    show normalizeExecutionMode, parseExecutionMode;
 import 'settings/persona_choice.dart' show normalizePersona, parsePersona;
 import 'settings/reasoning_effort.dart' show normalizeEffort, parseEffort;
 import 'settings/temperature.dart'
@@ -84,6 +86,7 @@ class Settings {
   static const _kTemperature = 'sonder_temperature';
   static const _kReasoningEffort = 'sonder_reasoning_effort';
   static const _kPersona = 'sonder_persona';
+  static const _kExecutionMode = 'sonder_execution_mode';
   static const _kKeepServerRunning = 'sonder_keep_server_running';
   static const _kAllowApproximateLocation = 'sonder_allow_approximate_location';
   static const _kLauncherUrl = 'sonder_launcher_url';
@@ -171,6 +174,13 @@ class Settings {
   String? _persona;
   String? get persona => _persona;
   set persona(String? value) => _persona = normalizePersona(value);
+
+  /// Optional execution-mode override (`single`, `ensemble`, `fanout`);
+  /// null is Auto (omits `execution_mode` so the server difficulty router runs).
+  String? _executionMode;
+  String? get executionMode => _executionMode;
+  set executionMode(String? value) =>
+      _executionMode = normalizeExecutionMode(value);
   bool keepServerRunning;
   bool allowApproximateLocation;
   String launcherUrl;
@@ -219,6 +229,7 @@ class Settings {
     double? temperature,
     String? reasoningEffort,
     String? persona,
+    String? executionMode,
     this.keepServerRunning = false,
     this.allowApproximateLocation = false,
     this.launcherUrl = '',
@@ -235,6 +246,7 @@ class Settings {
         temperature = normalizeTemperature(temperature),
         reasoningEffort = normalizeEffort(reasoningEffort),
         _persona = normalizePersona(persona),
+        _executionMode = normalizeExecutionMode(executionMode),
         serverUrl = serverUrl ?? defaultServerUrl;
 
   bool get isConfigured => serverUrl.trim().isNotEmpty;
@@ -256,6 +268,8 @@ class Settings {
     bool autoReasoningEffort = false,
     String? persona,
     bool autoPersona = false,
+    String? executionMode,
+    bool autoExecutionMode = false,
     bool? keepServerRunning,
     bool? allowApproximateLocation,
     String? launcherUrl,
@@ -285,6 +299,9 @@ class Settings {
             ? null
             : reasoningEffort ?? this.reasoningEffort,
         persona: autoPersona ? null : persona ?? this.persona,
+        executionMode: autoExecutionMode
+            ? null
+            : executionMode ?? this.executionMode,
         keepServerRunning: keepServerRunning ?? this.keepServerRunning,
         allowApproximateLocation:
             allowApproximateLocation ?? this.allowApproximateLocation,
@@ -425,6 +442,7 @@ class Settings {
       temperature: _temperatureFrom(p),
       reasoningEffort: _reasoningEffortFrom(p),
       persona: _personaFrom(p),
+      executionMode: _executionModeFrom(p),
       keepServerRunning: p.getBool(_kKeepServerRunning) ?? false,
       allowApproximateLocation: p.getBool(_kAllowApproximateLocation) ?? false,
       launcherUrl: p.getString(_kLauncherUrl) ?? '',
@@ -464,6 +482,15 @@ class Settings {
   static String? _personaFrom(SharedPreferences p) {
     try {
       return parsePersona(p.getString(_kPersona));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The stored execution mode; a missing or garbled value is Auto (null).
+  static String? _executionModeFrom(SharedPreferences p) {
+    try {
+      return parseExecutionMode(p.getString(_kExecutionMode));
     } catch (_) {
       return null;
     }
@@ -592,6 +619,12 @@ class Settings {
       await p.remove(_kPersona);
     } else {
       await p.setString(_kPersona, stagedPersona);
+    }
+    final stagedExecutionMode = executionMode;
+    if (stagedExecutionMode == null) {
+      await p.remove(_kExecutionMode);
+    } else {
+      await p.setString(_kExecutionMode, stagedExecutionMode);
     }
     await p.setBool(_kKeepServerRunning, keepServerRunning);
     await p.setBool(_kAllowApproximateLocation, allowApproximateLocation);
