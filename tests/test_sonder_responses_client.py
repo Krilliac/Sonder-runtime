@@ -433,9 +433,10 @@ def _generate_ca_and_server_certs(tmp_path: Path) -> tuple[Path, Path, Path, Pat
 
     now = dt.datetime.now(dt.timezone.utc)
 
-    def _make_ca(common_name: str) -> tuple[object, object]:
+    def _make_ca(common_name: str) -> tuple[object, object, object]:
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         name = x509.Name([x509.NameAttribute(oid.NameOID.COMMON_NAME, common_name)])
+        ski = x509.SubjectKeyIdentifier.from_public_key(key.public_key())
         cert = (
             x509.CertificateBuilder()
             .subject_name(name)
@@ -445,12 +446,31 @@ def _generate_ca_and_server_certs(tmp_path: Path) -> tuple[Path, Path, Path, Pat
             .not_valid_before(now - dt.timedelta(minutes=5))
             .not_valid_after(now + dt.timedelta(days=1))
             .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=False,
+                    content_commitment=False,
+                    key_encipherment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=True,
+                    crl_sign=True,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(ski, critical=False)
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ski),
+                critical=False,
+            )
             .sign(key, hashes.SHA256())
         )
-        return key, cert
+        return key, cert, ski
 
-    ca_key, ca_cert = _make_ca("Sonder Test Root CA")
-    other_key, other_ca_cert = _make_ca("Unrelated Root CA")
+    ca_key, ca_cert, ca_ski = _make_ca("Sonder Test Root CA")
+    other_key, other_ca_cert, _other_ski = _make_ca("Unrelated Root CA")
     _ = other_key
 
     srv_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -463,6 +483,33 @@ def _generate_ca_and_server_certs(tmp_path: Path) -> tuple[Path, Path, Path, Pat
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - dt.timedelta(minutes=5))
         .not_valid_after(now + dt.timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([oid.ExtendedKeyUsageOID.SERVER_AUTH]),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(srv_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ca_ski),
+            critical=False,
+        )
         .add_extension(
             x509.SubjectAlternativeName([
                 x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
@@ -1185,6 +1232,19 @@ def test_ca_verified_https_succeeds_with_pinned_ca_and_rejects_untrusted(tmp_pat
         system_ca_client = SonderResponsesClient(SonderResponsesConfig(base_url=https_url))
         with pytest.raises(DependencyUnavailable, match="TLS verification failed"):
             system_ca_client.create(ResponsesRequest(input="should also fail"))
+
+        # 4. Cert chain satisfies OpenSSL 3 VERIFY_X509_STRICT (Python 3.13+ default)
+        strict_ctx = ssl.create_default_context(cafile=str(ca_pem))
+        strict_ctx.verify_flags |= ssl.VERIFY_X509_STRICT
+        strict_client = SonderResponsesClient(
+            trusted_cfg,
+            opener_factory=lambda _budget: urllib.request.build_opener(
+                urllib.request.ProxyHandler({}),
+                urllib.request.HTTPSHandler(context=strict_ctx),
+            ),
+        )
+        res_strict = strict_client.create(ResponsesRequest(input="strict x509 over tls"))
+        assert res_strict.output_text == "turn-1"
 
 
 def test_private_worker_binds_pinned_ca_trust_scope(tmp_path: Path) -> None:
