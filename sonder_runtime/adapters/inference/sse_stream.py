@@ -57,6 +57,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -73,6 +74,13 @@ CANCEL_POLL_SECONDS = 0.25
 DONE = "[DONE]"
 MAX_STALL_SECONDS = 86_400.0
 STALL_POLL_SECONDS = 0.25
+_MAX_TOKEN_COUNT = 1_000_000_000
+_MAX_DETAIL_KEYS = 16
+_MAX_DETAIL_KEY_LEN = 64
+_USAGE_COUNT_KEYS = frozenset({
+    "prompt_tokens", "completion_tokens", "total_tokens",
+    "input_tokens", "output_tokens",
+})
 
 
 class StreamTimeout(TimeoutError):
@@ -137,22 +145,265 @@ def current_stall_limits() -> StallLimits:
     return _LIMITS.get() or StallLimits()
 
 
+def _close_budget_sockets(budget) -> None:
+    """Shut down and close every socket attached to ``budget`` without altering timeout flags."""
+    lock = getattr(budget, "_lock", None)
+    if lock is not None:
+        with lock:
+            sockets = list(getattr(budget, "_sockets", ()))
+    else:
+        sockets = list(getattr(budget, "_sockets", ()))
+    for sock in sockets:
+        if sock is None:
+            continue
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except (OSError, AttributeError):
+            pass
+        try:
+            detach = getattr(sock, "detach", None)
+            if callable(detach):
+                descriptor = detach()
+                if isinstance(descriptor, int) and descriptor >= 0:
+                    socket.close(descriptor)
+            else:
+                close = getattr(sock, "close", None)
+                if callable(close):
+                    close()
+        except (OSError, ValueError):
+            pass
+
+
 def _abort_exchange(budget) -> None:
     """Break a read that is blocked on the exchange's sockets."""
-    budget._expire()  # shutdown(): unblocks a pending read on POSIX
+    expire = getattr(budget, "_expire", None)
+    if callable(expire):
+        expire()  # shutdown(): unblocks a pending read on POSIX
     # Windows only aborts a blocking recv() on another thread when the
     # descriptor itself is closed.  The response's file object keeps the
     # socket open past ``socket.close()``, so detach the descriptor and
     # close that (the server then sees the disconnect and cancels).
-    with budget._lock:
-        sockets = list(budget._sockets)
-    for sock in sockets:
-        try:
-            descriptor = sock.detach()
-            if descriptor >= 0:
-                socket.close(descriptor)
-        except OSError:
-            pass
+    _close_budget_sockets(budget)
+
+
+def _live_cancelled(live: object) -> bool:
+    if live is None:
+        return False
+    try:
+        return bool(getattr(live, "cancelled", False))
+    except Exception:
+        return False
+
+
+def _valid_token_count(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 <= value <= _MAX_TOKEN_COUNT else None
+
+
+def _clean_token_details(raw: object, *, max_cached: int | None = None) -> dict[str, int]:
+    if not isinstance(raw, Mapping):
+        return {}
+    cleaned: dict[str, int] = {}
+    for key, value in raw.items():
+        if len(cleaned) >= _MAX_DETAIL_KEYS:
+            break
+        if (
+            not isinstance(key, str)
+            or not key
+            or len(key) > _MAX_DETAIL_KEY_LEN
+            or not key.isascii()
+            or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in key)
+        ):
+            continue
+        count = _valid_token_count(value)
+        if count is None:
+            continue
+        if key == "cached_tokens" and max_cached is not None and count > max_cached:
+            continue
+        cleaned[key] = count
+    return cleaned
+
+
+def _merge_dict_extra(existing: object, incoming: object) -> object:
+    """Merge non-null dict extras across chunks without letting null clobber data."""
+    if incoming is None:
+        return existing
+    if not isinstance(incoming, dict):
+        return existing if isinstance(existing, dict) else incoming
+    if not isinstance(existing, dict):
+        return dict(incoming)
+    merged = dict(existing)
+    for key, value in incoming.items():
+        if value is None:
+            continue
+        prev = merged.get(key)
+        if isinstance(prev, dict) and isinstance(value, dict):
+            nested = dict(prev)
+            nested.update({k: v for k, v in value.items() if v is not None})
+            merged[key] = nested
+        else:
+            merged[key] = value
+    return merged
+
+
+def _merge_usage_extra(existing: object, incoming: object) -> object:
+    """Merge chunk ``usage`` fields without letting null or placeholder zeros clobber counts."""
+    if incoming is None:
+        return existing
+    if not isinstance(incoming, dict):
+        return existing if isinstance(existing, dict) else incoming
+    if not isinstance(existing, dict):
+        return dict(incoming)
+    merged = dict(existing)
+    for key, value in incoming.items():
+        if value is None:
+            continue
+        if key in _USAGE_COUNT_KEYS:
+            prev_count = _valid_token_count(merged.get(key))
+            new_count = _valid_token_count(value)
+            if new_count is None:
+                if prev_count is None:
+                    merged[key] = value
+                continue
+            if prev_count is not None and prev_count > 0 and new_count == 0:
+                continue
+            merged[key] = new_count
+            continue
+        prev = merged.get(key)
+        if isinstance(prev, dict) and isinstance(value, dict):
+            merged[key] = _merge_dict_extra(prev, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _effective_timings(document: Mapping[str, object]) -> dict[str, object]:
+    timings: dict[str, object] = {}
+    raw_timings = document.get("timings")
+    if isinstance(raw_timings, Mapping):
+        timings.update({str(k): v for k, v in raw_timings.items() if v is not None})
+    raw_usage = document.get("usage")
+    if isinstance(raw_usage, Mapping):
+        sonder_ext = raw_usage.get("sonder")
+        if isinstance(sonder_ext, Mapping):
+            nested = sonder_ext.get("timings")
+            if isinstance(nested, Mapping):
+                timings.update({str(k): v for k, v in nested.items() if v is not None})
+    return timings
+
+
+def _extract_normalized_usage(document: Mapping[str, object]) -> dict[str, object] | None:
+    """Extract canonical bounded OpenAI token counts from an aggregated response."""
+    raw_usage = document.get("usage")
+    usage = raw_usage if isinstance(raw_usage, Mapping) else {}
+    timings = _effective_timings(document)
+
+    prompt = _valid_token_count(usage.get("prompt_tokens"))
+    if prompt is None:
+        prompt = _valid_token_count(usage.get("input_tokens"))
+    timing_prompt = _valid_token_count(timings.get("prompt_n"))
+    if (prompt is None or prompt == 0) and timing_prompt is not None and (
+        prompt is None or timing_prompt > 0
+    ):
+        prompt = timing_prompt
+
+    completion = _valid_token_count(usage.get("completion_tokens"))
+    if completion is None:
+        completion = _valid_token_count(usage.get("output_tokens"))
+    timing_completion = _valid_token_count(timings.get("predicted_n"))
+    if (completion is None or completion == 0) and timing_completion is not None and (
+        completion is None or timing_completion > 0
+    ):
+        completion = timing_completion
+
+    total = _valid_token_count(usage.get("total_tokens"))
+    if prompt is None and completion is None and total is None:
+        return None
+    prompt_val = prompt or 0
+    completion_val = completion or 0
+    computed_total = prompt_val + completion_val
+    total_val = total if (total is not None and total >= computed_total) else computed_total
+    normalized: dict[str, object] = {
+        "prompt_tokens": prompt_val,
+        "completion_tokens": completion_val,
+        "total_tokens": total_val,
+    }
+    prompt_details = _clean_token_details(
+        usage.get("prompt_tokens_details"), max_cached=prompt_val,
+    )
+    if "cached_tokens" not in prompt_details:
+        cache_n = _valid_token_count(timings.get("cache_n"))
+        if cache_n is not None and cache_n <= prompt_val:
+            prompt_details["cached_tokens"] = cache_n
+    if prompt_details:
+        normalized["prompt_tokens_details"] = prompt_details
+    completion_details = _clean_token_details(usage.get("completion_tokens_details"))
+    if completion_details:
+        normalized["completion_tokens_details"] = completion_details
+    return normalized
+
+
+def _accumulate_usage(
+    existing: object,
+    incoming: Mapping[str, object],
+) -> dict[str, object]:
+    if not isinstance(existing, Mapping):
+        return dict(incoming)
+    prompt = min(
+        _MAX_TOKEN_COUNT,
+        (_valid_token_count(existing.get("prompt_tokens")) or 0)
+        + (_valid_token_count(incoming.get("prompt_tokens")) or 0),
+    )
+    completion = min(
+        _MAX_TOKEN_COUNT,
+        (_valid_token_count(existing.get("completion_tokens")) or 0)
+        + (_valid_token_count(incoming.get("completion_tokens")) or 0),
+    )
+    existing_total = _valid_token_count(existing.get("total_tokens")) or 0
+    incoming_total = _valid_token_count(incoming.get("total_tokens")) or 0
+    total = min(_MAX_TOKEN_COUNT, max(existing_total + incoming_total, prompt + completion))
+    merged: dict[str, object] = {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+    }
+    for detail_key in ("prompt_tokens_details", "completion_tokens_details"):
+        combined: dict[str, int] = {}
+        for source in (existing.get(detail_key), incoming.get(detail_key)):
+            if not isinstance(source, Mapping):
+                continue
+            for key, value in source.items():
+                count = _valid_token_count(value)
+                if isinstance(key, str) and key and count is not None:
+                    combined[key] = min(_MAX_TOKEN_COUNT, combined.get(key, 0) + count)
+        if detail_key == "prompt_tokens_details" and combined.get("cached_tokens", 0) > prompt:
+            combined.pop("cached_tokens", None)
+        if combined:
+            merged[detail_key] = combined
+    return merged
+
+
+def _report_live_usage(live, document: object) -> None:
+    if live is None or not isinstance(document, Mapping):
+        return
+    normalized = _extract_normalized_usage(document)
+    if normalized is None:
+        return
+    recorder = getattr(live, "record_usage", None)
+    if callable(recorder):
+        recorder(dict(normalized))
+        return
+    inner = getattr(live, "_live", None)
+    inner_recorder = getattr(inner, "record_usage", None) if inner is not None else None
+    if callable(inner_recorder):
+        inner_recorder(dict(normalized))
+        return
+    try:
+        current = getattr(live, "upstream_usage", None)
+        live.upstream_usage = _accumulate_usage(current, normalized)
+    except AttributeError:
+        pass
 
 
 class _StallWatch:
@@ -221,27 +472,40 @@ class _CancelWatch:
         self.cancelled = False
         self._live = live
         self._budget = budget
+        self._trip_lock = threading.Lock()
+        self._tripped = False
         self._stop = threading.Event()
         self._thread = None
         if live is not None:
-            self._thread = Thread(
-                target=self._run, name="sonder-inference-stream-cancel", daemon=True,
-            )
-            self._thread.start()
+            if _live_cancelled(live):
+                self.trip()
+            else:
+                self._thread = Thread(
+                    target=self._run, name="sonder-inference-stream-cancel", daemon=True,
+                )
+                self._thread.start()
 
     def _run(self) -> None:
         while not self._stop.wait(CANCEL_POLL_SECONDS):
-            if self._live.cancelled:
+            if _live_cancelled(self._live):
                 self.trip()
                 return
 
     def trip(self) -> None:
-        self.cancelled = True
-        _abort_exchange(self._budget)
+        with self._trip_lock:
+            self.cancelled = True
+            if self._tripped:
+                return
+            self._tripped = True
+        abort = getattr(self._budget, "abort", None)
+        if callable(abort):
+            abort()
+        else:
+            _abort_exchange(self._budget)
 
     def stop(self) -> None:
         self._stop.set()
-        if self._thread is not None:
+        if self._thread is not None and threading.current_thread() is not self._thread:
             self._thread.join(timeout=CANCEL_POLL_SECONDS + 1.0)
 
 
@@ -284,9 +548,15 @@ class _Aggregate:
         for key, attr in (("model", "model"), ("id", "ident")):
             if chunk.get(key) is not None and getattr(self, attr) is None:
                 setattr(self, attr, chunk[key])
-        for key in ("usage", "timings", "sonder"):
+        if "usage" in chunk:
+            merged_usage = _merge_usage_extra(self.extras.get("usage"), chunk["usage"])
+            if merged_usage is not None:
+                self.extras["usage"] = merged_usage
+        for key in ("timings", "sonder"):
             if key in chunk:
-                self.extras[key] = chunk[key]
+                merged_extra = _merge_dict_extra(self.extras.get(key), chunk[key])
+                if merged_extra is not None:
+                    self.extras[key] = merged_extra
         choices = chunk.get("choices")
         if not isinstance(choices, list) or not choices:
             return
@@ -373,6 +643,18 @@ class _Aggregate:
         if self.model is not None:
             document["model"] = self.model
         document.update(self.extras)
+        raw_usage = document.get("usage")
+        if isinstance(raw_usage, dict):
+            normalized = _extract_normalized_usage(document)
+            if normalized is not None:
+                merged_usage = dict(raw_usage)
+                merged_usage["prompt_tokens"] = normalized["prompt_tokens"]
+                merged_usage["completion_tokens"] = normalized["completion_tokens"]
+                merged_usage["total_tokens"] = normalized["total_tokens"]
+                for detail_key in ("prompt_tokens_details", "completion_tokens_details"):
+                    if detail_key in normalized and not isinstance(merged_usage.get(detail_key), dict):
+                        merged_usage[detail_key] = normalized[detail_key]
+                document["usage"] = merged_usage
         return document
 
 
@@ -393,9 +675,13 @@ def consume_event_stream(
     data_lines: list[str] = []
     total = 0
     while not aggregate.done:
+        if _live_cancelled(live):
+            raise Cancelled("the streaming client disconnected; generation cancelled")
         raw = stream.readline(MAX_LINE_BYTES + 1)
         if not raw:
             break
+        if _live_cancelled(live):
+            raise Cancelled("the streaming client disconnected; generation cancelled")
         if progress is not None:
             progress.touch()
         total += len(raw)
@@ -421,7 +707,9 @@ def consume_event_stream(
         aggregate.event("\n".join(data_lines), error_fields)
     if not aggregate.done:
         raise DependencyUnavailable("%s stream ended before [DONE]" % label)
-    return aggregate.document()
+    document = aggregate.document()
+    _report_live_usage(live, document)
+    return document
 
 
 def post_streaming(
@@ -437,6 +725,8 @@ def post_streaming(
     OpenAI-compatible gateway keeps its own proxy policy); ``label`` names the
     provider in error text.  Stall limits come from :func:`stall_limits`.
     """
+    if _live_cancelled(live):
+        raise Cancelled("the streaming client disconnected; generation cancelled")
     gateway = exchange
     budget_seconds = float(timeout) if timeout else gateway.DEFAULT_TIMEOUT_SECONDS
     data = json.dumps(payload).encode("utf-8")
@@ -446,6 +736,8 @@ def post_streaming(
     limits = current_stall_limits()
     started = time.monotonic()
     with gateway._ExchangeBudget(budget_seconds) as budget:
+        if getattr(budget, "aborted", False):
+            raise Cancelled("the operation was cancelled; generation stopped")
         if opener_factory is not None:
             opener = opener_factory(budget)
         else:
@@ -456,6 +748,9 @@ def post_streaming(
         watch = _CancelWatch(live, budget)
         stall = _StallWatch(budget, limits, started, label) if limits.active else None
         try:
+            if watch.cancelled or _live_cancelled(live):
+                watch.trip()
+                raise Cancelled("the streaming client disconnected; generation cancelled")
             try:
                 response = opener.open(request, timeout=budget_seconds)
             except urllib.error.HTTPError as exc:
@@ -470,6 +765,11 @@ def post_streaming(
             if stall is not None:
                 stall.arm_idle()
             with response:
+                if watch.cancelled or _live_cancelled(live):
+                    watch.trip()
+                    raise Cancelled("the streaming client disconnected; generation cancelled")
+                if getattr(budget, "aborted", False):
+                    raise Cancelled("the operation was cancelled; generation stopped")
                 content_type = str(response.headers.get("Content-Type", "")).lower()
                 if "text/event-stream" not in content_type:
                     # A server that answered with one JSON document: the
@@ -483,11 +783,13 @@ def post_streaming(
                             "%s response exceeds %d bytes" % (label, gateway.RESPONSE_BODY_LIMIT)
                         )
                     try:
-                        return json.loads(body.decode("utf-8"))
+                        document = json.loads(body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
                         raise DependencyUnavailable(
                             "%s returned a non-JSON response" % label
                         ) from exc
+                    _report_live_usage(live, document)
+                    return document
                 return consume_event_stream(
                     response, live, limit=gateway.RESPONSE_BODY_LIMIT,
                     error_fields=gateway._error_document_fields,
@@ -496,26 +798,32 @@ def post_streaming(
         except urllib.error.HTTPError:
             raise
         except Exception as exc:
-            if watch.cancelled or isinstance(exc, Cancelled) or (
-                live is not None and live.cancelled
-            ):
+            if watch.cancelled or isinstance(exc, Cancelled) or _live_cancelled(live):
+                watch.trip()
                 raise Cancelled(
                     "the streaming client disconnected; generation cancelled"
                 ) from exc
             if getattr(budget, "aborted", False):
                 # The operation's cancellation token closed the exchange.
+                _close_budget_sockets(budget)
                 raise Cancelled("the operation was cancelled; generation stopped") from exc
             if stall is not None and stall.fired is not None:
+                _close_budget_sockets(budget)
                 raise stall.fired from exc
             if budget.expired:
+                _close_budget_sockets(budget)
                 raise StreamTimeout("total", (
                     "%s exchange exceeded its %.1fs budget (total timeout fired after %.1fs)"
                     % (label, budget_seconds, time.monotonic() - started)
                 )) from exc
+            _close_budget_sockets(budget)
             if isinstance(exc, http.client.HTTPException):
                 raise DependencyUnavailable(
                     "%s sent a malformed HTTP response (%s)" % (label, type(exc).__name__)
                 ) from exc
+            raise
+        except BaseException:
+            _close_budget_sockets(budget)
             raise
         finally:
             if stall is not None:
