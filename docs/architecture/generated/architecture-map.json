@@ -573,7 +573,7 @@
       ]
     },
     {
-      "file_count": 460,
+      "file_count": 461,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -903,6 +903,7 @@
         "sonder_runtime/application/routing/capability_router.py",
         "sonder_runtime/application/routing/context_fit.py",
         "sonder_runtime/application/routing/evidence_gateway.py",
+        "sonder_runtime/application/routing/execution_mode_service.py",
         "sonder_runtime/application/routing/identity_cache.py",
         "sonder_runtime/application/routing/long_context_overflow.py",
         "sonder_runtime/application/routing/request_capabilities.py",
@@ -1136,7 +1137,7 @@
       ]
     },
     {
-      "file_count": 343,
+      "file_count": 344,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1412,6 +1413,7 @@
         "sonder_runtime/domain/routing/calibration_profiles.py",
         "sonder_runtime/domain/routing/capability_profiles.py",
         "sonder_runtime/domain/routing/capability_router.py",
+        "sonder_runtime/domain/routing/execution_mode_router.py",
         "sonder_runtime/domain/routing/fleet_router.py",
         "sonder_runtime/domain/routing/model_names.py",
         "sonder_runtime/domain/routing/route_planner.py",

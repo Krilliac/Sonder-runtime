@@ -19,6 +19,11 @@ from typing import Any
 
 from sonder_runtime.application.chat.handoff_receipts import ChatWorkResult
 from sonder_runtime.application.chat.provider_bridge import degradation_scope
+from sonder_runtime.application.routing.execution_mode_service import (
+    VALID_EXECUTION_MODES,
+    check_execution_mode,
+    plan_chat_execution_mode,
+)
 from sonder_runtime.application.routing.long_context_overflow import (
     notice_scope as overflow_notice_scope,
     receipt_entry as overflow_receipt_entry,
@@ -60,6 +65,7 @@ class ChatTurnDeps:
     acquire_chat_slot: Callable[[Any], Any]
     run_natural_fanout: Callable[[dict[str, Any]], Any]
     run_natural_ensemble: Callable[[dict[str, Any], str], Any]
+    resolve_local_tier_models: Callable[[], dict[str, str]] | None = None
 
 
 def handle_chat_completions(
@@ -424,6 +430,37 @@ def handle_chat_completions(
             )
             return
 
+    request_execution_mode: str = ""
+    if req.get("execution_mode") is not None:
+        checked_exec_mode = check_execution_mode(req.get("execution_mode"))
+        if checked_exec_mode is None:
+            record_early_chat_metric("invalid_execution_mode")
+            handler._send_json_payload(
+                {
+                    "error": {
+                        "message": "execution_mode: expected one of %s"
+                        % ", ".join(sorted(VALID_EXECUTION_MODES)),
+                        "type": "invalid_request",
+                    }
+                },
+                status=400,
+            )
+            return
+        if checked_exec_mode in ("ensemble", "fanout", "agent") and not serve_mod._developer_authorized(context):
+            record_early_chat_metric("execution_mode_forbidden")
+            handler._send_json_payload(
+                {
+                    "error": {
+                        "message": "developer or admin authentication is required for %s execution mode"
+                        % checked_exec_mode,
+                        "type": "forbidden_command",
+                    }
+                },
+                status=403,
+            )
+            return
+        request_execution_mode = checked_exec_mode
+
     history_source = req.get("history")
     if history_source is not None and history_source not in serve_mod._CHAT_HISTORY_SOURCES:
         record_early_chat_metric("invalid_history")
@@ -526,6 +563,7 @@ def handle_chat_completions(
 
     deps.reference_lookup_lanes_mod.reset_turn()
     tool_turn: Any = None
+    execution_decision: Any = None
     client_slash_handoffs: list[Any] = []
     client_slash_records: list[Any] = []
 
@@ -688,6 +726,99 @@ def handle_chat_completions(
                         lane_session=session,
                         storage_session=storage_session,
                     )
+                if (
+                    structured_schema is None
+                    and reply is None
+                    and natural_model is None
+                    and (
+                        allow_control_routes
+                        or request_execution_mode in ("ensemble", "fanout", "agent")
+                    )
+                ):
+                    has_request_image = any(
+                        isinstance(item, dict)
+                        and isinstance(item.get("content"), list)
+                        and any(
+                            isinstance(part, dict)
+                            and part.get("type") in ("image_url", "image", "input_image")
+                            for part in item["content"]
+                        )
+                        for item in messages
+                    )
+                    if deps.resolve_local_tier_models is not None:
+                        resolved_tier_models = deps.resolve_local_tier_models()
+                    else:
+                        resolved_tier_models = {}
+                        cfg_tiers = getattr(runtime, "_configured_local_tiers", None)
+                        is_cloud_fn = getattr(runtime, "_is_cloud_tier", None)
+                        lane_guard = getattr(runtime, "_tool_lane_guard", None)
+                        serve_target = getattr(runtime, "_serve_target", None)
+                        if callable(cfg_tiers) and lane_guard is not None and serve_target is not None:
+                            for tier_name in cfg_tiers():
+                                if callable(is_cloud_fn) and is_cloud_fn(tier_name):
+                                    continue
+                                target_model = lane_guard.chat_target(
+                                    serve_target, tier_name, False
+                                )[0]
+                                if target_model:
+                                    resolved_tier_models[str(tier_name)] = str(target_model)
+                    candidate_decision = plan_chat_execution_mode(
+                        prompt,
+                        tier_models=resolved_tier_models,
+                        developer_authorized=bool(serve_mod._developer_authorized(context)),
+                        has_image=has_request_image,
+                        structured_output=False,
+                        explicit_model_pin=not allow_control_routes,
+                        requested_mode=request_execution_mode,
+                        env=os.environ,
+                    )
+                    if candidate_decision.auto_selected or bool(request_execution_mode):
+                        execution_decision = candidate_decision
+                        if candidate_decision.mode == "ensemble":
+                            reply = deps.run_natural_ensemble(
+                                {
+                                    "kind": "ensemble",
+                                    "prompt": prompt,
+                                    "tiers": ",".join(candidate_decision.recommended_tiers),
+                                    "mode": candidate_decision.ensemble_mode,
+                                    "require_all_tiers": False,
+                                },
+                                storage_project,
+                            )
+                        elif candidate_decision.mode == "fanout":
+                            reply = deps.run_natural_fanout(
+                                {
+                                    "kind": "fanout",
+                                    "prompt": prompt,
+                                    "scope": candidate_decision.fanout_scope,
+                                }
+                            )
+                        elif candidate_decision.mode == "agent":
+                            reply = serve_mod._handle_slash(
+                                "/agent %s" % prompt,
+                                messages=chat_slash_messages(
+                                    messages, history, serve_mod._history_from_messages,
+                                ),
+                                state=state,
+                                project=storage_project
+                                or runtime._http_chat_tools().account_default_project(
+                                    context, serve_mod._state_principal(context),
+                                ),
+                                context=context,
+                                idempotency_key=handler.headers.get("Idempotency-Key", ""),
+                                workspace_project=project,
+                                lane_session=session,
+                                storage_session=storage_session,
+                                selected_model=not allow_control_routes,
+                            )
+                        elif (
+                            candidate_decision.mode == "single"
+                            and candidate_decision.auto_selected
+                            and candidate_decision.band == "quick"
+                            and not model_selector
+                            and "fast" in candidate_decision.recommended_tiers
+                        ):
+                            model_selector = "fast"
                 if (
                     structured_schema is None
                     and reply is None
@@ -1164,6 +1295,8 @@ def handle_chat_completions(
         receipt["degraded"] = list(turn_degradations)
     if chat_work_receipt is not None:
         receipt["chat_work"] = chat_work_receipt
+    if execution_decision is not None:
+        receipt["execution_route"] = execution_decision.to_dict()
     if turn is not None and reply is None and truncation_flag[0]:
         receipt["truncated"] = True
     receipt.update(reply_receipt_fields(reply))
