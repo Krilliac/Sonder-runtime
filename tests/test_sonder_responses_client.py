@@ -1149,10 +1149,16 @@ def test_cancellation_before_send_midstream_and_via_callback() -> None:
 # -- Real CA-verified HTTPS & trust_scope tests -------------------------------
 
 
+def _make_server_ssl_context(certfile: Path, keyfile: Path) -> ssl.SSLContext:
+    ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(certfile=str(certfile), keyfile=str(keyfile))
+    return ctx
+
+
 def test_ca_verified_https_succeeds_with_pinned_ca_and_rejects_untrusted(tmp_path: Path) -> None:
     ca_pem, other_ca_pem, srv_cert_pem, srv_key_pem = _generate_ca_and_server_certs(tmp_path)
-    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_ctx.load_cert_chain(certfile=str(srv_cert_pem), keyfile=str(srv_key_pem))
+    server_ctx = _make_server_ssl_context(srv_cert_pem, srv_key_pem)
 
     fake = FakeResponsesServer()
     with _serve_fake(fake, ssl_context=server_ctx) as https_url:
@@ -1233,8 +1239,7 @@ def test_private_worker_binds_pinned_ca_trust_scope(tmp_path: Path) -> None:
 
 def test_stream_does_not_leak_trust_scope_across_yield_or_callbacks(tmp_path: Path) -> None:
     ca_pem, _other_ca, srv_cert_pem, srv_key_pem = _generate_ca_and_server_certs(tmp_path)
-    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_ctx.load_cert_chain(certfile=str(srv_cert_pem), keyfile=str(srv_key_pem))
+    server_ctx = _make_server_ssl_context(srv_cert_pem, srv_key_pem)
 
     fake = FakeResponsesServer()
     fake.stream_tokens = ["one", "two"]
