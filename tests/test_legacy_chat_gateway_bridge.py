@@ -709,3 +709,40 @@ def test_other_bridged_providers_keep_the_plain_refusal(monkeypatch, local_ollam
     assert caught.value.status == 400
     assert "SONDER_INFERENCE_FALLBACK" not in caught.value.detail
     assert local_ollama == []
+
+
+def test_tools_kwarg_reroutes_sonder_inference_to_ollama_pool(monkeypatch, local_ollama):
+    monkeypatch.setattr(server, "OLLAMA_POOL", _pool(remote_workers=True))
+    graph = _inference_graph(fallback=True)
+    _install(monkeypatch, graph)
+    tools = [{"type": "function", "function": {"name": "directory_tree", "parameters": {"type": "object"}}}]
+    with provider_bridge.bind_rung("sonder_inference", "reasoning"):
+        server._chat_request(
+            _schema_payload(model="qwen3-coder-next-80b:latest"),
+            model="qwen3-coder-next-80b:latest",
+            tools=tools,
+            tool_choice="auto",
+            accept_native_tool_calls=True,
+            return_message=True,
+        )
+    [post] = local_ollama
+    assert post["payload"].get("tools") == tools
+    assert post["payload"].get("tool_choice") == "auto"
+    assert post["local_only"] is False
+    assert graph.model_gateway.calls == []
+
+
+def test_tools_kwarg_not_silently_dropped_on_openai_compatible(monkeypatch, local_ollama):
+    _install(monkeypatch, _graph(_openai_transport()))
+    tools = [{"type": "function", "function": {"name": "directory_tree", "parameters": {"type": "object"}}}]
+    with provider_bridge.bind_rung("openai_compatible", "code"):
+        with pytest.raises(server.ModelCallError) as caught:
+            server._chat_request(
+                _schema_payload(model="bonsai-27b-pq2"),
+                model="bonsai-27b-pq2",
+                tools=tools,
+                accept_native_tool_calls=True,
+                return_message=True,
+            )
+    assert caught.value.status == 400
+    assert local_ollama == []
