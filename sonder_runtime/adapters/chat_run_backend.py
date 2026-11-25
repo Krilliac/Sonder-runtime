@@ -1,6 +1,7 @@
 """Execution backend for ``ChatToolTurn`` tool calls (``run_code``, ``tool_search``, workspace)."""
 from __future__ import annotations
 
+import math
 import os
 import re
 import time
@@ -223,6 +224,54 @@ def resolve_agent_project_scope(project: object) -> tuple[str, str]:
     return "", ""
 
 
+def _safe_token_count(raw: Any) -> int:
+    if raw is None or isinstance(raw, bool):
+        return 0
+    if isinstance(raw, int):
+        return max(0, raw)
+    if isinstance(raw, float):
+        return max(0, int(raw)) if math.isfinite(raw) else 0
+    try:
+        parsed = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int(parsed)) if math.isfinite(parsed) else 0
+
+
+def _extract_backend_usage(out: Any) -> dict[str, int]:
+    if not isinstance(out, Mapping):
+        return {"tokens_in": 0, "tokens_out": 0}
+    usage_obj = out.get("usage")
+    usage_map: Mapping[str, Any] = usage_obj if isinstance(usage_obj, Mapping) else {}
+    tokens_in = 0
+    for candidate in (
+        out.get("prompt_eval_count"),
+        usage_map.get("tokens_in"),
+        usage_map.get("prompt_tokens"),
+        usage_map.get("prompt_eval_count"),
+        usage_map.get("input_tokens"),
+        out.get("prompt_tokens"),
+    ):
+        val = _safe_token_count(candidate)
+        if val > 0:
+            tokens_in = val
+            break
+    tokens_out = 0
+    for candidate in (
+        out.get("eval_count"),
+        usage_map.get("tokens_out"),
+        usage_map.get("completion_tokens"),
+        usage_map.get("eval_count"),
+        usage_map.get("output_tokens"),
+        out.get("completion_tokens"),
+    ):
+        val = _safe_token_count(candidate)
+        if val > 0:
+            tokens_out = val
+            break
+    return {"tokens_in": tokens_in, "tokens_out": tokens_out}
+
+
 def run_chat_tool_turn(
     turn: Any,
     *,
@@ -254,13 +303,11 @@ def run_chat_tool_turn(
             accept_native_tool_calls=True,
         )
         msg_dict = message if isinstance(message, Mapping) else {"role": "assistant", "content": str(message or "")}
+        out_map: Mapping[str, Any] = out if isinstance(out, Mapping) else {}
         return {
             "message": dict(msg_dict),
-            "usage": {
-                "tokens_in": int((out or {}).get("prompt_eval_count") or 0),
-                "tokens_out": int((out or {}).get("eval_count") or 0),
-            },
-            "meta": {"model": (out or {}).get("model") or model},
+            "usage": _extract_backend_usage(out_map),
+            "meta": {"model": out_map.get("model") or model},
         }
 
     return turn.run(step, system=system, prompt=prompt, history=history)

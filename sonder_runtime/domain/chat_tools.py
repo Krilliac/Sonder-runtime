@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from sonder_runtime.domain.agents.delegation import BOARD_MESSAGE_KINDS, DELEGATION_TOOLS
-from sonder_runtime.domain.resilience import repair_tool_arguments
+from sonder_runtime.domain.resilience import (
+    MAX_TOOL_ARGUMENT_CHARS,
+    MAX_TOOL_ARGUMENT_DEPTH,
+    _check_json_bounds,
+    _strict_json_loads,
+    repair_tool_arguments,
+)
 from sonder_runtime.domain.security import redaction
 
 TOOL_BACKEND_CONTAINER = "container"
@@ -44,6 +50,16 @@ _SENSITIVE_PREVIEW_KEYS = frozenset({
 })
 
 
+def _safe_json_preview(value: Any, *, max_chars: int = 8000) -> str:
+    try:
+        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError, RecursionError):
+        rendered = repr(value)
+    if len(rendered) > max_chars:
+        return rendered[:max_chars] + f"... (truncated {len(rendered) - max_chars} chars)"
+    return rendered
+
+
 def preview_tool_arguments(
     tool_name: str,
     args: Mapping[str, Any],
@@ -60,7 +76,7 @@ def preview_tool_arguments(
     if tool_name == "run_code":
         bidi_texts.append(str(visible_args.get("code") or ""))
     else:
-        bidi_texts.append(json.dumps(visible_args, ensure_ascii=False, sort_keys=True, default=str))
+        bidi_texts.append(_safe_json_preview(visible_args, max_chars=max(max_detail_chars * 2, 8000)))
     has_bidi, bidi_chars = detect_bidi_chars("\n".join(bidi_texts))
     redacted_args = redaction.redact_structure(visible_args, sensitive_keys=True)
     detail = ""
@@ -68,7 +84,7 @@ def preview_tool_arguments(
         detail = redaction.redact_text(str(redacted_args.get("code") or ""))
     elif tool_name in {"file_write", "file_edit", "file_delete", "text_patch", "workspace_run"}:
         detail = redaction.redact_text(
-            json.dumps(redacted_args, ensure_ascii=False, sort_keys=True, default=str)
+            _safe_json_preview(redacted_args, max_chars=max(max_detail_chars * 2, 8000))
         )
     truncated = len(detail) > max_detail_chars
     shown_detail = (
@@ -84,10 +100,13 @@ def preview_tool_arguments(
             safe_args[key] = value
         else:
             try:
-                json.dumps(value, ensure_ascii=False)
-                safe_args[key] = value
-            except (TypeError, ValueError):
-                safe_args[key] = redaction.redact_text(str(value))
+                serialized = json.dumps(value, ensure_ascii=False)
+                if len(serialized) > 512:
+                    safe_args[key] = redaction.redact_text(serialized[:512] + "...")
+                else:
+                    safe_args[key] = value
+            except (TypeError, ValueError, RecursionError):
+                safe_args[key] = redaction.redact_text(str(value)[:512])
     return {
         "arguments": safe_args,
         "detail": shown_detail,
@@ -109,6 +128,9 @@ class ChatToolBudget:
     model_output_chars: int = 4000
     user_output_chars: int = 12000
     approval_wait_seconds: float = 120.0
+    max_argument_chars: int = MAX_TOOL_ARGUMENT_CHARS
+    max_argument_depth: int = MAX_TOOL_ARGUMENT_DEPTH
+    max_tool_calls_per_step: int = 32
 
 
 DEFAULT_CHAT_TOOL_BUDGET = ChatToolBudget()
@@ -837,6 +859,64 @@ def tool_backend_label(tool_name: str, *, container_active: bool = False) -> str
     return _BACKEND_BY_TOOL.get(name, TOOL_BACKEND_WORKSPACE)
 
 
+def validate_tool_arguments(
+    raw: Any,
+    *,
+    max_chars: int = MAX_TOOL_ARGUMENT_CHARS,
+    max_depth: int = MAX_TOOL_ARGUMENT_DEPTH,
+) -> tuple[dict[str, Any], bool, str]:
+    """Validate and normalize provider tool arguments with strict size/depth/JSON bounds.
+
+    Returns ``(args_dict, was_repaired, error_message)``. When ``error_message`` is
+    non-empty, callers must fail closed instead of executing the tool with ``{}``.
+    """
+    char_cap = max(1, int(max_chars))
+    depth_cap = max(1, int(max_depth))
+    if raw is None:
+        return {}, False, ""
+    if isinstance(raw, Mapping):
+        bounds_err = _check_json_bounds(raw, max_depth=depth_cap)
+        if bounds_err:
+            return {}, False, bounds_err
+        try:
+            serialized = json.dumps(raw, ensure_ascii=False, allow_nan=False, default=str)
+        except (TypeError, ValueError, RecursionError) as exc:
+            return {}, False, f"arguments cannot be serialized as JSON: {exc}"
+        if len(serialized) > char_cap:
+            return {}, False, f"arguments exceed maximum size ({len(serialized)} > {char_cap} chars)"
+        return {str(k): v for k, v in raw.items()}, False, ""
+    if not isinstance(raw, str):
+        return {}, False, f"arguments must be a JSON object, got {type(raw).__name__}"
+    text = raw.strip()
+    if not text:
+        return {}, False, ""
+    if len(text) > char_cap:
+        return {}, False, f"arguments exceed maximum size ({len(text)} > {char_cap} chars)"
+    try:
+        loaded = _strict_json_loads(text)
+    except RecursionError:
+        return {}, False, f"arguments exceed maximum nesting depth ({depth_cap})"
+    except (TypeError, ValueError) as exc:
+        if "non-finite" in str(exc).lower():
+            return {}, False, "arguments contain non-finite JSON constants"
+        repaired, was_repaired = repair_tool_arguments(text, max_chars=char_cap, max_depth=depth_cap)
+        if was_repaired:
+            try:
+                serialized = json.dumps(repaired, ensure_ascii=False, allow_nan=False, default=str)
+            except (TypeError, ValueError, RecursionError) as ser_exc:
+                return {}, False, f"arguments cannot be serialized as JSON: {ser_exc}"
+            if len(serialized) > char_cap:
+                return {}, False, f"arguments exceed maximum size ({len(serialized)} > {char_cap} chars)"
+            return repaired, True, ""
+        return {}, False, "malformed JSON arguments; expected a JSON object"
+    if not isinstance(loaded, Mapping):
+        return {}, False, f"arguments must be a JSON object, got {type(loaded).__name__}"
+    bounds_err = _check_json_bounds(loaded, max_depth=depth_cap)
+    if bounds_err:
+        return {}, False, bounds_err
+    return {str(k): v for k, v in loaded.items()}, False, ""
+
+
 def parse_tool_arguments(raw: Any) -> dict[str, Any]:
     """Normalize provider tool-call arguments into a dict, repairing common LLM JSON slips."""
     parsed, _repaired = repair_tool_arguments(raw)
@@ -883,4 +963,5 @@ __all__ = [
     "parse_tool_arguments",
     "preview_tool_arguments",
     "tool_backend_label",
+    "validate_tool_arguments",
 ]

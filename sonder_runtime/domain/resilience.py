@@ -12,6 +12,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import difflib
 import json
+import math
 import re
 import threading
 import time
@@ -108,31 +109,94 @@ def classify_tool_failure(tool_name: str, error_text: str) -> str:
 
 _FENCE_STRIP_RE = re.compile(r"^\s*```(?:json|python|js)?\s*\r?\n(.*?)\r?\n```\s*$", re.DOTALL | re.IGNORECASE)
 _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
+MAX_TOOL_ARGUMENT_CHARS = 65_536
+MAX_TOOL_ARGUMENT_DEPTH = 32
 
 
-def repair_tool_arguments(raw: Any) -> tuple[dict[str, Any], bool]:
+def _reject_non_finite_constant(token: str) -> Any:
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
+def _strict_json_loads(text: str) -> Any:
+    return json.loads(text, parse_constant=_reject_non_finite_constant)
+
+
+def _check_json_bounds(
+    value: Any,
+    *,
+    max_depth: int,
+    _depth: int = 0,
+    _active: set[int] | None = None,
+) -> str:
+    """Return ``""`` when *value* is acyclic, finite, and within *max_depth*, else an error reason."""
+    if _depth > max_depth:
+        return f"arguments exceed maximum nesting depth ({max_depth})"
+    if isinstance(value, float) and not math.isfinite(value):
+        return "arguments contain non-finite numeric values"
+    if isinstance(value, Mapping):
+        active = set() if _active is None else _active
+        obj_id = id(value)
+        if obj_id in active:
+            return "arguments contain a circular reference"
+        active.add(obj_id)
+        try:
+            for item in value.values():
+                err = _check_json_bounds(item, max_depth=max_depth, _depth=_depth + 1, _active=active)
+                if err:
+                    return err
+        finally:
+            active.discard(obj_id)
+        return ""
+    if isinstance(value, (list, tuple)):
+        active = set() if _active is None else _active
+        obj_id = id(value)
+        if obj_id in active:
+            return "arguments contain a circular reference"
+        active.add(obj_id)
+        try:
+            for item in value:
+                err = _check_json_bounds(item, max_depth=max_depth, _depth=_depth + 1, _active=active)
+                if err:
+                    return err
+        finally:
+            active.discard(obj_id)
+        return ""
+    return ""
+
+
+def repair_tool_arguments(
+    raw: Any,
+    *,
+    max_chars: int = MAX_TOOL_ARGUMENT_CHARS,
+    max_depth: int = MAX_TOOL_ARGUMENT_DEPTH,
+) -> tuple[dict[str, Any], bool]:
     """Parse tool arguments, safely repairing common local-LLM JSON mistakes.
 
     Returns ``(parsed_dict, was_repaired)``. Never calls ``eval()``/``exec()``.
+    Enforces hard size, nesting-depth, acyclicity, and finite-number bounds.
     Handles:
     - Markdown code fences wrapping JSON
     - Leading/trailing prose around a JSON object
     - Trailing commas before ``}`` or ``]``
     - Python-style single-quoted dicts / ``True`` / ``False`` / ``None`` via ``ast.literal_eval``
     """
+    char_cap = max(1, int(max_chars))
+    depth_cap = max(1, int(max_depth))
     if isinstance(raw, Mapping):
+        if _check_json_bounds(raw, max_depth=depth_cap):
+            return {}, False
         return dict(raw), False
     if not isinstance(raw, str):
         return {}, False
     text = raw.strip()
-    if not text:
+    if not text or len(text) > char_cap:
         return {}, False
-    # Fast path: valid JSON object
+    # Fast path: valid strict JSON object
     try:
-        loaded = json.loads(text)
-        if isinstance(loaded, Mapping):
+        loaded = _strict_json_loads(text)
+        if isinstance(loaded, Mapping) and not _check_json_bounds(loaded, max_depth=depth_cap):
             return dict(loaded), False
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         pass
 
     candidate = text
@@ -146,21 +210,23 @@ def repair_tool_arguments(raw: Any) -> tuple[dict[str, Any], bool]:
     if first_brace != -1 and last_brace > first_brace:
         candidate = candidate[first_brace : last_brace + 1]
 
-    # Strip trailing commas and retry JSON
+    # Strip trailing commas and retry strict JSON
     cleaned = _TRAILING_COMMA_RE.sub(r"\1", candidate)
     try:
-        loaded = json.loads(cleaned)
-        if isinstance(loaded, Mapping):
+        loaded = _strict_json_loads(cleaned)
+        if isinstance(loaded, Mapping) and not _check_json_bounds(loaded, max_depth=depth_cap):
             return dict(loaded), True
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         pass
 
     # Safe Python literal fallback for single quotes / True / False / None
-    if len(cleaned) <= 32_000:
+    if len(cleaned) <= min(32_000, char_cap):
         try:
             lit = ast.literal_eval(cleaned)
             if isinstance(lit, Mapping):
-                return {str(k): v for k, v in lit.items()}, True
+                repaired = {str(k): v for k, v in lit.items()}
+                if not _check_json_bounds(repaired, max_depth=depth_cap):
+                    return repaired, True
         except (SyntaxError, ValueError, TypeError, RecursionError):
             pass
 
@@ -460,6 +526,7 @@ def compact_messages_for_retry(
         out: list[dict[str, Any]] = []
         saved = 0
         total = len(messages)
+        cap = max(64, int(max_tool_chars))
         for idx, msg in enumerate(messages):
             item = dict(msg)
             role = str(item.get("role") or "")
@@ -469,17 +536,19 @@ def compact_messages_for_retry(
                 or (idx <= 1 and role == "user")
                 or (protect_tail > 0 and idx >= total - protect_tail)
             )
-            if not is_protected and isinstance(content, str) and len(content) > max_tool_chars:
+            if not is_protected and isinstance(content, str) and len(content) > cap:
                 if role == "tool":
-                    head = content[: max_tool_chars // 2]
-                    tail = content[-(max_tool_chars // 3) :]
+                    head = content[: cap // 2]
+                    tail = content[-(cap // 3) :]
                     trimmed = f"{head}\n... [compacted {len(content) - len(head) - len(tail)} chars for context recovery] ...\n{tail}"
-                    saved += max(0, len(content) - len(trimmed))
-                    item["content"] = trimmed
-                elif role == "assistant" and len(content) > max_tool_chars * 2:
-                    trimmed = content[: max_tool_chars * 2] + "\n... [compacted]"
-                    saved += max(0, len(content) - len(trimmed))
-                    item["content"] = trimmed
+                    if len(trimmed) < len(content):
+                        saved += len(content) - len(trimmed)
+                        item["content"] = trimmed
+                elif role == "assistant" and len(content) > cap * 2:
+                    trimmed = content[: cap * 2] + "\n... [compacted]"
+                    if len(trimmed) < len(content):
+                        saved += len(content) - len(trimmed)
+                        item["content"] = trimmed
             out.append(item)
         return out, saved
 
@@ -580,6 +649,8 @@ __all__ = [
     "FallbackOption",
     "GLOBAL_CIRCUIT_BREAKER",
     "GLOBAL_TELEMETRY",
+    "MAX_TOOL_ARGUMENT_CHARS",
+    "MAX_TOOL_ARGUMENT_DEPTH",
     "ResilienceTelemetry",
     "classify_model_error",
     "classify_tool_failure",
