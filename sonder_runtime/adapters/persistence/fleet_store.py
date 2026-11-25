@@ -21,6 +21,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import os
 import secrets
 import socket
@@ -52,6 +53,10 @@ DEFAULT_PROGRESS_DEADLINE_SECONDS = 120
 # exceed that call's own timeout plus this margin.
 DEFAULT_MODEL_CALL_TIMEOUT_SECONDS = 300
 MODEL_CALL_PROGRESS_MARGIN_SECONDS = 60
+DEFAULT_STALL_WARNING_INTERVAL_SECONDS = 0.0
+INTERACTIVE_LANE_OWNER_ID = "interactive-lanes"
+INTERACTIVE_LANE_ROLE = "agent_lane"
+_MAX_STALL_WARN_CACHE = 1024
 DEFAULT_FINISHED_RETENTION = 500
 DEFAULT_EVENT_RETENTION = 2000
 MAX_TASK_CHARS = 32_000
@@ -81,11 +86,16 @@ MAX_RETRY_LEASE_SECONDS = 3600
 RETRYABLE_STATUSES = frozenset(("interrupted", "failed", "cancelled", "task_drift"))
 
 _SCHEMA_LOCK = threading.RLock()
+_STALL_WARN_LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
 # Cache the database identity, not merely its pathname.  A recovered or
 # restored fleet ledger may replace the database while this process remains
 # alive; its schema must be rechecked before it is used.
 _INITIALIZED_PATHS: dict[str, tuple[int, int]] = {}
+# Deduplicate / rate-limit stalled-agent warnings per (db_path, agent_id) so
+# frequent /v1/sonder/status polling does not flood stderr while a lane remains
+# unchanged at the same updated_ts.  Maps (db_key, agent_id) -> (updated_ts, last_warned_ts).
+_STALL_WARNED: dict[tuple[str, str], tuple[float, float]] = {}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS fleet_owners (
@@ -555,9 +565,82 @@ def lane_progress_deadline(row, deadline: float) -> float:
     return float(deadline)
 
 
+def stall_warning_interval_seconds() -> float:
+    """Return optional repeat-warning interval for an already-reported stall.
+
+    ``0.0`` (default) logs each stall episode (same ``updated_ts``) once so
+    repeated ``/v1/sonder/status`` polls do not flood stderr. Setting
+    ``SONDER_FLEET_STALL_WARN_INTERVAL_SECONDS`` to a positive value enables
+    rate-limited periodic reminders while the stall persists.
+    """
+    raw = os.environ.get("SONDER_FLEET_STALL_WARN_INTERVAL_SECONDS", "").strip()
+    if not raw:
+        return float(DEFAULT_STALL_WARNING_INTERVAL_SECONDS)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return float(DEFAULT_STALL_WARNING_INTERVAL_SECONDS)
+    if not math.isfinite(value) or value <= 0.0:
+        return 0.0
+    return min(value, float(24 * 60 * 60))
+
+
+def _db_cache_key(path: str | None = None) -> str:
+    return str(Path(path or database_path()).expanduser().resolve())
+
+
+def _should_emit_stall_warning(
+    db_key: str,
+    agent_id: str,
+    updated_ts: float,
+    *,
+    now: float,
+    interval: float,
+) -> bool:
+    key = (db_key, agent_id)
+    with _STALL_WARN_LOCK:
+        previous = _STALL_WARNED.get(key)
+        if previous is not None:
+            prev_updated_ts, last_warned_at = previous
+            if abs(prev_updated_ts - updated_ts) < 1e-6:
+                if interval <= 0.0 or (now - last_warned_at) < interval:
+                    return False
+        _STALL_WARNED[key] = (updated_ts, now)
+        if len(_STALL_WARNED) > _MAX_STALL_WARN_CACHE:
+            excess = len(_STALL_WARNED) - _MAX_STALL_WARN_CACHE
+            oldest = sorted(_STALL_WARNED.items(), key=lambda item: item[1][1])[:excess]
+            for old_key, _ in oldest:
+                _STALL_WARNED.pop(old_key, None)
+        return True
+
+
+def _clear_stall_warnings(
+    db_key: str, agent_ids: list[str] | set[str] | tuple[str, ...] | None = None,
+) -> None:
+    with _STALL_WARN_LOCK:
+        if agent_ids is None:
+            for key in [item for item in _STALL_WARNED if item[0] == db_key]:
+                _STALL_WARNED.pop(key, None)
+            return
+        for agent_id in agent_ids:
+            _STALL_WARNED.pop((db_key, str(agent_id)), None)
+
+
+def _is_synthetic_interactive_root(row) -> bool:
+    """Return True for virtual session-anchor rows created by ``agent_lanes``."""
+    if not row:
+        return False
+    return (
+        row.get("owner_id") == INTERACTIVE_LANE_OWNER_ID
+        and int(row.get("owner_pid") or 0) == 0
+        and row.get("role") == INTERACTIVE_LANE_ROLE
+        and not (row.get("parent_id") or "")
+    )
+
+
 def _annotate_progress(row: dict, *, now: float, deadline: float) -> dict:
     """Add read-only progress health to one public fleet row."""
-    if row.get("status") not in ACTIVE_STATUSES:
+    if row.get("status") not in ACTIVE_STATUSES or _is_synthetic_interactive_root(row):
         row["progress_age_seconds"] = 0.0
         row["stalled"] = False
         row["stalled_reason"] = ""
@@ -632,7 +715,14 @@ def close_owner(owner_id: str, reason: str = "process exited before completion")
                 "fleet state machine does not allow %s -> interrupted" % src
             )
     now = time.time()
+    affected_ids: list[str] = []
     with _write_transaction() as conn:
+        affected_ids = [
+            str(row["id"]) for row in conn.execute(
+                "SELECT id FROM fleet_agents WHERE owner_id=? AND status IN ('queued', 'running')",
+                (owner_id,),
+            ).fetchall()
+        ]
         cursor = conn.execute(
             """
             UPDATE fleet_agents
@@ -646,7 +736,264 @@ def close_owner(owner_id: str, reason: str = "process exited before completion")
             "UPDATE fleet_owners SET closed_ts=?, heartbeat_ts=? WHERE owner_id=?",
             (now, now, owner_id),
         )
-        return int(cursor.rowcount)
+        count = int(cursor.rowcount)
+    if affected_ids:
+        _clear_stall_warnings(_db_cache_key(), affected_ids)
+    return count
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        is not None
+    )
+
+
+_TERMINAL_LANE_STATUS_MAP = {
+    "completed": "completed",
+    "failed": "failed",
+    "cancelled": "cancelled",
+    "interrupted": "interrupted",
+    "awaiting_input": "interrupted",
+    "archived": "done",
+}
+
+
+def _reconcile_interactive_lanes(
+    conn: sqlite3.Connection,
+    *,
+    current: float,
+    deadline: float,
+) -> tuple[list[str], list[str]]:
+    """Retire stale/cancelled synthetic interactive roots and sync terminal child projections."""
+    retired_roots: list[str] = []
+    cleared_ids: list[str] = []
+    if _table_exists(conn, "agent_lanes"):
+        stale_children = conn.execute(
+            """
+            SELECT a.id, l.data
+            FROM fleet_agents AS a
+            JOIN agent_lanes AS l ON l.id = a.id
+            WHERE a.owner_id = ?
+              AND a.owner_pid = 0
+              AND a.role = ?
+              AND a.parent_id <> ''
+              AND a.status IN ('queued', 'running')
+            """,
+            (INTERACTIVE_LANE_OWNER_ID, INTERACTIVE_LANE_ROLE),
+        ).fetchall()
+        for child in stale_children:
+            try:
+                lane_status = str(json.loads(child["data"]).get("status") or "").lower()
+            except (TypeError, ValueError, AttributeError):
+                continue
+            mapped = _TERMINAL_LANE_STATUS_MAP.get(lane_status)
+            if not mapped:
+                continue
+            cursor = conn.execute(
+                """
+                UPDATE fleet_agents
+                SET status=?, activity=?, in_model_call=0,
+                    finished_ts=COALESCE(finished_ts, ?)
+                WHERE id=? AND status IN ('queued', 'running')
+                """,
+                (mapped, _clamp_text(lane_status, MAX_ACTIVITY_CHARS), current, child["id"]),
+            )
+            if cursor.rowcount > 0:
+                cleared_ids.append(str(child["id"]))
+
+    roots = conn.execute(
+        """
+        SELECT id, status, updated_ts, cancel_requested
+        FROM fleet_agents
+        WHERE owner_id = ?
+          AND owner_pid = 0
+          AND role = ?
+          AND parent_id = ''
+          AND status IN ('queued', 'running')
+        """,
+        (INTERACTIVE_LANE_OWNER_ID, INTERACTIVE_LANE_ROLE),
+    ).fetchall()
+    if not roots:
+        return retired_roots, cleared_ids
+
+    has_parent_grants = (
+        _table_exists(conn, "agent_lane_roots")
+        and _table_exists(conn, "agent_lane_parent_grants")
+    )
+    idle_cutoff = current - deadline
+    for root in roots:
+        root_id = str(root["id"])
+        if root["cancel_requested"]:
+            if finish_cancelled_interactive_root(conn, root_id, current):
+                retired_roots.append(root_id)
+                cleared_ids.append(root_id)
+            continue
+        desc = conn.execute(
+            """
+            WITH RECURSIVE descendants(id) AS (
+                SELECT id FROM fleet_agents WHERE parent_id=?
+                UNION ALL
+                SELECT child.id FROM fleet_agents AS child
+                JOIN descendants AS parent ON child.parent_id=parent.id
+            )
+            SELECT
+                MAX(CASE WHEN agent.status IN ('queued', 'running') OR agent.in_model_call=1
+                    THEN 1 ELSE 0 END) AS has_active,
+                MAX(agent.updated_ts) AS max_updated_ts
+            FROM fleet_agents AS agent
+            JOIN descendants ON agent.id=descendants.id
+            """,
+            (root_id,),
+        ).fetchone()
+        if desc is not None and desc["has_active"]:
+            continue
+        if has_parent_grants:
+            active_grant = conn.execute(
+                """
+                SELECT 1
+                FROM agent_lane_roots AS r
+                JOIN agent_lane_parent_grants AS g ON g.session_id = r.session_id
+                WHERE r.agent_id = ? AND g.revoked = 0 AND g.expires > ?
+                LIMIT 1
+                """,
+                (root_id, current),
+            ).fetchone()
+            if active_grant is not None:
+                continue
+        last_activity = max(
+            float(root["updated_ts"] or 0.0),
+            float(desc["max_updated_ts"] or 0.0) if desc is not None else 0.0,
+        )
+        if last_activity > idle_cutoff:
+            continue
+        src_status = str(root["status"])
+        if not _sm.fleet_can_transition(src_status, "done"):
+            raise ValueError(
+                "fleet state machine does not allow %s -> done" % src_status
+            )
+        cursor = conn.execute(
+            """
+            UPDATE fleet_agents
+            SET status='done',
+                activity='reconciled idle interactive lane root',
+                in_model_call=0,
+                finished_ts=?,
+                updated_ts=?
+            WHERE id=? AND status IN ('queued', 'running') AND cancel_requested=0
+            """,
+            (current, current, root_id),
+        )
+        if cursor.rowcount > 0:
+            retired_roots.append(root_id)
+            cleared_ids.append(root_id)
+    return retired_roots, cleared_ids
+
+
+def _has_reconcile_candidates(
+    probe: sqlite3.Connection,
+    *,
+    current: float,
+    cutoff: float,
+    deadline: float,
+    orphan_cutoff: float,
+) -> bool:
+    if probe.execute(
+        "SELECT 1 FROM fleet_owners WHERE closed_ts IS NULL AND heartbeat_ts < ? LIMIT 1",
+        (cutoff,),
+    ).fetchone():
+        return True
+    if probe.execute(
+        """
+        SELECT 1 FROM fleet_agents AS a
+        JOIN fleet_owners AS o ON o.owner_id = a.owner_id
+        WHERE a.status IN ('queued', 'running') AND o.closed_ts IS NOT NULL
+        LIMIT 1
+        """
+    ).fetchone():
+        return True
+    if probe.execute(
+        """
+        SELECT 1 FROM fleet_agents AS a
+        LEFT JOIN fleet_owners AS o ON o.owner_id = a.owner_id
+        WHERE a.status IN ('queued', 'running')
+          AND a.owner_id <> ?
+          AND o.owner_id IS NULL
+          AND a.updated_ts <= ?
+        LIMIT 1
+        """,
+        (INTERACTIVE_LANE_OWNER_ID, orphan_cutoff),
+    ).fetchone():
+        return True
+    has_parent_grants = (
+        _table_exists(probe, "agent_lane_roots")
+        and _table_exists(probe, "agent_lane_parent_grants")
+    )
+    grant_clause = (
+        """
+        AND NOT EXISTS (
+            SELECT 1 FROM agent_lane_roots AS r
+            JOIN agent_lane_parent_grants AS g ON g.session_id = r.session_id
+            WHERE r.agent_id = a.id AND g.revoked = 0 AND g.expires > ?
+        )
+        """
+        if has_parent_grants
+        else ""
+    )
+    root_params: list[object] = [
+        INTERACTIVE_LANE_OWNER_ID,
+        INTERACTIVE_LANE_ROLE,
+        current - deadline,
+    ]
+    if has_parent_grants:
+        root_params.append(current)
+    if probe.execute(
+        f"""
+        SELECT 1 FROM fleet_agents AS a
+        WHERE a.owner_id = ?
+          AND a.owner_pid = 0
+          AND a.role = ?
+          AND a.parent_id = ''
+          AND a.status IN ('queued', 'running')
+          AND (
+              a.cancel_requested = 1
+              OR (
+                  a.updated_ts <= ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM fleet_agents AS c
+                      WHERE c.parent_id = a.id
+                        AND (c.status IN ('queued', 'running') OR c.in_model_call = 1)
+                  )
+                  {grant_clause}
+              )
+          )
+        LIMIT 1
+        """,
+        root_params,
+    ).fetchone():
+        return True
+    if _table_exists(probe, "agent_lanes"):
+        if probe.execute(
+            """
+            SELECT 1 FROM fleet_agents AS a
+            JOIN agent_lanes AS l ON l.id = a.id
+            WHERE a.owner_id = ?
+              AND a.owner_pid = 0
+              AND a.role = ?
+              AND a.parent_id <> ''
+              AND a.status IN ('queued', 'running')
+              AND lower(COALESCE(json_extract(l.data, '$.status'), '')) IN (
+                  'completed', 'failed', 'cancelled', 'interrupted', 'awaiting_input', 'archived'
+              )
+            LIMIT 1
+            """,
+            (INTERACTIVE_LANE_OWNER_ID, INTERACTIVE_LANE_ROLE),
+        ).fetchone():
+            return True
+    return False
 
 
 def reconcile_stale_owners(
@@ -659,27 +1006,32 @@ def reconcile_stale_owners(
             raise ValueError(
                 "fleet state machine does not allow %s -> interrupted" % src
             )
-    current = float(now or time.time())
+    current = float(now if now is not None else time.time())
     stale_seconds = max(15, min(int(stale_seconds), 3600))
     grace_seconds = max(1, min(int(grace_seconds), 300))
     cutoff = current - stale_seconds
+    deadline = progress_deadline_seconds()
+    orphan_cutoff = current - max(float(stale_seconds), deadline)
     probe = _connect()
     try:
-        has_stale_owner = probe.execute(
-            """
-            SELECT 1 FROM fleet_owners
-            WHERE closed_ts IS NULL AND heartbeat_ts < ? LIMIT 1
-            """,
-            (cutoff,),
-        ).fetchone()
+        has_work = _has_reconcile_candidates(
+            probe,
+            current=current,
+            cutoff=cutoff,
+            deadline=deadline,
+            orphan_cutoff=orphan_cutoff,
+        )
     finally:
         probe.close()
-    if not has_stale_owner:
+    if not has_work:
         return {"suspect_owners": 0, "interrupted": 0, "owners": []}
     suspects = 0
     interrupted = 0
-    owners = []
-    identity_mismatches = []
+    owners: list[str] = []
+    identity_mismatches: list[str] = []
+    reconciled_orphans: list[str] = []
+    retired_interactive_roots: list[str] = []
+    cleared_warn_ids: list[str] = []
     with _write_transaction() as conn:
         rows = conn.execute(
             """
@@ -714,6 +1066,12 @@ def reconcile_stale_owners(
             if float(stale_seen) > current - grace_seconds:
                 suspects += 1
                 continue
+            owner_agent_ids = [
+                str(item["id"]) for item in conn.execute(
+                    "SELECT id FROM fleet_agents WHERE owner_id=? AND status IN ('queued', 'running')",
+                    (owner_id,),
+                ).fetchall()
+            ]
             cursor = conn.execute(
                 """
                 UPDATE fleet_agents
@@ -727,17 +1085,99 @@ def reconcile_stale_owners(
             )
             interrupted += int(cursor.rowcount)
             owners.append(owner_id)
+            cleared_warn_ids.extend(owner_agent_ids)
             conn.execute(
                 "UPDATE fleet_owners SET closed_ts=? WHERE owner_id=?",
                 (current, owner_id),
             )
-    result = {
+
+        # Reconcile active rows whose owner row is already closed (e.g., race
+        # between owner shutdown and a late insert, or restored database).
+        closed_orphans = conn.execute(
+            """
+            SELECT a.id FROM fleet_agents AS a
+            JOIN fleet_owners AS o ON o.owner_id = a.owner_id
+            WHERE a.status IN ('queued', 'running') AND o.closed_ts IS NOT NULL
+            """
+        ).fetchall()
+        for row in closed_orphans:
+            agent_id = str(row["id"])
+            cursor = conn.execute(
+                """
+                UPDATE fleet_agents
+                SET status='interrupted',
+                    activity='interrupted after owner closed',
+                    cancel_requested=1, in_model_call=0,
+                    finished_ts=?, updated_ts=?
+                WHERE id=? AND status IN ('queued', 'running')
+                """,
+                (current, current, agent_id),
+            )
+            if cursor.rowcount > 0:
+                interrupted += int(cursor.rowcount)
+                reconciled_orphans.append(agent_id)
+                cleared_warn_ids.append(agent_id)
+
+        # Reconcile orphaned non-interactive rows that have no fleet_owners
+        # lease row at all, are stale past their progress deadline, and whose
+        # recorded owner PID is provably dead.
+        missing_orphans = conn.execute(
+            """
+            SELECT a.id, a.owner_pid, a.updated_ts, a.in_model_call
+            FROM fleet_agents AS a
+            LEFT JOIN fleet_owners AS o ON o.owner_id = a.owner_id
+            WHERE a.status IN ('queued', 'running')
+              AND a.owner_id <> ?
+              AND o.owner_id IS NULL
+              AND a.updated_ts <= ?
+            """,
+            (INTERACTIVE_LANE_OWNER_ID, orphan_cutoff),
+        ).fetchall()
+        for row in missing_orphans:
+            row_deadline = max(
+                float(stale_seconds),
+                lane_progress_deadline({"in_model_call": row["in_model_call"]}, deadline),
+            )
+            if float(row["updated_ts"] or 0.0) > current - row_deadline:
+                continue
+            state, _observed = probe_process(row["owner_pid"])
+            if state != PROCESS_DEAD:
+                continue
+            agent_id = str(row["id"])
+            cursor = conn.execute(
+                """
+                UPDATE fleet_agents
+                SET status='interrupted',
+                    activity='interrupted orphaned agent with dead owner',
+                    cancel_requested=1, in_model_call=0,
+                    finished_ts=?, updated_ts=?
+                WHERE id=? AND status IN ('queued', 'running')
+                """,
+                (current, current, agent_id),
+            )
+            if cursor.rowcount > 0:
+                interrupted += int(cursor.rowcount)
+                reconciled_orphans.append(agent_id)
+                cleared_warn_ids.append(agent_id)
+
+        retired_interactive_roots, interactive_cleared = _reconcile_interactive_lanes(
+            conn, current=current, deadline=deadline,
+        )
+        cleared_warn_ids.extend(interactive_cleared)
+
+    if cleared_warn_ids:
+        _clear_stall_warnings(_db_cache_key(), cleared_warn_ids)
+    result: dict = {
         "suspect_owners": suspects,
         "interrupted": interrupted,
         "owners": owners,
     }
     if identity_mismatches:
         result["identity_mismatches"] = identity_mismatches
+    if retired_interactive_roots:
+        result["retired_interactive_roots"] = retired_interactive_roots
+    if reconciled_orphans:
+        result["reconciled_orphans"] = reconciled_orphans
     return result
 
 
@@ -860,6 +1300,7 @@ def start_agent(
         row = conn.execute(
             "SELECT * FROM fleet_agents WHERE id=?", (agent_id,)
         ).fetchone()
+    _clear_stall_warnings(_db_cache_key(), [agent_id])
     return _row_dict(row)
 
 
@@ -884,6 +1325,7 @@ def begin_model_call(
         row = conn.execute(
             "SELECT * FROM fleet_agents WHERE id=?", (agent_id,)
         ).fetchone()
+    _clear_stall_warnings(_db_cache_key(), [agent_id])
     return _row_dict(row)
 
 
@@ -922,6 +1364,7 @@ def update_agent(agent_id: str, owner_id: str, **changes) -> dict | None:
         row = conn.execute(
             "SELECT * FROM fleet_agents WHERE id=?", (agent_id,)
         ).fetchone()
+    _clear_stall_warnings(_db_cache_key(), [agent_id])
     return _row_dict(row)
 
 
@@ -1066,6 +1509,7 @@ def finish_agent(
                     now, stored_dict["retry_of"],
                 ),
             )
+    _clear_stall_warnings(_db_cache_key(), [agent_id])
     return _row_dict(stored), marker
 
 
@@ -1090,12 +1534,24 @@ def cancel_agents(selector: str) -> dict:
             selected = {value}
         else:
             selected = {agent_id for agent_id in active if agent_id.startswith(value)}
+        seed_parents = set(selected)
+        if value and value.lower() not in ("all", "*") and value not in active:
+            retired_root = conn.execute(
+                """
+                SELECT id FROM fleet_agents
+                WHERE id=? AND owner_id=? AND owner_pid=0 AND role=? AND parent_id=''
+                """,
+                (value, INTERACTIVE_LANE_OWNER_ID, INTERACTIVE_LANE_ROLE),
+            ).fetchone()
+            if retired_root is not None:
+                seed_parents.add(str(retired_root["id"]))
         changed = True
         while changed:
             changed = False
             for agent_id, row in active.items():
-                if row.get("parent_id") in selected and agent_id not in selected:
+                if row.get("parent_id") in seed_parents and agent_id not in selected:
                     selected.add(agent_id)
+                    seed_parents.add(agent_id)
                     changed = True
         queued = 0
         running = 0
@@ -1142,6 +1598,8 @@ def cancel_agents(selector: str) -> dict:
                 f"SELECT * FROM fleet_agents WHERE id IN ({placeholders})",
                 sorted(selected),
             ).fetchall()
+    if selected:
+        _clear_stall_warnings(_db_cache_key(), selected)
     return {
         "selector": value,
         "matched": len(selected),
@@ -1659,6 +2117,9 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
     reconcile = reconcile_stale_owners()
     captured_at = time.time()
     deadline = progress_deadline_seconds()
+    warn_interval = stall_warning_interval_seconds()
+    db_path = database_path()
+    db_key = _db_cache_key(db_path)
     conn = _connect()
     try:
         where = "" if include_finished else "WHERE status IN ('queued', 'running')"
@@ -1705,10 +2166,14 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
         ).fetchall()
         stalled_total = conn.execute(
             "SELECT COUNT(*) FROM fleet_agents "
-            "WHERE status IN ('queued','running') AND ("
+            "WHERE status IN ('queued','running') "
+            "AND NOT (owner_id=? AND owner_pid=0 AND role=? AND parent_id='') "
+            "AND ("
             "(in_model_call=0 AND updated_ts <= ?) OR "
             "(in_model_call=1 AND updated_ts <= ?))",
             (
+                INTERACTIVE_LANE_OWNER_ID,
+                INTERACTIVE_LANE_ROLE,
                 captured_at - deadline,
                 captured_at - lane_progress_deadline({"in_model_call": 1}, deadline),
             ),
@@ -1718,13 +2183,31 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
             for row in rows
         ]
         stalled_rows = [row for row in public_rows if row.get("stalled")]
+        if int(stalled_total or 0) == 0:
+            _clear_stall_warnings(db_key)
+        else:
+            recovered_ids = [
+                str(row["id"]) for row in public_rows
+                if row.get("id") and not row.get("stalled")
+            ]
+            if recovered_ids:
+                _clear_stall_warnings(db_key, recovered_ids)
         if stalled_rows:
             for row in stalled_rows:
-                logger.warning(
-                    "fleet agent %s stalled: %s activity=%r updated_ts=%.3f",
-                    row.get("id"), row.get("stalled_reason"),
-                    row.get("activity", ""), float(row.get("updated_ts") or 0),
-                )
+                agent_id = str(row.get("id") or "")
+                updated_ts = float(row.get("updated_ts") or 0)
+                if _should_emit_stall_warning(
+                    db_key,
+                    agent_id,
+                    updated_ts,
+                    now=captured_at,
+                    interval=warn_interval,
+                ):
+                    logger.warning(
+                        "fleet agent %s stalled: %s activity=%r updated_ts=%.3f",
+                        agent_id, row.get("stalled_reason"),
+                        row.get("activity", ""), updated_ts,
+                    )
         data = {
             "active_agents": int(totals["active_agents"] or 0),
             "running_agents": int(totals["running_agents"] or 0),
@@ -1753,7 +2236,7 @@ def snapshot(include_finished: bool = True, limit: int = 20) -> dict:
             "latest_master_result": latest["output"] if latest else "",
             "latest_master": dict(latest) if latest else {},
             "reconcile": reconcile,
-            "database": database_path(),
+            "database": db_path,
         }
         from sonder_runtime.domain.work_narration import progress
         data["progress"] = progress(fleet=data)
@@ -1911,8 +2394,15 @@ def clear_all() -> None:
         conn.execute("DELETE FROM fleet_events")
         conn.execute("DELETE FROM fleet_agents")
         conn.execute("DELETE FROM fleet_owners")
+    _clear_stall_warnings(_db_cache_key())
+
+
+def reset_stall_warnings_for_tests() -> None:
+    with _STALL_WARN_LOCK:
+        _STALL_WARNED.clear()
 
 
 def reset_schema_cache_for_tests() -> None:
     with _SCHEMA_LOCK:
         _INITIALIZED_PATHS.clear()
+    reset_stall_warnings_for_tests()
