@@ -176,6 +176,12 @@ class TurnDelta extends TurnEvent {
   const TurnDelta(this.text);
 }
 
+/// More reasoning/thinking text streamed live before or alongside the answer.
+class TurnReasoningDelta extends TurnEvent {
+  final String text;
+  const TurnReasoningDelta(this.text);
+}
+
 /// A live `sonder_tool` approval/execution update during the turn.
 class TurnTool extends TurnEvent {
   final ChatStreamToolEvent tool;
@@ -547,6 +553,9 @@ class _ApiTurn implements ChatTurn {
   }
 
   Future<void> _run(SonderApiPort api, TurnRequest r) async {
+    final nativeToolIds = <int, String>{};
+    final nativeToolNames = <int, String>{};
+    final nativeToolArgs = <int, StringBuffer>{};
     try {
       await for (final event in api.chatStream(
         r.history,
@@ -573,6 +582,41 @@ class _ApiTurn implements ChatTurn {
             break;
           case ChatStreamStatus(:final text):
             _controller.add(TurnStatus(text));
+          case ChatStreamReasoningDelta(:final text):
+            if (text.isNotEmpty) {
+              if (_progress.reasoned()) _phase();
+              _controller.add(TurnReasoningDelta(text));
+            }
+          case ChatStreamToolCallDelta(
+              :final index,
+              :final id,
+              :final name,
+              :final argumentsDelta,
+            ):
+            if (id.isNotEmpty) nativeToolIds[index] = id;
+            if (name.isNotEmpty) nativeToolNames[index] = name;
+            if (argumentsDelta.isNotEmpty) {
+              final buf = nativeToolArgs.putIfAbsent(index, StringBuffer.new);
+              if (buf.length < 4096) {
+                buf.write(argumentsDelta);
+              }
+            }
+            final resolvedName = nativeToolNames[index] ?? '';
+            if (resolvedName.isNotEmpty) {
+              final resolvedId = nativeToolIds[index] ?? 'model-tool-$index';
+              final detail = nativeToolArgs[index]?.toString() ?? '';
+              final synth = ChatStreamToolEvent(
+                id: resolvedId,
+                callId: resolvedId,
+                tool: resolvedName,
+                phase: 'running',
+                state: 'running',
+                detail: detail,
+                argumentsReported: detail.isNotEmpty,
+              );
+              if (_progress.toolEvent(synth)) _phase();
+              _controller.add(TurnTool(synth));
+            }
           case ChatStreamToolEvent():
             if (_progress.toolEvent(event)) _phase();
             _controller.add(TurnTool(event));

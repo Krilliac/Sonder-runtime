@@ -53,11 +53,15 @@ class LiveTurnStream:
         self,
         write: Callable[[str], bool],
         *,
+        write_reasoning: Callable[[str], bool] | None = None,
+        write_tool_call: Callable[[dict], bool] | None = None,
         client_gone: Callable[[], bool] | None = None,
         hold_marker: str | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._write = write
+        self._write_reasoning = write_reasoning
+        self._write_tool_call = write_tool_call
         self._client_gone = client_gone
         self._hold_marker = hold_marker or None
         self._clock = clock
@@ -68,6 +72,18 @@ class LiveTurnStream:
         self.first_delta_at: float | None = None
         self.forwarded = ""
         self.generated = ""
+        self.reasoning_forwarded = ""
+        self.reasoning_generated = ""
+        self.tool_call_deltas_forwarded = 0
+
+    @property
+    def any_forwarded(self) -> bool:
+        """Whether any live delta (content, reasoning, or tool call) was sent."""
+        return bool(
+            self.forwarded
+            or self.reasoning_forwarded
+            or self.tool_call_deltas_forwarded
+        )
 
     @property
     def claimed(self) -> bool:
@@ -128,6 +144,39 @@ class LiveTurnStream:
         if self.first_delta_at is None:
             self.first_delta_at = self._clock()
         self.forwarded += piece
+        return True
+
+    def emit_reasoning(self, text: str) -> bool:
+        """Forward one reasoning/thinking delta when reasoning streaming is enabled."""
+        if not isinstance(text, str) or not text:
+            return not self.cancelled
+        self.reasoning_generated += text
+        if self.cancelled:
+            return False
+        if self._write_reasoning is None:
+            return True
+        if not self._write_reasoning(text):
+            self._gone = True
+            return False
+        if self.first_delta_at is None:
+            self.first_delta_at = self._clock()
+        self.reasoning_forwarded += text
+        return True
+
+    def emit_tool_call_delta(self, delta: dict) -> bool:
+        """Forward one structured tool-call delta when tool streaming is enabled."""
+        if not isinstance(delta, dict) or not delta:
+            return not self.cancelled
+        if self.cancelled:
+            return False
+        if self._write_tool_call is None:
+            return True
+        if not self._write_tool_call(delta):
+            self._gone = True
+            return False
+        if self.first_delta_at is None:
+            self.first_delta_at = self._clock()
+        self.tool_call_deltas_forwarded += 1
         return True
 
     def reconcile(self, final: str) -> tuple[str, bool]:

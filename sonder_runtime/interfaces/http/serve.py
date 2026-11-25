@@ -3529,10 +3529,10 @@ class Handler(BaseHTTPRequestHandler):
             self, _chunk, iid, model, content, elapsed_ms, receipt, usage, activity, lock=lock,
         )
 
-    def _run_streamable_prompt(self, *args, tool_turn=None, **kwargs):
+    def _run_streamable_prompt(self, *args, tool_turn=None, expose_reasoning=False, **kwargs):
         """The plain model turn; a streaming provider forwards live deltas."""
         from sonder_runtime.application.chat import tool_loop as _tool_loop
-        with _tool_loop.bind_turn(tool_turn), _live_stream.armed_for(self, _chunk, hold_code=server._code_gate_enabled()), _live_stream.stream_admission(self, server._bound_request_timeout(None, server.TIMEOUT), bool(kwargs.get("capture_stream")), admission=server._stream_turn_admission):
+        with _tool_loop.bind_turn(tool_turn), _live_stream.armed_for(self, _chunk, hold_code=server._code_gate_enabled(), expose_reasoning=bool(expose_reasoning)), _live_stream.stream_admission(self, server._bound_request_timeout(None, server.TIMEOUT), bool(kwargs.get("capture_stream")), admission=server._stream_turn_admission):
             return _run_prompt(*args, **kwargs)
 
     def _begin_early_stream(self, model="sonder"):

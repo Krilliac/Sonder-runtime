@@ -934,6 +934,7 @@ def handle_chat_completions(
                                     augment=not bool(context.get("account")),
                                     metrics=lifecycle.metrics,
                                     tool_turn=tool_turn,
+                                    expose_reasoning=serve_mod._reasoning_visible_to(context),
                                 )
                         finally:
                             handler._pause_early_stream()
