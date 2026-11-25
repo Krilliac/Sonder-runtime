@@ -160,14 +160,16 @@ CORE_CHAT_TOOL_DEFINITIONS: tuple[ChatToolDefinition, ...] = (
     ChatToolDefinition(
         name="tool_search",
         description=(
-            "Discover additional workspace, git, test, lint, data, or memory tools "
-            "and their JSON argument schemas by query or exact tool name."
+            "Discover and dynamically load any additional permitted Sonder tool into this turn "
+            "(git/repo, build/lint/format/typecheck, file_find/patches/archives, tasks/checklists, "
+            "playbooks, web_search/web_fetch, documents/media/images, sqlite/data, artifacts). "
+            "Matched tools become immediately callable on your next step."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Keyword such as read, edit, test, git."},
-                "name": {"type": "string", "description": "Exact tool name to inspect."},
+                "query": {"type": "string", "description": "Keyword or capability such as git, build, web, tasks, archive, document."},
+                "name": {"type": "string", "description": "Exact tool name to inspect and load."},
             },
         },
         backend=TOOL_BACKEND_DISCOVERY,
@@ -891,6 +893,40 @@ def parse_tool_arguments(raw: Any) -> dict[str, Any]:
     return parsed
 
 
+def catalog_entry_to_ollama_tool(name: str, entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Convert one MCP catalog entry into a sanitized OpenAI/Ollama function tool schema."""
+    raw_desc = str(entry.get("description") or "").strip()
+    first_line = " ".join(raw_desc.splitlines()[:2]).strip() or f"Invoke Sonder tool {name}."
+    raw_schema = entry.get("input_schema") or entry.get("parameters") or {}
+    props: dict[str, Any] = {}
+    required: list[str] = []
+    if isinstance(raw_schema, Mapping):
+        raw_props = raw_schema.get("properties")
+        if isinstance(raw_props, Mapping):
+            props = {
+                str(k): v
+                for k, v in raw_props.items()
+                if str(k) not in _SENSITIVE_PREVIEW_KEYS
+            }
+        raw_req = raw_schema.get("required")
+        if isinstance(raw_req, (list, tuple)):
+            required = [
+                str(k) for k in raw_req
+                if str(k) not in _SENSITIVE_PREVIEW_KEYS and str(k) in props
+            ]
+    parameters: dict[str, Any] = {"type": "object", "properties": props}
+    if required:
+        parameters["required"] = required
+    return {
+        "type": "function",
+        "function": {
+            "name": str(name),
+            "description": first_line[:320],
+            "parameters": parameters,
+        },
+    }
+
+
 def chat_tools_payload(
     *,
     allowed_names: Sequence[str] | frozenset[str] | None = None,
@@ -926,6 +962,7 @@ __all__ = [
     "TOOL_BACKEND_DISCOVERY",
     "TOOL_BACKEND_HOST",
     "TOOL_BACKEND_WORKSPACE",
+    "catalog_entry_to_ollama_tool",
     "chat_tools_payload",
     "detect_bidi_chars",
     "parse_tool_arguments",

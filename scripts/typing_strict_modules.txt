@@ -372,6 +372,7 @@ sonder_runtime/application/memory/procedural_learning.py
 sonder_runtime/application/memory/recall_service.py
 sonder_runtime/application/memory/receipt_bound_fact_promotion.py
 sonder_runtime/application/memory/retrieval_evaluation.py
+sonder_runtime/application/memory/scratchpad_context.py
 sonder_runtime/application/meshgen/__init__.py
 sonder_runtime/application/model3d_generation.py
 sonder_runtime/application/model_gateway/__init__.py

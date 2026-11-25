@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import Any
 
 from ..cloud_access import LEGACY_ERROR_PREFIX
 
@@ -37,10 +38,31 @@ _EXAMPLES = {
 _SYNONYMS = {
     "read": ("file_read", "file_read_range", "text_search"),
     "search": ("file_find", "text_search", "repository_symbol_index"),
-    "edit": ("file_edit", "file_write", "text_patch"),
-    "check": ("file_check", "lint_run", "test_run"),
-    "test": ("test_run", "workspace_run"),
+    "edit": ("file_edit", "file_write", "text_patch", "apply_patch"),
+    "check": ("file_check", "lint_run", "test_run", "typecheck_run"),
+    "test": ("test_run", "test_discover", "workspace_run"),
+    "git": ("repo_status", "repo_diff", "repo_log", "git_commit", "git_branch"),
+    "repo": ("repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame"),
+    "notes": ("scratchpad_read", "scratchpad_write", "scratchpad_delete", "playbook_read"),
+    "scratchpad": ("scratchpad_read", "scratchpad_write", "scratchpad_delete"),
+    "web": ("web_search", "web_fetch", "weather_lookup"),
+    "build": ("build_run", "build_clean", "scaffold_project", "test_run"),
+    "lint": ("lint_run", "format_code", "typecheck_run", "code_audit"),
+    "format": ("format_code", "lint_run"),
+    "math": ("math_eval", "logic_verify"),
+    "task": ("task_list", "task_create", "task_update", "task_plan", "task_show"),
+    "todo": ("task_list", "task_create", "task_update", "checklist_create"),
+    "checklist": ("checklist_create", "checklist_show", "checklist_update"),
+    "archive": ("archive_list", "archive_create", "archive_extract"),
+    "document": ("document_extract", "file_read"),
+    "image": ("image_inspect", "media_inspect"),
+    "media": ("media_inspect", "image_inspect"),
+    "sql": ("data_query", "sqlite_mutate", "data_inspect"),
+    "database": ("data_query", "sqlite_mutate", "data_inspect"),
+    "playbook": ("playbook_read",),
+    "artifact": ("artifact_generate", "artifact_verify", "artifact_ground"),
 }
+_QUERY_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _LINE = re.compile(r"^\s*-\s*([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$")
 _SCOPE: ContextVar[frozenset[str] | None] = ContextVar("agent_help_names", default=None)
 _FOOTER = ('Reply with exactly one JSON object:\n'
@@ -207,6 +229,58 @@ def build_agent_tool_help(
     )
 
 
+def _row_description(row):
+    if isinstance(row, Mapping):
+        return str(row.get("description", "") or "")
+    return str(getattr(row, "description", "") or "")
+
+
+def match_catalog_tools(
+    *,
+    name: str = "",
+    query: str = "",
+    catalog: Mapping[str, Any] | None = None,
+    limit: int = 8,
+) -> list[str]:
+    """Return up to ``limit`` ranked matching tool names from ``catalog``."""
+    visible = _visible_catalog(catalog)
+    names = sorted(visible)
+    target = str(name or "").strip()
+    if target:
+        return [target] if target in visible else []
+    term = str(query or "").strip()[:512].lower()
+    if not term:
+        return []
+    hits: list[str] = [n for n in names if term in n.lower()]
+    for syn in _SYNONYMS.get(term, ()):
+        if syn in visible and syn not in hits:
+            hits.append(syn)
+    tokens = [tok for tok in _QUERY_TOKEN_RE.findall(term) if len(tok) >= 2]
+    if tokens:
+        for tok in tokens:
+            for syn in _SYNONYMS.get(tok, ()):
+                if syn in visible and syn not in hits:
+                    hits.append(syn)
+        scored: list[tuple[int, str]] = []
+        hit_set = set(hits)
+        for n in names:
+            if n in hit_set:
+                continue
+            n_low = n.lower()
+            desc_low = _row_description(visible[n]).lower()
+            score = 0
+            for tok in tokens:
+                if tok in n_low:
+                    score += 3
+                elif tok in desc_low:
+                    score += 1
+            if score > 0:
+                scored.append((-score, n))
+        scored.sort()
+        hits.extend(n for _, n in scored)
+    return hits[: max(1, int(limit))]
+
+
 def tool_help_text(*, name="", query="", catalog=None):
     """Describe registered metadata only; no filesystem, model or network calls."""
     if not isinstance(name, str) or not isinstance(query, str):
@@ -221,18 +295,16 @@ def tool_help_text(*, name="", query="", catalog=None):
         schema = filtered_schema(_schema(row))
         args = ", ".join(key + (" (required)" if key in schema["required"] else "")
                          for key in schema["properties"])
-        desc = row.get("description", "") if isinstance(row, Mapping) else getattr(row, "description", "")
-        sentence = " ".join(str(desc).split()).split(". ", 1)[0].rstrip(".")
+        desc = _row_description(row)
+        sentence = " ".join(desc.split()).split(". ", 1)[0].rstrip(".")
         example = json.dumps({"tool": name, "args": _example(name, row)}, separators=(",", ":"))
         return (f"Example: {example}\nArguments: {args or 'none'}.\n"
                 f"When to use: {sentence or 'use for ' + name.replace('_', ' ')}.")[:1200]
     if name:
         closest = difflib.get_close_matches(name[:512], names, n=3, cutoff=0)
         return ("unknown tool; closest: " + ", ".join(closest))[:1200]
-    term = query[:512].lower()
-    hits = [n for n in names if term in n.lower()]
-    hits += [n for n in _SYNONYMS.get(term, ()) if n in catalog and n not in hits]
-    return "matching tools: " + (", ".join(hits[:5]) if hits else "none")
+    hits = match_catalog_tools(query=query, catalog=catalog, limit=5)
+    return "matching tools: " + (", ".join(hits) if hits else "none")
 
 
 tool_help = tool_help_text

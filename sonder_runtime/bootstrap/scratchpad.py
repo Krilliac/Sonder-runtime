@@ -12,6 +12,11 @@ from sonder_runtime.adapters.persistence.scratchpad_store import (
 )
 from sonder_runtime.adapters.security import approval_ledger as _approval_ledger
 from sonder_runtime.application.context import current_operation_context
+from sonder_runtime.application.memory.scratchpad_context import (
+    DEFAULT_MAX_INDEX_BYTES,
+    DEFAULT_MAX_INDEX_NOTES,
+    frame_scratchpad_index,
+)
 from sonder_runtime.domain.common.errors import InvalidInput
 from sonder_runtime.domain.memory.scratchpad import ScratchpadPolicy
 from sonder_runtime.platform import paths as runtime_paths
@@ -127,4 +132,49 @@ def register_tools(
     return scratchpad_read, scratchpad_write, scratchpad_delete
 
 
-__all__ = ["get_store", "register_tools", "resolve_owner"]
+def scratchpad_index_block(
+    *,
+    config: Any = None,
+    home: str | Path | None = None,
+    max_bytes: int = DEFAULT_MAX_INDEX_BYTES,
+    max_notes: int = DEFAULT_MAX_INDEX_NOTES,
+) -> str:
+    """Return a bounded, untrusted-framed index of the current owner's scratchpad notes.
+
+    Fail-soft: returns ``""`` if the owner has no notes or the store cannot be read.
+    """
+    try:
+        owner = resolve_owner()
+        store = get_store(config=config, home=home)
+        listing = store.list_notes(owner)
+        notes = listing.get("notes")
+        if not isinstance(notes, list) or not notes:
+            return ""
+        return frame_scratchpad_index(notes, max_bytes=max_bytes, max_notes=max_notes)
+    except (OSError, ValueError, TypeError, RuntimeError, ScratchpadError):
+        return ""
+
+
+def augment_with_scratchpad_index(
+    text: str,
+    *,
+    cloud: bool = False,
+    config: Any = None,
+    home: str | Path | None = None,
+) -> str:
+    """Append the bounded owner scratchpad index to ``text`` on local, non-cloud turns."""
+    if cloud:
+        return text
+    block = scratchpad_index_block(config=config, home=home)
+    if not block:
+        return text
+    return f"{text}\n\n{block}" if text else block
+
+
+__all__ = [
+    "augment_with_scratchpad_index",
+    "get_store",
+    "register_tools",
+    "resolve_owner",
+    "scratchpad_index_block",
+]

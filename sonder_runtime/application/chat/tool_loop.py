@@ -127,11 +127,15 @@ class ChatToolTurn:
     is_aborted: Callable[[], bool] | None = None
     role_refusal: Callable[[str], str] | None = None
     allow_system_tools: bool = False
+    allow_dynamic_catalog: bool = False
     client_exec_tools: frozenset[str] = frozenset()
     client_exec_only: bool = False
     delegate_client_tool: Callable[[str, dict[str, Any]], tuple[str, ChatToolRecord]] | None = None
     client_handoffs: list[dict[str, Any]] = field(default_factory=list)
     records: list[ChatToolRecord] = field(default_factory=list)
+    _dynamic_admitted: set[str] = field(default_factory=set, init=False, repr=False)
+    _dynamic_order: list[str] = field(default_factory=list, init=False, repr=False)
+    _active_tools_payload: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     def _emit(self, payload: Mapping[str, Any]) -> None:
         if self.on_tool_event is None:
@@ -193,7 +197,75 @@ class ChatToolTurn:
         return "\n".join(lines)
 
     def _admitted_tool_names(self) -> tuple[str, ...]:
-        return tuple(t.name for t in self.manifest.tools if t.name)
+        base = [t.name for t in self.manifest.tools if t.name]
+        if not self._dynamic_admitted:
+            return tuple(base)
+        seen = set(base)
+        extra = [n for n in self._dynamic_order if n in self._dynamic_admitted and n not in seen]
+        return tuple([*base, *extra])
+
+    def _admit_dynamic_schemas(self, schemas: Sequence[Mapping[str, Any]]) -> list[str]:
+        """Register dynamically discovered tool schemas into this turn (capped at 64 total)."""
+        if not self.allow_dynamic_catalog or self.client_exec_only or not schemas:
+            return []
+        core_names = {t.name for t in self.manifest.tools if t.name}
+        existing_payload_names = {
+            str(((item.get("function") or {}) if isinstance(item, Mapping) else {}).get("name") or "")
+            for item in self._active_tools_payload
+        }
+        newly_loaded: list[str] = []
+        for entry in schemas:
+            fn = entry.get("function") if isinstance(entry, Mapping) else None
+            name = str((fn or {}).get("name") or "").strip() if isinstance(fn, Mapping) else ""
+            if not name or name in core_names or name in self.blocked_tools:
+                continue
+            if self.role_refusal is not None and self.role_refusal(name):
+                continue
+            if name not in self._dynamic_admitted:
+                self._dynamic_admitted.add(name)
+                self._dynamic_order.append(name)
+                newly_loaded.append(name)
+            if name not in existing_payload_names:
+                while len(self._active_tools_payload) >= 64 and self._dynamic_order:
+                    evicted = next(
+                        (
+                            cand for cand in self._dynamic_order
+                            if cand not in core_names and cand in existing_payload_names and cand != name
+                        ),
+                        None,
+                    )
+                    if evicted is None:
+                        break
+                    self._active_tools_payload = [
+                        item for item in self._active_tools_payload
+                        if str(((item.get("function") or {}) if isinstance(item, Mapping) else {}).get("name") or "") != evicted
+                    ]
+                    existing_payload_names.discard(evicted)
+                    self._dynamic_order = [n for n in self._dynamic_order if n != evicted]
+                if len(self._active_tools_payload) < 64:
+                    self._active_tools_payload.append(dict(entry))
+                    existing_payload_names.add(name)
+        return newly_loaded
+
+    def _decide_permission(self, name: str, args: Mapping[str, Any]) -> Any:
+        decision = self.permission_policy.decide(
+            name,
+            interactive=False,
+            surface="chat-tool",
+            arguments=args,
+        )
+        if (
+            name == "tool_search"
+            and getattr(decision, "risk", "") == "unclassified"
+            and getattr(decision, "source", "") in {"unclassified", "mode"}
+        ):
+            decision = self.permission_policy.decide(
+                "tool_help",
+                interactive=False,
+                surface="chat-tool",
+                arguments=args,
+            )
+        return decision
 
     def _run_tool_call(
         self,
@@ -216,6 +288,23 @@ class ChatToolTurn:
         backend = self.backend.backend_for(name)
         if not name:
             return "ERROR: tool name is required", run_count
+        if name in self.blocked_tools and not self.allow_system_tools and not self.client_exec_only:
+            msg = f"ERROR: HOST POLICY: tool '{name}' is restricted to operator control surfaces."
+            self.records.append(ChatToolRecord("", name, "refused", backend, reason=msg[:200]))
+            return msg, run_count
+        if (
+            name not in admitted
+            and self.allow_dynamic_catalog
+            and not self.client_exec_only
+            and name not in self.blocked_tools
+        ):
+            resolve_fn = getattr(self.backend, "resolve_catalog_tool", None)
+            if callable(resolve_fn):
+                resolved_schema = resolve_fn(name)
+                if isinstance(resolved_schema, Mapping):
+                    self._admit_dynamic_schemas([resolved_schema])
+                    admitted = self._admitted_tool_names()
+                    suggestions = []
         if name not in admitted and suggestions:
             msg = (
                 f"ERROR: unknown tool '{name}' is not in this turn's admitted tools. "
@@ -286,12 +375,7 @@ class ChatToolTurn:
             self.records.append(ChatToolRecord("", name, "budget_exceeded", backend, reason=msg[:200]))
             return msg, run_count
 
-        decision = self.permission_policy.decide(
-            name,
-            interactive=False,
-            surface="chat-tool",
-            arguments=args,
-        )
+        decision = self._decide_permission(name, args)
         call_id = str(getattr(decision, "call_id", "") or "")
         preview = preview_tool_arguments(name, args)
 
@@ -320,9 +404,7 @@ class ChatToolTurn:
                 outcome = self.wait_for_approval(name, call_id, decision, preview)
                 if outcome == "approved":
                     self._emit({"phase": "approved", "call_id": call_id, "tool": name})
-                    decision = self.permission_policy.decide(
-                        name, interactive=False, surface="chat-tool", arguments=args,
-                    )
+                    decision = self._decide_permission(name, args)
                 else:
                     self._emit({"phase": outcome, "call_id": call_id, "tool": name})
                     msg = f"ERROR: HOST POLICY: operator {outcome} {name} (call {call_id})."
@@ -455,6 +537,20 @@ class ChatToolTurn:
             )
             return self._guard_observation(name, clipped_model) + hint, new_runs
         guarded = self._guard_observation(name, clipped_model)
+        if name in {"tool_search", "tool_help"} and self.allow_dynamic_catalog and not self.client_exec_only:
+            search_fn = getattr(self.backend, "search_catalog_tools", None)
+            if callable(search_fn):
+                try:
+                    _ok, _help, matched_schemas = search_fn(
+                        query=str(args.get("query") or args.get("q") or ""),
+                        name=str(args.get("name") or ""),
+                        limit=8,
+                    )
+                    loaded = self._admit_dynamic_schemas(matched_schemas)
+                    if loaded:
+                        guarded += f"\n[LOADED FOR THIS TURN — callable now: {', '.join(loaded)}]"
+                except Exception:
+                    pass
         audit_notice = self._proactive_write_audit(name, args)
         return guarded + audit_notice, new_runs
 
@@ -526,6 +622,9 @@ class ChatToolTurn:
             messages.extend(dict(item) for item in history)
         messages.append({"role": "user", "content": prompt})
 
+        self._dynamic_admitted = set()
+        self._dynamic_order = []
+        self._active_tools_payload = list(self.tools_payload)
         started = time.monotonic()
         run_count = 0
         tool_calls_total = 0
@@ -574,7 +673,7 @@ class ChatToolTurn:
                         break
                     calls += 1
                     step_tools = (
-                        self.tools_payload
+                        list(self._active_tools_payload)
                         if (
                             calls < self.budget.max_model_calls
                             and not self.client_handoffs
@@ -802,6 +901,7 @@ def build_tool_turn_manifest(
     user_run_command: bool,
     mode: str,
     container_active: bool = False,
+    dynamic_discovery: bool = False,
 ) -> TurnToolManifest:
     """Build the authoritative ``TurnToolManifest`` for an active chat-tool turn."""
     callable_entries: list[CallableTool] = []
@@ -815,17 +915,35 @@ def build_tool_turn_manifest(
             backend = "container" if container_active else "host"
             note = f"python/js/powershell; mode={mode}; backend={backend}"
         elif name == "tool_search":
-            note = "discover other Sonder tools by query or name"
+            note = "discover and dynamically load any additional Sonder tool into this turn"
+        elif name == "scratchpad_read":
+            note = "read, list, or search persistent Markdown scratchpad notes"
+        elif name == "scratchpad_write":
+            note = "save or append persistent Markdown working notes/plans"
+        elif name == "scratchpad_delete":
+            note = "delete one named scratchpad note"
+        elif name == "reasoning_board":
+            note = "structured facts/hypotheses/decisions audit board"
+        elif name == "memory_search":
+            note = "search learned local facts, lessons, and prior solutions"
+        elif name == "learn_tool":
+            note = "inspect an external CLI or package via live help/metadata"
         elif name == "report_progress":
             note = "post live progress/thinking updates"
         elif name in {"post_to_board", "read_board"}:
             note = "shared peer board coordination with @handle mentions"
         elif name in {"delegate_task", "spawn_agents"}:
             note = "delegate bounded depth-1 child tasks (depth 0 only)"
+        elif name in {"ensemble_answer", "consult"}:
+            note = "local multi-model synthesis or second opinion"
         else:
             note = f"mode={mode}"
         callable_entries.append(CallableTool(name, note))
-    return TurnToolManifest(tuple(callable_entries), user_run_command=bool(user_run_command))
+    return TurnToolManifest(
+        tuple(callable_entries),
+        user_run_command=bool(user_run_command),
+        dynamic_discovery=bool(dynamic_discovery),
+    )
 
 
 __all__ = [

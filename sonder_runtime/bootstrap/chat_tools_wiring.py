@@ -15,6 +15,7 @@ from sonder_runtime.adapters.security import powershell_gate as _powershell_gate
 from sonder_runtime.application.agents import delegation_runtime as _delegation
 from sonder_runtime.application.chat.tool_loop import ChatToolTurn, build_tool_turn_manifest
 from sonder_runtime.bootstrap import agent_help_tools as _agent_help_tools
+from sonder_runtime.bootstrap import generic_agent_dispatch as _generic_agent_dispatch
 from sonder_runtime.domain.agents.delegation import DELEGATION_TOOLS
 from sonder_runtime.domain.chat_tools import (
     CORE_CHAT_TOOL_DEFINITIONS,
@@ -190,6 +191,32 @@ def _mcp_catalog(mcp: Any) -> Mapping[str, Any]:
     return dict(result) if isinstance(result, Mapping) else {}
 
 
+def _dynamic_blocked_tools(server: Any, account_blocked: frozenset[str] = frozenset()) -> frozenset[str]:
+    """Operator, admin, direct-only, and recursive entrypoints never dynamically admitted."""
+    return (
+        frozenset(getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ()))
+        | account_blocked
+        | (_generic_agent_dispatch.RECURSIVE_ENTRYPOINTS - DELEGATION_TOOLS)
+        | _generic_agent_dispatch.ADMIN_NAMES
+        | _generic_agent_dispatch.DIRECT_ONLY_NAMES
+    )
+
+
+def _plan_allows_tool(permission_policy: Any, name: str) -> bool:
+    """Return True iff ``name`` is permitted in read-only ``plan`` mode."""
+    try:
+        decision = permission_policy.decide(name, interactive=False, record=False)
+        if (
+            name == "tool_search"
+            and getattr(decision, "risk", "") == "unclassified"
+            and getattr(decision, "source", "") in {"unclassified", "mode"}
+        ):
+            decision = permission_policy.decide("tool_help", interactive=False, record=False)
+        return bool(getattr(decision, "allowed", False))
+    except Exception:
+        return False
+
+
 def build_http_chat_tool_turn(
     *,
     server: Any,
@@ -230,7 +257,7 @@ def build_http_chat_tool_turn(
         mode = str(permission_policy.current_mode() or "")
     except Exception:
         mode = ""
-    if (not use_client_exec and mode == "plan") or not _model_supports_tools(server, model):
+    if not _model_supports_tools(server, model):
         return None
     depth = _delegation.current_depth()
     account_blocked = (
@@ -248,6 +275,7 @@ def build_http_chat_tool_turn(
             if not role_tool_policy.agent_refusal(item.name)
             and item.name not in account_blocked
             and (depth == 0 or item.name not in DELEGATION_TOOLS)
+            and (mode != "plan" or _plan_allows_tool(permission_policy, item.name))
         ]
         admitted = list(dict.fromkeys([*admitted_core, *(d.name for d in CLIENT_DELEGATABLE_TOOL_DEFINITIONS)]))
         core_non_client = [
@@ -263,6 +291,7 @@ def build_http_chat_tool_turn(
             if not role_tool_policy.agent_refusal(item.name)
             and item.name not in account_blocked
             and (depth == 0 or item.name not in DELEGATION_TOOLS)
+            and (mode != "plan" or _plan_allows_tool(permission_policy, item.name))
         ]
         tools_payload = chat_tools_payload(allowed_names=admitted, depth=depth)
         turn_client_tools = frozenset()
@@ -274,6 +303,7 @@ def build_http_chat_tool_turn(
         user_run_command=bool(authorized_tools and mode != "plan"),
         mode=("manual" if use_client_exec and not authorized_tools else (mode or "manual")),
         container_active=container_active,
+        dynamic_discovery=bool(authorized_tools and "tool_search" in admitted),
     )
     resolved_project_root = ""
     if authorized_tools and project:
@@ -283,7 +313,7 @@ def build_http_chat_tool_turn(
                 resolved_project_root = str(resolver(project) or "")
             except Exception:
                 resolved_project_root = ""
-    blocked_tools = frozenset(getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ())) | account_blocked
+    blocked_tools = _dynamic_blocked_tools(server, account_blocked)
     if authorized_tools and account_scope is not None:
         boundary_fn = getattr(server, "scoped_task_account_boundary", None)
 
@@ -422,6 +452,7 @@ def build_http_chat_tool_turn(
         is_aborted=(lambda: bool(early.client_gone)) if early is not None else None,
         role_refusal=role_tool_policy.agent_refusal,
         allow_system_tools=allow_system_tools and authorized_tools and account_scope is None,
+        allow_dynamic_catalog=bool(authorized_tools),
         client_exec_tools=turn_client_tools,
         client_exec_only=bool(use_client_exec and not authorized_tools),
         delegate_client_tool=delegate_client if use_client_exec else None,
@@ -769,29 +800,32 @@ def maybe_open_mcp_chat_tool_turn(
         mode = str(permission_policy.current_mode() or "")
     except Exception:
         mode = ""
-    if mode == "plan" or not _model_supports_tools(server, model):
+    if not _model_supports_tools(server, model):
         return None
     depth = _delegation.current_depth()
     admitted = [
         item.name for item in CORE_CHAT_TOOL_DEFINITIONS
         if not role_tool_policy.agent_refusal(item.name)
         and (depth == 0 or item.name not in DELEGATION_TOOLS)
+        and (mode != "plan" or _plan_allows_tool(permission_policy, item.name))
     ]
     if not admitted:
         return None
     container_active = _container_running(server)
     manifest = build_tool_turn_manifest(
         admitted_tools=admitted,
-        user_run_command=True,
+        user_run_command=(mode != "plan"),
         mode=mode or "manual",
         container_active=container_active,
+        dynamic_discovery=("tool_search" in admitted),
     )
     resolved_project_root, _ = resolve_agent_project_scope(project)
+    blocked_tools = _dynamic_blocked_tools(server)
     backend = ChatRunBackend(
         dispatch_agent_tool=server._agent_dispatch,
         catalog_provider=lambda: _mcp_catalog(server.mcp),
         permission_policy=permission_policy,
-        blocked_tools=frozenset(getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ())),
+        blocked_tools=blocked_tools,
         container_active=lambda: container_active,
         project_root=resolved_project_root,
     )
@@ -800,8 +834,9 @@ def maybe_open_mcp_chat_tool_turn(
         tools_payload=chat_tools_payload(allowed_names=admitted, depth=depth),
         backend=backend,
         permission_policy=permission_policy,
-        blocked_tools=frozenset(getattr(server, "_AGENT_SYSTEM_OPERATOR_TOOLS", ())),
+        blocked_tools=blocked_tools,
         role_refusal=role_tool_policy.agent_refusal,
+        allow_dynamic_catalog=True,
     )
 
 
