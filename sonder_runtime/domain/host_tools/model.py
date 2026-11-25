@@ -19,7 +19,7 @@ from enum import Enum
 import hashlib
 import json
 import re
-from typing import Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, TypeVar
 
 from ..common.errors import InvalidInput
 
@@ -219,7 +219,7 @@ def sort_key(record: ToolRecord) -> tuple[int, str]:
     return (_CATEGORY_RANK[record.category], record.name.lower())
 
 
-def _record_to_wire(record: ToolRecord) -> dict:
+def _record_to_wire(record: ToolRecord) -> dict[str, Any]:
     return {
         "name": record.name,
         "category": record.category.value,
@@ -243,7 +243,7 @@ def snapshot_digest(tools: Iterable[ToolRecord]) -> str:
     return hashlib.sha256(canonical.encode("ascii")).hexdigest()
 
 
-def snapshot_to_wire(snapshot: InventorySnapshot) -> dict:
+def snapshot_to_wire(snapshot: InventorySnapshot) -> dict[str, Any]:
     return {
         "schema": snapshot.schema,
         "os": snapshot.os,
@@ -272,7 +272,10 @@ def _wire_str(value: object, limit: int, what: str, *, allow_empty: bool = True)
     return value
 
 
-def _wire_enum(enum_type, value: object, what: str):
+_E = TypeVar("_E", bound=Enum)
+
+
+def _wire_enum(enum_type: type[_E], value: object, what: str) -> _E:
     _require(isinstance(value, str), f"{what} must be a string")
     try:
         return enum_type(value)
@@ -289,8 +292,10 @@ def _record_from_wire(data: object) -> ToolRecord:
     _require(is_absolute_host_path(path), "tool path must be absolute")
     on_path = data.get("on_path")
     _require(isinstance(on_path, bool), "on_path must be a boolean")
+    assert isinstance(on_path, bool)
     alternatives = data.get("alternatives", [])
     _require(isinstance(alternatives, list), "alternatives must be a list")
+    assert isinstance(alternatives, list)
     _require(len(alternatives) <= MAX_ALTERNATIVES, "too many alternatives")
     alt_paths = []
     for item in alternatives:
@@ -299,10 +304,12 @@ def _record_from_wire(data: object) -> ToolRecord:
         alt_paths.append(alt)
     details = data.get("details", [])
     _require(isinstance(details, list), "details must be a list")
+    assert isinstance(details, list)
     _require(len(details) <= MAX_DETAILS, "too many details")
     pairs = []
     for item in details:
         _require(isinstance(item, list) and len(item) == 2, "detail must be a pair")
+        assert isinstance(item, list)
         key = _wire_str(item[0], MAX_DETAIL_KEY_CHARS, "detail key", allow_empty=False)
         value = _wire_str(item[1], MAX_DETAIL_VALUE_CHARS, "detail value")
         pairs.append((key, value))
@@ -320,7 +327,7 @@ def _record_from_wire(data: object) -> ToolRecord:
     )
 
 
-def snapshot_from_wire(data: Mapping) -> InventorySnapshot:
+def snapshot_from_wire(data: Mapping[str, object]) -> InventorySnapshot:
     """Validate and rebuild a snapshot; raises ``InvalidInput`` on any defect."""
     _require(isinstance(data, Mapping), "snapshot must be an object")
     _require(data.get("schema") == SNAPSHOT_SCHEMA, "snapshot schema mismatch")
@@ -331,13 +338,20 @@ def snapshot_from_wire(data: Mapping) -> InventorySnapshot:
     records = tuple(_record_from_wire(item) for item in tools)
     notes = data.get("notes", [])
     _require(isinstance(notes, list) and len(notes) <= MAX_NOTES, "notes are invalid")
+    assert isinstance(notes, list)
     note_values = tuple(_wire_str(note, MAX_NOTE_CHARS, "note") for note in notes)
     created_at = data.get("created_at")
-    _require(type(created_at) in (int, float) and created_at >= 0, "created_at is invalid")
+    _require(
+        type(created_at) in (int, float) and isinstance(created_at, (int, float)) and created_at >= 0,
+        "created_at is invalid",
+    )
+    assert isinstance(created_at, (int, float))
     duration = data.get("duration_ms")
-    _require(type(duration) is int and duration >= 0, "duration_ms is invalid")
+    _require(type(duration) is int and isinstance(duration, int) and duration >= 0, "duration_ms is invalid")
+    assert isinstance(duration, int)
     truncated = data.get("truncated")
     _require(isinstance(truncated, bool), "truncated must be a boolean")
+    assert isinstance(truncated, bool)
     digest = _wire_str(data.get("digest"), 64, "digest")
     _require(digest == snapshot_digest(records), "snapshot digest mismatch")
     return InventorySnapshot(
@@ -579,7 +593,7 @@ def build_view(
     )
 
 
-def view_to_wire(view: InventoryView) -> dict:
+def view_to_wire(view: InventoryView) -> dict[str, Any]:
     return {
         "object": "tool_inventory",
         "snapshot_digest": view.snapshot_digest,
