@@ -5,7 +5,7 @@ from __future__ import annotations
 import os.path
 
 
-def created_path_key(path) -> str:
+def created_path_key(path: object) -> str:
     """One canonical key per on-disk target.
 
     Case-folded and separator-normalized so ``src\\a.h``, ``src/a.h``, and

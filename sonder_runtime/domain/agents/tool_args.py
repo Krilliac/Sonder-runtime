@@ -93,8 +93,8 @@ def _command_parts(value: Any) -> tuple[Any, Any]:
         # backslashes remain ordinary Windows path characters.  This is only
         # argument shaping; it never invokes a shell or evaluates input.
         parts = []
-        buf = []
-        quote = None
+        buf: list[str] = []
+        quote: str | None = None
         word_started = False
         for char in value.strip():
             if quote is not None:
