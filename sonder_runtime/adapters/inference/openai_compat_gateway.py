@@ -52,6 +52,7 @@ dollar totals and counts only -- never a key, a prompt or a reply.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import http.client
 import ipaddress
 import json
@@ -59,6 +60,7 @@ import logging
 import re
 import socket
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -66,7 +68,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from email.utils import format_datetime, parsedate_to_datetime
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Sequence
 
 import sonder_runtime.adapters.inference.gpu_admission as gpu_admission
@@ -122,6 +124,11 @@ from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_EMBEDDINGS,
     GATEWAY_CAPABILITY_FIXED_ENDPOINT,
 )
+from ...domain.native_tool_policy import (
+    MAX_ARGUMENT_CHARS,
+    MAX_ARGUMENT_DEPTH,
+    TOOL_NAME_RE,
+)
 from ...domain.sampling_temperature import check_temperature
 from ...platform.metrics import default_registry
 from ..model_request_admission import (
@@ -129,6 +136,7 @@ from ..model_request_admission import (
     host_model_request_admission,
 )
 from ..model_transport import ModelCallError
+from ..observability import activity_tracker
 from ..tls_contexts import default_https_context
 from ..provider_bindings import PROVIDER_TIERS, provider_id_for_label
 from .anthropic_spend import SpendLedger
@@ -165,6 +173,29 @@ _MALFORMED_BASE_URL = (
     "(check the host, the port, and for spaces or control characters)"
 )
 _PERCENT_IN_HOST = "OpenAI-compatible base URL host must not contain percent-encoding"
+
+# Native OpenAI function-tool request/response bounds.
+MAX_TOOLS = 128
+MAX_TOOL_DESCRIPTION_CHARS = 16_384
+MAX_TOOL_SCHEMA_CHARS = 65_536
+MAX_TOOLS_PAYLOAD_BYTES = 512 * 1024
+MAX_RESPONSE_TOOL_CALLS = 64
+MAX_TOOL_CALL_ID_CHARS = 128
+MAX_TOOL_NAME_CHARS = 128
+MAX_TOOL_CALL_ARGUMENTS_CHARS = MAX_ARGUMENT_CHARS
+MAX_TOOL_CALL_ARGUMENTS_DEPTH = MAX_ARGUMENT_DEPTH
+_VALID_TOOL_CHOICE_STRINGS = frozenset({"auto", "none", "required"})
+_VALID_FINISH_REASONS = frozenset({
+    "stop", "length", "content_filter", "tool_calls", "function_call",
+})
+_ALLOWED_TOOL_KEYS = frozenset({"type", "function"})
+_ALLOWED_TOOL_FUNCTION_KEYS = frozenset({"name", "description", "parameters", "strict"})
+_ALLOWED_TOOL_CHOICE_KEYS = frozenset({"type", "function"})
+_ALLOWED_TOOL_CHOICE_FN_KEYS = frozenset({"name"})
+
+_STREAM_TOOL_CAPTURE: contextvars.ContextVar["dict[str, int] | None"] = (
+    contextvars.ContextVar("sonder_openai_compat_stream_tool_capture", default=None)
+)
 
 def shared_https_context() -> ssl.SSLContext:
     """The verifying TLS context for model-endpoint openers, shared in-process.
@@ -227,6 +258,664 @@ def _opener_for(url: str):
     return urllib.request.build_opener(*handlers)
 
 
+class _ToolValidationError(DependencyUnavailable):
+    """Internal ``DependencyUnavailable`` carrying a bounded telemetry reason."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class OpenAIToolCall:
+    """One strictly validated native OpenAI function tool call."""
+
+    id: str
+    name: str
+    arguments: Mapping[str, Any]
+    arguments_json: str
+    type: str = "function"
+
+    def to_openai_dict(self) -> dict[str, Any]:
+        """Serialize back into standard OpenAI ``message.tool_calls[]`` wire shape."""
+        return {
+            "id": self.id,
+            "type": self.type,
+            "function": {
+                "name": self.name,
+                "arguments": self.arguments_json,
+            },
+        }
+
+
+@dataclass(frozen=True)
+class OpenAIToolTelemetry:
+    """Content-free per-call native tool telemetry (no arguments or text)."""
+
+    tools_requested: int = 0
+    tool_choice: str | None = None
+    tool_calls_returned: int = 0
+    tool_names: tuple[str, ...] = ()
+    streamed: bool = False
+    stream_delta_count: int = 0
+
+
+@dataclass(frozen=True)
+class OpenAICompatibleResponse(ModelResponse):
+    """Additive OpenAI-compatible response fields without changing ``ModelResponse``."""
+
+    tool_calls: tuple[OpenAIToolCall, ...] = ()
+    finish_reason: str | None = None
+    reasoning_content: str | None = None
+    tool_telemetry: OpenAIToolTelemetry | None = None
+
+
+def _reject_nonfinite_json(constant: str) -> Any:
+    raise ValueError("non-finite JSON constant %r is not allowed" % constant)
+
+
+def _json_text_depth_within(text: str, limit: int) -> bool:
+    """Return False once bracket nesting outside JSON string literals exceeds ``limit``."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{[":
+            depth += 1
+            if depth > limit:
+                return False
+        elif char in "}]":
+            depth -= 1
+    return True
+
+
+def _value_depth_within(value: object, limit: int) -> bool:
+    """Iteratively verify container nesting depth of a parsed Python structure."""
+    stack: list[tuple[object, int]] = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, Mapping):
+            children = item.values()
+        elif isinstance(item, (list, tuple)):
+            children = item
+        else:
+            continue
+        if depth > limit:
+            return False
+        stack.extend((child, depth + 1) for child in children)
+    return True
+
+
+def _plain_json_structure(value: object) -> Any:
+    """Convert nested ``Mapping``/``tuple`` containers (depth already bounded) to JSON-native types."""
+    if isinstance(value, Mapping):
+        return {k: _plain_json_structure(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json_structure(v) for v in value]
+    return value
+
+
+def _validate_tool_call_id(
+    raw_id: object, *, where: str, error_cls: type[SonderError], reason: str | None = None,
+) -> str:
+    def _fail(msg: str) -> SonderError:
+        if error_cls is _ToolValidationError and reason is not None:
+            return _ToolValidationError(msg, reason=reason)
+        return error_cls(msg)
+
+    if raw_id is None:
+        return ""
+    if not isinstance(raw_id, str):
+        raise _fail("%s id must be a string" % where)
+    if _UNSAFE_HEADER_VALUE_RE.search(raw_id) or len(raw_id) > MAX_TOOL_CALL_ID_CHARS:
+        raise _fail("%s id must be at most %d printable characters" % (where, MAX_TOOL_CALL_ID_CHARS))
+    return raw_id.strip()
+
+
+def _parse_json_object_arguments(
+    raw_arguments: object, *, where: str, error_cls: type[SonderError],
+) -> tuple[dict[str, Any], str]:
+    def _fail(msg: str, reason: str) -> SonderError:
+        if error_cls is _ToolValidationError:
+            return _ToolValidationError(msg, reason=reason)
+        return error_cls(msg)
+
+    if isinstance(raw_arguments, str):
+        if len(raw_arguments) > MAX_TOOL_CALL_ARGUMENTS_CHARS:
+            raise _fail(
+                "%s arguments exceed %d characters" % (where, MAX_TOOL_CALL_ARGUMENTS_CHARS),
+                "oversized_arguments",
+            )
+        if not _json_text_depth_within(raw_arguments, MAX_TOOL_CALL_ARGUMENTS_DEPTH):
+            raise _fail(
+                "%s arguments exceed nesting depth %d" % (where, MAX_TOOL_CALL_ARGUMENTS_DEPTH),
+                "deeply_nested_arguments",
+            )
+        try:
+            parsed = json.loads(raw_arguments, parse_constant=_reject_nonfinite_json)
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise _fail("%s arguments are not valid JSON" % where, "malformed_arguments") from exc
+        if not isinstance(parsed, dict):
+            raise _fail("%s arguments must decode to a JSON object" % where, "non_object_arguments")
+        if not _value_depth_within(parsed, MAX_TOOL_CALL_ARGUMENTS_DEPTH):
+            raise _fail(
+                "%s arguments exceed nesting depth %d" % (where, MAX_TOOL_CALL_ARGUMENTS_DEPTH),
+                "deeply_nested_arguments",
+            )
+        try:
+            canonical = json.dumps(
+                parsed, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"), allow_nan=False,
+            )
+        except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise _fail("%s arguments are not JSON-serializable" % where, "malformed_arguments") from exc
+        if len(canonical) > MAX_TOOL_CALL_ARGUMENTS_CHARS:
+            raise _fail(
+                "%s arguments exceed %d characters" % (where, MAX_TOOL_CALL_ARGUMENTS_CHARS),
+                "oversized_arguments",
+            )
+        return parsed, canonical
+    if isinstance(raw_arguments, Mapping):
+        if not _value_depth_within(raw_arguments, MAX_TOOL_CALL_ARGUMENTS_DEPTH):
+            raise _fail(
+                "%s arguments exceed nesting depth %d" % (where, MAX_TOOL_CALL_ARGUMENTS_DEPTH),
+                "deeply_nested_arguments",
+            )
+        try:
+            canonical = json.dumps(
+                _plain_json_structure(raw_arguments), ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"), allow_nan=False,
+            )
+        except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise _fail("%s arguments are not valid JSON object data" % where, "malformed_arguments") from exc
+        if len(canonical) > MAX_TOOL_CALL_ARGUMENTS_CHARS:
+            raise _fail(
+                "%s arguments exceed %d characters" % (where, MAX_TOOL_CALL_ARGUMENTS_CHARS),
+                "oversized_arguments",
+            )
+        parsed = json.loads(canonical, parse_constant=_reject_nonfinite_json)
+        return parsed, canonical
+    raise _fail("%s arguments must be a JSON string or object" % where, "invalid_arguments_type")
+
+
+def normalize_openai_tools(raw_tools: object) -> tuple[list[dict[str, Any]], frozenset[str]]:
+    """Validate and normalize an OpenAI ``tools`` list into detached wire dicts."""
+    if not isinstance(raw_tools, (list, tuple)):
+        raise InvalidInput("option 'tools' must be a list of tool definitions")
+    if not raw_tools:
+        raise InvalidInput("option 'tools' must be a non-empty list of tool definitions")
+    if len(raw_tools) > MAX_TOOLS:
+        raise InvalidInput("option 'tools' exceeds the maximum of %d tools" % MAX_TOOLS)
+    normalized: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for index, raw_tool in enumerate(raw_tools):
+        where = "tools[%d]" % index
+        if not isinstance(raw_tool, Mapping):
+            raise InvalidInput("%s must be an object" % where)
+        extra_keys = set(raw_tool) - _ALLOWED_TOOL_KEYS
+        if extra_keys:
+            raise InvalidInput(
+                "%s contains unsupported keys: %s" % (where, ", ".join(sorted(str(k) for k in extra_keys)))
+            )
+        if raw_tool.get("type") != "function":
+            raise InvalidInput("%s.type must be 'function'" % where)
+        raw_fn = raw_tool.get("function")
+        if not isinstance(raw_fn, Mapping):
+            raise InvalidInput("%s.function must be an object" % where)
+        extra_fn_keys = set(raw_fn) - _ALLOWED_TOOL_FUNCTION_KEYS
+        if extra_fn_keys:
+            raise InvalidInput(
+                "%s.function contains unsupported keys: %s"
+                % (where, ", ".join(sorted(str(k) for k in extra_fn_keys)))
+            )
+        raw_name = raw_fn.get("name")
+        if not isinstance(raw_name, str) or not TOOL_NAME_RE.fullmatch(raw_name.strip()):
+            raise InvalidInput("%s.function.name must be a valid tool identifier" % where)
+        name = raw_name.strip()
+        if name in seen_names:
+            raise InvalidInput("option 'tools' contains duplicate tool name %r" % name)
+        seen_names.add(name)
+        fn_obj: dict[str, Any] = {"name": name}
+        if "description" in raw_fn and raw_fn["description"] is not None:
+            desc = raw_fn["description"]
+            if not isinstance(desc, str) or "\x00" in desc or len(desc) > MAX_TOOL_DESCRIPTION_CHARS:
+                raise InvalidInput(
+                    "%s.function.description must be text of at most %d characters"
+                    % (where, MAX_TOOL_DESCRIPTION_CHARS)
+                )
+            fn_obj["description"] = desc
+        if "parameters" in raw_fn and raw_fn["parameters"] is not None:
+            params = raw_fn["parameters"]
+            if not isinstance(params, Mapping):
+                raise InvalidInput("%s.function.parameters must be a JSON Schema object" % where)
+            if "type" in params and params["type"] != "object":
+                raise InvalidInput("%s.function.parameters.type must be 'object'" % where)
+            if not _value_depth_within(params, MAX_TOOL_CALL_ARGUMENTS_DEPTH):
+                raise InvalidInput(
+                    "%s.function.parameters exceeds nesting depth %d"
+                    % (where, MAX_TOOL_CALL_ARGUMENTS_DEPTH)
+                )
+            try:
+                serialized_params = json.dumps(
+                    _plain_json_structure(params), ensure_ascii=False, allow_nan=False,
+                )
+            except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+                raise InvalidInput("%s.function.parameters must be JSON-serializable" % where) from exc
+            if len(serialized_params) > MAX_TOOL_SCHEMA_CHARS:
+                raise InvalidInput(
+                    "%s.function.parameters exceeds %d characters" % (where, MAX_TOOL_SCHEMA_CHARS)
+                )
+            fn_obj["parameters"] = json.loads(serialized_params, parse_constant=_reject_nonfinite_json)
+        if "strict" in raw_fn and raw_fn["strict"] is not None:
+            strict = raw_fn["strict"]
+            if type(strict) is not bool:
+                raise InvalidInput("%s.function.strict must be a boolean" % where)
+            fn_obj["strict"] = strict
+        normalized.append({"type": "function", "function": fn_obj})
+    encoded = json.dumps(normalized, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    if len(encoded) > MAX_TOOLS_PAYLOAD_BYTES:
+        raise InvalidInput(
+            "option 'tools' serialized size exceeds %d bytes" % MAX_TOOLS_PAYLOAD_BYTES
+        )
+    return normalized, frozenset(seen_names)
+
+
+def normalize_openai_tool_choice(
+    raw_choice: object, *, declared_tools: frozenset[str],
+) -> str | dict[str, Any]:
+    """Validate and normalize an OpenAI ``tool_choice`` value against declared tools."""
+    if not declared_tools:
+        raise InvalidInput("option 'tool_choice' requires non-empty 'tools'")
+    if isinstance(raw_choice, str):
+        if raw_choice not in _VALID_TOOL_CHOICE_STRINGS:
+            raise InvalidInput(
+                "option 'tool_choice' string must be one of: auto, none, required"
+            )
+        return raw_choice
+    if isinstance(raw_choice, Mapping):
+        if set(raw_choice) != _ALLOWED_TOOL_CHOICE_KEYS or raw_choice.get("type") != "function":
+            raise InvalidInput(
+                "option 'tool_choice' object must be {'type': 'function', 'function': {'name': ...}}"
+            )
+        raw_fn = raw_choice.get("function")
+        if not isinstance(raw_fn, Mapping) or set(raw_fn) != _ALLOWED_TOOL_CHOICE_FN_KEYS:
+            raise InvalidInput("option 'tool_choice'.function must contain only 'name'")
+        raw_name = raw_fn.get("name")
+        if not isinstance(raw_name, str) or not TOOL_NAME_RE.fullmatch(raw_name.strip()):
+            raise InvalidInput("option 'tool_choice'.function.name must be a valid tool identifier")
+        name = raw_name.strip()
+        if name not in declared_tools:
+            raise InvalidInput("option 'tool_choice' names undeclared tool %r" % name)
+        return {"type": "function", "function": {"name": name}}
+    raise InvalidInput(
+        "option 'tool_choice' must be 'auto', 'none', 'required', or a function selector object"
+    )
+
+
+def _tool_choice_label(tool_choice: str | dict[str, Any] | None) -> str | None:
+    if tool_choice is None:
+        return None
+    if isinstance(tool_choice, str):
+        return tool_choice
+    fn = tool_choice.get("function")
+    if isinstance(fn, Mapping) and isinstance(fn.get("name"), str):
+        return "function:%s" % fn["name"]
+    return "function"
+
+
+def _history_ends_with_tool_result(history: object) -> bool:
+    if not isinstance(history, (list, tuple)) or not history:
+        return False
+    last = history[-1]
+    return isinstance(last, Mapping) and last.get("role") == "tool"
+
+
+def parse_openai_tool_calls(
+    raw_tool_calls: object,
+    *,
+    allowed_names: frozenset[str] | None = None,
+    forced_name: str | None = None,
+) -> tuple[OpenAIToolCall, ...]:
+    """Parse and strictly validate OpenAI ``message.tool_calls`` into typed DTOs."""
+    if raw_tool_calls is None:
+        return ()
+    if not isinstance(raw_tool_calls, list):
+        raise _ToolValidationError(
+            "endpoint returned invalid tool_calls", reason="invalid_tool_calls_shape",
+        )
+    if len(raw_tool_calls) > MAX_RESPONSE_TOOL_CALLS:
+        raise _ToolValidationError(
+            "endpoint returned too many tool calls (%d > %d)"
+            % (len(raw_tool_calls), MAX_RESPONSE_TOOL_CALLS),
+            reason="too_many_tool_calls",
+        )
+    parsed_calls: list[OpenAIToolCall] = []
+    seen_ids: set[str] = set()
+    for index, raw_item in enumerate(raw_tool_calls):
+        where = "tool_calls[%d]" % index
+        if not isinstance(raw_item, Mapping):
+            raise _ToolValidationError(
+                "endpoint returned non-object %s" % where, reason="invalid_tool_call_shape",
+            )
+        raw_type = raw_item.get("type", "function")
+        if raw_type is not None and raw_type != "function":
+            raise _ToolValidationError(
+                "endpoint returned unsupported type in %s" % where,
+                reason="unsupported_tool_call_type",
+            )
+        call_id = _validate_tool_call_id(
+            raw_item.get("id"), where="endpoint %s" % where,
+            error_cls=_ToolValidationError, reason="invalid_tool_call_id",
+        )
+        if call_id:
+            if call_id in seen_ids:
+                raise _ToolValidationError(
+                    "endpoint returned duplicate tool_call id %r" % call_id,
+                    reason="duplicate_tool_call_id",
+                )
+        else:
+            suffix = index
+            candidate = "call_%d" % suffix
+            while candidate in seen_ids:
+                suffix += 1
+                candidate = "call_%d" % suffix
+            call_id = candidate
+        seen_ids.add(call_id)
+        raw_fn = raw_item.get("function")
+        if not isinstance(raw_fn, Mapping):
+            raise _ToolValidationError(
+                "endpoint returned invalid function object in %s" % where,
+                reason="invalid_tool_call_shape",
+            )
+        raw_name = raw_fn.get("name")
+        if not isinstance(raw_name, str) or not TOOL_NAME_RE.fullmatch(raw_name.strip()):
+            raise _ToolValidationError(
+                "endpoint returned invalid tool name in %s" % where,
+                reason="invalid_tool_name",
+            )
+        name = raw_name.strip()
+        if allowed_names is not None and name not in allowed_names:
+            raise _ToolValidationError(
+                "endpoint returned undeclared tool call %r" % name,
+                reason="undeclared_tool",
+            )
+        if forced_name is not None and name != forced_name:
+            raise _ToolValidationError(
+                "endpoint returned tool call %r instead of forced %r" % (name, forced_name),
+                reason="tool_choice_violation",
+            )
+        if "arguments" not in raw_fn:
+            raise _ToolValidationError(
+                "endpoint returned %s without arguments" % where,
+                reason="missing_arguments",
+            )
+        parsed_args, canonical_json = _parse_json_object_arguments(
+            raw_fn["arguments"], where="endpoint %s" % where, error_cls=_ToolValidationError,
+        )
+        parsed_calls.append(OpenAIToolCall(
+            id=call_id,
+            name=name,
+            arguments=MappingProxyType(parsed_args),
+            arguments_json=canonical_json,
+            type="function",
+        ))
+    return tuple(parsed_calls)
+
+
+class ToolCallDeltaAssembler:
+    """Strictly assemble OpenAI streaming ``delta.tool_calls`` fragments by index.
+
+    Handles interleaved parallel tool calls, incremental argument fragments,
+    split function names across chunks, idempotent repeated headers, and fails
+    closed on malformed deltas, conflicting/duplicate IDs, or oversized payloads.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_calls: int = MAX_RESPONSE_TOOL_CALLS,
+        max_argument_chars: int = MAX_TOOL_CALL_ARGUMENTS_CHARS,
+    ) -> None:
+        if type(max_calls) is not int or not 1 <= max_calls <= MAX_RESPONSE_TOOL_CALLS:
+            raise ValueError("max_calls must be an integer in [1, %d]" % MAX_RESPONSE_TOOL_CALLS)
+        if (type(max_argument_chars) is not int
+                or not 1 <= max_argument_chars <= MAX_TOOL_CALL_ARGUMENTS_CHARS):
+            raise ValueError(
+                "max_argument_chars must be an integer in [1, %d]" % MAX_TOOL_CALL_ARGUMENTS_CHARS
+            )
+        self._max_calls = max_calls
+        self._max_argument_chars = max_argument_chars
+        self._slots: dict[int, dict[str, str]] = {}
+        self._id_to_index: dict[str, int] = {}
+        self._delta_count = 0
+
+    @property
+    def delta_count(self) -> int:
+        return self._delta_count
+
+    @property
+    def call_count(self) -> int:
+        return len(self._slots)
+
+    def add_delta(self, delta: object) -> dict[str, Any]:
+        """Validate and merge one ``delta.tool_calls[]`` item; return normalized delta."""
+        if not isinstance(delta, Mapping):
+            raise _ToolValidationError(
+                "endpoint streamed non-object tool_call delta",
+                reason="invalid_stream_delta",
+            )
+        raw_idx = delta["index"] if "index" in delta else 0
+        if (type(raw_idx) is not int or raw_idx < 0 or raw_idx >= self._max_calls):
+            raise _ToolValidationError(
+                "endpoint streamed invalid tool_call index",
+                reason="invalid_stream_index",
+            )
+        if raw_idx not in self._slots and len(self._slots) >= self._max_calls:
+            raise _ToolValidationError(
+                "endpoint streamed too many distinct tool calls",
+                reason="too_many_tool_calls",
+            )
+        slot = self._slots.setdefault(
+            raw_idx, {"id": "", "type": "function", "name": "", "arguments": ""},
+        )
+        raw_id = delta.get("id")
+        clean_id = ""
+        same_id_repeated = False
+        if raw_id is not None and raw_id != "":
+            clean_id = _validate_tool_call_id(
+                raw_id, where="streamed tool_calls[%d]" % raw_idx,
+                error_cls=_ToolValidationError, reason="invalid_tool_call_id",
+            )
+            if clean_id:
+                existing_owner = self._id_to_index.get(clean_id)
+                if existing_owner is not None and existing_owner != raw_idx:
+                    raise _ToolValidationError(
+                        "endpoint streamed duplicate tool_call id %r across indexes" % clean_id,
+                        reason="duplicate_tool_call_id",
+                    )
+                if slot["id"] and slot["id"] != clean_id:
+                    raise _ToolValidationError(
+                        "endpoint streamed conflicting tool_call id on index %d" % raw_idx,
+                        reason="conflicting_tool_call_id",
+                    )
+                same_id_repeated = bool(slot["id"] and slot["id"] == clean_id)
+                slot["id"] = clean_id
+                self._id_to_index[clean_id] = raw_idx
+        raw_type = delta.get("type")
+        if raw_type is not None and raw_type != "":
+            if raw_type != "function":
+                raise _ToolValidationError(
+                    "endpoint streamed unsupported tool_call type on index %d" % raw_idx,
+                    reason="unsupported_tool_call_type",
+                )
+            slot["type"] = "function"
+        raw_fn = delta.get("function")
+        emitted_name: str | None = None
+        emitted_args: str | None = None
+        if raw_fn is not None:
+            if not isinstance(raw_fn, Mapping):
+                raise _ToolValidationError(
+                    "endpoint streamed invalid function delta on index %d" % raw_idx,
+                    reason="invalid_stream_delta",
+                )
+            raw_name = raw_fn.get("name")
+            if raw_name is not None:
+                if not isinstance(raw_name, str):
+                    raise _ToolValidationError(
+                        "endpoint streamed non-string function name on index %d" % raw_idx,
+                        reason="invalid_tool_name",
+                    )
+                if raw_name:
+                    if _UNSAFE_HEADER_VALUE_RE.search(raw_name):
+                        raise _ToolValidationError(
+                            "endpoint streamed invalid control characters in function name on index %d" % raw_idx,
+                            reason="invalid_tool_name",
+                        )
+                    if same_id_repeated and slot["name"] == raw_name:
+                        pass  # idempotent proxy re-send of full header
+                    else:
+                        if len(slot["name"]) + len(raw_name) > MAX_TOOL_NAME_CHARS:
+                            raise _ToolValidationError(
+                                "endpoint streamed oversized function name on index %d" % raw_idx,
+                                reason="invalid_tool_name",
+                            )
+                        slot["name"] += raw_name
+                        emitted_name = raw_name
+            raw_args = raw_fn.get("arguments")
+            if raw_args is not None:
+                if not isinstance(raw_args, str):
+                    raise _ToolValidationError(
+                        "endpoint streamed non-string arguments on index %d" % raw_idx,
+                        reason="invalid_arguments_type",
+                    )
+                if raw_args:
+                    if len(slot["arguments"]) + len(raw_args) > self._max_argument_chars:
+                        raise _ToolValidationError(
+                            "endpoint streamed oversized arguments on index %d" % raw_idx,
+                            reason="oversized_arguments",
+                        )
+                    slot["arguments"] += raw_args
+                    emitted_args = raw_args
+                elif emitted_name is not None:
+                    emitted_args = ""
+        self._delta_count += 1
+        normalized: dict[str, Any] = {"index": raw_idx}
+        if clean_id and not same_id_repeated:
+            normalized["id"] = clean_id
+        if raw_type == "function" and not same_id_repeated:
+            normalized["type"] = "function"
+        fn_delta: dict[str, str] = {}
+        if emitted_name is not None:
+            fn_delta["name"] = emitted_name
+        if emitted_args is not None:
+            fn_delta["arguments"] = emitted_args
+        if fn_delta:
+            normalized["function"] = fn_delta
+        return normalized
+
+    def feed_chunk(self, chunk: object) -> list[dict[str, Any]]:
+        """Feed one OpenAI ``chat.completion.chunk`` object; return normalized tool deltas."""
+        if not isinstance(chunk, Mapping):
+            raise _ToolValidationError(
+                "endpoint streamed non-object chunk", reason="invalid_stream_delta",
+            )
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return []
+        choice = choices[0]
+        if not isinstance(choice, Mapping):
+            raise _ToolValidationError(
+                "endpoint streamed non-object choice", reason="invalid_stream_delta",
+            )
+        delta = choice.get("delta")
+        if not isinstance(delta, Mapping) or "tool_calls" not in delta or delta["tool_calls"] is None:
+            return []
+        raw_tool_calls = delta["tool_calls"]
+        if not isinstance(raw_tool_calls, list):
+            raise _ToolValidationError(
+                "endpoint streamed non-list delta.tool_calls", reason="invalid_stream_delta",
+            )
+        return [self.add_delta(item) for item in raw_tool_calls]
+
+    def to_openai_list(self) -> list[dict[str, Any]]:
+        """Return assembled ``message.tool_calls`` entries ordered by delta index."""
+        return [
+            {
+                "id": self._slots[idx]["id"],
+                "type": self._slots[idx]["type"],
+                "function": {
+                    "name": self._slots[idx]["name"],
+                    "arguments": self._slots[idx]["arguments"],
+                },
+            }
+            for idx in sorted(self._slots)
+        ]
+
+    def finalize(
+        self,
+        *,
+        allowed_names: frozenset[str] | None = None,
+        forced_name: str | None = None,
+    ) -> tuple[OpenAIToolCall, ...]:
+        """Validate and materialize all assembled streaming tool calls."""
+        if not self._slots:
+            return ()
+        return parse_openai_tool_calls(
+            self.to_openai_list(), allowed_names=allowed_names, forced_name=forced_name,
+        )
+
+
+class _ToolCallStreamProxy:
+    """Validate and assemble streaming ``tool_calls`` deltas while forwarding live events."""
+
+    def __init__(
+        self,
+        live: Any,
+        assembler: ToolCallDeltaAssembler,
+        *,
+        allow_tool_calls: bool,
+    ) -> None:
+        self._live = live
+        self._assembler = assembler
+        self._allow_tool_calls = allow_tool_calls
+
+    @property
+    def cancelled(self) -> bool:
+        return bool(self._live.cancelled) if self._live is not None else False
+
+    def emit(self, text: str) -> bool:
+        if self._live is None:
+            return True
+        return bool(self._live.emit(text))
+
+    def emit_reasoning(self, text: str) -> bool:
+        if self._live is None:
+            return True
+        emit_fn = getattr(self._live, "emit_reasoning", None)
+        return bool(emit_fn(text)) if callable(emit_fn) else True
+
+    def emit_tool_call_delta(self, delta: dict[str, object]) -> bool:
+        if not self._allow_tool_calls:
+            raise _ToolValidationError(
+                "endpoint streamed tool calls when tool calls were not allowed",
+                reason="unrequested_tool_calls",
+            )
+        normalized = self._assembler.add_delta(delta)
+        if self._live is None:
+            return True
+        emit_fn = getattr(self._live, "emit_tool_call_delta", None)
+        return bool(emit_fn(normalized)) if callable(emit_fn) else True
+
+
 def _stream_transport(url: str, payload: dict, headers: dict, timeout) -> dict:
     """``"stream": true`` POST: read the event stream into one completion.
 
@@ -263,10 +952,25 @@ def _stream_transport(url: str, payload: dict, headers: dict, timeout) -> dict:
             handlers.append(urllib.request.ProxyHandler({}))
         return urllib.request.build_opener(*handlers)
 
-    return post_streaming(
-        url, payload, headers, timeout or _DEFAULT_TIMEOUT, stream_sink.call_stream(),
+    allow_tool_calls = bool(payload.get("tools")) and payload.get("tool_choice") != "none"
+    assembler = ToolCallDeltaAssembler()
+    proxy = _ToolCallStreamProxy(
+        stream_sink.call_stream(), assembler, allow_tool_calls=allow_tool_calls,
+    )
+    document = post_streaming(
+        url, payload, headers, timeout or _DEFAULT_TIMEOUT, proxy,
         exchange=exchange, opener_factory=opener_factory, label="endpoint",
     )
+    capture = _STREAM_TOOL_CAPTURE.get()
+    if capture is not None:
+        capture["delta_count"] = assembler.delta_count
+    if isinstance(document, dict) and assembler.delta_count > 0:
+        choices = document.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            message = choices[0].get("message")
+            if isinstance(message, dict):
+                message["tool_calls"] = assembler.to_openai_list()
+    return document
 
 
 def _split_networks(raw: str) -> tuple[str, ...]:
@@ -648,6 +1352,7 @@ class OpenAICompatibleGateway:
         self._get_transport = get_transport
         self._config = config
         self._transport = transport
+        self._openai_call = threading.local()
         self._request_admission = (
             host_model_request_admission()
             if request_admission is None else request_admission
@@ -672,6 +1377,11 @@ class OpenAICompatibleGateway:
     @property
     def request_admission(self) -> HostModelRequestAdmission:
         return self._request_admission
+
+    @property
+    def last_response_meta(self) -> dict[str, object]:
+        """Content-free measurements for this thread's last call; failures clear old data."""
+        return dict(getattr(self._openai_call, "response_meta", {}))
 
     # -- status ------------------------------------------------------------
 
@@ -986,10 +1696,15 @@ class OpenAICompatibleGateway:
     def _reserve_chat(
         self, cfg: OpenAICompatibleConfig, price: ChatPrice, payload: dict,
     ) -> _SpendCall:
+        # A token is at least a byte, so the UTF-8 byte length bounds input tokens.
+        prompt_estimate = len(json.dumps(payload["messages"]).encode("utf-8"))
+        if "tools" in payload:
+            prompt_estimate += len(json.dumps(payload["tools"]).encode("utf-8"))
+        if "tool_choice" in payload:
+            prompt_estimate += len(json.dumps(payload["tool_choice"]).encode("utf-8"))
         return self._reserve(
             cfg,
-            # A token is at least a byte, so the byte length bounds the input tokens.
-            prompt_estimate=len(json.dumps(payload["messages"]).encode("utf-8")),
+            prompt_estimate=prompt_estimate,
             output_estimate=int(payload["max_tokens"]),
             input_rate=price.input, output_rate=price.output,
         )
@@ -1029,10 +1744,32 @@ class OpenAICompatibleGateway:
 
     # -- generate ----------------------------------------------------------
 
+    def _record_tool_validation_failure(
+        self, *, reason: str, streamed: bool, tools_requested: int,
+    ) -> None:
+        """Emit content-free warning & activity telemetry when tool validation rejects a reply."""
+        payload = {
+            "reason": reason,
+            "streamed": streamed,
+            "tools_requested": tools_requested,
+        }
+        logger.warning(
+            "openai-compatible: tool call validation failed (reason=%s, streamed=%s, tools_requested=%d)",
+            reason, streamed, tools_requested,
+        )
+        activity_tracker.record_event(
+            "openai_tool_validation_failed",
+            provider=self._provider_id,
+            summary=json.dumps(payload, sort_keys=True),
+            **payload,
+        )
+
     def generate(
         self, request: ModelRequest, context: OperationContext
     ) -> ModelResponse:
-        if not (request.prompt or "").strip():
+        self._openai_call.response_meta = {}
+        has_prompt = bool((request.prompt or "").strip())
+        if not has_prompt and not _history_ends_with_tool_result(request.history):
             raise InvalidInput("model request prompt is empty")
         cfg = self._resolved_config()
         self._enforce_consent(cfg, context)
@@ -1040,21 +1777,39 @@ class OpenAICompatibleGateway:
 
         options = dict(request.options or {})
         live = stream_sink.call_stream()
+        use_stream = live is not None or bool(request.stream)
         model = str(options.get("model") or cfg.model_for_tier(request.tier) or request.tier or "default")
         logger.debug(f"OpenAICompatibleGateway.generate: model={model!r}, base_url={redact_url(cfg.base_url)!r}, timeout={timeout}")
-        payload = {
+        payload: dict[str, Any] = {
             "model": model,
             "messages": self._build_messages(request),
-            # The caller's live stream (claimed only for a streaming provider)
-            # decides: a streaming call reads the event stream and returns the
-            # same aggregated document, so everything below is unchanged.
-            "stream": live is not None,
+            # The caller's live stream (or explicit request.stream) decides:
+            # a streaming call reads the event stream and returns the same
+            # aggregated document, so everything below is unchanged.
+            "stream": use_stream,
         }
         temperature = check_temperature(options.get("temperature"))
         if temperature is not None:  # unset: the server's preset applies
             payload["temperature"] = temperature
-        if live is not None:
+        if use_stream:
             payload["stream_options"] = {"include_usage": True}
+        declared_tools: frozenset[str] = frozenset()
+        tool_choice: str | dict[str, Any] | None = None
+        if "tools" in options and options["tools"] is not None:
+            normalized_tools, declared_tools = normalize_openai_tools(options["tools"])
+            payload["tools"] = normalized_tools
+        if "tool_choice" in options and options["tool_choice"] is not None:
+            tool_choice = normalize_openai_tool_choice(
+                options["tool_choice"], declared_tools=declared_tools,
+            )
+            payload["tool_choice"] = tool_choice
+        if "parallel_tool_calls" in options and options["parallel_tool_calls"] is not None:
+            if not declared_tools:
+                raise InvalidInput("option 'parallel_tool_calls' requires non-empty 'tools'")
+            parallel = options["parallel_tool_calls"]
+            if type(parallel) is not bool:
+                raise InvalidInput("option 'parallel_tool_calls' must be a boolean")
+            payload["parallel_tool_calls"] = parallel
         try:
             template_kwargs = normalize_chat_template_options(options)
         except ChatTemplateOptionsError as exc:
@@ -1071,7 +1826,10 @@ class OpenAICompatibleGateway:
         try:
             if price is not None:
                 spend = self._reserve_chat(cfg, price, payload)
-            return self._generate_sent(request, context, cfg, payload, model, timeout, spend)
+            return self._generate_sent(
+                request, context, cfg, payload, model, timeout, spend,
+                declared_tools=declared_tools, tool_choice=tool_choice,
+            )
         finally:
             if spend is not None:
                 spend.release()
@@ -1079,19 +1837,34 @@ class OpenAICompatibleGateway:
     def _generate_sent(
         self, request: ModelRequest, context: OperationContext, cfg: OpenAICompatibleConfig,
         payload: dict, model: str, timeout, spend: _SpendCall | None,
+        *,
+        declared_tools: frozenset[str] = frozenset(),
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> ModelResponse:
         started = time.monotonic()
+        streamed = bool(payload.get("stream"))
+        stream_capture: dict[str, int] = {"delta_count": 0}
 
         def post(trace: _SendTrace | None) -> dict:
-            with stall_limits(
-                cfg.stream_idle_seconds, cfg.stream_first_content_seconds,
-                idle_setting=ENV_STREAM_IDLE, first_content_setting=ENV_STREAM_FIRST_CONTENT,
-            ):
-                return self._post(
-                    "/v1/chat/completions", payload, cfg, timeout, context=context, trace=trace,
-                )
+            token = _STREAM_TOOL_CAPTURE.set(stream_capture)
+            try:
+                with stall_limits(
+                    cfg.stream_idle_seconds, cfg.stream_first_content_seconds,
+                    idle_setting=ENV_STREAM_IDLE, first_content_setting=ENV_STREAM_FIRST_CONTENT,
+                ):
+                    return self._post(
+                        "/v1/chat/completions", payload, cfg, timeout, context=context, trace=trace,
+                    )
+            finally:
+                _STREAM_TOOL_CAPTURE.reset(token)
 
-        data = post(None) if spend is None else self._post_metered(post, spend)
+        try:
+            data = post(None) if spend is None else self._post_metered(post, spend)
+        except _ToolValidationError as exc:
+            self._record_tool_validation_failure(
+                reason=exc.reason, streamed=streamed, tools_requested=len(declared_tools),
+            )
+            raise
         if spend is not None:
             # A completed response is billable even if the caller was cancelled:
             # account before the liveness gate below, and before parsing it.
@@ -1099,7 +1872,86 @@ class OpenAICompatibleGateway:
         # urllib cannot observe a token while blocked.  A final liveness gate
         # prevents a response/cancellation race from publishing stale work.
         self._check_liveness(context, phase="during model call")
-        text = self._extract_text(data)
+
+        choices = data.get("choices") or []
+        if not isinstance(choices, list) or not choices:
+            raise DependencyUnavailable("endpoint returned no choices")
+        if not isinstance(choices[0], dict):
+            raise DependencyUnavailable("endpoint returned an invalid choice")
+        raw_message = choices[0].get("message")
+        if raw_message is None:
+            message: dict[str, Any] = {}
+        elif isinstance(raw_message, dict):
+            message = raw_message
+        else:
+            raise DependencyUnavailable("endpoint returned an invalid message")
+        raw_finish = choices[0].get("finish_reason")
+        finish_reason = (
+            raw_finish
+            if isinstance(raw_finish, str) and raw_finish in _VALID_FINISH_REASONS
+            else None
+        )
+        raw_reasoning = message.get("reasoning_content")
+        if not isinstance(raw_reasoning, str) or not raw_reasoning:
+            raw_reasoning = message.get("reasoning")
+        reasoning_content = (
+            raw_reasoning if isinstance(raw_reasoning, str) and raw_reasoning else None
+        )
+
+        forced_name: str | None = None
+        if isinstance(tool_choice, Mapping):
+            fn_obj = tool_choice.get("function")
+            if isinstance(fn_obj, Mapping) and isinstance(fn_obj.get("name"), str):
+                forced_name = fn_obj["name"]
+
+        raw_tool_calls = message.get("tool_calls")
+        tool_calls: tuple[OpenAIToolCall, ...] = ()
+        try:
+            if raw_tool_calls is not None and not isinstance(raw_tool_calls, list):
+                raise _ToolValidationError(
+                    "endpoint returned invalid tool_calls", reason="invalid_tool_calls_shape",
+                )
+            if raw_tool_calls:
+                if not declared_tools:
+                    raise _ToolValidationError(
+                        "endpoint returned tool calls when no tools were requested",
+                        reason="unrequested_tool_calls",
+                    )
+                if tool_choice == "none":
+                    raise _ToolValidationError(
+                        "endpoint returned tool calls despite tool_choice='none'",
+                        reason="tool_choice_none_violation",
+                    )
+                tool_calls = parse_openai_tool_calls(
+                    raw_tool_calls, allowed_names=declared_tools, forced_name=forced_name,
+                )
+            elif tool_choice == "required" or forced_name is not None:
+                raw_content = message.get("content")
+                if not (
+                    finish_reason == "length"
+                    and (raw_content is None or isinstance(raw_content, str) and not raw_content.strip())
+                ):
+                    raise _ToolValidationError(
+                        "endpoint returned no tool calls despite required tool_choice",
+                        reason="missing_required_tool_call",
+                    )
+        except _ToolValidationError as exc:
+            self._record_tool_validation_failure(
+                reason=exc.reason, streamed=streamed, tools_requested=len(declared_tools),
+            )
+            raise
+
+        if tool_calls:
+            raw_content = message.get("content")
+            if raw_content is None:
+                text = ""
+            elif isinstance(raw_content, str):
+                text = raw_content
+            else:
+                raise DependencyUnavailable("endpoint returned invalid message content")
+        else:
+            text = require_model_text(self._extract_text(data))
+
         usage = data.get("usage")
         if usage is None:
             usage = {}
@@ -1114,14 +1966,54 @@ class OpenAICompatibleGateway:
         if output_count is None:
             output_count = timings.get("predicted_n")
         duration_ms = int((time.monotonic() - started) * 1000)
-        response = ModelResponse(
-            text=require_model_text(text),
+
+        tool_names = tuple(call.name for call in tool_calls)
+        stream_delta_count = int(stream_capture.get("delta_count", 0))
+        choice_label = _tool_choice_label(tool_choice)
+        tool_telemetry: OpenAIToolTelemetry | None = None
+        if declared_tools or tool_calls:
+            tool_telemetry = OpenAIToolTelemetry(
+                tools_requested=len(declared_tools),
+                tool_choice=choice_label,
+                tool_calls_returned=len(tool_calls),
+                tool_names=tool_names,
+                streamed=streamed,
+                stream_delta_count=stream_delta_count,
+            )
+
+        response_meta: dict[str, object] = {
+            key: value for key, value in (
+                ("finish_reason", finish_reason),
+                ("done_reason", finish_reason),
+                ("streamed", True if streamed else None),
+                ("tools_requested", len(declared_tools) if declared_tools else None),
+                ("tool_choice", choice_label),
+                ("tool_calls_returned", len(tool_calls) if (declared_tools or tool_calls) else None),
+                ("tool_names", list(tool_names) if tool_names else None),
+                ("stream_delta_count", stream_delta_count if stream_delta_count else None),
+            ) if value is not None
+        }
+        self._openai_call.response_meta = response_meta
+        if response_meta:
+            activity_tracker.record_event(
+                "inference_outcome",
+                provider=self._provider_id,
+                summary=json.dumps(response_meta, sort_keys=True),
+                **response_meta,
+            )
+
+        response = OpenAICompatibleResponse(
+            text=text,
             model=model,
             tier=request.tier or "openai",
             duration_ms=duration_ms,
             tokens_in=optional_token_count(prompt_count, "prompt token count"),
             tokens_out=optional_token_count(output_count, "completion token count"),
             telemetry=telemetry,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            reasoning_content=reasoning_content,
+            tool_telemetry=tool_telemetry,
         )
         if duration_ms > 60_000:
             logger.warning(
@@ -1130,7 +2022,9 @@ class OpenAICompatibleGateway:
             )
         logger.debug(
             f"OpenAICompatibleGateway.generate: completed in {duration_ms}ms, "
-            f"tokens_in={response.tokens_in}, tokens_out={response.tokens_out}"
+            f"tokens_in={response.tokens_in}, tokens_out={response.tokens_out}, "
+            f"tools_requested={len(declared_tools)}, tool_calls={len(tool_calls)}, "
+            f"finish_reason={finish_reason!r}"
         )
         default_registry().observe_inference(self._provider_id, telemetry)
         return response
@@ -1224,16 +2118,101 @@ class OpenAICompatibleGateway:
     # -- helpers -----------------------------------------------------------
 
     @staticmethod
+    def _normalize_history_tool_calls(raw_tool_calls: object) -> list[dict[str, Any]]:
+        if not isinstance(raw_tool_calls, (list, tuple)) or not raw_tool_calls:
+            raise InvalidInput("assistant history tool_calls must be a non-empty list")
+        if len(raw_tool_calls) > MAX_RESPONSE_TOOL_CALLS:
+            raise InvalidInput(
+                "assistant history tool_calls exceeds maximum of %d" % MAX_RESPONSE_TOOL_CALLS
+            )
+        normalized: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for index, item in enumerate(raw_tool_calls):
+            where = "history tool_calls[%d]" % index
+            if isinstance(item, OpenAIToolCall):
+                item = item.to_openai_dict()
+            if not isinstance(item, Mapping):
+                raise InvalidInput("%s must be an object" % where)
+            raw_type = item.get("type", "function")
+            if raw_type is not None and raw_type != "function":
+                raise InvalidInput("%s.type must be 'function'" % where)
+            call_id = _validate_tool_call_id(
+                item.get("id"), where=where, error_cls=InvalidInput,
+            )
+            if call_id:
+                if call_id in seen_ids:
+                    raise InvalidInput("duplicate tool_call id %r in assistant history" % call_id)
+            else:
+                suffix = index
+                candidate = "call_%d" % suffix
+                while candidate in seen_ids:
+                    suffix += 1
+                    candidate = "call_%d" % suffix
+                call_id = candidate
+            seen_ids.add(call_id)
+            raw_fn = item.get("function")
+            if not isinstance(raw_fn, Mapping):
+                raise InvalidInput("%s.function must be an object" % where)
+            raw_name = raw_fn.get("name")
+            if not isinstance(raw_name, str) or not TOOL_NAME_RE.fullmatch(raw_name.strip()):
+                raise InvalidInput("%s.function.name must be a valid tool identifier" % where)
+            if "arguments" not in raw_fn:
+                raise InvalidInput("%s.function.arguments is required" % where)
+            _parsed, canonical = _parse_json_object_arguments(
+                raw_fn["arguments"], where=where, error_cls=InvalidInput,
+            )
+            normalized.append({
+                "id": call_id,
+                "type": "function",
+                "function": {"name": raw_name.strip(), "arguments": canonical},
+            })
+        return normalized
+
+    @staticmethod
     def _build_messages(request: ModelRequest) -> list:
         messages = []
         if request.system:
             messages.append({"role": "system", "content": request.system})
         for entry in request.history or ():
-            if isinstance(entry, dict) and entry.get("role") and "content" in entry:
-                messages.append({"role": entry["role"], "content": entry["content"]})
+            if isinstance(entry, Mapping) and entry.get("role"):
+                role = entry["role"]
+                if role == "assistant" and entry.get("tool_calls") is not None:
+                    raw_content = entry.get("content")
+                    if raw_content is not None and not isinstance(raw_content, str):
+                        raise InvalidInput("assistant history message content must be a string or null")
+                    messages.append({
+                        "role": "assistant",
+                        "content": "" if raw_content is None else raw_content,
+                        "tool_calls": OpenAICompatibleGateway._normalize_history_tool_calls(
+                            entry["tool_calls"]
+                        ),
+                    })
+                elif role == "tool":
+                    raw_content = entry.get("content")
+                    if not isinstance(raw_content, str):
+                        raise InvalidInput("tool history message must include string content")
+                    tool_msg: dict[str, Any] = {"role": "tool", "content": raw_content}
+                    if "tool_call_id" in entry and entry["tool_call_id"] is not None:
+                        tool_call_id = _validate_tool_call_id(
+                            entry["tool_call_id"],
+                            where="tool history message tool_call_id",
+                            error_cls=InvalidInput,
+                        )
+                        if not tool_call_id:
+                            raise InvalidInput("tool history message tool_call_id must not be empty")
+                        tool_msg["tool_call_id"] = tool_call_id
+                    if "name" in entry and entry["name"] is not None:
+                        raw_name = entry["name"]
+                        if not isinstance(raw_name, str) or not TOOL_NAME_RE.fullmatch(raw_name.strip()):
+                            raise InvalidInput("tool history message name must be a valid tool identifier")
+                        tool_msg["name"] = raw_name.strip()
+                    messages.append(tool_msg)
+                elif "content" in entry:
+                    messages.append({"role": role, "content": entry["content"]})
             elif isinstance(entry, (list, tuple)) and len(entry) == 2:
                 messages.append({"role": entry[0], "content": entry[1]})
-        messages.append({"role": "user", "content": request.prompt})
+        if (request.prompt or "").strip() or not _history_ends_with_tool_result(request.history):
+            messages.append({"role": "user", "content": request.prompt})
         return messages
 
     @staticmethod
@@ -1243,8 +2222,12 @@ class OpenAICompatibleGateway:
             raise DependencyUnavailable("endpoint returned no choices")
         if not isinstance(choices[0], dict):
             raise DependencyUnavailable("endpoint returned an invalid choice")
-        message = choices[0].get("message") or {}
-        if not isinstance(message, dict):
+        raw_message = choices[0].get("message")
+        if raw_message is None:
+            message: dict[str, Any] = {}
+        elif isinstance(raw_message, dict):
+            message = raw_message
+        else:
             raise DependencyUnavailable("endpoint returned an invalid message")
         text = message.get("content")
         try:
