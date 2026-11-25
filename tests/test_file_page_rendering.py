@@ -285,6 +285,7 @@ def test_file_range_uses_same_renderer_without_changing_raw_read(monkeypatch):
 @pytest.mark.parametrize("alias", ["file", "filename", "file_path"])
 def test_dispatch_policies_and_project_scoping_receive_canonical_alias_path(monkeypatch, alias):
     from sonder_runtime.adapters.filesystem import file_ops
+    from sonder_runtime.application.tasks.account_scope import active_task_account_scope
     from sonder_runtime.bootstrap import prepared_workbench
 
     source = (Path(__file__).parents[1] / "runtime" / "server.py").read_text(encoding="utf-8")
@@ -293,6 +294,7 @@ def test_dispatch_policies_and_project_scoping_receive_canonical_alias_path(monk
                                    "_scope_arg_is_rooted", "_is_network_spelling_raw"}]
     namespace = {
         "os": os, "re": re, "file_ops": file_ops, "_require_managed_agent_admission": lambda: None,
+        "active_task_account_scope": active_task_account_scope,
         "unsafe_lab": SimpleNamespace(active=lambda: False),
         "_canonical_agent_tool_name": lambda name: name,
         "_AGENT_SYSTEM_OPERATOR_TOOLS": set(),

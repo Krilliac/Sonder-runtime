@@ -14,6 +14,44 @@ logger = logging.getLogger(__name__)
 SYSTEM_OPERATION_UNBOUND = "unbound-system-operation"
 MAX_NESTED_SLASH_DEPTH = 8
 
+# Slash commands handled inside ``control_command`` that bypass top-level HTTP
+# account scoping (session namespacing, fanout/autopilot owners, scoped tasks,
+# or global operator state) when nested inside ``/sonder`` or ``/loop``.
+_ACCOUNT_UNSCOPED_NESTED_SLASH_COMMANDS = frozenset({
+    "/activity", "/agent", "/agentcancel", "/agentcapacity", "/agentretry",
+    "/agents", "/auto", "/autopilot", "/cancelagents", "/capacity",
+    "/chainofthought", "/checklist", "/compact", "/compaction", "/context",
+    "/contextsize", "/cot", "/ctxsize", "/delegate", "/discovertool", "/dump",
+    "/effort", "/embedfix", "/embeddings", "/emotion", "/emotions",
+    "/endreport", "/forge", "/game", "/gamecampaign", "/gamefleet", "/gamegen",
+    "/gamesuite", "/goal", "/goals", "/improve", "/improvements", "/learn_tool",
+    "/learnhealth", "/learning", "/learntool", "/master", "/master_orchestrate",
+    "/masterstatus", "/metrics", "/mission", "/mood", "/plan", "/prefer",
+    "/preference", "/preferences", "/privacy", "/privacyfix", "/privacyreview",
+    "/prompts", "/quality", "/qualityfix", "/report", "/retryagent", "/run",
+    "/runproject", "/stats", "/task", "/tasks", "/temp", "/thoughts", "/todo",
+    "/todos", "/vectors", "/work", "/workbench_agent",
+})
+
+# Catalogued tools that require top-level HTTP scoping or read operator-global
+# state and must not be invoked nested inside ``/sonder`` by a hosted account.
+_ACCOUNT_UNSCOPED_NESTED_TOOLS = frozenset({
+    "activity_status", "admin_private_chain_of_thought", "agent", "agent_lane",
+    "autopilot_cancel", "autopilot_pause", "autopilot_resume", "autopilot_start",
+    "autopilot_status", "batch_job_recent", "batch_job_results", "batch_job_status",
+    "checklist_create", "checklist_show", "checklist_update",
+    "context_compaction_plan", "context_health", "diagnostics",
+    "emotion_vector_status", "game_reference_suite", "learn_preference",
+    "learn_tiers", "master_cancel", "master_capacity", "master_status",
+    "mission_start", "mission_status", "model_fanout_recent", "model_fanout_status",
+    "openrouter_account", "preferences_status", "reasoning_show",
+    "self_heal_check", "self_heal_repair", "set_context_size",
+    "system_improvement_report", "system_profile_text", "task_create",
+    "task_delete", "task_depend", "task_ledger", "task_list", "task_plan",
+    "task_progress", "task_show", "task_update", "tune_emotion_vectors",
+    "turn_inspect", "update_emotion_vectors", "workbench_agent",
+})
+
 
 def system_operation_for(
     tool_name,
@@ -185,7 +223,8 @@ def nested_slash_authority_refusal(
     if dangerous_slash(stripped) and not developer_authorized(context):
         return "refused %s: developer or administrator authorization is required" % label
     try:
-        chain_tools = console_tools().get(cmd, ()) or http_slash_tools().get(cmd, ())
+        console_map = console_tools()
+        chain_tools = console_map.get(cmd, ()) or http_slash_tools().get(cmd, ())
     except catalog_unavailable as exc:
         return "refused %s: %s" % (label, exc)
     chain_tools = narrow_branch_tools(cmd, arg, chain_tools)
@@ -202,9 +241,20 @@ def nested_slash_authority_refusal(
         task_error = task_boundary_refusal(boundary_tool, {}, context)
         if task_error:
             return task_error
+    is_account = bool((context or {}).get("account"))
+    if is_account and cmd in _ACCOUNT_UNSCOPED_NESTED_SLASH_COMMANDS:
+        return (
+            "refused %s: nested '%s' cannot bypass top-level HTTP account scoping; "
+            "issue the scoped command directly." % (label, cmd)
+        )
     try:
         invocation = parse_invocation(stripped)
     except ValueError:
+        if is_account and label in ("/sonder", "/loop") and cmd not in console_map:
+            return (
+                "refused %s: unrecognized nested command '%s'; hosted account chat "
+                "must use /v1/chat/completions." % (label, cmd)
+            )
         return ""
     except catalog_unavailable as exc:
         return "refused %s: %s" % (label, exc)
@@ -216,10 +266,19 @@ def nested_slash_authority_refusal(
         task_error = task_boundary_refusal(nested_tool, nested_kwargs, context)
         if task_error:
             return task_error
-        if nested_tool in ("master_orchestrate", "sonder"):
+        if is_account and nested_tool in _ACCOUNT_UNSCOPED_NESTED_TOOLS:
+            return (
+                "refused %s: nested '/%s' cannot bypass top-level HTTP account scoping; "
+                "issue the scoped command directly." % (label, nested_tool)
+            )
+        if nested_tool in ("master_orchestrate", "sonder", "agent", "workbench_agent"):
             project_error = project_refusal(nested_kwargs.get("project", ""))
             if project_error:
                 return project_error
+        if nested_tool == "agent":
+            cwd_error = project_refusal(nested_kwargs.get("cwd", ""))
+            if cwd_error:
+                return cwd_error
         if nested_tool == "loop":
             loop_error = loop_refusal(
                 nested_kwargs.get("actions_json"), context, _depth=depth + 1,
@@ -227,7 +286,7 @@ def nested_slash_authority_refusal(
             if loop_error:
                 return loop_error
         elif nested_tool == "sonder":
-            return nested_slash_authority_refusal(
+            nested_refusal = nested_slash_authority_refusal(
                 nested_kwargs.get("prompt", ""), label, context,
                 slash_head=slash_head, slash_operation=slash_operation,
                 authority_error=authority_error, dangerous_slash=dangerous_slash,
@@ -237,6 +296,24 @@ def nested_slash_authority_refusal(
                 task_boundary_refusal=task_boundary_refusal, parse_invocation=parse_invocation,
                 project_refusal=project_refusal, loop_refusal=loop_refusal, depth=depth + 1,
             )
+            if nested_refusal:
+                return nested_refusal
+            if is_account:
+                nested_prompt = str(nested_kwargs.get("prompt", "") or "").strip()
+                if (
+                    not nested_prompt.startswith("/")
+                    or str(nested_kwargs.get("tier") or "").strip()
+                    or str(nested_kwargs.get("model_override") or "").strip()
+                ):
+                    return (
+                        "refused %s: hosted account chat must use /v1/chat/completions "
+                        "rather than the local operator /sonder tool." % label
+                    )
+    elif is_account and label in ("/sonder", "/loop") and cmd not in console_map:
+        return (
+            "refused %s: unrecognized nested command '%s'; hosted account chat "
+            "must use /v1/chat/completions." % (label, cmd)
+        )
     return ""
 
 
