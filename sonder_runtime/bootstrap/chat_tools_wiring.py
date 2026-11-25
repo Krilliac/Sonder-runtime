@@ -5,7 +5,7 @@ import hashlib
 import inspect
 import os
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from sonder_runtime.adapters.chat_run_backend import ChatRunBackend, resolve_agent_project_scope
@@ -34,6 +34,9 @@ from sonder_runtime.domain.client_tools import (
     resolve_client_slash_command,
 )
 from sonder_runtime.interfaces.http.client_tools import DEFAULT_NON_STREAM_HANDOFF_TTL_SECONDS
+from sonder_runtime.platform.runtime_threads import run_bounded
+
+_TOOL_CAPABILITY_PROBE_TIMEOUT_SECONDS = 1.5
 
 
 def slash_run_arguments(
@@ -62,6 +65,273 @@ def audit_mode_transition(
     )
 
 
+def _model_lookup_key(name: object) -> str:
+    text = str(name or "").strip().casefold()
+    return text[:-7] if text.endswith(":latest") else text
+
+
+def _normalized_model_names(raw: object) -> set[str]:
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, Iterable):
+        return set()
+    names: set[str] = set()
+    for item in raw:
+        key = _model_lookup_key(item)
+        if key:
+            names.add(key)
+    return names
+
+
+def _match_supports_tools_mapping(supports: object, keys: set[str]) -> bool | None:
+    if not isinstance(supports, Mapping):
+        return None
+    saw_false = False
+    for name, flag in supports.items():
+        if _model_lookup_key(name) not in keys or not isinstance(flag, bool):
+            continue
+        if flag is True:
+            return True
+        saw_false = True
+    return False if saw_false else None
+
+
+def _pool_cached_tool_support(
+    pool: Any,
+    candidates: list[str],
+    keys: set[str],
+) -> bool | None:
+    """Tri-state cached tool lookup from ``OLLAMA_POOL`` without performing I/O."""
+    if pool is None:
+        return None
+    saw_false = False
+    snapshots_fn = getattr(pool, "snapshots", None)
+    if callable(snapshots_fn):
+        try:
+            for snap in snapshots_fn():
+                if getattr(snap, "healthy", True) is False:
+                    continue
+                verdict = _match_supports_tools_mapping(
+                    getattr(snap, "supports_tools", None),
+                    keys,
+                )
+                if verdict is True:
+                    return True
+                if verdict is False:
+                    saw_false = True
+        except Exception:
+            pass
+    if saw_false:
+        return False
+    lookup_fn = getattr(pool, "model_supports_tools", None)
+    if callable(lookup_fn):
+        for candidate in candidates:
+            try:
+                try:
+                    result = lookup_fn(candidate, probe=False)
+                except TypeError:
+                    result = lookup_fn(candidate)
+            except Exception:
+                continue
+            if result is True:
+                return True
+            if result is False:
+                saw_false = True
+        if saw_false:
+            return False
+    return None
+
+
+def _find_inference_gateways(server: Any) -> list[Any]:
+    roots: list[Any] = []
+    for direct_attr in ("sonder_inference_gateway", "model_gateway"):
+        direct = getattr(server, direct_attr, None)
+        if direct is not None:
+            roots.append(direct)
+    graph = getattr(server, "_APP_GRAPH", None)
+    if graph is None and not hasattr(server, "_APP_GRAPH"):
+        app_fn = getattr(server, "_application", None)
+        if callable(app_fn):
+            try:
+                graph = app_fn()
+            except Exception:
+                graph = None
+    if graph is None and hasattr(server, "_APP_GRAPH") and getattr(server, "__name__", "") == "server":
+        try:
+            from sonder_runtime.bootstrap.app import built_default_app
+
+            graph = built_default_app()
+        except Exception:
+            graph = None
+    if graph is not None:
+        gw = getattr(graph, "model_gateway", None)
+        if gw is not None:
+            roots.append(gw)
+    found: list[Any] = []
+    seen: set[int] = set()
+    queue: list[Any] = list(roots)
+    while queue:
+        cand = queue.pop(0)
+        if cand is None or id(cand) in seen:
+            continue
+        seen.add(id(cand))
+        if (
+            callable(getattr(cand, "unified_worker_status", None))
+            or getattr(cand, "tool_capable_models", None) is not None
+        ):
+            found.append(cand)
+        for map_attr in ("providers", "_providers"):
+            providers = getattr(cand, map_attr, None)
+            if isinstance(providers, Mapping):
+                queue.extend(providers.values())
+        for attr in (
+            "_inner",
+            "inner",
+            "_gateway",
+            "gateway",
+            "_primary",
+            "primary",
+            "_fallback",
+            "fallback",
+        ):
+            nested = getattr(cand, attr, None)
+            if nested is not None and id(nested) not in seen:
+                queue.append(nested)
+    return found
+
+
+def _call_unified_worker_status(unified_fn: Callable[..., Any], pool: Any) -> Any:
+    try:
+        sig = inspect.signature(unified_fn)
+        params: Mapping[str, inspect.Parameter] = sig.parameters
+        accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):
+        params = {}
+        accepts_var_kw = True
+    kwargs: dict[str, Any] = {}
+    if accepts_var_kw or "ollama_pool" in params:
+        kwargs["ollama_pool"] = pool
+    try:
+        return unified_fn(**kwargs)
+    except TypeError:
+        return unified_fn()
+
+
+def _gateway_tool_support(
+    server: Any,
+    pool: Any,
+    keys: set[str],
+) -> bool | None:
+    """Check attached ``sonder_inference`` gateway(s) for ``tool_capable_models`` / worker flags."""
+    saw_false = False
+    for gw in _find_inference_gateways(server):
+        raw_direct = getattr(gw, "tool_capable_models", None)
+        if callable(raw_direct):
+            try:
+                raw_direct = raw_direct()
+            except Exception:
+                raw_direct = None
+        if keys & _normalized_model_names(raw_direct):
+            return True
+        unified_fn = getattr(gw, "unified_worker_status", None)
+        if not callable(unified_fn):
+            continue
+        try:
+            status = _call_unified_worker_status(unified_fn, pool)
+        except Exception:
+            continue
+        if not isinstance(status, Mapping):
+            continue
+        if keys & _normalized_model_names(status.get("tool_capable_models")):
+            return True
+        pool_section = status.get("pool")
+        if isinstance(pool_section, Mapping):
+            if keys & _normalized_model_names(pool_section.get("tool_capable_models")):
+                return True
+        workers = status.get("workers")
+        if isinstance(workers, Iterable) and not isinstance(workers, (str, bytes)):
+            for row in workers:
+                if not isinstance(row, Mapping):
+                    continue
+                if row.get("healthy", True) is False:
+                    continue
+                verdict = _match_supports_tools_mapping(row.get("supports_tools"), keys)
+                if verdict is True:
+                    return True
+                if verdict is False:
+                    saw_false = True
+    return False if saw_false else None
+
+
+def _pool_has_unprobed_snapshots(pool: Any) -> bool:
+    snapshots_fn = getattr(pool, "snapshots", None)
+    if not callable(snapshots_fn):
+        return False
+    try:
+        snaps = list(snapshots_fn())
+    except Exception:
+        return False
+    if not snaps:
+        return True
+    for snap in snaps:
+        if getattr(snap, "healthy", True) is False:
+            continue
+        supports = getattr(snap, "supports_tools", None)
+        if not isinstance(supports, Mapping) or not supports:
+            return True
+        if getattr(snap, "capabilities_stale", False) is True:
+            return True
+    return False
+
+
+def _probe_pool_tool_support(
+    pool: Any,
+    candidates: list[str],
+    keys: set[str],
+) -> tuple[bool | None, bool]:
+    """Run a bounded cached capability probe on ``pool``; return ``(verdict, probed)``."""
+    if pool is None:
+        return None, False
+    lookup_fn = getattr(pool, "model_supports_tools", None)
+    if callable(lookup_fn):
+        can_probe = bool(getattr(pool, "has_capability_prober", True))
+        if not can_probe:
+            return None, False
+        saw_false = False
+        probed = False
+        for candidate in candidates:
+            try:
+                try:
+                    result = lookup_fn(
+                        candidate,
+                        probe=True,
+                        probe_timeout=_TOOL_CAPABILITY_PROBE_TIMEOUT_SECONDS,
+                    )
+                except TypeError:
+                    try:
+                        result = lookup_fn(candidate, probe=True)
+                    except TypeError:
+                        result = lookup_fn(candidate)
+                probed = True
+            except Exception:
+                continue
+            if result is True:
+                return True, True
+            if result is False:
+                saw_false = True
+        return (False if saw_false else None), probed
+    refresh_fn = getattr(pool, "refresh_capabilities", None)
+    if callable(refresh_fn) and _pool_has_unprobed_snapshots(pool):
+        try:
+            run_bounded(
+                lambda: refresh_fn(),
+                _TOOL_CAPABILITY_PROBE_TIMEOUT_SECONDS,
+                name="sonder-chat-tools-pool-refresh",
+            )
+        except Exception:
+            pass
+        return _pool_cached_tool_support(pool, candidates, keys), True
+    return None, False
+
+
 def _model_supports_tools(server: Any, model: str) -> bool:
     candidates: list[str] = []
     raw_model = str(model or "").strip()
@@ -79,31 +349,36 @@ def _model_supports_tools(server: Any, model: str) -> bool:
                 candidates.append(resolved_name.strip())
         except Exception:
             pass
-    keys = {c.casefold() for c in candidates if c}
+    keys = {_model_lookup_key(c) for c in candidates if _model_lookup_key(c)}
+    if not keys:
+        return False
     extra_models = {
-        item.strip().casefold()
+        _model_lookup_key(item)
         for item in str(os.environ.get("SONDER_CHAT_TOOL_MODELS", "") or "").split(",")
         if item.strip()
     }
     if keys & extra_models:
         return True
     pool = getattr(server, "OLLAMA_POOL", None)
-    snapshots_fn = getattr(pool, "snapshots", None)
-    if callable(snapshots_fn):
-        try:
-            for snap in snapshots_fn():
-                supports = getattr(snap, "supports_tools", None)
-                if isinstance(supports, Mapping):
-                    for name, flag in supports.items():
-                        if str(name or "").strip().casefold() in keys and flag is True:
-                            return True
-        except Exception:
-            pass
+    cached_verdict = _pool_cached_tool_support(pool, candidates, keys)
+    if cached_verdict is not None:
+        return cached_verdict
+    gateway_verdict = _gateway_tool_support(server, pool, keys)
+    if gateway_verdict is not None:
+        return gateway_verdict
     if bool(getattr(pool, "enabled", False)):
+        probed_verdict, probed = _probe_pool_tool_support(pool, candidates, keys)
+        if probed_verdict is not None:
+            return probed_verdict
+        if probed:
+            return False
+    records_fn = getattr(server, "_runtime_installed_model_records", None)
+    has_cap_fn = getattr(server, "_runtime_model_has_capability", None)
+    if not callable(records_fn) or not callable(has_cap_fn):
         return False
     try:
-        records = server._runtime_installed_model_records()
-        return any(bool(server._runtime_model_has_capability(c, "tools", records)) for c in candidates)
+        records = records_fn()
+        return any(bool(has_cap_fn(c, "tools", records)) for c in candidates)
     except Exception:
         return False
 
