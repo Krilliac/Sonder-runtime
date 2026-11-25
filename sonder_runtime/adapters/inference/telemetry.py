@@ -50,6 +50,45 @@ def _reported_or_derived_rate(reported, count, duration_ms) -> float | None:
     return measured if measured is not None else _derived_rate(count, duration_ms)
 
 
+def _uncached_prompt_rate(
+    reported,
+    *,
+    prompt_tokens: int | None,
+    cached_tokens: int | None,
+    uncached_tokens: int | None,
+    prompt_n,
+    prompt_ms: float | None,
+) -> float | None:
+    """Prompt evaluation rate (tok/s) guarded against KV-cache-hit inflation.
+
+    Backends that divide total ``prompt_tokens`` by uncached ``prompt_ms``
+    report wildly inflated rates on KV-cache hits (e.g. 50k+ tok/s on a 99%
+    cache hit).  Whenever ``cached_tokens`` is known and positive, derive
+    strictly from ``uncached_tokens`` and ``prompt_ms`` instead of trusting a
+    reported rate, and return ``None`` on a 100% cache hit (0 uncached tokens)
+    or when uncached duration is missing.
+    """
+    if cached_tokens is not None and cached_tokens > 0:
+        if uncached_tokens is not None:
+            if uncached_tokens == 0:
+                return None
+            return _derived_rate(uncached_tokens, prompt_ms)
+        evaluated = _count(prompt_n)
+        if evaluated == 0:
+            return None
+        derived = _derived_rate(evaluated, prompt_ms)
+        measured = _rate(reported)
+        if derived is not None:
+            if measured is not None and measured <= derived * 1.05:
+                return measured
+            return derived
+        return None
+    if uncached_tokens == 0 and cached_tokens == 0 and prompt_tokens == 0:
+        return None
+    count = prompt_n if prompt_n is not None else prompt_tokens
+    return _reported_or_derived_rate(reported, count, prompt_ms)
+
+
 def _load_state(payload: dict) -> str | None:
     state = payload.get("load_state")
     if isinstance(state, str) and state.casefold() in ("cold", "warm"):
@@ -88,8 +127,13 @@ def from_ollama(payload: dict) -> InferenceTelemetry | None:
         prompt_cached_tokens=cached_tokens,
         prompt_uncached_tokens=uncached_tokens,
         output_tokens=_count(payload.get("eval_count")),
-        prompt_tokens_per_second=_derived_rate(
-            payload.get("prompt_eval_count"), prompt_ms
+        prompt_tokens_per_second=_uncached_prompt_rate(
+            None,
+            prompt_tokens=prompt_tokens,
+            cached_tokens=cached_tokens,
+            uncached_tokens=uncached_tokens,
+            prompt_n=prompt_tokens,
+            prompt_ms=prompt_ms,
         ),
         output_tokens_per_second=_derived_rate(payload.get("eval_count"), eval_ms),
         load_state=_load_state(payload),
@@ -131,17 +175,21 @@ def from_openai_compatible(payload: dict, *, with_usage: bool = False) -> Infere
 
     Also reads ``timings.ttft_ms``, ``timings.cache_n`` and
     ``timings.draft_n``/``draft_n_accepted``.  ``with_usage`` (Sonder
-    Inference) additionally reads the prompt total, cached prompt tokens and
-    completion count from ``usage`` (see :func:`_prompt_cache_counts`);
-    generic peers keep their historical timings-only telemetry.  Every absent
-    field stays ``None`` (unknown).
+    Inference) additionally reads the prompt total, cached prompt tokens,
+    nested ``usage.sonder.timings`` fallback, and completion count from
+    ``usage`` (see :func:`_prompt_cache_counts`); generic peers keep their
+    historical timings-only telemetry.  Every absent field stays ``None``
+    (unknown).
     """
-    timings = payload.get("timings")
-    if not isinstance(timings, dict):
-        timings = {}
+    raw_timings = payload.get("timings")
+    timings = dict(raw_timings) if isinstance(raw_timings, dict) else {}
     usage = payload.get("usage") if with_usage else None
     if not isinstance(usage, dict):
         usage = {}
+    elif isinstance(usage.get("sonder"), dict) and isinstance(usage["sonder"].get("timings"), dict):
+        for key, value in usage["sonder"]["timings"].items():
+            if key not in timings:
+                timings[key] = value
     prompt_ms = _milliseconds(timings.get("prompt_ms"))
     eval_ms = _milliseconds(timings.get("predicted_ms"))
     prompt_tokens, cached_tokens, uncached_tokens = _prompt_cache_counts(usage, timings)
@@ -161,12 +209,17 @@ def from_openai_compatible(payload: dict, *, with_usage: bool = False) -> Infere
         load_ms=_milliseconds(timings.get("load_ms")),
         prompt_eval_ms=prompt_ms,
         eval_ms=eval_ms,
-        prompt_tokens_per_second=_reported_or_derived_rate(
-            timings.get("prompt_per_second"), timings.get("prompt_n"), prompt_ms
+        prompt_tokens_per_second=_uncached_prompt_rate(
+            timings.get("prompt_per_second"),
+            prompt_tokens=prompt_tokens,
+            cached_tokens=cached_tokens,
+            uncached_tokens=uncached_tokens,
+            prompt_n=timings.get("prompt_n"),
+            prompt_ms=prompt_ms,
         ),
         output_tokens_per_second=_reported_or_derived_rate(
             timings.get("predicted_per_second"),
-            timings.get("predicted_n"),
+            timings.get("predicted_n") if timings.get("predicted_n") is not None else output_tokens,
             eval_ms,
         ),
         load_state=_load_state(payload),

@@ -28,6 +28,12 @@ from sonder_runtime.application.routing.long_context_overflow import (
     notice_scope as overflow_notice_scope,
     receipt_entry as overflow_receipt_entry,
 )
+from sonder_runtime.application.session.provider_attempts import (
+    report_ensemble_event,
+    report_execution_route,
+    report_fanout_event,
+    telemetry_error_code,
+)
 from ..chat_tool_stream import (
     request_mode_scope as chat_request_mode_scope,
     slash_messages as chat_slash_messages,
@@ -66,6 +72,117 @@ class ChatTurnDeps:
     run_natural_fanout: Callable[[dict[str, Any]], Any]
     run_natural_ensemble: Callable[[dict[str, Any], str], Any]
     resolve_local_tier_models: Callable[[], dict[str, str]] | None = None
+
+
+def _split_tier_labels(raw: object) -> list[str]:
+    if isinstance(raw, str):
+        return [part.strip() for part in raw.split(",") if part.strip()]
+    if isinstance(raw, (list, tuple)):
+        return [str(part).strip() for part in raw if str(part).strip()]
+    return []
+
+
+def _is_error_reply_text(reply: object) -> bool:
+    return isinstance(reply, str) and reply.lstrip().startswith(("ERROR:", "ERROR contacting "))
+
+
+def _run_observed_ensemble(
+    run_fn: Callable[[dict[str, Any], str], Any],
+    request_payload: dict[str, Any],
+    storage_project: str,
+    *,
+    auto_selected: bool,
+) -> Any:
+    tiers = _split_tier_labels(request_payload.get("tiers"))
+    base_fields: dict[str, object] = {
+        "mode": request_payload.get("mode"),
+        "tiers": tiers,
+        "participant_count": len(tiers) if tiers else None,
+        "auto_selected": auto_selected,
+        "require_all_tiers": bool(request_payload.get("require_all_tiers", False)),
+    }
+    report_ensemble_event("started", {**base_fields, "status": "running"})
+    started = time.monotonic()
+    try:
+        result = run_fn(request_payload, storage_project)
+    except BaseException as exc:
+        elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+        report_ensemble_event(
+            "failed",
+            {
+                **base_fields,
+                "elapsed_ms": elapsed_ms,
+                "status": "error",
+                "error_code": telemetry_error_code(exc),
+            },
+        )
+        raise
+    elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+    if _is_error_reply_text(result):
+        report_ensemble_event(
+            "failed",
+            {
+                **base_fields,
+                "elapsed_ms": elapsed_ms,
+                "status": "error",
+                "error_code": "ERROR_REPLY",
+            },
+        )
+    else:
+        report_ensemble_event(
+            "completed",
+            {**base_fields, "elapsed_ms": elapsed_ms, "status": "ok"},
+        )
+    return result
+
+
+def _run_observed_fanout(
+    run_fn: Callable[[dict[str, Any]], Any],
+    request_payload: dict[str, Any],
+    *,
+    tiers: list[str] | None = None,
+    auto_selected: bool = False,
+) -> Any:
+    tier_list = list(tiers) if tiers else _split_tier_labels(request_payload.get("tiers"))
+    base_fields: dict[str, object] = {
+        "scope": request_payload.get("scope"),
+        "tiers": tier_list,
+        "participant_count": len(tier_list) if tier_list else None,
+        "auto_selected": auto_selected,
+    }
+    report_fanout_event("started", {**base_fields, "status": "running"})
+    started = time.monotonic()
+    try:
+        result = run_fn(request_payload)
+    except BaseException as exc:
+        elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+        report_fanout_event(
+            "failed",
+            {
+                **base_fields,
+                "elapsed_ms": elapsed_ms,
+                "status": "error",
+                "error_code": telemetry_error_code(exc),
+            },
+        )
+        raise
+    elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+    if _is_error_reply_text(result):
+        report_fanout_event(
+            "failed",
+            {
+                **base_fields,
+                "elapsed_ms": elapsed_ms,
+                "status": "error",
+                "error_code": "ERROR_REPLY",
+            },
+        )
+    else:
+        report_fanout_event(
+            "completed",
+            {**base_fields, "elapsed_ms": elapsed_ms, "status": "ok"},
+        )
+    return result
 
 
 def handle_chat_completions(
@@ -774,8 +891,10 @@ def handle_chat_completions(
                     )
                     if candidate_decision.auto_selected or bool(request_execution_mode):
                         execution_decision = candidate_decision
+                        report_execution_route(execution_decision.to_dict())
                         if candidate_decision.mode == "ensemble":
-                            reply = deps.run_natural_ensemble(
+                            reply = _run_observed_ensemble(
+                                deps.run_natural_ensemble,
                                 {
                                     "kind": "ensemble",
                                     "prompt": prompt,
@@ -784,14 +903,18 @@ def handle_chat_completions(
                                     "require_all_tiers": False,
                                 },
                                 storage_project,
+                                auto_selected=candidate_decision.auto_selected,
                             )
                         elif candidate_decision.mode == "fanout":
-                            reply = deps.run_natural_fanout(
+                            reply = _run_observed_fanout(
+                                deps.run_natural_fanout,
                                 {
                                     "kind": "fanout",
                                     "prompt": prompt,
                                     "scope": candidate_decision.fanout_scope,
-                                }
+                                },
+                                tiers=list(candidate_decision.recommended_tiers),
+                                auto_selected=candidate_decision.auto_selected,
                             )
                         elif candidate_decision.mode == "agent":
                             reply = serve_mod._handle_slash(
@@ -825,14 +948,23 @@ def handle_chat_completions(
                     and natural_model
                     and natural_model["kind"] == "fanout"
                 ):
-                    reply = deps.run_natural_fanout(natural_model)
+                    reply = _run_observed_fanout(
+                        deps.run_natural_fanout,
+                        natural_model,
+                        auto_selected=False,
+                    )
                 if (
                     structured_schema is None
                     and reply is None
                     and natural_model
                     and natural_model["kind"] == "ensemble"
                 ):
-                    reply = deps.run_natural_ensemble(natural_model, storage_project)
+                    reply = _run_observed_ensemble(
+                        deps.run_natural_ensemble,
+                        natural_model,
+                        storage_project,
+                        auto_selected=False,
+                    )
                 if (
                     structured_schema is None
                     and allow_control_routes
