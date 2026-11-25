@@ -284,3 +284,59 @@ os._exit(23)
         )
     with pytest.raises(OwnerUnsupported):
         DisposableRuntimeOwner(root, writable_roots=lambda: ())
+
+
+def test_serve_main_skips_cloud_refresh_when_legacy_runtime_unavailable(monkeypatch):
+    """Typed/disposable HTTP hosts without legacy runtime must reach serve_forever."""
+    from types import SimpleNamespace
+    import sonder_runtime.interfaces.http.serve as serve
+
+    served = []
+    refresh_calls = []
+    lifecycle = SimpleNamespace(
+        startup=lambda **_kwargs: None,
+        begin_ollama_probe=lambda: None,
+        stop_probe=lambda: True,
+        coordinator=SimpleNamespace(add_flush_hook=lambda _hook: None, draining=False),
+        drain=lambda _reason: True,
+    )
+
+    class _Listener:
+        def __init__(self, *_args):
+            pass
+
+        def serve_forever(self):
+            served.append(True)
+
+        def server_close(self):
+            return None
+
+    for name in (
+        "_ARTIFACT_TRANSFER_BINDING",
+        "_APP_CONTROL_BINDING",
+        "_MEMORY_REPLICATION_RECEIVER",
+        "_MEMORY_REPLICATION_SERVICE",
+    ):
+        monkeypatch.setattr(serve, name, None)
+    monkeypatch.setattr(serve, "_LEGACY_RUNTIME", None)
+    monkeypatch.setattr(serve, "_SESSION_FACADE", object())
+    monkeypatch.setattr(serve, "_CONTROL_PLANE_SERVICE", object())
+    monkeypatch.setattr(serve.sonder_lifecycle, "get", lambda: lifecycle)
+    monkeypatch.setattr(serve, "_validate_bind_security", lambda _host, **_kwargs: None)
+    monkeypatch.setattr(serve, "_machine_host_names", lambda: None)
+    monkeypatch.setattr(serve, "_selected_listener_port", lambda _config: 0)
+    monkeypatch.setattr(serve, "_WORK_RUNNER", SimpleNamespace(reconcile=lambda: None))
+    monkeypatch.setattr(serve, "_register_telemetry_drain", lambda *_a, **_k: False)
+    monkeypatch.setattr(serve, "_live_telemetry_application", lambda: None)
+    monkeypatch.setattr(serve, "_warn_if_local_open", lambda: None)
+    monkeypatch.setattr(serve.command_catalog, "http_slash_tools", lambda: None)
+    monkeypatch.setattr(serve.command_catalog, "catalog", lambda: None)
+    monkeypatch.setattr(
+        serve.cloud_model_refresh_schedule,
+        "start_scheduled_refresh",
+        lambda **kwargs: refresh_calls.append(kwargs) or True,
+    )
+
+    serve.main(None, _server_factory=_Listener, _close_default_resources=False)
+    assert served == [True]
+    assert refresh_calls == []
