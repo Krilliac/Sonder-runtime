@@ -33,13 +33,14 @@ _logger = logging.getLogger("sonder.serve")
 CODE_FENCE = "```"
 
 
-def arm(handler, chunk, *, hold_code: bool) -> stream_sink.LiveTurnStream | None:
+def arm(handler, chunk, *, hold_code: bool, expose_reasoning: bool = False) -> stream_sink.LiveTurnStream | None:
     """A live stream bound to ``handler``'s early SSE response, or ``None``.
 
     The deltas carry a completion id minted here, before the turn has an
     interaction id; the early stream keeps it (``completion_id``) so the rest
     of the same SSE response (remainder, terminal, usage and error frames)
-    reuses it.
+    reuses it.  ``expose_reasoning`` gates live ``reasoning_content`` deltas
+    under the deployment's reasoning visibility policy.
     """
     handler._live_stream = None
     early = getattr(handler, "_early_stream", None)
@@ -49,8 +50,8 @@ def arm(handler, chunk, *, hold_code: bool) -> stream_sink.LiveTurnStream | None
     iid = early.completion_id = getattr(early, "completion_id", None) or uuid.uuid4().hex[:12]
     first = [True]
 
-    def write(text: str) -> bool:
-        delta = {"role": "assistant", "content": text} if first[0] else {"content": text}
+    def _send_delta(payload: dict) -> bool:
+        delta = {"role": "assistant", **payload} if first[0] else payload
         frame = chunk(iid, model, delta).encode("utf-8")
         with early.lock:
             if early.client_gone:
@@ -66,8 +67,20 @@ def arm(handler, chunk, *, hold_code: bool) -> stream_sink.LiveTurnStream | None
         first[0] = False
         return True
 
+    def write(text: str) -> bool:
+        return _send_delta({"content": text})
+
+    def write_reasoning(text: str) -> bool:
+        return _send_delta({"reasoning_content": text})
+
+    def write_tool_call(delta: dict) -> bool:
+        return _send_delta({"tool_calls": [delta]})
+
     live = stream_sink.LiveTurnStream(
-        write, client_gone=lambda: early.client_gone,
+        write,
+        write_reasoning=write_reasoning if expose_reasoning else None,
+        write_tool_call=write_tool_call,
+        client_gone=lambda: early.client_gone,
         hold_marker=CODE_FENCE if hold_code else None,
     )
     handler._live_stream = live
@@ -109,10 +122,11 @@ def arm_wait_status(handler, *, interval_seconds: float = wait_status.DEFAULT_IN
 
 
 @contextlib.contextmanager
-def armed_for(handler, chunk, *, hold_code: bool):
+def armed_for(handler, chunk, *, hold_code: bool, expose_reasoning: bool = False):
     """Arm a live stream for the enclosed turn when the response is early SSE."""
-    with stream_sink.armed(arm(handler, chunk, hold_code=hold_code)) as live, \
-            wait_status.armed(arm_wait_status(handler)):
+    with stream_sink.armed(
+        arm(handler, chunk, hold_code=hold_code, expose_reasoning=expose_reasoning)
+    ) as live, wait_status.armed(arm_wait_status(handler)):
         yield live
 
 
@@ -127,7 +141,7 @@ def response_id(handler, iid):
     """
     early = getattr(handler, "_early_stream", None)
     live = getattr(handler, "_live_stream", None)
-    if early is not None and live is not None and live.forwarded:
+    if early is not None and live is not None and (live.forwarded or getattr(live, "any_forwarded", False)):
         return getattr(early, "completion_id", None) or iid
     return iid
 
@@ -173,10 +187,21 @@ def write_stream_body(handler, chunk, iid, model, content, elapsed_ms, receipt,
     """Write the answer and terminal frames of a streamed turn; ``True`` when sent."""
     live = getattr(handler, "_live_stream", None) if lock is not None else None
     with lock if lock is not None else contextlib.nullcontext():
+        any_live = live is not None and (live.forwarded or getattr(live, "any_forwarded", False))
         if live is None or not live.forwarded:
+            if any_live:
+                iid = response_id(handler, iid)
             _write_content_deltas(
-                handler, chunk, iid, model, content, include_role=True,
+                handler, chunk, iid, model, content, include_role=not any_live,
             )
+            if any_live:
+                ttft = live.ttft_ms()
+                receipt = dict(receipt or {})
+                receipt["live_stream"] = {
+                    "revised": False,
+                    **({"reasoning_streamed": True} if getattr(live, "reasoning_forwarded", "") else {}),
+                    **({"ttft_ms": int(ttft)} if ttft is not None else {}),
+                }
         else:
             # One completion, one id: continue under the id the deltas used.
             iid = response_id(handler, iid)
@@ -191,6 +216,7 @@ def write_stream_body(handler, chunk, iid, model, content, elapsed_ms, receipt,
             receipt = dict(receipt or {})
             receipt["live_stream"] = {
                 "revised": revised,
+                **({"reasoning_streamed": True} if getattr(live, "reasoning_forwarded", "") else {}),
                 **({"ttft_ms": int(ttft)} if ttft is not None else {}),
             }
         handler.wfile.write(chunk(
