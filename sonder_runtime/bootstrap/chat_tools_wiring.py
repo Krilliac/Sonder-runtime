@@ -209,6 +209,8 @@ def _call_unified_worker_status(unified_fn: Callable[..., Any], pool: Any) -> An
     kwargs: dict[str, Any] = {}
     if accepts_var_kw or "ollama_pool" in params:
         kwargs["ollama_pool"] = pool
+    if "gateway_rows" in params:
+        kwargs["gateway_rows"] = []
     try:
         return unified_fn(**kwargs)
     except TypeError:

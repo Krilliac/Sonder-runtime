@@ -15,6 +15,7 @@ from sonder_runtime.adapters.inference.ollama_pool import (
     _default_capability_prober,
 )
 from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+    PrivateWorkerSpec,
     SonderInferenceConfig,
     SonderInferenceGateway,
 )
@@ -769,4 +770,53 @@ def test_failing_show_probe_backs_off_and_stays_fail_closed(monkeypatch):
     # Backoff prevents hammering /api/show on subsequent turns.
     assert chat_tools_wiring._model_supports_tools(server, MOE_MODEL) is False
     assert sum(1 for _o, m in calls["show"] if m == MOE_MODEL) == attempts_after_first
+
+
+def test_gateway_tool_support_skips_remote_worker_health_http_probes(monkeypatch, tmp_path):
+    """_model_supports_tools must pass gateway_rows=[] so remote workers are never HTTP-probed."""
+    monkeypatch.delenv("SONDER_CHAT_TOOL_MODELS", raising=False)
+    ca_file = tmp_path / "worker-ca.pem"
+    ca_file.write_text("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    monkeypatch.setenv("SONDER_TEST_WORKER_TOKEN", "x" * 32)
+
+    health_calls: list[str] = []
+
+    def fail_on_get(url: str, _headers: dict, _timeout: float):
+        health_calls.append(url)
+        raise AssertionError(f"unexpected synchronous gateway HTTP GET: {url}")
+
+    gw = SonderInferenceGateway(
+        SonderInferenceConfig(
+            base_url="http://127.0.0.1:11437",
+            allow_remote=True,
+            workers=(
+                PrivateWorkerSpec(
+                    url="https://192.0.2.20:8443",
+                    ca_bundle=str(ca_file),
+                    token_env="SONDER_TEST_WORKER_TOKEN",
+                ),
+            ),
+        ),
+        get_transport=fail_on_get,
+        transport=lambda *_a, **_k: {},
+    )
+
+    # Case 1: pool.enabled=True with unprobed snapshots -> zero remote worker health HTTP calls.
+    enabled_pool = SimpleNamespace(
+        enabled=True,
+        has_capability_prober=False,
+        snapshots=lambda: (SimpleNamespace(healthy=True, supports_tools={}),),
+    )
+    server_enabled = _stub_server_for_turns(enabled_pool, gateway=gw)
+    assert chat_tools_wiring._model_supports_tools(server_enabled, MOE_MODEL) is False
+    assert health_calls == []
+
+    # Case 2: pool.enabled=False -> still zero remote worker health HTTP calls.
+    disabled_pool = SimpleNamespace(
+        enabled=False,
+        snapshots=lambda: (SimpleNamespace(healthy=True, supports_tools={}),),
+    )
+    server_disabled = _stub_server_for_turns(disabled_pool, gateway=gw)
+    assert chat_tools_wiring._model_supports_tools(server_disabled, MOE_MODEL) is False
+    assert health_calls == []
 
