@@ -27,6 +27,7 @@ from sonder_runtime.adapters import legacy_chat_bridge
 from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     ENV_NATIVE_TOOLS,
     ENV_PRIVATE_WORKERS,
+    MAX_RESPONSE_TOOL_CALLS,
     SonderInferenceConfig,
     SonderInferenceGateway,
     SonderInferenceResponse,
@@ -285,7 +286,6 @@ def test_gateway_supports_native_tools_fails_closed_when_down():
 
 @pytest.mark.parametrize("tool_choice", [
     "auto",
-    "none",
     "required",
     {"type": "function", "function": {"name": "get_weather"}},
 ])
@@ -319,6 +319,121 @@ def test_gateway_forwards_tools_and_tool_choice_and_extracts_tool_calls(tool_cho
     assert meta["finish_reason"] == "tool_calls"
     assert meta["tool_call_count"] == 1
     assert "Austin" not in json.dumps(meta)
+
+
+def test_gateway_forwards_tool_choice_none_and_accepts_text_reply():
+    fake = FakeInference(
+        health=_health(capabilities=["streaming", "tool_calling"]),
+        chat=lambda payload: _text_reply("No tools used."),
+    )
+    response = _gateway(fake).generate(
+        ModelRequest(
+            prompt="Just answer directly.",
+            tier="code",
+            options={"tools": [WEATHER_TOOL], "tool_choice": "none"},
+        ),
+        _ctx(),
+    )
+    assert isinstance(response, SonderInferenceResponse)
+    assert response.text == "No tools used."
+    assert response.tool_calls is None
+    assert fake.posts[0]["tool_choice"] == "none"
+
+
+def test_gateway_rejects_unsolicited_tool_calls_when_no_tools_or_tool_choice_none():
+    # No tools offered on this request -> returned tool_calls must fail closed.
+    fake_no_tools = FakeInference(chat=lambda payload: _tool_call_reply())
+    with pytest.raises(DependencyUnavailable, match="unsolicited tool_calls"):
+        _gateway(fake_no_tools).generate(
+            ModelRequest(prompt="Plain text only.", tier="code"),
+            _ctx(),
+        )
+
+    # Tools declared, but tool_choice="none" explicitly forbids tool calls.
+    fake_forbidden = FakeInference(chat=lambda payload: _tool_call_reply())
+    with pytest.raises(DependencyUnavailable, match="unsolicited tool_calls"):
+        _gateway(fake_forbidden).generate(
+            ModelRequest(
+                prompt="Do not call tools.",
+                tier="code",
+                options={"tools": [WEATHER_TOOL], "tool_choice": "none"},
+            ),
+            _ctx(),
+        )
+
+
+def test_gateway_rejects_undeclared_tool_and_forced_tool_choice_mismatch():
+    # Undeclared tool name in response.
+    fake_undeclared = FakeInference(
+        chat=lambda payload: _tool_call_reply(
+            tool_calls=[{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "shell_exec", "arguments": "{}"},
+            }],
+        ),
+    )
+    with pytest.raises(DependencyUnavailable, match="undeclared tool"):
+        _gateway(fake_undeclared).generate(
+            ModelRequest(prompt="Weather?", tier="code", options={"tools": [WEATHER_TOOL]}),
+            _ctx(),
+        )
+
+    # Response calls another declared tool instead of the forced tool_choice function.
+    fake_wrong_forced = FakeInference(
+        chat=lambda payload: _tool_call_reply(
+            tool_calls=[{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "math_eval", "arguments": '{"expression":"1+1"}'},
+            }],
+        ),
+    )
+    with pytest.raises(DependencyUnavailable, match="forced tool"):
+        _gateway(fake_wrong_forced).generate(
+            ModelRequest(
+                prompt="Weather?",
+                tier="code",
+                options={
+                    "tools": [WEATHER_TOOL, CALC_TOOL],
+                    "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+                },
+            ),
+            _ctx(),
+        )
+
+
+def test_gateway_caps_response_tool_calls_and_rejects_nan_mapping_arguments():
+    too_many = [
+        {
+            "id": "call_%d" % i,
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": '{"city":"Austin"}'},
+        }
+        for i in range(MAX_RESPONSE_TOOL_CALLS + 1)
+    ]
+    fake_many = FakeInference(chat=lambda payload: _tool_call_reply(tool_calls=too_many))
+    with pytest.raises(DependencyUnavailable, match="more than %d" % MAX_RESPONSE_TOOL_CALLS):
+        _gateway(fake_many).generate(
+            ModelRequest(prompt="Weather?", tier="code", options={"tools": [WEATHER_TOOL]}),
+            _ctx(),
+        )
+
+    # Mapping arguments containing NaN must fail closed (allow_nan=False).
+    fake_nan = FakeInference(
+        chat=lambda payload: _tool_call_reply(
+            tool_calls=[{
+                "id": "call_nan",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": {"temp": float("nan")}},
+            }],
+        ),
+    )
+    with pytest.raises(DependencyUnavailable, match="non-serializable"):
+        _gateway(fake_nan).generate(
+            ModelRequest(prompt="Weather?", tier="code", options={"tools": [WEATHER_TOOL]}),
+            _ctx(),
+        )
 
 
 def test_gateway_preserves_prose_alongside_tool_calls():
@@ -789,6 +904,58 @@ def test_provider_bridge_never_enables_native_tools_for_other_providers_or_image
         "tools": [WEATHER_TOOL],
     }
     assert bridge.ollama_only_feature(fmt_payload, provider="sonder_inference", native_tools=True)[0] == "format"
+
+
+def test_provider_bridge_refuses_and_reroutes_tool_role_messages_without_native_tools():
+    # Mid-history or trailing role="tool" without tools/tool_choice/assistant.tool_calls
+    # must still trigger ollama_only_feature and refuse fail-closed (or reroute to Ollama).
+    mid_tool_payload = {
+        "model": "qwen2.5-coder:7b",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "tool", "tool_call_id": "call_1", "name": "get_weather", "content": "72F"},
+            {"role": "user", "content": "summarize"},
+        ],
+    }
+    trailing_tool_payload = {
+        "model": "qwen2.5-coder:7b",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "tool", "tool_call_id": "call_1", "name": "get_weather", "content": "72F"},
+        ],
+    }
+    for payload in (mid_tool_payload, trailing_tool_payload):
+        found = bridge.ollama_only_feature(payload, provider="sonder_inference")
+        assert found == ("tool_calls", "images and tool calls are only available on Ollama tiers")
+        assert bridge.ollama_only_feature(payload, provider="openrouter", native_tools=True) == found
+        with pytest.raises(bridge.UnsupportedProviderFeature):
+            bridge.model_request_from_ollama_payload(payload, tier="code", provider="sonder_inference")
+        # Permitted only when sonder_inference positively advertises native tools.
+        assert bridge.ollama_only_feature(payload, provider="sonder_inference", native_tools=True) is None
+        req = bridge.model_request_from_ollama_payload(
+            payload, tier="code", provider="sonder_inference", native_tools=True,
+        )
+        assert any(
+            isinstance(entry, dict) and entry.get("role") == "tool" and entry.get("tool_call_id") == "call_1"
+            for entry in req.history
+        )
+
+    # Also verify legacy_chat_bridge.ollama_only_reroute reroutes standalone role="tool" to Ollama.
+    bindings = ProviderBindings(
+        default_generation_provider="sonder_inference",
+        tier_providers={t: "sonder_inference" for t in ("fast", "general", "code", "reasoning", "vision")},
+        embedding_provider="ollama",
+        fallbacks={"sonder_inference": "ollama"},
+    )
+    legacy_gw = _gateway(FakeInference(health=_health(capabilities=["streaming"])))
+    graph = SimpleNamespace(provider_bindings=bindings, model_gateway=legacy_gw)
+    rung = bridge.RungBinding(provider="sonder_inference", tier="code")
+    bridge.set_native_tools_probe(lambda p: p == "sonder_inference" and legacy_gw.supports_native_tools())
+    rerouted = legacy_chat_bridge.ollama_only_reroute(
+        legacy_gw, trailing_tool_payload, rung, model="qwen2.5-coder:7b", graph=graph,
+        loopback_endpoint=True, context_probe=lambda: 8192,
+    )
+    assert rerouted is not None
 
 
 def test_ollama_only_reroute_respects_native_tools_probe_and_preserves_fallback():

@@ -423,7 +423,7 @@ def ollama_only_feature(
         if message.get("images"):
             return ("images",
                     "images and tool calls are only available on Ollama tiers")
-        if message.get("tool_calls") and not tools_allowed():
+        if (message.get("tool_calls") or message.get("role") == "tool") and not tools_allowed():
             return ("tool_calls",
                     "images and tool calls are only available on Ollama tiers")
     return None

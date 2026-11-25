@@ -179,6 +179,7 @@ LATENCY_EWMA_ALPHA = 0.3
 MAX_PRIVATE_WORKERS = 8
 MAX_WORKER_INFLIGHT = 16
 MAX_TOOLS_PER_REQUEST = 128
+MAX_RESPONSE_TOOL_CALLS = 64
 MIN_WORKER_TOKEN_LENGTH = 16
 PRIVATE_WORKERS_LIMIT = 16_384
 NATIVE_TOOL_MARKERS = frozenset({"tool_calling", "tools", "native_tools"})
@@ -515,8 +516,20 @@ def _normalize_message_tool_calls(raw: object, *, msg_index: int) -> list[dict[s
     return normalized
 
 
-def _extract_response_tool_calls(data: dict) -> tuple[dict[str, object], ...] | None:
-    """Validate and extract OpenAI ``choices[0].message.tool_calls``."""
+def _extract_response_tool_calls(
+    data: dict,
+    *,
+    tools: list[dict[str, object]] | None = None,
+    tool_choice: str | dict[str, object] | None = None,
+) -> tuple[dict[str, object], ...] | None:
+    """Validate and extract OpenAI ``choices[0].message.tool_calls``.
+
+    Fails closed with :class:`DependencyUnavailable` if the server returns
+    unsolicited tool calls (``tools`` absent or ``tool_choice == "none"``),
+    exceeds :data:`MAX_RESPONSE_TOOL_CALLS`, names an undeclared tool,
+    violates a forced function ``tool_choice``, or emits malformed/NaN
+    arguments.
+    """
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         return None
@@ -528,6 +541,24 @@ def _extract_response_tool_calls(data: dict) -> tuple[dict[str, object], ...] | 
         raise DependencyUnavailable("sonder-inference returned invalid tool_calls")
     if not raw:
         return None
+    if not tools or tool_choice == "none":
+        raise DependencyUnavailable(
+            "sonder-inference returned unsolicited tool_calls when tools were not permitted"
+        )
+    if len(raw) > MAX_RESPONSE_TOOL_CALLS:
+        raise DependencyUnavailable(
+            "sonder-inference returned more than %d tool_calls" % MAX_RESPONSE_TOOL_CALLS
+        )
+    allowed_names = {
+        str(fn["name"])
+        for item in tools
+        if isinstance(fn := item.get("function"), Mapping) and isinstance(fn.get("name"), str)
+    }
+    forced_name: str | None = None
+    if isinstance(tool_choice, Mapping):
+        tc_fn = tool_choice.get("function")
+        if isinstance(tc_fn, Mapping) and isinstance(tc_fn.get("name"), str):
+            forced_name = tc_fn["name"]
     calls: list[dict[str, object]] = []
     for idx, item in enumerate(raw):
         if not isinstance(item, dict):
@@ -549,6 +580,16 @@ def _extract_response_tool_calls(data: dict) -> tuple[dict[str, object], ...] | 
         name = fn.get("name")
         if not isinstance(name, str) or not name.strip():
             raise DependencyUnavailable("sonder-inference returned a tool call without a name")
+        clean_name = name.strip()
+        if clean_name not in allowed_names:
+            raise DependencyUnavailable(
+                "sonder-inference returned tool call for undeclared tool %r" % clean_name
+            )
+        if forced_name is not None and clean_name != forced_name:
+            raise DependencyUnavailable(
+                "sonder-inference returned tool call %r instead of forced tool %r"
+                % (clean_name, forced_name)
+            )
         raw_args = fn.get("arguments")
         if raw_args is None:
             args_str = "{}"
@@ -556,7 +597,9 @@ def _extract_response_tool_calls(data: dict) -> tuple[dict[str, object], ...] | 
             args_str = raw_args
         elif isinstance(raw_args, Mapping):
             try:
-                args_str = json.dumps(dict(raw_args), ensure_ascii=False, separators=(",", ":"))
+                args_str = json.dumps(
+                    dict(raw_args), ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+                )
             except (TypeError, ValueError, RecursionError) as exc:
                 raise DependencyUnavailable(
                     "sonder-inference returned non-serializable tool call arguments"
@@ -566,7 +609,7 @@ def _extract_response_tool_calls(data: dict) -> tuple[dict[str, object], ...] | 
         calls.append({
             "id": tc_id,
             "type": "function",
-            "function": {"name": name.strip(), "arguments": args_str},
+            "function": {"name": clean_name, "arguments": args_str},
         })
     return tuple(calls)
 
@@ -2643,7 +2686,9 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             return served
 
         served = served_model(data)
-        tool_calls = _extract_response_tool_calls(data)
+        tool_calls = _extract_response_tool_calls(
+            data, tools=tools, tool_choice=tool_choice,
+        )
         choices = data.get("choices")
         choice = choices[0] if isinstance(choices, list) and choices else None
         message = choice.get("message") if isinstance(choice, dict) else None
@@ -2681,7 +2726,9 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                                       context=context)
                 self._check_liveness(context, phase="during model call")
                 served = served_model(data)
-                tool_calls = _extract_response_tool_calls(data)
+                tool_calls = _extract_response_tool_calls(
+                    data, tools=tools, tool_choice=tool_choice,
+                )
                 repaired = True
         if tool_calls:
             choices = data.get("choices")
@@ -2764,6 +2811,7 @@ __all__ = [
     "ENV_PRIVATE_WORKERS",
     "HealthSnapshot",
     "IdentityObservation",
+    "MAX_RESPONSE_TOOL_CALLS",
     "NATIVE_TOOLS_REFUSAL",
     "NATIVE_TOOL_MARKERS",
     "PROVIDER_ID",
