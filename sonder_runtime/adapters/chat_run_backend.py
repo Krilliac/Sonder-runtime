@@ -11,8 +11,8 @@ from typing import Any
 from sonder_runtime.adapters.security import role_tool_policy
 from sonder_runtime.application.agents.delegation_runtime import can_delegate
 from sonder_runtime.domain.agents.delegation import DELEGATION_TOOLS
-from sonder_runtime.domain.agents.tool_help import tool_help_text
-from sonder_runtime.domain.chat_tools import tool_backend_label
+from sonder_runtime.domain.agents.tool_help import match_catalog_tools, tool_help_text
+from sonder_runtime.domain.chat_tools import catalog_entry_to_ollama_tool, tool_backend_label
 from sonder_runtime.domain.cloud_access import LEGACY_ERROR_PREFIX, has_legacy_error_prefix
 
 
@@ -44,7 +44,7 @@ def _filtered_catalog(
     allow_delegation = can_delegate()
     out: dict[str, Any] = {}
     for name, meta in (catalog or {}).items():
-        if name in blocked_tools:
+        if name in blocked_tools or str(name).startswith("admin_"):
             continue
         if not allow_delegation and name in DELEGATION_TOOLS:
             continue
@@ -114,6 +114,50 @@ class ChatRunBackend:
             except Exception:
                 active = False
         return tool_backend_label(tool_name, container_active=active)
+
+    def resolve_catalog_tool(self, tool_name: str) -> dict[str, Any] | None:
+        """Return a sanitized OpenAI/Ollama schema if ``tool_name`` is permitted in the catalog."""
+        name = str(tool_name or "").strip().lstrip("/")
+        if not name or name in {"tool_search", "tool_help"}:
+            return None
+        catalog = _filtered_catalog(
+            self._catalog_provider(), self._blocked_tools, self._permission_policy,
+        )
+        entry = catalog.get(name)
+        if not isinstance(entry, Mapping):
+            return None
+        return catalog_entry_to_ollama_tool(name, entry)
+
+    def search_catalog_tools(
+        self,
+        *,
+        query: str = "",
+        name: str = "",
+        limit: int = 8,
+    ) -> tuple[bool, str, list[dict[str, Any]]]:
+        """Search the filtered catalog and return ``(ok, help_text, matched_ollama_tools)``."""
+        catalog = _filtered_catalog(
+            self._catalog_provider(), self._blocked_tools, self._permission_policy,
+        )
+        target_name = str(name or "").strip()
+        query_text = str(query or "").strip()
+        if target_name and target_name not in catalog:
+            return False, f"{LEGACY_ERROR_PREFIX} tool '{target_name}' is not available in this turn.", []
+        help_fn: Any = tool_help_text
+        text = str(help_fn(name=target_name, query=query_text or ("" if target_name else "read"), catalog=catalog))
+        ok = not has_legacy_error_prefix(text)
+        matched_names = match_catalog_tools(
+            name=target_name,
+            query=query_text or ("" if target_name else "read"),
+            catalog=catalog,
+            limit=limit,
+        )
+        schemas = [
+            catalog_entry_to_ollama_tool(matched, catalog[matched])
+            for matched in matched_names
+            if matched in catalog and isinstance(catalog[matched], Mapping)
+        ]
+        return ok, text, schemas
 
     def execute(self, tool_name: str, args: Mapping[str, Any]) -> ToolExecutionResult:
         started = time.monotonic()

@@ -57,7 +57,7 @@ import sonder_runtime.application.evaluation_history.use_cases as eval_history_u
 import sonder_runtime.adapters.memory_store as memory_store
 from sonder_runtime.bootstrap import playbook_context
 from sonder_runtime.bootstrap.playbooks import register_tools as _register_playbook_tools
-from sonder_runtime.bootstrap.scratchpad import register_tools as _register_scratchpad_tools
+from sonder_runtime.bootstrap import scratchpad as _scratchpad_bootstrap
 import sonder_runtime.application.session.transcript_export as session_transcript_export
 from sonder_runtime.application.server_core import (
     agent_guards as _agent_guards_core,
@@ -2563,7 +2563,7 @@ def _read_system_context():
         goal_block = goal_store.context_block()
     except Exception:
         goal_block = ""
-    return profile, emotions, goal_block, playbook_context.stable_index()
+    return profile, emotions, goal_block, playbook_context.stable_index(), _scratchpad_bootstrap.scratchpad_index_block(config=getattr(_APP_GRAPH, "config", None))
 
 
 @contextlib.contextmanager
@@ -2623,10 +2623,11 @@ def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     values = parts or _read_system_context()
     profile, emotions, goal_block = values[:3]
     playbook_index = values[3] if len(values) > 3 else ""
+    scratchpad_block = values[4] if len(values) > 4 else ""
     return _prefix_cache.compose_local_system(  # stable first, volatile last
         _runtime_identity_block(model, cloud, provider), profile, emotions, goal_block,
         effective_system,
-        playbook=playbook_context.frame_owner_notes(playbook_index),
+        playbook=playbook_context.frame_owner_notes(playbook_index), scratchpad=scratchpad_block,
     )
 
 
@@ -4576,7 +4577,7 @@ else:
     )
 _PERSISTENT_MCP = mcp
 playbook_note, playbook_read = _register_playbook_tools(mcp, config_getter=lambda: getattr(_APP_GRAPH, "config", None))
-scratchpad_read, scratchpad_write, scratchpad_delete = _register_scratchpad_tools(mcp, config_getter=lambda: getattr(_APP_GRAPH, "config", None))
+scratchpad_read, scratchpad_write, scratchpad_delete = _scratchpad_bootstrap.register_tools(mcp, config_getter=lambda: getattr(_APP_GRAPH, "config", None))
 
 
 def _bounded_timeout(value) -> int:
@@ -18661,7 +18662,9 @@ def _agent_turn(
         )
         state.pre_model_context_rendered = bool(context_text)
         transcript += context_text
-    transcript, _ = playbook_context.augment(transcript, prompt, cloud=cloud or restricted is not None or account_scoped or _provider_bridge.hosted_rung_active())
+    _no_local_ctx = cloud or restricted is not None or account_scoped or _provider_bridge.hosted_rung_active()
+    transcript, _ = playbook_context.augment(transcript, prompt, cloud=_no_local_ctx)
+    transcript = _scratchpad_bootstrap.augment_with_scratchpad_index(transcript, cloud=_no_local_ctx, config=getattr(_APP_GRAPH, "config", None))
 
     def ensure_not_cancelled():
         if _cancel_requested(cancel_check) or _foreground_turns.cancel_requested():

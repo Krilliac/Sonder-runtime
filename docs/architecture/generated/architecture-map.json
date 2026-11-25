@@ -574,7 +574,7 @@
       ]
     },
     {
-      "file_count": 461,
+      "file_count": 462,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -760,6 +760,7 @@
         "sonder_runtime/application/memory/receipt_observation.py",
         "sonder_runtime/application/memory/replication.py",
         "sonder_runtime/application/memory/retrieval_evaluation.py",
+        "sonder_runtime/application/memory/scratchpad_context.py",
         "sonder_runtime/application/memory/strategy_memory.py",
         "sonder_runtime/application/meshgen/__init__.py",
         "sonder_runtime/application/meshgen/loop.py",
