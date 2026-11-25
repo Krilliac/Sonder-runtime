@@ -21,9 +21,9 @@ Security & hygiene invariants:
 """
 from __future__ import annotations
 
-from collections import OrderedDict
 import threading
 import time
+from collections import OrderedDict
 from typing import Any
 
 from sonder_runtime.domain.security import redaction
@@ -279,9 +279,55 @@ def reasoning_board(
         }
 
 
+def run_reasoning_board_from_json(
+    *,
+    owner: str = "local",
+    action: str = "summary",
+    board_id: str = "default",
+    goal: str = "",
+    text: str = "",
+    source: str = "",
+    hypothesis_id: str = "",
+    status: str = "",
+    confidence: float | None = None,
+    evidence_for: str = "",
+    evidence_against: str = "",
+    fact_refs_json: str | list[str] = "",
+    alternatives_json: str | list[str] = "",
+) -> dict[str, Any]:
+    """Decode optional JSON-string list arguments and invoke :func:`reasoning_board`."""
+    import json
+
+    fact_refs = (
+        json.loads(fact_refs_json)
+        if isinstance(fact_refs_json, str) and fact_refs_json.strip()
+        else (fact_refs_json if isinstance(fact_refs_json, list) else None)
+    )
+    alternatives = (
+        json.loads(alternatives_json)
+        if isinstance(alternatives_json, str) and alternatives_json.strip()
+        else (alternatives_json if isinstance(alternatives_json, list) else None)
+    )
+    return reasoning_board(
+        action=action,
+        board_id=board_id,
+        owner=owner,
+        goal=goal,
+        text=text,
+        source=source,
+        hypothesis_id=hypothesis_id,
+        status=status,
+        confidence=confidence,
+        evidence_for=evidence_for,
+        evidence_against=evidence_against,
+        fact_refs=fact_refs,
+        alternatives=alternatives,
+    )
+
+
 def _reset_for_tests() -> None:
     with _LOCK:
         _BOARDS.clear()
 
 
-__all__ = ["reasoning_board"]
+__all__ = ["reasoning_board", "run_reasoning_board_from_json"]

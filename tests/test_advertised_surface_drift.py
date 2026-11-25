@@ -230,10 +230,10 @@ def test_extractors_cannot_go_vacuous():
     # server.py is size-capped, so newer tool families register themselves
     # from their own module with the same ``@mcp.tool()`` decorator (inside a
     # ``register(mcp, ...)`` function). Their source is part of the AST view.
-    from sonder_runtime.bootstrap import batch_job_tools, computer_use_tools, openrouter_tools, playbooks
+    from sonder_runtime.bootstrap import batch_job_tools, computer_use_tools, openrouter_tools, playbooks, scratchpad
     from sonder_runtime.bootstrap.agent_help_tools import discover_agent_tool_registrars
     import importlib
-    registrars = (batch_job_tools, computer_use_tools, openrouter_tools, playbooks) + tuple(
+    registrars = (batch_job_tools, computer_use_tools, openrouter_tools, playbooks, scratchpad) + tuple(
         importlib.import_module("sonder_runtime.bootstrap." + name)
         for name, _register in discover_agent_tool_registrars())
 

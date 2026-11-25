@@ -2694,6 +2694,89 @@
     },
     {
       "function": {
+        "description": "Delete one named note from the owner's persistent Markdown scratchpad",
+        "name": "scratchpad_delete",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Read, list, or search owner-scoped restart-persistent Markdown scratchpad notes",
+        "name": "scratchpad_read",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "max_lines": {
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "query": {
+              "type": "string"
+            },
+            "start_line": {
+              "type": "integer"
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Create, replace, or append to an owner-scoped restart-persistent Markdown scratchpad note",
+        "name": "scratchpad_write",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "mode": {
+              "enum": [
+                "replace",
+                "append"
+              ],
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "name",
+            "content"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
         "description": "Find scripts under allowed roots",
         "name": "script_search",
         "parameters": {

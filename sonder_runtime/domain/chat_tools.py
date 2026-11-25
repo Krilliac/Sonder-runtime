@@ -529,6 +529,54 @@ CORE_CHAT_TOOL_DEFINITIONS: tuple[ChatToolDefinition, ...] = (
         backend=TOOL_BACKEND_DISCOVERY,
     ),
     ChatToolDefinition(
+        name="scratchpad_read",
+        description=(
+            "Read, list, or search your restart-persistent free-form Markdown scratchpad notes. "
+            "Pass name to read one note, query to search across notes, or neither to list all notes."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "default": ""},
+                "query": {"type": "string", "default": ""},
+                "tag": {"type": "string", "default": ""},
+                "start_line": {"type": "integer", "minimum": 1, "default": 1},
+                "max_lines": {"type": "integer", "minimum": 1, "maximum": 400, "default": 200},
+            },
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
+        name="scratchpad_write",
+        description=(
+            "Create, overwrite (mode='replace'), or append (mode='append') a restart-persistent "
+            "free-form Markdown scratchpad note for working plans, drafts, or investigation notes."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "content": {"type": "string"},
+                "mode": {"type": "string", "enum": ["replace", "append"], "default": "replace"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["name", "content"],
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
+        name="scratchpad_delete",
+        description="Delete one named note from your persistent Markdown scratchpad.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+            },
+            "required": ["name"],
+        },
+        backend=TOOL_BACKEND_DISCOVERY,
+    ),
+    ChatToolDefinition(
         name="memory_search",
         description="Search Sonder's local memory for previously learned facts, lessons, and prior solutions.",
         parameters={

@@ -204,6 +204,42 @@ class ToolExecutorAdapter:
                     output=json.dumps(res, sort_keys=True),
                     evidence=res,
                 )
+            if call.tool in ("scratchpad_read", "scratchpad_write", "scratchpad_delete"):
+                from sonder_runtime.adapters.persistence.scratchpad_store import ScratchpadStore
+                from sonder_runtime.platform import paths as _runtime_paths
+
+                owner = str(getattr(context, "owner_id", "") or getattr(context, "principal", "") or "local")
+                home = getattr(context, "sonder_home", None) or _runtime_paths.default_home()
+                store = ScratchpadStore(home)
+                if call.tool == "scratchpad_read":
+                    note_name = str(args.get("name") or "").strip()
+                    query_text = str(args.get("query") or "").strip()
+                    if note_name:
+                        res = store.read(
+                            owner,
+                            note_name,
+                            start_line=args.get("start_line", 1),
+                            max_lines=args.get("max_lines", 200),
+                        )
+                    elif query_text:
+                        res = store.search(owner, query_text)
+                    else:
+                        res = store.list_notes(owner, tag=str(args.get("tag") or ""))
+                elif call.tool == "scratchpad_write":
+                    res = store.write(
+                        owner,
+                        str(args.get("name") or ""),
+                        str(args.get("content") or ""),
+                        mode=str(args.get("mode") or "replace"),
+                        tags=args.get("tags"),
+                    )
+                else:
+                    res = store.delete(owner, str(args.get("name") or ""))
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, ensure_ascii=False, sort_keys=True),
+                    evidence=res,
+                )
             if call.tool == "symbol_verify":
                 import sonder_runtime.adapters.inspection.symbol_verify as symbol_verify_mod
 

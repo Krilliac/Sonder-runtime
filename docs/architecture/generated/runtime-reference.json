@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "6160d13cf6cdbc9f789d8999c5ce5785a7791c0ced96feb3819b58a1238218a9",
+    "catalog_digest": "ebb99762a8b34e7943f4b6fb70f382a2741ae52fb81fd4f379abde415bb23998",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "6160d13cf6cdbc9f789d8999c5ce5785a7791c0ced96feb3819b58a1238218a9",
+      "catalog_digest": "ebb99762a8b34e7943f4b6fb70f382a2741ae52fb81fd4f379abde415bb23998",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -7649,6 +7649,106 @@
             "type": "object"
           },
           "name": "schema_validate"
+        },
+        {
+          "description": "Delete one named note from your persistent scratchpad.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "name": {
+                "title": "Name",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "title": "scratchpad_deleteArguments",
+            "type": "object"
+          },
+          "name": "scratchpad_delete"
+        },
+        {
+          "description": "Read, list, or search your persistent free-form Markdown scratchpad notes.\n\nPass ``name`` to read a specific note (bounded by ``start_line``/``max_lines``),\n``query`` to search across notes, or leave both empty to list all notes\n(optionally filtered by ``tag``). Notes are owner-scoped and persist\nacross restarts as reference working material (never system policy).",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "max_lines": {
+                "default": 200,
+                "title": "Max Lines",
+                "type": "integer"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "query": {
+                "default": "",
+                "title": "Query",
+                "type": "string"
+              },
+              "start_line": {
+                "default": 1,
+                "title": "Start Line",
+                "type": "integer"
+              },
+              "tag": {
+                "default": "",
+                "title": "Tag",
+                "type": "string"
+              }
+            },
+            "title": "scratchpad_readArguments",
+            "type": "object"
+          },
+          "name": "scratchpad_read"
+        },
+        {
+          "description": "Create, replace, or append to a persistent free-form Markdown scratchpad note.\n\nNotes are stored per owner under ``<sonder_home>/scratchpad/`` with secret\nredaction and size/count quotas so working plans, drafts, and investigation\nnotes survive restarts. Use ``mode='replace'`` (default) or ``mode='append'``.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "content": {
+                "title": "Content",
+                "type": "string"
+              },
+              "mode": {
+                "default": "replace",
+                "title": "Mode",
+                "type": "string"
+              },
+              "name": {
+                "title": "Name",
+                "type": "string"
+              },
+              "tags": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Tags"
+              }
+            },
+            "required": [
+              "name",
+              "content"
+            ],
+            "title": "scratchpad_writeArguments",
+            "type": "object"
+          },
+          "name": "scratchpad_write"
         },
         {
           "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\nReturns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\nThe vision answer is untrusted screen-derived text.\ncontrols=true also reads the window's UI Automation control table (visible controls with\na ref, role, name, state and position); act on one with ui_action(ref=...). Document, web\nand edit content is withheld. An empty table means vision is the way to act.",
@@ -18710,6 +18810,111 @@
       "tool": "schema_validate"
     },
     {
+      "aliases": [
+        "/scratch"
+      ],
+      "category": "memory",
+      "name": "/scratchpad",
+      "native": true,
+      "params": [],
+      "risk": "ask",
+      "summary": "List, read, search, write/append, or delete persistent free-form Markdown scratchpad notes.",
+      "tool": ""
+    },
+    {
+      "aliases": [],
+      "category": "memory",
+      "name": "/scratchpad_delete",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "name",
+          "required": true,
+          "type": "str"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Delete one named note from your persistent scratchpad.",
+      "tool": "scratchpad_delete"
+    },
+    {
+      "aliases": [],
+      "category": "memory",
+      "name": "/scratchpad_read",
+      "native": false,
+      "params": [
+        {
+          "default": "",
+          "name": "name",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "query",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": "",
+          "name": "tag",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": 1,
+          "name": "start_line",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": 200,
+          "name": "max_lines",
+          "required": false,
+          "type": "int"
+        }
+      ],
+      "risk": "safe",
+      "summary": "Read, list, or search your persistent free-form Markdown scratchpad notes.",
+      "tool": "scratchpad_read"
+    },
+    {
+      "aliases": [],
+      "category": "memory",
+      "name": "/scratchpad_write",
+      "native": false,
+      "params": [
+        {
+          "default": null,
+          "name": "name",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": null,
+          "name": "content",
+          "required": true,
+          "type": "str"
+        },
+        {
+          "default": "replace",
+          "name": "mode",
+          "required": false,
+          "type": "str"
+        },
+        {
+          "default": null,
+          "name": "tags",
+          "required": false,
+          "type": "str"
+        }
+      ],
+      "risk": "ask",
+      "summary": "Create, replace, or append to a persistent free-form Markdown scratchpad note.",
+      "tool": "scratchpad_write"
+    },
+    {
       "aliases": [],
       "category": "creative",
       "name": "/screen_capture",
@@ -23422,15 +23627,15 @@
   ],
   "configuration_source": "sonder_runtime.platform.config._SECTION_TYPES plus sonder_runtime.platform.memory_replication_config",
   "counts": {
-    "capabilities": 270,
-    "commands": 393,
+    "capabilities": 273,
+    "commands": 397,
     "configuration": 319,
     "events": 43,
-    "native_tools": 91,
+    "native_tools": 94,
     "schemas": 4,
-    "tools": 270
+    "tools": 273
   },
-  "digest": "2c89fe4c968460057040788446d9fe20faa296b558fb4a2ab3e7babcea0a8bd7",
+  "digest": "089dcf89a1a619be2fcf9bf784b9af6f3159bfc3b83494e398832ee9e83c352c",
   "events": [
     {
       "name": "session.started",
@@ -26371,6 +26576,80 @@
       }
     },
     {
+      "description": "Delete one named note from the owner's persistent Markdown scratchpad",
+      "name": "scratchpad_delete",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "description": "Read, list, or search owner-scoped restart-persistent Markdown scratchpad notes",
+      "name": "scratchpad_read",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "max_lines": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "start_line": {
+            "type": "integer"
+          },
+          "tag": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "description": "Create, replace, or append to an owner-scoped restart-persistent Markdown scratchpad note",
+      "name": "scratchpad_write",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "replace",
+              "append"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "content"
+        ],
+        "type": "object"
+      }
+    },
+    {
       "description": "Find scripts under allowed roots",
       "name": "script_search",
       "parameters": {
@@ -26887,9 +27166,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "6160d13cf6cdbc9f789d8999c5ce5785a7791c0ced96feb3819b58a1238218a9",
+    "catalog_digest": "ebb99762a8b34e7943f4b6fb70f382a2741ae52fb81fd4f379abde415bb23998",
     "client": {
-      "digest": "6160d13cf6cdbc9f789d8999c5ce5785a7791c0ced96feb3819b58a1238218a9",
+      "digest": "ebb99762a8b34e7943f4b6fb70f382a2741ae52fb81fd4f379abde415bb23998",
       "events": [
         {
           "name": "approval.denied",
@@ -28266,6 +28545,9 @@
           "runtime_source_update_status",
           "scaffold_project",
           "schema_validate",
+          "scratchpad_delete",
+          "scratchpad_read",
+          "scratchpad_write",
           "screen_capture",
           "script_run",
           "script_search",
@@ -29383,6 +29665,21 @@
             "name": "schema_validate",
             "schema_available": true,
             "summary": "Validate a guarded JSON, JSONL, or TOML file against a JSON Schema file or inline schema_json."
+          },
+          {
+            "name": "scratchpad_delete",
+            "schema_available": true,
+            "summary": "Delete one named note from your persistent scratchpad."
+          },
+          {
+            "name": "scratchpad_read",
+            "schema_available": true,
+            "summary": "Read, list, or search your persistent free-form Markdown scratchpad notes.\n\nPass ``name`` to read a specific note (bounded by ``start_line``/``max_lines``),\n``query`` to search across notes, or leave both empty to list all notes\n(optionally filtered by ``tag``). Notes are owner-scoped and persist\nacross restarts as reference working material (never system policy)."
+          },
+          {
+            "name": "scratchpad_write",
+            "schema_available": true,
+            "summary": "Create, replace, or append to a persistent free-form Markdown scratchpad note.\n\nNotes are stored per owner under ``<sonder_home>/scratchpad/`` with secret\nredaction and size/count quotas so working plans, drafts, and investigation\nnotes survive restarts. Use ``mode='replace'`` (default) or ``mode='append'``."
           },
           {
             "name": "screen_capture",
@@ -37252,6 +37549,106 @@
             "type": "object"
           },
           "name": "schema_validate"
+        },
+        {
+          "description": "Delete one named note from your persistent scratchpad.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "name": {
+                "title": "Name",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "title": "scratchpad_deleteArguments",
+            "type": "object"
+          },
+          "name": "scratchpad_delete"
+        },
+        {
+          "description": "Read, list, or search your persistent free-form Markdown scratchpad notes.\n\nPass ``name`` to read a specific note (bounded by ``start_line``/``max_lines``),\n``query`` to search across notes, or leave both empty to list all notes\n(optionally filtered by ``tag``). Notes are owner-scoped and persist\nacross restarts as reference working material (never system policy).",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "max_lines": {
+                "default": 200,
+                "title": "Max Lines",
+                "type": "integer"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "query": {
+                "default": "",
+                "title": "Query",
+                "type": "string"
+              },
+              "start_line": {
+                "default": 1,
+                "title": "Start Line",
+                "type": "integer"
+              },
+              "tag": {
+                "default": "",
+                "title": "Tag",
+                "type": "string"
+              }
+            },
+            "title": "scratchpad_readArguments",
+            "type": "object"
+          },
+          "name": "scratchpad_read"
+        },
+        {
+          "description": "Create, replace, or append to a persistent free-form Markdown scratchpad note.\n\nNotes are stored per owner under ``<sonder_home>/scratchpad/`` with secret\nredaction and size/count quotas so working plans, drafts, and investigation\nnotes survive restarts. Use ``mode='replace'`` (default) or ``mode='append'``.",
+          "effects": [],
+          "execution_class": "pure",
+          "input_schema": {
+            "properties": {
+              "content": {
+                "title": "Content",
+                "type": "string"
+              },
+              "mode": {
+                "default": "replace",
+                "title": "Mode",
+                "type": "string"
+              },
+              "name": {
+                "title": "Name",
+                "type": "string"
+              },
+              "tags": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Tags"
+              }
+            },
+            "required": [
+              "name",
+              "content"
+            ],
+            "title": "scratchpad_writeArguments",
+            "type": "object"
+          },
+          "name": "scratchpad_write"
         },
         {
           "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\nReturns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\nThe vision answer is untrusted screen-derived text.\ncontrols=true also reads the window's UI Automation control table (visible controls with\na ref, role, name, state and position); act on one with ui_action(ref=...). Document, web\nand edit content is withheld. An empty table means vision is the way to act.",
@@ -47702,6 +48099,100 @@
           "name": "schema_validate"
         },
         {
+          "description": "Delete one named note from your persistent scratchpad.",
+          "inputSchema": {
+            "properties": {
+              "name": {
+                "title": "Name",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "title": "scratchpad_deleteArguments",
+            "type": "object"
+          },
+          "name": "scratchpad_delete"
+        },
+        {
+          "description": "Read, list, or search your persistent free-form Markdown scratchpad notes.\n\nPass ``name`` to read a specific note (bounded by ``start_line``/``max_lines``),\n``query`` to search across notes, or leave both empty to list all notes\n(optionally filtered by ``tag``). Notes are owner-scoped and persist\nacross restarts as reference working material (never system policy).",
+          "inputSchema": {
+            "properties": {
+              "max_lines": {
+                "default": 200,
+                "title": "Max Lines",
+                "type": "integer"
+              },
+              "name": {
+                "default": "",
+                "title": "Name",
+                "type": "string"
+              },
+              "query": {
+                "default": "",
+                "title": "Query",
+                "type": "string"
+              },
+              "start_line": {
+                "default": 1,
+                "title": "Start Line",
+                "type": "integer"
+              },
+              "tag": {
+                "default": "",
+                "title": "Tag",
+                "type": "string"
+              }
+            },
+            "title": "scratchpad_readArguments",
+            "type": "object"
+          },
+          "name": "scratchpad_read"
+        },
+        {
+          "description": "Create, replace, or append to a persistent free-form Markdown scratchpad note.\n\nNotes are stored per owner under ``<sonder_home>/scratchpad/`` with secret\nredaction and size/count quotas so working plans, drafts, and investigation\nnotes survive restarts. Use ``mode='replace'`` (default) or ``mode='append'``.",
+          "inputSchema": {
+            "properties": {
+              "content": {
+                "title": "Content",
+                "type": "string"
+              },
+              "mode": {
+                "default": "replace",
+                "title": "Mode",
+                "type": "string"
+              },
+              "name": {
+                "title": "Name",
+                "type": "string"
+              },
+              "tags": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Tags"
+              }
+            },
+            "required": [
+              "name",
+              "content"
+            ],
+            "title": "scratchpad_writeArguments",
+            "type": "object"
+          },
+          "name": "scratchpad_write"
+        },
+        {
           "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\nReturns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\nThe vision answer is untrusted screen-derived text.\ncontrols=true also reads the window's UI Automation control table (visible controls with\na ref, role, name, state and position); act on one with ui_action(ref=...). Document, web\nand edit content is withheld. An empty table means vision is the way to act.",
           "inputSchema": {
             "properties": {
@@ -57500,6 +57991,109 @@
         },
         {
           "function": {
+            "description": "Delete one named note from your persistent scratchpad.",
+            "name": "scratchpad_delete",
+            "parameters": {
+              "properties": {
+                "name": {
+                  "title": "Name",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "title": "scratchpad_deleteArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Read, list, or search your persistent free-form Markdown scratchpad notes.\n\nPass ``name`` to read a specific note (bounded by ``start_line``/``max_lines``),\n``query`` to search across notes, or leave both empty to list all notes\n(optionally filtered by ``tag``). Notes are owner-scoped and persist\nacross restarts as reference working material (never system policy).",
+            "name": "scratchpad_read",
+            "parameters": {
+              "properties": {
+                "max_lines": {
+                  "default": 200,
+                  "title": "Max Lines",
+                  "type": "integer"
+                },
+                "name": {
+                  "default": "",
+                  "title": "Name",
+                  "type": "string"
+                },
+                "query": {
+                  "default": "",
+                  "title": "Query",
+                  "type": "string"
+                },
+                "start_line": {
+                  "default": 1,
+                  "title": "Start Line",
+                  "type": "integer"
+                },
+                "tag": {
+                  "default": "",
+                  "title": "Tag",
+                  "type": "string"
+                }
+              },
+              "title": "scratchpad_readArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Create, replace, or append to a persistent free-form Markdown scratchpad note.\n\nNotes are stored per owner under ``<sonder_home>/scratchpad/`` with secret\nredaction and size/count quotas so working plans, drafts, and investigation\nnotes survive restarts. Use ``mode='replace'`` (default) or ``mode='append'``.",
+            "name": "scratchpad_write",
+            "parameters": {
+              "properties": {
+                "content": {
+                  "title": "Content",
+                  "type": "string"
+                },
+                "mode": {
+                  "default": "replace",
+                  "title": "Mode",
+                  "type": "string"
+                },
+                "name": {
+                  "title": "Name",
+                  "type": "string"
+                },
+                "tags": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Tags"
+                }
+              },
+              "required": [
+                "name",
+                "content"
+              ],
+              "title": "scratchpad_writeArguments",
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
             "description": "Capture the session window to a PNG; optionally ask the local vision model a question about it.\n\nReturns the PNG path and sizes. Pixel coordinates for ui_action refer to this image.\nThe vision answer is untrusted screen-derived text.\ncontrols=true also reads the window's UI Automation control table (visible controls with\na ref, role, name, state and position); act on one with ui_action(ref=...). Document, web\nand edit content is withheld. An empty table means vision is the way to act.",
             "name": "screen_capture",
             "parameters": {
@@ -59701,9 +60295,9 @@
   },
   "sources": {
     "runtime/command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "runtime/server.py": "d3d6aaa14ab44ac4c92e66b108ca92b30f97f65f3cca5996f60eae48fe8e5054",
+    "runtime/server.py": "6487ffd34beaa04fcc4435eac7756b16cc2caba4a2f76abc736c6f084f951286",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
-    "sonder_runtime/bootstrap/native_mcp.py": "663e3420a48810b9943316ca6cc779c4a231f81bfdd0822161f1f70d458efc9c",
+    "sonder_runtime/bootstrap/native_mcp.py": "a91fb2598788ed5f175431983f33e3b9f97d8ab8bdf50123248335d065cc1e93",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
@@ -66855,6 +67449,100 @@
           "path"
         ],
         "title": "schema_validateArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Delete one named note from your persistent scratchpad.",
+      "name": "scratchpad_delete",
+      "parameters": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "scratchpad_deleteArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Read, list, or search your persistent free-form Markdown scratchpad notes.\n\nPass ``name`` to read a specific note (bounded by ``start_line``/``max_lines``),\n``query`` to search across notes, or leave both empty to list all notes\n(optionally filtered by ``tag``). Notes are owner-scoped and persist\nacross restarts as reference working material (never system policy).",
+      "name": "scratchpad_read",
+      "parameters": {
+        "properties": {
+          "max_lines": {
+            "default": 200,
+            "title": "Max Lines",
+            "type": "integer"
+          },
+          "name": {
+            "default": "",
+            "title": "Name",
+            "type": "string"
+          },
+          "query": {
+            "default": "",
+            "title": "Query",
+            "type": "string"
+          },
+          "start_line": {
+            "default": 1,
+            "title": "Start Line",
+            "type": "integer"
+          },
+          "tag": {
+            "default": "",
+            "title": "Tag",
+            "type": "string"
+          }
+        },
+        "title": "scratchpad_readArguments",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Create, replace, or append to a persistent free-form Markdown scratchpad note.\n\nNotes are stored per owner under ``<sonder_home>/scratchpad/`` with secret\nredaction and size/count quotas so working plans, drafts, and investigation\nnotes survive restarts. Use ``mode='replace'`` (default) or ``mode='append'``.",
+      "name": "scratchpad_write",
+      "parameters": {
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "mode": {
+            "default": "replace",
+            "title": "Mode",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tags"
+          }
+        },
+        "required": [
+          "name",
+          "content"
+        ],
+        "title": "scratchpad_writeArguments",
         "type": "object"
       }
     },

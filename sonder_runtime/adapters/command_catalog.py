@@ -271,6 +271,7 @@ _CATEGORY_BY_TOOL = {
     "sonder_stats": "memory",
     "sonder_remember_fact": "memory", "sonder_forget_fact": "memory",
     "playbook_note": "memory", "playbook_read": "memory",
+    "scratchpad_read": "memory", "scratchpad_write": "memory", "scratchpad_delete": "memory",
     "hardware_profile": "system",
     "environment_status": "system",
     "toolchain_status": "system",
@@ -443,6 +444,9 @@ _DANGEROUS = frozenset({
 # ``ask`` default above is the right answer for anything unverified.
 _READ_ONLY = frozenset({
     "playbook_read",
+    # Owner-scoped read/list/search of persistent Markdown scratchpad notes
+    # (no write path; scratchpad_write and scratchpad_delete remain gated).
+    "scratchpad_read",
     # Batch-job reads (bootstrap/batch_job_tools.py): status and results read
     # job state and the caller's own sealed answers, recent lists ids and
     # counts only; none starts, resumes or cancels work, calls a model or writes.
