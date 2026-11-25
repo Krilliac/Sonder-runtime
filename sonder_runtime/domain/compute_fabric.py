@@ -13,7 +13,7 @@ import hashlib
 import json
 import math
 import re
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 _IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -374,11 +374,11 @@ class WorkloadRequest:
         _optional_nonnegative_int(self.max_queue_depth, "max_queue_depth")
         if self.max_queue_depth is not None and self.max_queue_depth > 4096:
             raise ValueError("max_queue_depth must be at most 4096")
-        for values, label in (
+        for node_ids, label in (
             (self.preferred_node_ids, "preferred_node_ids"),
             (self.avoided_node_ids, "avoided_node_ids"),
         ):
-            for node_id in values:
+            for node_id in node_ids:
                 _require_identity(node_id, label)
         if self.preferred_node_ids & self.avoided_node_ids:
             raise ValueError("a node cannot be both preferred and avoided")
@@ -551,7 +551,7 @@ class ComputePlacementScheduler:
         snapshots: Iterable[NodeSnapshot],
         *,
         now: datetime,
-        snapshot_digest=None,
+        snapshot_digest: Callable[[NodeSnapshot], str] | None = None,
     ) -> PlacementDecision:
         if not isinstance(request, WorkloadRequest):
             raise TypeError("request must be a WorkloadRequest")
