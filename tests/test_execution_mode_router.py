@@ -379,6 +379,7 @@ def _make_chat_harness(
         _release_http_conversation_state=lambda *_a, **_kw: None,
         _ensure_refusal_observer=lambda: None,
         _feed_request_owner=lambda _c: "owner",
+        _task_account_scope=lambda _c: None,
         _state_principal=lambda _c: "owner",
         _mode_principal=lambda _c: "owner",
         _reasoning_request_owner=lambda _c: "owner",
