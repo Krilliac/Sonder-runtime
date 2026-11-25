@@ -6,8 +6,6 @@ import json
 import threading
 import types
 
-import pytest
-
 from sonder_runtime.adapters.inference import sse_stream
 from sonder_runtime.application.chat import stream_sink
 from sonder_runtime.interfaces.http import live_stream
