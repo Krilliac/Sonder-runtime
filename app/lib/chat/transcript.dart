@@ -157,7 +157,7 @@ class _TranscriptState extends State<Transcript> {
     }
     final pendingLen = _pendingOutputLength(widget.entries);
     if (pendingLen > _lastPendingOutputLength && !_detached) {
-      scrollTranscriptToEnd(widget.scroll);
+      scrollTranscriptToEnd(widget.scroll, jump: true);
     }
     _lastPendingOutputLength = pendingLen;
   }
@@ -172,7 +172,7 @@ class _TranscriptState extends State<Transcript> {
     final isStreaming = widget.live.value != null;
     final toolsCount = widget.live.value?.toolCalls.length ?? 0;
     if (toolsCount > _lastLiveToolsCount && !_detached) {
-      scrollTranscriptToEnd(widget.scroll);
+      scrollTranscriptToEnd(widget.scroll, jump: true);
     }
     _lastLiveToolsCount = toolsCount;
     if (isStreaming != _wasStreaming) {
@@ -371,6 +371,7 @@ class _TranscriptAutoScroll {
   bool userDetached = false;
   bool callbackScheduled = false;
   bool pendingForce = false;
+  bool pendingJump = false;
 }
 
 final Expando<_TranscriptAutoScroll> _autoScrollState =
@@ -383,9 +384,15 @@ bool isTranscriptAutoScrollDetached(ScrollController scroll) =>
 
 /// Scroll to the end only when the reader is attached to the bottom, unless
 /// [force] (the reader just sent a message, switched threads, or tapped
-/// "Latest"). Coalesces rapid streaming frames and never fights an active
-/// upward scroll gesture by the reader (P2-17).
-void scrollTranscriptToEnd(ScrollController scroll, {bool force = false}) {
+/// "Latest"). Pass [jump] during high-frequency live streaming deltas so rapid
+/// chunks advance smoothly without restarting a 220ms animation every frame.
+/// Coalesces rapid frames and never fights an active upward scroll gesture
+/// by the reader (P2-17).
+void scrollTranscriptToEnd(
+  ScrollController scroll, {
+  bool force = false,
+  bool jump = false,
+}) {
   final state = _autoScrollState[scroll] ??= _TranscriptAutoScroll();
   if (force) {
     state.userDetached = false;
@@ -393,12 +400,15 @@ void scrollTranscriptToEnd(ScrollController scroll, {bool force = false}) {
   } else if (state.userDetached) {
     return;
   }
+  if (jump) state.pendingJump = true;
   if (state.callbackScheduled) return;
   state.callbackScheduled = true;
   WidgetsBinding.instance.addPostFrameCallback((_) {
     state.callbackScheduled = false;
     final forced = state.pendingForce;
+    final shouldJump = state.pendingJump && !forced;
     state.pendingForce = false;
+    state.pendingJump = false;
     if (!scroll.hasClients) return;
     if (!forced && state.userDetached) return;
     final position = scroll.position;
@@ -412,10 +422,16 @@ void scrollTranscriptToEnd(ScrollController scroll, {bool force = false}) {
       state.userDetached = true;
       return;
     }
-    if (!forced) {
+    if (shouldJump) {
       // Jump cleanly on high-frequency streaming deltas so we never restart a
       // 220ms animation every frame or steal the first pixels of an upward drag.
       position.jumpTo(position.maxScrollExtent);
+    } else if (!forced) {
+      scroll.animateTo(
+        position.maxScrollExtent,
+        duration: SonderMotion.medium,
+        curve: SonderMotion.standard,
+      );
     } else {
       final target = position.maxScrollExtent;
       scroll
