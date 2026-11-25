@@ -55,7 +55,7 @@ import sonder_runtime.application.tasks.use_cases as task_use_cases
 import sonder_runtime.adapters.eval_history_reader as eval_history_adapter
 import sonder_runtime.application.evaluation_history.use_cases as eval_history_use_cases
 import sonder_runtime.adapters.memory_store as memory_store
-from sonder_runtime.bootstrap import playbook_context
+from sonder_runtime.bootstrap import playbook_context, thinking_ensemble as _thinking_ensemble
 from sonder_runtime.bootstrap.playbooks import register_tools as _register_playbook_tools
 import sonder_runtime.application.session.transcript_export as session_transcript_export
 from sonder_runtime.application.server_core import (
@@ -2645,7 +2645,7 @@ def _serve_target(tier, strict, *, chat_only=False):
     single server can drive many models — pick per request.
     """
     _refresh_live_cloud_tiers()
-    t = (tier or "").strip().lower()
+    t = _thinking_ensemble.normalize_tier_alias(tier, TIERS)
     if t in ("", "sonder", "local"):
         # A strict selection is an explicit compatibility-alias contract. Only
         # the unpinned default route resolves through the chat policy lane.
@@ -5673,6 +5673,7 @@ def _offload_tier_impl(
     # until after live tier refresh, so defer selection to the generation
     # boundary where Ollama metadata can be consulted.
     _refresh_live_cloud_tiers()
+    tier = _thinking_ensemble.normalize_tier_alias(tier, TIERS)
     request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     model = TIERS.get(tier)
     if model is None:
@@ -5694,6 +5695,8 @@ def _offload_tier_impl(
         num_ctx = _auto_model_context(model)
 
     if not _should_learn(tier, learn):
+        if (_auto_ens := _thinking_ensemble.maybe_auto_ensemble_offload(sys.modules[__name__], prompt, tier=tier, system=system, num_predict=num_predict, num_ctx=num_ctx, schema=schema, cloud=cloud or (provider is not None and _provider_bridge.is_hosted(provider)), fleet_synthesis=fleet_synthesis)) is not None:
+            return _auto_ens
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -5828,6 +5831,8 @@ def _offload_tier_impl(
         )
         retrieve_kwargs["retrieve_fn"] = _no_retrieve_policy
     else:
+        if tier in ("code", "security") and schema is None and not fleet_synthesis:
+            system, _ = _thinking_ensemble.augment_system_with_thinking(sys.modules[__name__], system, prompt, tier=tier, model=model, cloud=False)
         # Learned calls use the tier's own binding, as learn=False does; the strict
         # sonder:latest alias belongs to the default chat route (_serve_target).
         gen = _make_tier_generate(
@@ -7000,6 +7005,7 @@ def _answer_with_history_impl(
             _resolved_persona = personas.resolve(_persona_choice, prompt=prompt, tier=tier_label)
             effective_system = _build_system("", trace, _resolved_persona, cloud=cloud, provider=bridged_provider, model=(
                 _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
+            effective_system, _ = _thinking_ensemble.augment_system_with_thinking(sys.modules[__name__], effective_system, prompt, tier=tier_label, model=model, cloud=cloud or (bridged_provider is not None and _provider_bridge.is_hosted(bridged_provider)) or active_task_account_scope() is not None, history=history)
             if not _has_chat_tools:
                 effective_system = no_verification_claims_system(effective_system)
             effective_system = _reference_lookup_lanes.system_for(model, _chat_tool_manifest.chat_system(  # one tools block, last, every route
@@ -20766,6 +20772,7 @@ def runtime_policy_data() -> dict:
         "embedding_model": policy["embedding_model"],
         "missing_models": [],
         "capability_errors": {},
+        "thinking_ensemble": _thinking_ensemble.status_dict(policy["local_models"], is_cloud_fn=_is_cloud_tier),
     }
     try:
         records = _runtime_installed_model_records()
@@ -20864,6 +20871,7 @@ def _runtime_policy_cached_data() -> dict:
         "embedding_model": policy["embedding_model"],
         "missing_models": [],
         "capability_errors": {},
+        "thinking_ensemble": _thinking_ensemble.status_dict(policy["local_models"], is_cloud_fn=_is_cloud_tier),
     }
     cached = dict(_RUNTIME_READINESS_CACHE)
     if not cached:
@@ -22308,19 +22316,8 @@ def _fanout_synthesize_run(run, synth_model=""):
 
 
 def _ensemble_targets(tiers: str = ""):
-    """Resolve the tiers to poll into a deduped [(tier, model)] list.
-
-    Deduplicated by *resolved model*, not by tier name: several tiers routinely
-    point at the same Ollama model (out of the box `code` and `general` are both
-    `sonder:latest`), and asking one model the same question twice costs a full
-    generation to learn nothing.
-    """
-    requested = [t.strip().lower() for t in (tiers or "").split(",") if t.strip()]
-    explicit = bool(requested)
-    if not requested:
-        requested = [
-            t for t in _configured_local_tiers() if t not in ENSEMBLE_SKIP_TIERS
-        ]
+    """Resolve the tiers to poll into a deduped [(tier, model)] list (auto-pairing code/security with a bound thinking tier)."""
+    requested, explicit = _thinking_ensemble.resolve_ensemble_requested_tiers(tiers, TIERS, _configured_local_tiers(), ENSEMBLE_SKIP_TIERS, is_cloud_fn=_is_cloud_tier)
     targets, seen_models, unknown = [], set(), []
     for tier in requested:
         if _is_cloud_tier(tier) or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier)):
@@ -22568,14 +22565,12 @@ def consult(
     # create a second module instance whose process-local cloud override is
     # still unset.  Status would truthfully say cloud is enabled while the
     # consult leg rejected the same tier as disabled.
-    result = consult_flow.consult(
-        prompt,
-        chosen,
-        ask_fn=lambda question, tier: ensemble_answer(
-            question, tiers=tier, mode="general"
-        ),
-        cloud_ok=cloud_allowed(), lookup=_reference_lookup_multi.consult_scope(_ensemble_targets),  # members share one lookup; the judge runs without
-    )
+    with _thinking_ensemble.thinking_delegation_scope():
+        result = consult_flow.consult(
+            prompt, chosen,
+            ask_fn=lambda question, tier: ensemble_answer(question, tiers=tier, mode="general"),
+            cloud_ok=cloud_allowed(), lookup=_reference_lookup_multi.consult_scope(_ensemble_targets),  # members share one lookup; the judge runs without
+        )
     return consult_flow.format_result(result)
 
 
@@ -23419,7 +23414,7 @@ def _ensemble_codegen_build_loop(
         files_json=files_json,
         build_program=build_program,
         build_args_json=build_args_json,
-        tiers="code,reasoning",
+        tiers=_thinking_ensemble.resolve_codegen_ensemble_tiers(TIERS, is_cloud_fn=_is_cloud_tier),
         attempts=2,
         error_regex=error_regex,
         slips_json=slips_json,
