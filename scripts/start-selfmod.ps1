@@ -11,7 +11,7 @@
 [CmdletBinding()]
 param(
   [double] $Hours = 4.0,
-  [string] $Model = 'qwen2.5-coder:14b',
+  [string] $Model = '',
   [int] $MaxBarren = 6,
   [int] $NumCtx = 16384,
   [string] $Python = '',
@@ -163,10 +163,15 @@ try {
   if ($dirty) { throw "working tree is dirty ($(($dirty | Measure-Object).Count) path(s)); commit or stash first" }
 
   New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
-  $proc = Start-Process -FilePath $py -ArgumentList @(
-      '-u', "`"$scriptPath`"", '--hours', "$Hours", '--model', "`"$Model`"",
-      '--max-barren', "$MaxBarren", '--num-ctx', "$NumCtx"
-    ) -WorkingDirectory $repo -RedirectStandardOutput $log `
+  $pyArgs = @(
+    '-u', "`"$scriptPath`"", '--hours', "$Hours",
+    '--max-barren', "$MaxBarren", '--num-ctx', "$NumCtx"
+  )
+  if (-not [string]::IsNullOrWhiteSpace($Model)) {
+    $pyArgs += @('--model', "`"$Model`"")
+  }
+  $proc = Start-Process -FilePath $py -ArgumentList $pyArgs `
+      -WorkingDirectory $repo -RedirectStandardOutput $log `
       -RedirectStandardError "$log.err" -WindowStyle Hidden -PassThru
   $creation = $null
   for ($i = 0; $i -lt 20 -and $null -eq $creation; $i++) {
@@ -183,7 +188,8 @@ try {
     try { $proc.Kill() } catch { }
     throw
   }
-  "started pid=$($proc.Id) for $Hours h on $Model (ctx $NumCtx; max-barren $MaxBarren; 0=unlimited)"
+  $modelLabel = if ([string]::IsNullOrWhiteSpace($Model)) { 'code-tier' } else { $Model }
+  "started pid=$($proc.Id) for $Hours h on $modelLabel (ctx $NumCtx; max-barren $MaxBarren; 0=unlimited)"
   "log: $log"
   "stop with: powershell -NoProfile -File scripts\start-selfmod.ps1 -Stop"
 } finally {

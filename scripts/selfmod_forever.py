@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-for candidate in (str(REPO), str(REPO / "scripts")):
+for candidate in (str(REPO / "scripts"), str(REPO / "runtime"), str(REPO)):
     if candidate not in sys.path:
         sys.path.insert(0, candidate)
 
@@ -53,18 +53,17 @@ def main() -> int:
         "--num-ctx", type=int, default=16384,
         help="local generation context window for selfmod prompts",
     )
-    parser.add_argument("--model", default="qwen2.5-coder:14b",
-                        help="model behind the code tier for this run")
+    parser.add_argument(
+        "--model", default="",
+        help=(
+            "optional explicit local model override; empty uses the configured "
+            "code tier (auto-ensembled with a bound local thinking tier)"
+        ),
+    )
     args = parser.parse_args()
 
     import server
 
-    # The default 'code' tier is a 7B, and a whole-file rewrite of a large
-    # module is exactly where it was measured to fail: the first run's six
-    # rejections were three lint failures and one candidate returning 22%
-    # of the original file. A 14B fits the host's 6 GB of VRAM with the
-    # remainder in system RAM and converted 6 of 12 bodies the 7B could not
-    # in a separate measurement.
     def log(message):
         print("%s %s" % (time.strftime("%H:%M:%S"), redact_text(message)), flush=True)
 
@@ -72,7 +71,7 @@ def main() -> int:
     committed, barren, passes = [], 0, 0
 
     log("=== selfmod continuous start: %.1fh, mode=%s, model=%s, ctx=%s, max-barren=%s, branch-commit ==="
-        % (args.hours, selfmod.settings().get("mode"), args.model,
+        % (args.hours, selfmod.settings().get("mode"), args.model or "code-tier",
            args.num_ctx,
            "unlimited" if args.max_barren <= 0 else args.max_barren))
 

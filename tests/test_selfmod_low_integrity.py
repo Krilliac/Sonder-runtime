@@ -422,3 +422,29 @@ def test_low_process_cannot_read_a_live_debug_run_capture(tmp_path, monkeypatch)
     finally:
         env.launcher.cancel(rid, "test over")
         env.launcher.wait(rid, 30)
+
+
+def test_low_candidate_loads_ssl_and_ruff_on_isolated_desktop(tmp_path):
+    """Low-integrity child initializes user32-linked binaries without 0xC0000142."""
+    import shutil
+    from scripts.selfmod_low_integrity import run_isolated
+
+    command = [
+        sys.executable, "-c",
+        "import os, _ssl; "
+        "assert os.environ.get('RUFF_CACHE_DIR', '').startswith(os.environ['TEMP']); "
+        "print('ssl-ok')",
+    ]
+    result = run_isolated(command, cwd=tmp_path, timeout=30)
+    assert result["passed"] is True, result
+    assert result["job"]["integrity"] == "low"
+    assert "ssl-ok" in str(result["output"])
+
+    ruff = Path(sys.executable).with_name("ruff.exe")
+    if not ruff.is_file():
+        found = shutil.which("ruff")
+        ruff = Path(found) if found else None
+    if ruff is not None:
+        ruff_res = run_isolated([str(ruff), "--version"], cwd=tmp_path, timeout=30)
+        assert ruff_res["passed"] is True, ruff_res
+        assert "ruff" in str(ruff_res["output"]).lower()
