@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 
+from ..common.bounded_json import JsonBoundsExceeded, check_depth
+
 
 def extract_agent_json(text: str | None) -> object:
     """Parse an agent decision, tolerating markdown fences and prose framing.
@@ -30,8 +32,9 @@ def extract_agent_json(text: str | None) -> object:
             text = text.rstrip()[:-3]
         text = text.strip()
     try:
+        check_depth(text)
         return json.loads(text)
-    except (json.JSONDecodeError, RecursionError):
+    except (JsonBoundsExceeded, json.JSONDecodeError, RecursionError):
         pass
     start = text.find("{")
     if start == -1:
@@ -59,8 +62,10 @@ def extract_agent_json(text: str | None) -> object:
         elif char == "}":
             depth -= 1
             if depth == 0:
+                candidate = text[start:index + 1]
                 try:
-                    return json.loads(text[start:index + 1])
-                except (json.JSONDecodeError, RecursionError):
+                    check_depth(candidate)
+                    return json.loads(candidate)
+                except (JsonBoundsExceeded, json.JSONDecodeError, RecursionError):
                     break
     raise ValueError("agent response was not JSON: %s" % text[:300])

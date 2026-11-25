@@ -21,6 +21,7 @@ import time
 import pytest
 
 from sonder_runtime.adapters import restricted_tool_lane as rtl
+from sonder_runtime.domain.security import delete_calls
 from sonder_runtime.domain.security import tool_call_classifier as rules
 
 pytestmark = pytest.mark.unit
@@ -420,6 +421,8 @@ _ADVERSARIAL = {
     "finder exec flags": ("bash", "-exec ", "find . ", " rm"),
     "fd exec bundles": ("bash", "-HIx", "fd . ", " rm"),
     "finder words": ("bash", "find ", "", "-delete"),
+    # Trailing ``/*`` stripping in ``_resolve`` must be linear (no per-step slice copy).
+    "trailing star slashes": ("bash", "/*", "rm -rf /a", ""),
 }
 
 
@@ -456,8 +459,7 @@ def test_adversarial_command_text_classifies_in_bounded_time(shape, size, limit)
 
 # A space str.strip() drops but shlex keeps (\xa0) at each end: the command is read as
 # given and stripped, each split both ways (``_client_texts``), and as the desktop client
-# splits it (``_dart_words``): up to five linear readings.  The slowest shape takes about
-# 1.6 s here; the limit leaves over 40% headroom for a loaded machine.
+# splits it (``_dart_words``): up to five linear readings (deduplicated per text).
 @pytest.mark.parametrize("shape", sorted(_ADVERSARIAL))
 def test_padded_command_text_classifies_in_bounded_time(shape):
     _language, unit, head, tail = _ADVERSARIAL[shape]
@@ -539,3 +541,60 @@ def test_text_above_the_cap_blocks():
     padded = {"command": "ls", "cwd": "/w/" + "a" * (256 * _K)}
     assert rules.classify("run_program", padded, risk="safe") == rules.BLOCK
     assert rules.classify("run_program", {"command": "ls", "cwd": "/w/a"}, risk="safe") == rules.ALLOW
+
+
+@pytest.mark.parametrize("which", sorted(_RULES))
+def test_oversized_brace_expansion_with_long_tail_classifies_in_bounded_time(which):
+    # _brace_words must reject oversized choice counts before building
+    # ``head + choice + tail`` copies (10k choices x 100 KB tail would allocate ~1 GB).
+    harmless = "echo {" + "a," * 10_000 + "b}" + "x" * 100_000
+    assert len(harmless) <= 256 * _K
+    verdict, elapsed = _timed(lambda: _RULES[which]("run_code", {"code": harmless, "language": "bash"}), 1.0)
+    assert verdict == rules.ASK
+    assert elapsed < 1.0, f"{which}: took {elapsed:.3f}s"
+
+    # Inside a delete, the floor still fails closed to BLOCK in bounded time.
+    delete_cmd = "rm -rf /{" + "a," * 10_000 + "b}" + "x" * 100_000
+    assert len(delete_cmd) <= 256 * _K
+    floor_verdict, floor_elapsed = _timed(
+        lambda: _RULES["floor"]("run_code", {"code": delete_cmd, "language": "bash"}), 1.0
+    )
+    assert floor_verdict == rules.BLOCK
+    assert floor_elapsed < 1.0, f"floor delete brace took {floor_elapsed:.3f}s"
+
+
+def test_repeated_trailing_star_slashes_preserve_root_verdict():
+    root_star = "rm -rf /" + "/*" * 60_000
+    assert len(root_star) <= 256 * _K
+    for which in sorted(_RULES):
+        verdict, elapsed = _timed(
+            lambda which=which: _RULES[which]("run_code", {"code": root_star, "language": "bash"}), 1.0
+        )
+        assert verdict == rules.BLOCK
+        assert elapsed < 1.0, f"{which}: took {elapsed:.3f}s"
+
+
+def test_delete_calls_repeated_suffixes_scan_in_bounded_time():
+    # _program_name in delete_calls must strip repeated PATHEXT suffixes in O(n).
+    harmless = {"command": "a" + ".exe" * 50_000}
+    verdict, elapsed = _timed(lambda: delete_calls.deletes_files("run_program", harmless), 0.5)
+    assert verdict is False
+    assert elapsed < 0.5, f"delete_calls took {elapsed:.3f}s"
+    assert delete_calls.deletes_files("run_program", {"command": "rm" + ".exe" * 100}) is True
+    assert delete_calls.deletes_files("run_code", {"language": "\ufeffpowershell", "code": "-enc AA=="}) is True
+
+
+@pytest.mark.parametrize(
+    "tool,args",
+    [
+        ("file_delete", {"path": ".", "cwd": "\ufeff/"}),
+        ("file_delete", {"path": "System32", "cwd": "\ufeffC:\\Windows"}),
+        ("run_code", {"language": "bash", "code": "rm -rf .", "cwd": "\ufeff/"}),
+        ("run_code", {"language": "powershell", "code": "Remove-Item -Recurse -Force System32", "cwd": "\ufeffC:\\Windows"}),
+    ],
+)
+def test_dart_trimmed_cwd_blocks_file_delete_and_run_code(tool, args):
+    # The desktop client trims ``cwd`` with Dart's String.trim (dropping U+FEFF),
+    # so file_delete and run_code must resolve relative deletes against the trimmed cwd too.
+    assert rtl.classifier_verdict(tool, args) == rules.BLOCK
+    assert rules.classify(tool, args, risk="safe") == rules.BLOCK

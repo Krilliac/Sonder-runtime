@@ -136,9 +136,9 @@ def test_long_dotted_reply_is_scanned_in_linear_time() -> None:
     import time
 
     text = "a." * 10_000
-    started = time.monotonic()
+    started = time.process_time()
     assert guard_unsaved_file_claim(text, folder="creations/lane") == text
-    assert time.monotonic() - started < 3.0
+    assert time.process_time() - started < 3.0
 
 
 def test_passive_claim_with_bounded_token_still_gets_note() -> None:

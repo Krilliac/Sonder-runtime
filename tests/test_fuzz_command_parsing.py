@@ -89,14 +89,15 @@ def _check_timings(timings: list[float], info: str) -> None:
 
 def _call(fn, allowed, data, timings, info):
     """Run ``fn(data)``; return (result, typed_error). Anything else fails."""
-    started = time.perf_counter()
+    # CPU time, not wall clock: sibling xdist workers on shared CI runners must not fail budgets.
+    started = time.process_time()
     try:
         result, error = fn(data), None
     except allowed as exc:
         result, error = None, exc
     except Exception as exc:  # noqa: BLE001 -- the point is to report any escape
         pytest.fail(f"{info}: {type(exc).__name__} escaped for input {data!r}: {exc!r}")
-    elapsed = time.perf_counter() - started
+    elapsed = time.process_time() - started
     timings.append(elapsed)
     assert elapsed < 2.0, f"{info}: {elapsed:.2f} s for input {data[:200] if isinstance(data, str) else data!r}"
     return result, error
@@ -389,12 +390,12 @@ def test_coerce_never_raises_and_follows_the_reference_oracle():
     timings: list[float] = []
     for value in _coerce_inputs(rng, 4000):
         for kind in ("int", "num", "bool", "str", "", "weird"):
-            started = time.perf_counter()
+            started = time.process_time()
             try:
                 got = cc._coerce(value, kind)
             except Exception as exc:  # noqa: BLE001
                 pytest.fail(f"{info}: _coerce({value[:80]!r}, {kind!r}) raised {exc!r}")
-            timings.append(time.perf_counter() - started)
+            timings.append(time.process_time() - started)
             where = f"{info}: _coerce({value[:80]!r}, {kind!r}) -> {got!r}"
             if kind == "int":
                 want = _int_oracle(value)
@@ -1403,23 +1404,79 @@ def test_clean_location_articles_and_placeholders(value, want):
     assert wi._clean_location(want) == want
 
 
-def test_clean_location_cost_grows_with_the_input_not_its_square():
-    """The fixpoint loop took 25 s on 20000 articles; one pass takes milliseconds.
+def _machine_unit() -> float:
+    """Seconds one fixed pure-Python loop takes on this machine: yardstick for machine-relative budgets."""
+    best = float("inf")
+    for _ in range(5):
+        started = time.perf_counter()
+        total = 0
+        for index in range(200_000):
+            total += index & 3
+        best = min(best, time.perf_counter() - started)
+    return best
 
-    Measured 13 ms and 9 ms for the first two inputs. The bound leaves room
-    for a loaded CI host and is still a hundred times under the old cost.
-    """
-    cases = [("the " * 50000 + "Paris", "Paris"), ("Paris" + " today x" * 50000, "Paris"),
-             ("the . " * 50000 + "the area", ""), ("x " * 100000, "")]
-    for value, want in cases:
-        best = None
-        for _ in range(3):
+
+def _assert_scales_linearly(
+    fn,
+    small_input: str,
+    big_input: str,
+    *,
+    label: str,
+    ratio_limit: float = 9.0,
+    ceiling_s: float = 2.0,
+) -> None:
+    """Interleaved running-minima 4x scaling check: linear ~4x, quadratic ~16x."""
+    assert len(big_input) >= 3 * len(small_input), label
+    small = big = float("inf")
+    ratio = 0.0
+    for repeats in (3, 5, 8):
+        for _ in range(repeats):
             start = time.perf_counter()
-            got = wi._clean_location(value)
-            elapsed = time.perf_counter() - start
-            best = elapsed if best is None else min(best, elapsed)
-        assert got == want
-        assert best < 0.2, f"{len(value)} characters took {best:.3f}s"
-    start = time.perf_counter()
-    assert wi.classify("weather in " + "the " * 50000 + "Paris")["location"] == "Paris"
-    assert time.perf_counter() - start < 1.0
+            fn(small_input)
+            small = min(small, time.perf_counter() - start)
+            start = time.perf_counter()
+            fn(big_input)
+            big = min(big, time.perf_counter() - start)
+        ratio = big / max(small, 1e-3)
+        if ratio < ratio_limit:
+            break
+    assert ratio < ratio_limit, (
+        f"{label}: x{len(big_input) / len(small_input):.1f} input cost x{ratio:.1f} "
+        f"({small * 1000:.1f} ms -> {big * 1000:.1f} ms), super-linear ({_info('scaling')})"
+    )
+    assert big < ceiling_s, f"{label}: {len(big_input)} characters took {big:.3f}s (ceiling {ceiling_s:.3f}s)"
+
+
+def test_clean_location_cost_grows_with_the_input_not_its_square():
+    """The fixpoint loop took 25 s on 20000 articles; one pass scales linearly in O(N).
+
+    Check 4x scaling ratios (linear ~4x, quadratic ~16x) alongside machine-calibrated
+    ceilings so shared CI runner jitter cannot fail a genuinely linear O(N) pass.
+    """
+    unit = _machine_unit()
+    cases = [
+        ("leading-articles", lambda n: "the " * n + "Paris", "Paris"),
+        ("trailing-time", lambda n: "Paris" + " today x" * n, "Paris"),
+        ("article-punct-placeholder", lambda n: "the . " * n + "the area", ""),
+        ("long-words", lambda n: "x " * (2 * n), ""),
+    ]
+    for label, build, want in cases:
+        small, big = build(12_500), build(50_000)
+        assert wi._clean_location(big) == want
+        _assert_scales_linearly(
+            wi._clean_location,
+            small,
+            big,
+            label=label,
+            ceiling_s=min(5.0, max(0.2, 60 * unit)),
+        )
+    small_weather = "weather in " + "the " * 12_500 + "Paris"
+    big_weather = "weather in " + "the " * 50_000 + "Paris"
+    assert wi.classify(big_weather)["location"] == "Paris"
+    _assert_scales_linearly(
+        wi.classify,
+        small_weather,
+        big_weather,
+        label="classify-weather-articles",
+        ceiling_s=min(10.0, max(1.0, 250 * unit)),
+    )

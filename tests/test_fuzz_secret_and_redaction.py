@@ -187,24 +187,70 @@ def _leaks(output: str, secret: Secret) -> str | None:
     return None
 
 
+def _machine_unit() -> float:
+    """Seconds one fixed pure-Python loop takes on this machine: yardstick for machine-relative budgets."""
+    best = float("inf")
+    for _ in range(5):
+        started = time.perf_counter()
+        total = 0
+        for index in range(200_000):
+            total += index & 3
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
+def _assert_scales_linearly(
+    fn,
+    small_input: str,
+    big_input: str,
+    *,
+    label: str,
+    ratio_limit: float = 9.0,
+    ceiling_s: float = HARD_LIMIT_S,
+    floor_s: float = 1e-3,
+) -> None:
+    """Interleaved running-minima 4x scaling check: linear ~4x, quadratic ~16x."""
+    assert len(big_input) >= 3 * len(small_input), label
+    small = big = float("inf")
+    ratio = 0.0
+    for repeats in (3, 5, 8):
+        for _ in range(repeats):
+            t0 = time.perf_counter()
+            fn(small_input)
+            small = min(small, time.perf_counter() - t0)
+            t0 = time.perf_counter()
+            fn(big_input)
+            big = min(big, time.perf_counter() - t0)
+        ratio = big / max(small, floor_s)
+        if ratio < ratio_limit:
+            break
+    assert ratio < ratio_limit, (
+        f"{label}: x{len(big_input) / len(small_input):.1f} input cost x{ratio:.1f} "
+        f"({small * 1000:.1f} ms -> {big * 1000:.1f} ms), super-linear (seed={SEED})"
+    )
+    assert big < ceiling_s, f"{label}: {big:.3f}s exceeded ceiling {ceiling_s:.3f}s (seed={SEED})"
+
+
 class Timer:
     def __init__(self) -> None:
         self.samples: list[tuple[float, str]] = []
 
     def run(self, fn, *args, label: str = "", **kwargs):
-        t0 = time.perf_counter()
+        # CPU time, not wall clock: sibling xdist workers on shared CI runners must not fail budgets.
+        t0 = time.process_time()
         try:
             return fn(*args, **kwargs)
         finally:
-            self.samples.append((time.perf_counter() - t0, label))
+            self.samples.append((time.process_time() - t0, label))
 
-    def check(self, *, p99: bool = True) -> None:
+    def check(self, *, p99: bool = True, p99_units: float | None = None) -> None:
         durations = sorted(d for d, _ in self.samples)
         worst, worst_label = max(self.samples, key=lambda s: s[0])
         assert worst < HARD_LIMIT_S, f"seed={SEED}: {worst:.3f}s on {worst_label[:200]!r}"
         if p99:
+            limit = max(P99_LIMIT_S, p99_units * _machine_unit()) if p99_units is not None else P99_LIMIT_S
             p99_s = durations[min(len(durations) - 1, int(len(durations) * 0.99))]
-            assert p99_s < P99_LIMIT_S, f"seed={SEED}: p99 {p99_s * 1000:.1f} ms"
+            assert p99_s < limit, f"seed={SEED}: p99 {p99_s * 1000:.1f} ms (limit {limit * 1000:.1f} ms)"
 
 
 def _fail(msg: str) -> str:
@@ -539,7 +585,7 @@ def test_scan_random_binary_and_size_bound() -> None:
         blob = bytes(rng.getrandbits(8) for _ in range(n))
         findings = timer.run(scanner.scan, blob, label=repr(blob[:80]))
         assert isinstance(findings, tuple)
-    timer.check()
+    timer.check(p99_units=20)
     # Boundary: exactly max_bytes passes, one more raises (str input, ASCII and multibyte).
     small = CredentialScanner(max_bytes=1000)
     assert small.scan("a" * 1000) == ()
@@ -587,16 +633,19 @@ def test_redact_text_hostile_16kb_inputs_stay_in_budget() -> None:
         unit = "".join(rng.choice(_HOSTILE_UNITS) for _ in range(rng.randint(1, 4)))
         text = (unit * (16_384 // len(unit) + 1))[:16_384]
         timer.run(redact_text, text, label=f"redact {unit!r}")
-    timer.check()
+    timer.check(p99_units=20)
 
 
 def test_regression_redact_text_scheme_scan_is_not_quadratic() -> None:
     """SUSPECT/bug: the URL-userinfo pattern (PATTERNS[4]) rescans a long scheme-character run from every word boundary."""
-    text = "sk-" * 5461  # 16 KB, no "://" anywhere
-    t0 = time.perf_counter()
-    redact_text(text)
-    elapsed = time.perf_counter() - t0
-    assert elapsed < P99_LIMIT_S, f"16 KB took {elapsed * 1000:.0f} ms"
+    unit = _machine_unit()
+    _assert_scales_linearly(
+        redact_text,
+        "sk-" * 1365,  # 4 KB, no "://" anywhere
+        "sk-" * 5461,  # 16 KB, no "://" anywhere
+        label="scheme-scan",
+        ceiling_s=max(P99_LIMIT_S, 20 * unit),
+    )
 
 
 def _aws_keys(count: int) -> list[str]:
@@ -702,11 +751,17 @@ def test_aws_key_run_is_applied_after_the_jwt_rule(module, redact) -> None:
     ],
 )
 def test_regression_repeated_unit_is_linear(fn, unit: str, size: int) -> None:
-    text = (unit * (size // len(unit) + 1))[:size]
-    t0 = time.perf_counter()
-    fn(text)
-    elapsed = time.perf_counter() - t0
-    assert elapsed < 0.2, f"{unit!r} x {size}: {elapsed:.3f}s"
+    small_size = size // 4
+    small = (unit * (small_size // len(unit) + 1))[:small_size]
+    big = (unit * (size // len(unit) + 1))[:size]
+    mu = _machine_unit()
+    _assert_scales_linearly(
+        fn,
+        small,
+        big,
+        label=f"{unit!r} x {size}",
+        ceiling_s=max(0.2, 60 * mu),
+    )
 
 
 def test_regression_scan_jwt_after_dash_is_detected_in_linear_time() -> None:
@@ -740,12 +795,22 @@ def test_regression_scan_jwt_after_dash_is_detected_in_linear_time() -> None:
     ]
     for text in ignored:
         assert not found(text), text
-    run = "-eyJ" * (256 * 1024 // 4)
-    for text, expected in ((run, False), (run + "." + rest, True), ("x" + run[1:] + "." + rest, True)):
-        t0 = time.perf_counter()
-        assert found(text) is expected
-        elapsed = time.perf_counter() - t0
-        assert elapsed < 0.5, f"256 KB '-eyJ' run: {elapsed:.3f}s"
+    small_run = "-eyJ" * (64 * 1024 // 4)
+    big_run = "-eyJ" * (256 * 1024 // 4)
+    mu = _machine_unit()
+    for small_text, big_text, expected in (
+        (small_run, big_run, False),
+        (small_run + "." + rest, big_run + "." + rest, True),
+        ("x" + small_run[1:] + "." + rest, "x" + big_run[1:] + "." + rest, True),
+    ):
+        assert found(big_text) is expected
+        _assert_scales_linearly(
+            found,
+            small_text,
+            big_text,
+            label=f"256 KB '-eyJ' run (expected={expected})",
+            ceiling_s=max(0.5, 150 * mu),
+        )
 
 
 @BOTH_COPIES
@@ -947,11 +1012,23 @@ def test_url_rules_are_ordered_around_the_query_rule(module, redact, monkeypatch
     assert seen == ["plain text"]
 
 
-@pytest.mark.parametrize("text", ["a." * 200_000, "a+" * 200_000 + "b://u:p@", "_" + "a-" * 200_000 + "://u:p@h"])
-def test_url_userinfo_scan_is_linear(text) -> None:
-    t0 = time.perf_counter()
-    redact_text(text)
-    assert time.perf_counter() - t0 < HARD_LIMIT_S
+@pytest.mark.parametrize(
+    ("label", "build"),
+    [
+        pytest.param("dot-run", lambda n: "a." * n, id="text0"),
+        pytest.param("plus-run-userinfo", lambda n: "a+" * n + "b://u:p@", id="text1"),
+        pytest.param("dash-run-userinfo", lambda n: "_" + "a-" * n + "://u:p@h", id="text2"),
+    ],
+)
+def test_url_userinfo_scan_is_linear(label: str, build) -> None:
+    mu = _machine_unit()
+    _assert_scales_linearly(
+        redact_text,
+        build(50_000),
+        build(200_000),
+        label=label,
+        ceiling_s=min(15.0, max(HARD_LIMIT_S, 250 * mu)),
+    )
 
 
 # --- hand-written scanners against the regexes they replaced ----------------
@@ -1001,15 +1078,6 @@ def test_hand_scanners_match_the_regexes_they_replaced(module, redact) -> None:
     assert url_changed > 500 and pem_changed > 500  # the oracle saw real matches
 
 
-def _best_of_3(fn, text: str) -> float:
-    best = float("inf")
-    for _ in range(3):
-        t0 = time.perf_counter()
-        fn(text)
-        best = min(best, time.perf_counter() - t0)
-    return best
-
-
 _GROWTH_SHAPES = {
     "plus-run": ("_sub_url_userinfo", lambda n: "+" * n),
     "plus-run-userinfo": ("_sub_url_userinfo", lambda n: "+" * n + "://u:" + "x" * n),
@@ -1025,11 +1093,17 @@ _GROWTH_SHAPES = {
 def test_hand_scanners_grow_linearly(module, redact, shape) -> None:
     name, build = _GROWTH_SHAPES[shape]
     fn = getattr(module, name)
-    small, large = 5_000, 20_000
-    assert _best_of_3(fn, build(small)) < 0.5  # small input is fast
-    t_small = max(_best_of_3(fn, build(small)), 0.005)  # floor: below 5 ms is timer noise
-    t_large = _best_of_3(fn, build(large))
-    assert t_large / t_small < 8, f"{shape}: t(4N)/t(N) = {t_large / t_small:.1f}"
+    small_text, large_text = build(5_000), build(20_000)
+    mu = _machine_unit()
+    _assert_scales_linearly(
+        fn,
+        small_text,
+        large_text,
+        label=shape,
+        ratio_limit=8.0,
+        ceiling_s=max(2.0, 200 * mu),
+        floor_s=0.005,
+    )
 
 
 # ---------------------------------------------------------------------------
