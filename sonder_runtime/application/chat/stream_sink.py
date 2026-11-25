@@ -54,7 +54,7 @@ class LiveTurnStream:
         write: Callable[[str], bool],
         *,
         write_reasoning: Callable[[str], bool] | None = None,
-        write_tool_call: Callable[[dict], bool] | None = None,
+        write_tool_call: Callable[[dict[str, object]], bool] | None = None,
         client_gone: Callable[[], bool] | None = None,
         hold_marker: str | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -163,7 +163,7 @@ class LiveTurnStream:
         self.reasoning_forwarded += text
         return True
 
-    def emit_tool_call_delta(self, delta: dict) -> bool:
+    def emit_tool_call_delta(self, delta: dict[str, object]) -> bool:
         """Forward one structured tool-call delta when tool streaming is enabled."""
         if not isinstance(delta, dict) or not delta:
             return not self.cancelled
