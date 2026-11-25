@@ -20,6 +20,7 @@ import pytest
 from sonder_runtime.adapters.inference import exchange_transport
 from sonder_runtime.adapters.inference.sonder_responses_client import (
     API_VERSION,
+    MAX_IMAGE_BASE64_CHARS,
     MAX_IMAGES_PER_REQUEST,
     PreviousResponseNotFound,
     ResponsesCorrelationHeaders,
@@ -982,6 +983,16 @@ def test_http_error_classification_and_previous_response_not_found() -> None:
             client.create(ResponsesRequest(input="hi", model="ghost"))
         assert not isinstance(mf_exc.value, PreviousResponseNotFound)
 
+        # 404 missing /v1/responses route on older server -> plain NotFound even with previous_response_id
+        fake.force_status = 404
+        fake.force_error_body = {
+            "error": {"code": "not_found", "message": "no route for /v1/responses", "param": None},
+            "sonder": {"api_version": 1},
+        }
+        with pytest.raises(NotFound) as route_exc:
+            client.create(ResponsesRequest(input="hi", previous_response_id="resp_1"))
+        assert not isinstance(route_exc.value, PreviousResponseNotFound)
+
         # 401 -> Forbidden
         fake.force_status = 401
         fake.force_error_body = {"error": {"code": "unauthorized", "message": "bad token"}}
@@ -1218,3 +1229,50 @@ def test_private_worker_binds_pinned_ca_trust_scope(tmp_path: Path) -> None:
     assert observed_ca == [str(ca_file)]
     # Trust scope restored cleanly after exchange
     assert getattr(exchange_transport._TRUST, "ca_bundle", "") == ""
+
+
+def test_stream_does_not_leak_trust_scope_across_yield_or_callbacks(tmp_path: Path) -> None:
+    ca_pem, _other_ca, srv_cert_pem, srv_key_pem = _generate_ca_and_server_certs(tmp_path)
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.load_cert_chain(certfile=str(srv_cert_pem), keyfile=str(srv_key_pem))
+
+    fake = FakeResponsesServer()
+    fake.stream_tokens = ["one", "two"]
+    with _serve_fake(fake, ssl_context=server_ctx) as https_url:
+        client = SonderResponsesClient(
+            SonderResponsesConfig(base_url=https_url, ca_bundle=str(ca_pem))
+        )
+
+        # 1. During generator iteration (between next() calls), _TRUST.ca_bundle must already be restored.
+        gen = client.stream(ResponsesRequest(input="hi", stream=True))
+        try:
+            first_event = next(gen)
+            assert first_event.event_type == "response.created"
+            assert getattr(exchange_transport._TRUST, "ca_bundle", "") == ""
+            second_event = next(gen)
+            assert second_event.event_type == "response.output_text.delta"
+            assert getattr(exchange_transport._TRUST, "ca_bundle", "") == ""
+        finally:
+            gen.close()
+
+        # 2. Inside streaming callbacks (on_event / on_text_delta), _TRUST.ca_bundle must be restored.
+        callback_trust: list[str] = []
+
+        def on_delta(_piece: str) -> None:
+            callback_trust.append(str(getattr(exchange_transport._TRUST, "ca_bundle", "")))
+
+        res = client.create(ResponsesRequest(input="hi", stream=True), on_text_delta=on_delta)
+        assert res.output_text == "onetwo"
+        assert callback_trust == ["", ""]
+
+
+def test_validate_data_image_uri_rejects_oversized_base64_before_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_if_called(*args: object, **kwargs: object) -> bytes:
+        raise AssertionError("base64.b64decode must not be called on oversized base64 payload")
+
+    monkeypatch.setattr(base64, "b64decode", _fail_if_called)
+    oversized_uri = "data:image/png;base64," + ("A" * (MAX_IMAGE_BASE64_CHARS + 4))
+    with pytest.raises(InvalidInput, match="maximum encoded size"):
+        validate_data_image_uri(oversized_uri)

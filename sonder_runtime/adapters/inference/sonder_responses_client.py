@@ -156,6 +156,7 @@ SUPPORTED_IMAGE_MIMES: frozenset[str] = frozenset({
 })
 
 MAX_IMAGE_DECODED_BYTES = 16 * 1024 * 1024
+MAX_IMAGE_BASE64_CHARS = ((MAX_IMAGE_DECODED_BYTES + 2) // 3) * 4
 MAX_IMAGES_PER_REQUEST = 8
 MAX_TOOLS_PER_REQUEST = 128
 MAX_OUTPUT_TOKENS_LIMIT = 1 << 20
@@ -501,6 +502,11 @@ def validate_data_image_uri(uri: str, *, where: str = "image_url") -> str:
     payload = uri[semi + 8:]
     if not payload or (len(payload) % 4) != 0:
         raise InvalidInput("%s base64 image data must be non-empty with length a multiple of 4" % where)
+    if len(payload) > MAX_IMAGE_BASE64_CHARS:
+        raise InvalidInput(
+            "%s base64 image payload exceeds maximum encoded size for %d bytes"
+            % (where, MAX_IMAGE_DECODED_BYTES)
+        )
     try:
         decoded = base64.b64decode(payload.encode("ascii"), validate=True)
     except (UnicodeEncodeError, binascii.Error, ValueError):
@@ -1891,7 +1897,9 @@ def _classify_http_error(
 
     if status == 404:
         if param == "previous_response_id" or (
-            code == "not_found" and previous_response_id is not None
+            code == "not_found"
+            and previous_response_id is not None
+            and "previous_response_id" in message.lower()
         ):
             return PreviousResponseNotFound(
                 "sonder-inference did not find previous_response_id (%s)%s" % (label, suffix),
@@ -2155,18 +2163,15 @@ class SonderResponsesClient:
         saw_terminal = False
         started = time.monotonic()
 
-        with (
-            trust_scope(self._config.ca_bundle),
-            _cancellation_scope(combined_cancel),
-            _ExchangeBudget(budget_seconds) as budget,
-        ):
-            opener = self._opener_factory(budget)
+        with _ExchangeBudget(budget_seconds, cancellation=combined_cancel) as budget:
             try:
                 try:
-                    response = cast(
-                        _ReadableHTTPResponse,
-                        opener.open(http_request, timeout=budget_seconds),
-                    )
+                    with trust_scope(self._config.ca_bundle):
+                        opener = self._opener_factory(budget)
+                        response = cast(
+                            _ReadableHTTPResponse,
+                            opener.open(http_request, timeout=budget_seconds),
+                        )
                 except urllib.error.HTTPError as exc:
                     status = int(exc.code)
                     try:
@@ -2574,6 +2579,7 @@ __all__ = [
     "DEFAULT_MODEL",
     "MAX_DEADLINE_MS",
     "MAX_IMAGES_PER_REQUEST",
+    "MAX_IMAGE_BASE64_CHARS",
     "MAX_IMAGE_DECODED_BYTES",
     "MAX_OUTPUT_TOKENS_LIMIT",
     "MAX_PREVIOUS_RESPONSE_ID_BYTES",
