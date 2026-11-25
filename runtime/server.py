@@ -5024,6 +5024,10 @@ def _chat_request(
         think_supported=_think_option_supported,
         model=model,
     )
+    if tools and not text_only:
+        payload = {**payload, "tools": list(tools)}
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
     _tool_lane_guard.require_generation(model, rung=bridged_rung, text_only=text_only, payload=payload)  # deny list unless text-only
     base_loopback = ollama_endpoint.is_loopback(BASE)
     rerouted = None if bridged_rung is None else _legacy_chat_bridge.ollama_only_reroute(  # a step Inference cannot carry
@@ -5087,10 +5091,6 @@ def _chat_request(
             and _think_option_supported(model)
         ):
             payload["think"] = True
-    if tools and not text_only:
-        payload = {**payload, "tools": list(tools)}
-        if tool_choice is not None:
-            payload["tool_choice"] = tool_choice
     out, attempts = _post_model(
         "/api/chat",
         payload,
