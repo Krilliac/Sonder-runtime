@@ -5,10 +5,12 @@ import asyncio
 import errno
 import fnmatch
 import itertools
+import math
 import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import sys
 import tempfile
@@ -20,9 +22,32 @@ from typing import Any
 MAX_OUTPUT_CHARS = 65_536
 MAX_ERROR_CHARS = 4_096
 _MAX_FILE_READ_CHARS = 65_536
+_MAX_FILE_READ_SCAN_BYTES = 8 * 1024 * 1024
+_MAX_FILE_WRITE_CHARS = 2 * 1024 * 1024
+_MAX_EDIT_FILE_BYTES = 4 * 1024 * 1024
+_MAX_STDIN_BYTES = 1 * 1024 * 1024
+_MAX_CAPTURE_BYTES = 256 * 1024
+_MAX_TEST_PATTERN_CHARS = 512
 _MAX_SEARCH_MATCHES = 100
 _MAX_FIND_MATCHES = 200
 _MAX_TREE_ENTRIES = 200
+_MAX_WALK_DEPTH = 64
+_MAX_WALK_DIRS = 5_000
+_KILL_WAIT_TIMEOUT_SECONDS = 5.0
+
+_BEARER_SECRET_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{6,}")
+_TOKEN_HEADER_SECRET_RE = re.compile(
+    r"(?i)(X-Sonder-Client-Agent-Token\s*[:=]\s*)[^\s,;\"']+"
+)
+_EXACT_SCRUBBED_ENV_KEYS: frozenset[str] = frozenset({
+    "SONDER_CLIENT_AGENT_TOKEN",
+    "SONDER_API_KEY",
+    "SONDER_AUTH_TOKEN",
+    "SONDER_MCP_TOKEN",
+    "SONDER_INFERENCE_API_KEY",
+    "SONDER_REMOTE_TOKEN",
+})
+_SONDER_SECRET_ENV_RE = re.compile(r"^SONDER_[A-Z0-9_]*(?:TOKEN|API_KEY|SECRET)$")
 
 CLIENT_AGENT_MODES: tuple[str, ...] = (
     "plan",
@@ -75,6 +100,64 @@ def _bound_text(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 16)] + "\n...[truncated]"
+
+
+def _sanitize_error_text(text: str, *, limit: int = MAX_ERROR_CHARS) -> str:
+    """Strip control chars, redact auth tokens, and bound executor error messages."""
+    cleaned = "".join(
+        ch if (ord(ch) >= 32 and ord(ch) != 127) or ch in ("\n", "\t") else " "
+        for ch in str(text or "")
+    )
+    cleaned = _BEARER_SECRET_RE.sub("Bearer [redacted]", cleaned)
+    cleaned = _TOKEN_HEADER_SECRET_RE.sub(r"\1[redacted]", cleaned)
+    env_token = os.environ.get("SONDER_CLIENT_AGENT_TOKEN", "").strip()
+    if len(env_token) >= 6:
+        cleaned = cleaned.replace(env_token, "[redacted]")
+    return _bound_text(cleaned, limit)
+
+
+def _parse_bounded_int(
+    raw: object,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+    name: str,
+) -> int:
+    """Parse an integer argument strictly (rejecting bools, NaN/Inf, and non-numeric types)."""
+    if raw is None or raw == "":
+        return default
+    if isinstance(raw, bool):
+        raise ValueError(f"'{name}' must be an integer, not boolean")
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, float):
+        if not math.isfinite(raw) or not raw.is_integer():
+            raise ValueError(f"'{name}' must be a finite integer")
+        value = int(raw)
+    elif isinstance(raw, str):
+        clean = raw.strip()
+        if not clean:
+            return default
+        try:
+            value = int(clean, 10)
+        except ValueError as exc:
+            raise ValueError(f"'{name}' must be an integer") from exc
+    else:
+        raise TypeError(f"'{name}' must be an integer")
+    return max(minimum, min(maximum, value))
+
+
+def _scrubbed_process_env(base_env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return a copy of the process environment stripped of Sonder companion/host tokens."""
+    source = os.environ if base_env is None else base_env
+    cleaned: dict[str, str] = {}
+    for key, value in source.items():
+        upper = key.upper()
+        if upper in _EXACT_SCRUBBED_ENV_KEYS or _SONDER_SECRET_ENV_RE.match(upper):
+            continue
+        cleaned[key] = value
+    return cleaned
 
 
 def tool_risk_of(tool: str) -> str:
@@ -604,11 +687,8 @@ def _resolve_path(raw: object, root: Path, *, allow_escape: bool) -> Path:
     _reject_link_components(candidate, root, allow_escape=allow_escape, raw_text=text)
     resolved = candidate.resolve()
     _reject_unsafe_path_spelling(str(resolved))
-    if not allow_escape:
-        try:
-            resolved.relative_to(root)
-        except ValueError as exc:
-            raise PermissionError(f"path '{text}' escapes workspace root '{root}'") from exc
+    if not allow_escape and not _path_is_within_root(resolved, root):
+        raise PermissionError(f"path '{text}' escapes workspace root '{root}'")
     return resolved
 
 
@@ -850,6 +930,205 @@ def _resolve_write_path(raw: object, root: Path, *, allow_escape: bool) -> Path:
     return resolved
 
 
+class _WindowsProcessJob:
+    """Win32 Job Object with ``KILL_ON_JOB_CLOSE`` for atomic process-tree cleanup."""
+
+    def __init__(self) -> None:
+        self._handle: int | None = None
+        self.attached: bool = False
+
+    def attach(self, pid: int) -> bool:
+        if sys.platform != "win32" or pid <= 0:
+            return False
+        import ctypes
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_uint64),
+                ("WriteOperationCount", ctypes.c_uint64),
+                ("OtherOperationCount", ctypes.c_uint64),
+                ("ReadTransferCount", ctypes.c_uint64),
+                ("WriteTransferCount", ctypes.c_uint64),
+                ("OtherTransferCount", ctypes.c_uint64),
+            ]
+
+        class _BasicLimitInfo(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", ctypes.c_uint32),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", ctypes.c_uint32),
+                ("SchedulingClass", ctypes.c_uint32),
+            ]
+
+        class _ExtendedLimitInfo(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimitInfo),
+                ("IoInfo", _IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+        kernel32.SetInformationJobObject.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        ]
+        kernel32.SetInformationJobObject.restype = ctypes.c_int
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        kernel32.AssignProcessToJobObject.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return False
+        info = _ExtendedLimitInfo()
+        info.BasicLimitInformation.LimitFlags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            kernel32.CloseHandle(ctypes.c_void_p(job))
+            return False
+        # PROCESS_SET_QUOTA (0x0100) | PROCESS_TERMINATE (0x0001)
+        proc_handle = kernel32.OpenProcess(0x0101, 0, pid)
+        if not proc_handle:
+            kernel32.CloseHandle(ctypes.c_void_p(job))
+            return False
+        try:
+            ok = bool(kernel32.AssignProcessToJobObject(ctypes.c_void_p(job), ctypes.c_void_p(proc_handle)))
+        finally:
+            kernel32.CloseHandle(ctypes.c_void_p(proc_handle))
+        if not ok:
+            kernel32.CloseHandle(ctypes.c_void_p(job))
+            return False
+        self._handle = int(job)
+        self.attached = True
+        return True
+
+    def terminate_and_close(self) -> None:
+        handle = self._handle
+        if handle is None or sys.platform != "win32":
+            return
+        self._handle = None
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel32.TerminateJobObject.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        try:
+            kernel32.TerminateJobObject(ctypes.c_void_p(handle), 1)
+        except OSError:
+            pass
+        try:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+        except OSError:
+            pass
+
+
+async def _terminate_process_tree(
+    proc: asyncio.subprocess.Process,
+    win_job: _WindowsProcessJob | None,
+) -> None:
+    """Force-terminate ``proc`` and all descendants on both Windows and POSIX."""
+    if sys.platform == "win32":
+        if win_job is not None and win_job.attached:
+            win_job.terminate_and_close()
+        elif proc.pid > 0:
+            # Fallback when Job Object assignment was unavailable.
+            try:
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill",
+                    "/F",
+                    "/T",
+                    "/PID",
+                    str(proc.pid),
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(killer.wait(), timeout=_KILL_WAIT_TIMEOUT_SECONDS)
+            except Exception:
+                pass
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+    else:
+        if proc.pid > 0:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                try:
+                    proc.kill()
+                except (ProcessLookupError, OSError):
+                    pass
+        else:
+            try:
+                proc.kill()
+            except (ProcessLookupError, OSError):
+                pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=_KILL_WAIT_TIMEOUT_SECONDS)
+    except Exception:
+        pass
+
+
+async def _read_stream_bounded(
+    stream: asyncio.StreamReader | None,
+    max_bytes: int,
+) -> tuple[bytes, bool]:
+    """Read an async subprocess pipe keeping at most ``max_bytes`` in memory."""
+    if stream is None:
+        return b"", False
+    chunks: list[bytes] = []
+    kept = 0
+    truncated = False
+    while True:
+        piece = await stream.read(16_384)
+        if not piece:
+            break
+        if kept < max_bytes:
+            room = max_bytes - kept
+            if len(piece) <= room:
+                chunks.append(piece)
+                kept += len(piece)
+            else:
+                chunks.append(piece[:room])
+                kept += room
+                truncated = True
+        else:
+            truncated = True
+    return b"".join(chunks), truncated
+
+
+async def _write_stdin_safely(proc: asyncio.subprocess.Process, stdin_bytes: bytes | None) -> None:
+    if stdin_bytes is None or proc.stdin is None:
+        return
+    try:
+        proc.stdin.write(stdin_bytes)
+        await proc.stdin.drain()
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        pass
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+
+
 async def _run_process(
     argv: list[str],
     *,
@@ -858,34 +1137,82 @@ async def _run_process(
     stdin_text: str = "",
     env: Mapping[str, str] | None = None,
 ) -> tuple[int, str, str]:
+    stdin_bytes = stdin_text.encode("utf-8") if stdin_text else None
+    if stdin_bytes is not None and len(stdin_bytes) > _MAX_STDIN_BYTES:
+        raise ValueError(f"stdin exceeds {_MAX_STDIN_BYTES} bytes")
+    effective_env = _scrubbed_process_env(env)
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=str(cwd),
-            stdin=asyncio.subprocess.PIPE if stdin_text else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=dict(env) if env is not None else None,
-        )
+        if sys.platform == "win32":
+            # CREATE_NEW_PROCESS_GROUP (0x00000200) isolates console signals.
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(cwd),
+                stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=effective_env,
+                creationflags=0x00000200,
+            )
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(cwd),
+                stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=effective_env,
+                start_new_session=True,
+            )
     except FileNotFoundError as exc:
         exe = argv[0] if argv else ""
         raise FileNotFoundError(f"executable not found: {exe}") from exc
-    stdin_bytes = stdin_text.encode("utf-8") if stdin_text else None
+
+    win_job = _WindowsProcessJob() if sys.platform == "win32" else None
+    if win_job is not None:
+        win_job.attach(proc.pid)
+
+    stdin_task = asyncio.create_task(_write_stdin_safely(proc, stdin_bytes))
+    stdout_task = asyncio.create_task(_read_stream_bounded(proc.stdout, _MAX_CAPTURE_BYTES))
+    stderr_task = asyncio.create_task(_read_stream_bounded(proc.stderr, _MAX_CAPTURE_BYTES))
+    wait_task = asyncio.create_task(proc.wait())
     try:
-        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(stdin_bytes), timeout=float(timeout))
+        _, (stdout_b, out_trunc), (stderr_b, err_trunc), _ = await asyncio.wait_for(
+            asyncio.gather(stdin_task, stdout_task, stderr_task, wait_task),
+            timeout=float(timeout),
+        )
     except asyncio.TimeoutError as exc:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        try:
-            await proc.wait()
-        except Exception:
-            pass
+        await _terminate_process_tree(proc, win_job)
+        for task in (stdin_task, stdout_task, stderr_task, wait_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(stdin_task, stdout_task, stderr_task, wait_task, return_exceptions=True)
         raise TimeoutError(f"command timed out after {timeout}s") from exc
-    stdout_s = (stdout_b or b"").decode("utf-8", errors="replace")
-    stderr_s = (stderr_b or b"").decode("utf-8", errors="replace")
-    return proc.returncode or 0, stdout_s, stderr_s
+    except BaseException:
+        await _terminate_process_tree(proc, win_job)
+        for task in (stdin_task, stdout_task, stderr_task, wait_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(stdin_task, stdout_task, stderr_task, wait_task, return_exceptions=True)
+        raise
+    finally:
+        # Clean up any orphaned background descendants left behind by the child.
+        if sys.platform == "win32":
+            if win_job is not None:
+                win_job.terminate_and_close()
+        elif proc.pid > 0:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+    stdout_s = stdout_b.decode("utf-8", errors="replace")
+    if out_trunc:
+        stdout_s = stdout_s + "\n...[truncated]"
+    stderr_s = stderr_b.decode("utf-8", errors="replace")
+    if err_trunc:
+        stderr_s = stderr_s + "\n...[truncated]"
+    rc = proc.returncode if proc.returncode is not None else -1
+    return rc, stdout_s, stderr_s
 
 
 def _run_process_sync(
@@ -919,8 +1246,20 @@ def _exec_file_read(args: Mapping[str, Any], root: Path, *, bypass: bool) -> Cli
         raise PermissionError(f"symlink or junction traversal is not permitted in path '{path}'")
     if not stat.S_ISREG(st_pre.st_mode):
         return ClientToolExecutionResult(ok=False, error=f"file not found: {path}")
-    offset = max(1, int(args.get("offset") or 1))
-    limit = max(1, min(500, int(args.get("limit") or 200)))
+    offset = _parse_bounded_int(
+        args.get("offset"),
+        default=1,
+        minimum=1,
+        maximum=10_000_000,
+        name="offset",
+    )
+    limit = _parse_bounded_int(
+        args.get("limit"),
+        default=200,
+        minimum=1,
+        maximum=500,
+        name="limit",
+    )
     try:
         fd = _open_regular_file_no_follow(
             path,
@@ -931,19 +1270,57 @@ def _exec_file_read(args: Mapping[str, Any], root: Path, *, bypass: bool) -> Cli
         )
     except FileNotFoundError:
         return ClientToolExecutionResult(ok=False, error=f"file not found: {path}")
-    # Stream to the requested window instead of decoding the whole file.
+    # Stream to the requested window with bounded per-line and total scan caps
+    # so a huge single-line or multi-GB file cannot exhaust memory.
+    slice_lines: list[str] = []
+    scanned_chars = 0
+    collected_chars = 0
+    line_cap = _MAX_FILE_READ_CHARS + 1
     with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as fh:
-        slice_lines = [
-            line.removesuffix("\n")
-            for line in itertools.islice(fh, offset - 1, offset - 1 + limit)
-        ]
+        lineno = 0
+        end_line = offset - 1 + limit
+        while lineno < end_line:
+            chunk = fh.readline(line_cap)
+            if not chunk:
+                break
+            scanned_chars += len(chunk)
+            if lineno < offset - 1 and scanned_chars > _MAX_FILE_READ_SCAN_BYTES:
+                return ClientToolExecutionResult(
+                    ok=False,
+                    error=f"file_read exceeded {_MAX_FILE_READ_SCAN_BYTES} byte scan budget before offset {offset}",
+                )
+            # Drain remainder of an overlong line without buffering it.
+            truncated_line = False
+            while not chunk.endswith("\n"):
+                tail = fh.readline(line_cap)
+                if not tail:
+                    break
+                truncated_line = True
+                scanned_chars += len(tail)
+                if scanned_chars > _MAX_FILE_READ_SCAN_BYTES:
+                    break
+            lineno += 1
+            if lineno >= offset:
+                line_text = chunk.rstrip("\r\n")
+                if truncated_line:
+                    line_text = _bound_text(line_text, _MAX_FILE_READ_CHARS)
+                slice_lines.append(line_text)
+                collected_chars += len(line_text) + 16
+                if collected_chars > _MAX_FILE_READ_CHARS + 1024:
+                    break
     rendered = "\n".join(f"{offset + idx}: {line}" for idx, line in enumerate(slice_lines))
     return ClientToolExecutionResult(ok=True, output=_bound_text(rendered, _MAX_FILE_READ_CHARS))
 
 
 def _exec_file_write(args: Mapping[str, Any], root: Path, *, bypass: bool) -> ClientToolExecutionResult:
     path = _resolve_write_path(args.get("path"), root, allow_escape=bypass)
-    content = str(args.get("content") or "")
+    raw_content = args.get("content")
+    content = "" if raw_content is None else str(raw_content)
+    if len(content) > _MAX_FILE_WRITE_CHARS:
+        return ClientToolExecutionResult(
+            ok=False,
+            error=f"file_write content exceeds {_MAX_FILE_WRITE_CHARS} characters",
+        )
     mode = str(args.get("mode") or "overwrite").strip().lower()
     if mode not in {"create", "overwrite", "append"}:
         return ClientToolExecutionResult(ok=False, error=f"unsupported file_write mode: {mode}")
@@ -993,10 +1370,20 @@ def _exec_file_edit(args: Mapping[str, Any], root: Path, *, bypass: bool) -> Cli
         raise PermissionError(f"symlink or junction traversal is not permitted in path '{path}'")
     if not stat.S_ISREG(st_pre.st_mode):
         return ClientToolExecutionResult(ok=False, error=f"file not found: {path}")
+    if st_pre.st_size > _MAX_EDIT_FILE_BYTES:
+        return ClientToolExecutionResult(
+            ok=False,
+            error=f"file exceeds maximum editable size of {_MAX_EDIT_FILE_BYTES} bytes",
+        )
     old = str(args.get("old") or "")
     new = str(args.get("new") or "")
     if not old:
         return ClientToolExecutionResult(ok=False, error="'old' text must be non-empty")
+    if len(new) > _MAX_FILE_WRITE_CHARS:
+        return ClientToolExecutionResult(
+            ok=False,
+            error=f"file_edit replacement exceeds {_MAX_FILE_WRITE_CHARS} characters",
+        )
     try:
         fd = _open_regular_file_no_follow(
             path,
@@ -1009,7 +1396,17 @@ def _exec_file_edit(args: Mapping[str, Any], root: Path, *, bypass: bool) -> Cli
         return ClientToolExecutionResult(ok=False, error=f"file not found: {path}")
     # Perform read and in-place write through the same verified descriptor.
     with os.fdopen(fd, "r+", encoding="utf-8", errors="replace") as fh:
-        text = fh.read()
+        if os.fstat(fh.fileno()).st_size > _MAX_EDIT_FILE_BYTES:
+            return ClientToolExecutionResult(
+                ok=False,
+                error=f"file exceeds maximum editable size of {_MAX_EDIT_FILE_BYTES} bytes",
+            )
+        text = fh.read(_MAX_EDIT_FILE_BYTES + 1)
+        if len(text) > _MAX_EDIT_FILE_BYTES:
+            return ClientToolExecutionResult(
+                ok=False,
+                error=f"file exceeds maximum editable size of {_MAX_EDIT_FILE_BYTES} bytes",
+            )
         count = text.count(old)
         if count == 0:
             return ClientToolExecutionResult(ok=False, error="target string not found in file")
@@ -1030,17 +1427,16 @@ def _exec_file_delete(args: Mapping[str, Any], root: Path, *, bypass: bool) -> C
     candidate = Path(text)
     if not candidate.is_absolute():
         candidate = root / candidate
+    if os.path.normcase(str(candidate)) == os.path.normcase(str(root)):
+        return ClientToolExecutionResult(ok=False, error="file_delete refuses directories")
     if candidate.name not in ("", ".", ".."):
         parent = candidate.parent
         _reject_unsafe_reparse_ancestors(parent)
         _reject_link_components(parent, root, allow_escape=bypass, raw_text=text)
         resolved_parent = parent.resolve()
         _reject_unsafe_path_spelling(str(resolved_parent))
-        if not bypass:
-            try:
-                resolved_parent.relative_to(root)
-            except ValueError as exc:
-                raise PermissionError(f"path '{text}' escapes workspace root '{root}'") from exc
+        if not bypass and not _path_is_within_root(resolved_parent, root):
+            raise PermissionError(f"path '{text}' escapes workspace root '{root}'")
         link_path = resolved_parent / candidate.name
         if _is_reparse_or_link(link_path):
             refusal = _write_refusal(text, link_path, root)
@@ -1052,8 +1448,15 @@ def _exec_file_delete(args: Mapping[str, Any], root: Path, *, bypass: bool) -> C
             link_path.unlink()
             return ClientToolExecutionResult(ok=True, output=f"deleted {link_path}")
     path = _resolve_write_path(raw, root, allow_escape=bypass)
-    if not path.exists():
+    if os.path.normcase(str(path)) == os.path.normcase(str(root)):
+        return ClientToolExecutionResult(ok=False, error="file_delete refuses directories")
+    if not os.path.lexists(path):
         return ClientToolExecutionResult(ok=False, error=f"file not found: {path}")
+    if _is_reparse_or_link(path):
+        if _is_junction(path):
+            return ClientToolExecutionResult(ok=False, error="file_delete refuses directories")
+        path.unlink()
+        return ClientToolExecutionResult(ok=True, output=f"deleted {path}")
     if path.is_dir():
         return ClientToolExecutionResult(ok=False, error="file_delete refuses directories")
     path.unlink()
@@ -1126,11 +1529,8 @@ def _scandir_classify(
         context = [_canonical_component(p) for p in context_parts]
         if _is_secret_read_path(names, context):
             return False, False, entry_path
-    if not bypass:
-        try:
-            entry_path.relative_to(root)
-        except ValueError:
-            return False, False, entry_path
+    if not bypass and not _path_is_within_root(entry_path, root):
+        return False, False, entry_path
     return True, is_dir, entry_path
 
 
@@ -1144,10 +1544,13 @@ def _exec_file_find(args: Mapping[str, Any], root: Path, *, bypass: bool) -> Cli
         return ClientToolExecutionResult(ok=False, error=f"directory not found: {base}")
     pattern = str(args.get("pattern") or "*").strip() or "*"
     matches: list[str] = []
+    visited_dirs = 0
 
-    def walk(cur: Path) -> None:
-        if len(matches) >= _MAX_FIND_MATCHES:
+    def walk(cur: Path, depth: int) -> None:
+        nonlocal visited_dirs
+        if len(matches) >= _MAX_FIND_MATCHES or depth > _MAX_WALK_DEPTH or visited_dirs >= _MAX_WALK_DIRS:
             return
+        visited_dirs += 1
         dirs: list[tuple[str, Path]] = []
         files: list[tuple[str, Path]] = []
         try:
@@ -1171,11 +1574,11 @@ def _exec_file_find(args: Mapping[str, Any], root: Path, *, bypass: bool) -> Cli
                 if len(matches) >= _MAX_FIND_MATCHES:
                     return
         for _, dpath in sorted(dirs, key=lambda pair: pair[0]):
-            walk(dpath)
-            if len(matches) >= _MAX_FIND_MATCHES:
+            walk(dpath, depth + 1)
+            if len(matches) >= _MAX_FIND_MATCHES or visited_dirs >= _MAX_WALK_DIRS:
                 return
 
-    walk(base)
+    walk(base, 0)
     return ClientToolExecutionResult(ok=True, output="\n".join(matches) or "(no matches)")
 
 
@@ -1183,7 +1586,13 @@ def _exec_directory_tree(args: Mapping[str, Any], root: Path, *, bypass: bool) -
     base = _resolve_scan_base(args.get("path", "."), root, bypass=bypass)
     if not base.is_dir():
         return ClientToolExecutionResult(ok=False, error=f"directory not found: {base}")
-    depth = max(1, min(5, int(args.get("depth") or 2)))
+    depth = _parse_bounded_int(
+        args.get("depth"),
+        default=2,
+        minimum=1,
+        maximum=5,
+        name="depth",
+    )
     lines: list[str] = []
 
     def walk(cur: Path, level: int) -> None:
@@ -1227,10 +1636,13 @@ def _exec_text_search(args: Mapping[str, Any], root: Path, *, bypass: bool) -> C
         return ClientToolExecutionResult(ok=False, error=f"directory not found: {base}")
     glob_pat = str(args.get("glob") or "").strip()
     matches: list[str] = []
+    visited_dirs = 0
 
-    def walk(cur: Path) -> None:
-        if len(matches) >= _MAX_SEARCH_MATCHES:
+    def walk(cur: Path, depth: int) -> None:
+        nonlocal visited_dirs
+        if len(matches) >= _MAX_SEARCH_MATCHES or depth > _MAX_WALK_DEPTH or visited_dirs >= _MAX_WALK_DIRS:
             return
+        visited_dirs += 1
         dirs: list[tuple[str, Path]] = []
         files: list[tuple[str, Path]] = []
         try:
@@ -1251,12 +1663,23 @@ def _exec_text_search(args: Mapping[str, Any], root: Path, *, bypass: bool) -> C
             if glob_pat and not fnmatch.fnmatch(name, glob_pat):
                 continue
             try:
-                if not fpath.is_file():
-                    continue
-                if fpath.stat().st_size > 512 * 1024:
-                    continue
-                content = fpath.read_text(encoding="utf-8", errors="replace")
+                fd = _open_regular_file_no_follow(
+                    fpath,
+                    root,
+                    flags=os.O_RDONLY,
+                    allow_escape=bypass,
+                    for_write=False,
+                )
+            except (OSError, PermissionError):
+                continue
+            try:
+                with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as fh:
+                    if os.fstat(fh.fileno()).st_size > 512 * 1024:
+                        continue
+                    content = fh.read(512 * 1024 + 1)
             except OSError:
+                continue
+            if len(content) > 512 * 1024:
                 continue
             rel = fpath.relative_to(base).as_posix()
             for lineno, line in enumerate(content.splitlines(), 1):
@@ -1265,11 +1688,11 @@ def _exec_text_search(args: Mapping[str, Any], root: Path, *, bypass: bool) -> C
                     if len(matches) >= _MAX_SEARCH_MATCHES:
                         return
         for _, dpath in sorted(dirs, key=lambda pair: pair[0]):
-            walk(dpath)
-            if len(matches) >= _MAX_SEARCH_MATCHES:
+            walk(dpath, depth + 1)
+            if len(matches) >= _MAX_SEARCH_MATCHES or visited_dirs >= _MAX_WALK_DIRS:
                 return
 
-    walk(base)
+    walk(base, 0)
     return ClientToolExecutionResult(ok=True, output="\n".join(matches) or "(no matches)")
 
 
@@ -1277,9 +1700,20 @@ def _exec_run_code(args: Mapping[str, Any], root: Path, *, bypass: bool) -> Clie
     code = str(args.get("code") or "")
     if not code.strip():
         return ClientToolExecutionResult(ok=False, error="code is required")
+    if len(code) > _MAX_FILE_WRITE_CHARS:
+        return ClientToolExecutionResult(
+            ok=False,
+            error=f"code exceeds {_MAX_FILE_WRITE_CHARS} characters",
+        )
     language = str(args.get("language") or "python").strip().lower()
     stdin_text = str(args.get("stdin") or "")
-    timeout = max(1, min(60, int(args.get("timeout") or 15)))
+    timeout = _parse_bounded_int(
+        args.get("timeout"),
+        default=15,
+        minimum=1,
+        maximum=60,
+        name="timeout",
+    )
     cwd = root
     if language in {"python", "py"}:
         rc, out, err = _run_process_sync(
@@ -1330,10 +1764,18 @@ def _exec_run_program(args: Mapping[str, Any], root: Path, *, bypass: bool) -> C
     command = str(args.get("command") or "").strip()
     if not command:
         return ClientToolExecutionResult(ok=False, error="command is required")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in command):
+        return ClientToolExecutionResult(ok=False, error="command contains disallowed control characters")
     cwd = _resolve_path(args.get("cwd") or ".", root, allow_escape=bypass)
     if not cwd.is_dir():
         return ClientToolExecutionResult(ok=False, error=f"working directory not found: {cwd}")
-    timeout = max(1, min(120, int(args.get("timeout") or 30)))
+    timeout = _parse_bounded_int(
+        args.get("timeout"),
+        default=30,
+        minimum=1,
+        maximum=120,
+        name="timeout",
+    )
     try:
         raw_tokens = shlex.split(command, posix=(os.name != "nt"))
     except ValueError as exc:
@@ -1344,6 +1786,7 @@ def _exec_run_program(args: Mapping[str, Any], root: Path, *, bypass: bool) -> C
     ]
     if not argv:
         return ClientToolExecutionResult(ok=False, error="command is required")
+    _reject_unsafe_path_spelling(argv[0])
     rc, out, err = _run_process_sync(argv, cwd=cwd, timeout=timeout)
     ok, stdout_msg, err_msg = _format_proc_output(rc, out, err)
     return ClientToolExecutionResult(ok=ok, output=stdout_msg, error=err_msg)
@@ -1353,6 +1796,13 @@ def _exec_test_run(args: Mapping[str, Any], root: Path, *, bypass: bool) -> Clie
     cwd = _resolve_path(args.get("root") or ".", root, allow_escape=bypass)
     if not cwd.is_dir():
         return ClientToolExecutionResult(ok=False, error=f"directory not found: {cwd}")
+    timeout = _parse_bounded_int(
+        args.get("timeout"),
+        default=120,
+        minimum=1,
+        maximum=120,
+        name="timeout",
+    )
     argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q"]
     rel_path = str(args.get("path") or "").strip()
     if rel_path:
@@ -1360,8 +1810,10 @@ def _exec_test_run(args: Mapping[str, Any], root: Path, *, bypass: bool) -> Clie
         argv.append(str(target))
     pattern = str(args.get("pattern") or "").strip()
     if pattern:
+        if len(pattern) > _MAX_TEST_PATTERN_CHARS or any(ord(ch) < 32 or ord(ch) == 127 for ch in pattern):
+            return ClientToolExecutionResult(ok=False, error="invalid test_run pattern")
         argv.extend(["-k", pattern])
-    rc, out, err = _run_process_sync(argv, cwd=cwd, timeout=120)
+    rc, out, err = _run_process_sync(argv, cwd=cwd, timeout=timeout)
     ok, stdout_msg, err_msg = _format_proc_output(rc, out, err)
     return ClientToolExecutionResult(ok=ok, output=stdout_msg, error=err_msg)
 
@@ -1420,7 +1872,11 @@ _GIT_PROGRAM_ENV_VARS: tuple[str, ...] = (
 
 
 def _git_environment(root: Path | None = None, *, bypass: bool = False) -> dict[str, str]:
-    env = {key: value for key, value in os.environ.items() if key.upper() not in _GIT_PROGRAM_ENV_VARS}
+    env = {
+        key: value
+        for key, value in _scrubbed_process_env().items()
+        if key.upper() not in _GIT_PROGRAM_ENV_VARS
+    }
     env.update({
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_OPTIONAL_LOCKS": "0",
@@ -1574,7 +2030,13 @@ def _exec_git(tool: str, args: Mapping[str, Any], root: Path, *, bypass: bool) -
             target = _resolve_read_path(rel_path, cwd, allow_escape=bypass, workspace_root=root)
             subcommand.extend(["--", str(target)])
     elif tool == "git_log":
-        limit = max(1, min(100, int(args.get("limit") or 20)))
+        limit = _parse_bounded_int(
+            args.get("limit"),
+            default=20,
+            minimum=1,
+            maximum=100,
+            name="limit",
+        )
         subcommand = ["log", "--no-ext-diff", "--no-textconv", f"-n{limit}", "--oneline"]
     else:
         subcommand = ["branch", "-a"]
@@ -1652,22 +2114,29 @@ def execute_client_tool(
     except ClientPathRefused as exc:
         return ClientToolExecutionResult(
             ok=False,
-            error=str(exc),
+            error=_sanitize_error_text(str(exc)),
             denied=True,
             mode=policy.mode,
             risk=risk,
         )
-    except (PermissionError, OSError, TimeoutError, ValueError, TypeError) as exc:
+    except (PermissionError, OSError, TimeoutError, ValueError, TypeError, OverflowError, UnicodeError) as exc:
         return ClientToolExecutionResult(
             ok=False,
-            error=str(exc),
+            error=_sanitize_error_text(str(exc)),
+            mode=policy.mode,
+            risk=risk,
+        )
+    except Exception:  # noqa: BLE001 - fail closed without leaking internal tracebacks
+        return ClientToolExecutionResult(
+            ok=False,
+            error="internal tool execution error",
             mode=policy.mode,
             risk=risk,
         )
     return ClientToolExecutionResult(
         ok=res.ok,
         output=res.output,
-        error=res.error,
+        error=_sanitize_error_text(res.error) if res.error else "",
         denied=res.denied,
         needs_approval=res.needs_approval,
         mode=policy.mode,
