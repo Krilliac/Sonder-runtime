@@ -26,7 +26,10 @@ def _run(root, namespace, job_id, workspace):
     # Only process-created environment and fixed namespace data are consumed.
     # Before importing the HTTP stack, prove this actual process was attached
     # to the canonical job record while its launch was durably pending.
-    from ..adapters.persistence.runtime_owner import SQLiteRuntimeOwnerJournal
+    from ..adapters.persistence.runtime_owner import (
+        OwnerStorageBusy,
+        SQLiteRuntimeOwnerJournal,
+    )
     from ..adapters.persistence.sqlite.job_registry import SQLiteDurableJobRegistry
     from ..adapters.process_liveness import process_identity
     from ..application.ports.runtime_owner import OwnerRefused
@@ -126,12 +129,20 @@ def _run(root, namespace, job_id, workspace):
 
         def control():
             ready = False
+            transient_busy = 0
             try:
                 while not stopped.wait(0.1):
                     if not ready and serve.BOUND_PORT == selected["port"]:
                         evidence("READY")
                         ready = True
-                    pending = journal.pending()
+                    try:
+                        pending = journal.pending()
+                    except OwnerStorageBusy:
+                        transient_busy += 1
+                        if transient_busy >= 5:
+                            raise
+                        continue
+                    transient_busy = 0
                     if pending is not None and pending.action == "stop":
                         lifecycle.get().drain("owned runtime stop")
                         return
@@ -149,7 +160,7 @@ def _run(root, namespace, job_id, workspace):
         stopped.set()
         try:
             if watcher_started:
-                watcher.join(2)
+                watcher.join(5)
         finally:
             close_default_runtime_resources(timeout=5)
     if watcher.is_alive() or watcher_failure:
