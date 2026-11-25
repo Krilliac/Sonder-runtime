@@ -11,7 +11,9 @@ byte-for-byte intact.
 """
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 import re
+from typing import Any
 
 
 NEGATIVE_CLAIM_RE = re.compile(
@@ -83,7 +85,9 @@ def task_exact_anchors(task: str) -> list[str]:
     return deduped[:6]
 
 
-def claim_review_tools(cloud: bool = False, *, cloud_tool_policy_error) -> frozenset:
+def claim_review_tools(
+    cloud: bool = False, *, cloud_tool_policy_error: Callable[[str], object],
+) -> frozenset[str]:
     """Claim-review tools this run can actually reach, derived from the gate.
 
     ``CLAIM_REVIEW_TOOLS`` is only the first of two gates a claim-review
@@ -108,14 +112,20 @@ def claim_review_tools(cloud: bool = False, *, cloud_tool_policy_error) -> froze
     )
 
 
-def claim_review_vocabulary(cloud: bool = False, *, cloud_tool_policy_error) -> tuple:
+def claim_review_vocabulary(
+    cloud: bool = False, *, cloud_tool_policy_error: Callable[[str], object],
+) -> tuple[str, ...]:
     """Deterministic ordering for the tool names shown to the reviewer."""
     return tuple(sorted(claim_review_tools(cloud, cloud_tool_policy_error=cloud_tool_policy_error)))
 
 
 def exact_negative_action(
-    task: str, observations, cloud: bool = False, *, cloud_tool_policy_error,
-) -> dict | None:
+    task: str,
+    observations: Iterable[object],
+    cloud: bool = False,
+    *,
+    cloud_tool_policy_error: Callable[[str], object],
+) -> dict[str, Any] | None:
     """Require exact anchor queries before accepting a negative existence claim."""
     # This deterministic action runs before the reviewer model is consulted, so
     # a hardcoded tool name here makes the *host itself* propose a tool the
@@ -143,7 +153,7 @@ def exact_negative_action(
     )
     if not missing:
         return None
-    args = {
+    args: dict[str, Any] = {
         "query": missing,
         "root": ".",
         "regex": False,

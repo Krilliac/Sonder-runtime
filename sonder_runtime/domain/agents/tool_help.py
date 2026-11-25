@@ -4,9 +4,10 @@ from __future__ import annotations
 import difflib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import Any
 
 from ..cloud_access import LEGACY_ERROR_PREFIX
 
@@ -20,7 +21,7 @@ _CORE = {
     "validate": ("test_run", "workspace_run", "lint_run", "repo_diff", "file_read", "file_check"),
     "report": _INSPECT + ("output_digest",),
 }
-_EXAMPLES = {
+_EXAMPLES: dict[str, dict[str, Any]] = {
     "directory_tree": {"path": "."}, "file_find": {"query": "*.py"},
     "text_search": {"query": "symbol"}, "file_read": {"path": "file.py"},
     "file_read_range": {"path": "file.py", "start_line": 1, "end_line": 80},
@@ -48,7 +49,7 @@ _FOOTER = ('Reply with exactly one JSON object:\n'
 
 
 @contextmanager
-def advertised_scope(names):
+def advertised_scope(names: Iterable[str] | None) -> Iterator[None]:
     """Bind visibility, never permission, for one host-owned agent dispatch."""
     token = _SCOPE.set(None if names is None else frozenset(names))
     try:
@@ -57,13 +58,13 @@ def advertised_scope(names):
         _SCOPE.reset(token)
 
 
-def _visible_catalog(catalog):
+def _visible_catalog(catalog: Mapping[str, Any] | None) -> dict[str, Any]:
     source = dict(catalog or {})
     names = _SCOPE.get()
     return source if names is None else {n: row for n, row in source.items() if n in names}
 
 
-def tool_advertised(name):
+def tool_advertised(name: str) -> bool:
     names = _SCOPE.get()
     return names is None or name in names
 
@@ -73,61 +74,82 @@ def has_active_scope() -> bool:
     return _SCOPE.get() is not None
 
 
-def _knob(name):
+def _knob(name: str) -> bool:
     return name in {"extra_roots", "token", "approval", "wait_seconds"} or name.startswith(
         ("max_", "timeout", "include_"))
 
 
-def filtered_schema(schema):
+def filtered_schema(schema: object) -> dict[str, Any]:
     """Keep required fields, including required knobs, and ordinary arguments."""
     if not isinstance(schema, Mapping):
         return {}
-    required = set(schema.get("required", ()))
-    properties = schema.get("properties", {})
+    raw_required = schema.get("required", ())
+    required_list = (
+        list(raw_required)
+        if isinstance(raw_required, Iterable) and not isinstance(raw_required, (str, bytes))
+        else []
+    )
+    required = set(required_list)
+    raw_properties = schema.get("properties", {})
+    properties = raw_properties if isinstance(raw_properties, Mapping) else {}
     return {
         "type": "object",
         "properties": {key: value for key, value in properties.items()
                        if key in required or not _knob(key)},
-        "required": list(schema.get("required", ())),
+        "required": required_list,
     }
 
 
-def _schema(row):
+def _schema(row: object) -> Any:
     if isinstance(row, Mapping):
         return row.get("input_schema", row.get("schema", row.get("parameters", {}))) or {}
     return getattr(row, "parameters", getattr(row, "input_schema", {})) or {}
 
 
-def _placeholder(key, spec):
+def _placeholder(key: str, spec: Mapping[str, Any]) -> Any:
     if "default" in spec:
         return spec["default"]
-    if spec.get("enum"):
-        return spec["enum"][0]
+    enum_values = spec.get("enum")
+    if isinstance(enum_values, (list, tuple)) and enum_values:
+        return enum_values[0]
     kind = spec.get("type")
+    if isinstance(kind, (list, tuple)):
+        kind = next((item for item in kind if isinstance(item, str) and item != "null"), None)
+    if not isinstance(kind, str):
+        return "<" + key + ">"
     if kind in {"integer", "number"}:
         return spec.get("minimum", 1)
     return {"boolean": False, "array": [], "object": {}}.get(kind, "<" + key + ">")
 
 
-def _example(name, row, raw=""):
+def _example(name: str, row: object, raw: str = "") -> dict[str, Any]:
     schema = filtered_schema(_schema(row))
     required = set(schema.get("required", ()))
     if name in _EXAMPLES:
-        value = dict(_EXAMPLES[name])
+        value: dict[str, Any] = dict(_EXAMPLES[name])
     else:
         try:
-            value, _ = json.JSONDecoder().raw_decode(raw)
+            decoded, _ = json.JSONDecoder().raw_decode(raw)
         except (TypeError, ValueError):
-            value = {}
-        if not isinstance(value, dict):
-            value = {}
+            decoded = {}
+        value = decoded if isinstance(decoded, dict) else {}
     value = {key: val for key, val in value.items() if key in required or not _knob(key)}
+    properties = schema.get("properties", {})
+    prop_map = properties if isinstance(properties, Mapping) else {}
     for key in schema.get("required", ()):
-        value.setdefault(key, _placeholder(key, schema["properties"].get(key, {})))
+        spec = prop_map.get(key, {})
+        value.setdefault(key, _placeholder(key, spec if isinstance(spec, Mapping) else {}))
     return value
 
 
-def render_tool_help(help_lines, *, allowlist=None, task_kind=None, catalog=None, compact=False):
+def render_tool_help(
+    help_lines: str | Iterable[str],
+    *,
+    allowlist: Iterable[str] | None = None,
+    task_kind: str | None = None,
+    catalog: Mapping[str, Any] | None = None,
+    compact: bool = False,
+) -> str:
     """Preserve legacy help verbatim unless allowlisted or ``compact=True``."""
     original = help_lines if isinstance(help_lines, str) else "\n".join(help_lines)
     if allowlist is None and not compact:
@@ -136,7 +158,7 @@ def render_tool_help(help_lines, *, allowlist=None, task_kind=None, catalog=None
     catalog = catalog or {}
     scope_names = set(raw) | set(catalog) if allowlist is None else set(allowlist)
     admitted = scope_names & (set(raw) | set(catalog))
-    core = [name for name in _CORE.get(task_kind, _INSPECT) if name in admitted]
+    core = [name for name in _CORE.get(task_kind or "", _INSPECT) if name in admitted]
     lines = ["Available tools: find the relevant file or symbol.",
              "Workflow: find -> read -> edit -> run tests -> final.",
              "Use task-relevant paths; ask tool_help for arguments."]
@@ -180,10 +202,10 @@ def build_agent_tool_help(
     *,
     generated_lines: list[str],
     advertised_names: set[str] | frozenset[str],
-    is_refused,
-    allowlist=None,
-    task_kind=None,
-    catalog=None,
+    is_refused: Callable[[str], object],
+    allowlist: Iterable[str] | None = None,
+    task_kind: str | None = None,
+    catalog: Mapping[str, Any] | None = None,
     num_ctx: int = 0,
 ) -> str:
     """Combine static/generated help lines, close admit-then-deny, and size for ``num_ctx``."""
@@ -207,7 +229,12 @@ def build_agent_tool_help(
     )
 
 
-def tool_help_text(*, name="", query="", catalog=None):
+def tool_help_text(
+    *,
+    name: str = "",
+    query: str = "",
+    catalog: Mapping[str, Any] | None = None,
+) -> str:
     """Describe registered metadata only; no filesystem, model or network calls."""
     if not isinstance(name, str) or not isinstance(query, str):
         return f"{LEGACY_ERROR_PREFIX} tool_help selectors must be strings"
@@ -219,8 +246,12 @@ def tool_help_text(*, name="", query="", catalog=None):
     if name and name in catalog:
         row = catalog[name]
         schema = filtered_schema(_schema(row))
-        args = ", ".join(key + (" (required)" if key in schema["required"] else "")
-                         for key in schema["properties"])
+        required_keys = schema.get("required", ())
+        properties = schema.get("properties", {})
+        args = ", ".join(
+            key + (" (required)" if key in required_keys else "")
+            for key in (properties if isinstance(properties, Mapping) else {})
+        )
         desc = row.get("description", "") if isinstance(row, Mapping) else getattr(row, "description", "")
         sentence = " ".join(str(desc).split()).split(". ", 1)[0].rstrip(".")
         example = json.dumps({"tool": name, "args": _example(name, row)}, separators=(",", ":"))

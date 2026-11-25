@@ -31,8 +31,10 @@ unmatched output, truncated output, or a masked count) and should call
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 import hashlib
 import re
+from typing import Any, cast
 
 
 GUARD_NAME = "verification_no_progress"
@@ -42,7 +44,7 @@ DEFAULT_REPEAT_LIMIT = 2
 _WHITESPACE = re.compile(r"\s+")
 
 
-def requested_attempts(value, default: int = 2) -> int:
+def requested_attempts(value: object, default: int = 2) -> int:
     """The integer a caller's attempt value means, before any clamping.
 
     Booleans and unparseable values fall back to ``default``; floats and
@@ -51,18 +53,18 @@ def requested_attempts(value, default: int = 2) -> int:
     if isinstance(value, bool):
         return default
     try:
-        return int(value)
+        return int(cast(Any, value))
     except (TypeError, ValueError):
         return default
 
 
-def bounded_attempts(value, default: int = 2) -> int:
+def bounded_attempts(value: object, default: int = 2) -> int:
     """Clamp a requested attempt count to ``1..MAX_VERIFICATION_ATTEMPTS``."""
     attempts = requested_attempts(value, default)
     return max(1, min(attempts, MAX_VERIFICATION_ATTEMPTS))
 
 
-def outcome_fingerprint(errors) -> str:
+def outcome_fingerprint(errors: Iterable[object] | None) -> str:
     """Order-insensitive digest of a verifier's error lines.
 
     Lines are normalized (whitespace runs collapsed) and sorted as a list, so
@@ -83,10 +85,10 @@ def outcome_fingerprint(errors) -> str:
 class VerificationProgressGuard:
     """Detect ``repeat_limit`` consecutive identical, non-improving failures."""
 
-    def __init__(self, repeat_limit: int = DEFAULT_REPEAT_LIMIT):
+    def __init__(self, repeat_limit: int = DEFAULT_REPEAT_LIMIT) -> None:
         self.repeat_limit = max(2, int(repeat_limit))
         self._last = ""
-        self._last_score = None
+        self._last_score: Any = None
         self._streak = 0
         self.stalled_fingerprint = ""
 
@@ -94,7 +96,7 @@ class VerificationProgressGuard:
         """Forget the streak (an outcome that cannot be compared was seen)."""
         self._last, self._last_score, self._streak = "", None, 0
 
-    def observe(self, errors, score=None) -> bool:
+    def observe(self, errors: Iterable[object] | None, score: Any = None) -> bool:
         """Record one attempt's outcome; return True when the loop stalled.
 
         ``score`` is optional and compared with ``<`` (lower is better, as in
