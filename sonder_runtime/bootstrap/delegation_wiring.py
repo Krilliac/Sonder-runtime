@@ -464,7 +464,39 @@ def _run_one_child(
         peers=[p for p in peer_handles if p != spec.agent_id],
         depth=1,
     )
-    child_prompt = f"{preamble}\n\n[DELEGATED TASK]\n{spec.task}"
+    thinking_section = ""
+    if spec.role in {"coder", "security"} or str(tier or "").strip().lower() in {"code", "security"}:
+        import sonder_runtime.bootstrap.thinking_ensemble as _thinking_ensemble
+        from sonder_runtime.domain.routing.thinking_ensemble import format_thinking_brief
+
+        child_lane = "security" if (spec.role == "security" or str(tier or "").strip().lower() == "security") else "code"
+        delib = _thinking_ensemble.deliberate_for_turn(
+            server,
+            spec.task,
+            tier=child_lane,
+            model=resolved_model,
+            cloud=False,
+            lane=child_lane,
+        )
+        if delib is not None and delib.brief:
+            thinking_section = "\n\n" + format_thinking_brief(
+                delib.brief,
+                thinking_tier=delib.tier,
+                thinking_model=delib.model,
+                lane=child_lane,
+            )
+            board.emit(
+                agent_id=spec.agent_id,
+                parent_id=parent_agent_id,
+                depth=1,
+                phase="thinking",
+                tier=delib.tier,
+                model=delib.model,
+                elapsed_ms=delib.elapsed_ms,
+                thinking=compact_text(delib.thinking or delib.brief, limit=240),
+                summary=f"thinking brief from {delib.tier} ({delib.model})",
+            )
+    child_prompt = f"{preamble}{thinking_section}\n\n[DELEGATED TASK]\n{spec.task}"
     origin_info = {"origin": "", "model": resolved_model}
 
     pool = getattr(server, "OLLAMA_POOL", None)
