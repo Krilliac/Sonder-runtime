@@ -100,6 +100,9 @@ AGENT_TOOL_HELP: str = """Available tools:
 - code_graph: {"root": ".", "action": "summary|impact|cycles|calls", "target": ""} -- module dependency graph, circular imports, blast-radius impact, and Python call graph
 - diff_semantic: {"path_a": "old.py", "path_b": "new.py", "text_a": "", "text_b": "", "kind": "auto|python|json|toml|ini"} -- AST-aware Python & structural JSON/TOML/INI diff
 - reasoning_board: {"action": "init|add_fact|add_hypothesis|update_hypothesis|add_decision|audit|summary|clear", "board_id": "default", "text": "", "source": ""} -- structured cognitive scratchpad & contradiction audit
+- scratchpad_read: {"name": "", "query": "", "tag": "", "start_line": 1, "max_lines": 200} -- read, list, or search persistent free-form Markdown scratchpad notes
+- scratchpad_write: {"name": "notes", "content": "...", "mode": "replace|append", "tags": []} -- create, overwrite, or append a persistent free-form Markdown scratchpad note
+- scratchpad_delete: {"name": "notes"} -- delete one named note from your persistent scratchpad
 - symbol_verify: {"action": "verify_symbol|audit_code", "module": "json", "symbol": "loads", "kwargs": [], "code": "", "root": ""} -- verify Python stdlib/repo modules, attributes, kwargs, or audit code snippets for hallucinated APIs
 - citation_audit: {"text": "", "root": ".", "claims": [], "sources": []} -- verify file:line citations, verbatim quotes, and source grounding
 - fact_cross_check: {"text": "..."} -- catch prose arithmetic errors, table total mismatches, bad dates/weekdays, list counts, and self-contradictions
@@ -203,7 +206,7 @@ REPOSITORY_READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "toolchain_status", "hardware_profile",
     "tool_inventory", "output_digest",
     "emotion_vector_status", "preferences_status", "tool_manifest",
-    "report_progress", "post_to_board", "read_board", "reasoning_board",
+    "report_progress", "post_to_board", "read_board", "reasoning_board", "scratchpad_read",
     "memory_search", "web_search", "web_fetch", "weather_lookup",
     "test_discover",
     "find_references", "diff_files",
@@ -261,6 +264,7 @@ an exact symbol named by the task; do not default to Python or server.py.
 - code_graph: {"root": ".", "action": "summary|impact|cycles|calls", "target": "<file, module, or symbol>"}
 - diff_semantic: {"path_a": "<first file>", "path_b": "<second file>", "text_a": "", "text_b": "", "kind": "auto"}
 - reasoning_board: {"action": "init|add_fact|add_hypothesis|update_hypothesis|add_decision|audit|summary|clear", "board_id": "default", "text": ""}
+- scratchpad_read: {"name": "", "query": "", "tag": "", "start_line": 1, "max_lines": 200}
 - symbol_verify: {"action": "verify_symbol|audit_code", "module": "<module>", "symbol": "<attr>", "code": "", "root": ""}
 - citation_audit: {"text": "<draft with file:line citations>", "root": ".", "claims": [], "sources": []}
 - fact_cross_check: {"text": "<draft prose>"}
@@ -388,6 +392,7 @@ PROJECT_BOUND_AGENT_TOOLS: frozenset[str] = (
         "environment_status", "toolchain_status", "hardware_profile",
         "tool_inventory", "output_digest", "language_matrix",
         "math_eval", "logic_verify", "regex_lab", "reasoning_board",
+        "scratchpad_read", "scratchpad_write", "scratchpad_delete",
         "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check",
         "learn_tool",
         "process_list", "process_memory_risk_inspect",

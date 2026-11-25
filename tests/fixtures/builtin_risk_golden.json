@@ -290,6 +290,7 @@
   "scaffold": "execution",
   "scaffold_project": "execution",
   "schema": "safe",
+  "scratchpad": "ask",
   "screen_capture": "ask",
   "script_run": "execution",
   "script_search": "safe",

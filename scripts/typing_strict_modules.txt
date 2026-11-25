@@ -177,6 +177,7 @@ sonder_runtime/adapters/persistence/checkpoint_store.py
 sonder_runtime/adapters/persistence/epoch_adoption.py
 sonder_runtime/adapters/persistence/interactive_root_reconciliation.py
 sonder_runtime/adapters/persistence/repair_journal.py
+sonder_runtime/adapters/persistence/scratchpad_store.py
 sonder_runtime/adapters/persistence/session_checkpoint_privacy.py
 sonder_runtime/adapters/persistence/sqlite/__init__.py
 sonder_runtime/adapters/persistence/sqlite/automation.py
@@ -570,6 +571,7 @@ sonder_runtime/bootstrap/managed_http.py
 sonder_runtime/bootstrap/model_gateways.py
 sonder_runtime/bootstrap/pool_wiring.py
 sonder_runtime/bootstrap/provider_bindings.py
+sonder_runtime/bootstrap/scratchpad.py
 sonder_runtime/bootstrap/security_eval_agent_tools.py
 sonder_runtime/bootstrap/typed_tools.py
 sonder_runtime/domain/__init__.py
@@ -680,6 +682,7 @@ sonder_runtime/domain/master_timeout.py
 sonder_runtime/domain/memory/__init__.py
 sonder_runtime/domain/memory/playbooks.py
 sonder_runtime/domain/memory/retention_gate.py
+sonder_runtime/domain/memory/scratchpad.py
 sonder_runtime/domain/memory/wp6_typed.py
 sonder_runtime/domain/meshgen/__init__.py
 sonder_runtime/domain/meshgen/dsl/__init__.py

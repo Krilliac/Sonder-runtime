@@ -687,6 +687,23 @@ def agent_tool_kwargs(
             "fact_refs_json": args.get("fact_refs_json", args.get("fact_refs", "")),
             "alternatives_json": args.get("alternatives_json", args.get("alternatives", "")),
         }
+    if tool_name == "scratchpad_read":
+        return {
+            "name": args.get("name", ""),
+            "query": args.get("query", ""),
+            "tag": args.get("tag", ""),
+            "start_line": args.get("start_line", 1),
+            "max_lines": args.get("max_lines", 200),
+        }
+    if tool_name == "scratchpad_write":
+        return {
+            "name": args.get("name", ""),
+            "content": args.get("content", ""),
+            "mode": args.get("mode", "replace"),
+            "tags": args.get("tags"),
+        }
+    if tool_name == "scratchpad_delete":
+        return {"name": args.get("name", "")}
     if tool_name == "symbol_verify":
         return {
             "action": args.get("action", "verify_symbol"),

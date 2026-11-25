@@ -311,6 +311,12 @@ COMMANDS = [
         "summary": "Track grounded facts, hypotheses, decisions, and contradiction audits in a structured scratchpad.",
     },
     {
+        "name": "/scratchpad",
+        "category": "memory",
+        "risk": "ask",
+        "summary": "List, read, search, write/append, or delete persistent free-form Markdown scratchpad notes.",
+    },
+    {
         "name": "/symcheck",
         "category": "dev",
         "risk": "safe",

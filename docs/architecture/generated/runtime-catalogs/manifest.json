@@ -1,13 +1,13 @@
 {
-  "artifact_digest": "c0dd1c27211daa8482ce5f6dd145d8c13450c3e5b20d10d8d1a5d477ece56b35",
-  "catalog_digest": "ed83104b9f639ce4d76c5cbc4e6a825945d9e30123be2fb2ffbd3918b7b574ec",
+  "artifact_digest": "4ccb25dd7cc9b56d4bfca9cf2efc67ff91bca72ab554828f56c2c6412c69a80b",
+  "catalog_digest": "5b524f3a6203958e30205244813e1095b2a61788f2af13ec1de3e75a02a1dceb",
   "files": {
-    "cli.json": "89b4f921599d5e1301be6db5ec61cfe33932f16d811f7c85da0e6880c21d9249",
-    "client.json": "28bfaed9ff95b1a0037c572f86601c564069d4d290f0ff721632e5eb5a0a79a1",
-    "conformance.json": "21a7d1b79795c70facfeea48020fba9729a80a764435187832c05c5968f9fc4c",
-    "mcp.json": "199f345eea0296784258931a6f608eacd1b34e11fd758ae8309a5d5f8039c2c1",
-    "openai.json": "e36b1f8b73599edff945af13500f2f02e6911e46693df9f146a1684da0b9cf4b",
-    "permissions.json": "f14a8bf4f4f4c64a60ffe9f0b113451b2337d84a16f43cf45421102d4ac31505"
+    "cli.json": "8fe2854e02fc82acae4615f42904d2790e755a10965e4d4234db9e3a87e4380f",
+    "client.json": "2c2f83864aaafa4addf633c6c1522ab6a07da905461aa7f69e43a654630de2cb",
+    "conformance.json": "03665864068813e511b55b9b59a5fcfa9fb7f281cd67b708f5d7b4a1d167fc17",
+    "mcp.json": "4dc63ef73bb0c10f6aac5b8d356710d7fa815efde3b0150d45d349a89c9f2b45",
+    "openai.json": "048374c4cf20f0157dbbcda133fe54e2208b42fe5a96ebc1ad2fdc498b476ebc",
+    "permissions.json": "6f35406a526a7c90c52edc78e9d7b6d51150975ace338ad10d2b5afde1fca473"
   },
   "schema": "sonder-runtime-catalog-manifest-v1"
 }

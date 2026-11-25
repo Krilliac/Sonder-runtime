@@ -70,6 +70,35 @@ def parse_control_kwargs(cmd: str, arg: str) -> tuple[dict[str, Any], str]:
         ):
             return {"action": board_args[0].lower(), "text": board_args[1]}, ""
         return {"action": "add_fact", "text": stripped}, ""
+    if cmd in ("/scratchpad", "/scratch"):
+        if not stripped or stripped.lower() == "list":
+            return {"_action": "read"}, ""
+        head, _, tail = stripped.partition(" ")
+        sub = head.lower()
+        rest = tail.strip()
+        if sub == "read":
+            if not rest:
+                return {}, "usage: /scratchpad read <name>"
+            return {"_action": "read", "name": rest}, ""
+        if sub == "search":
+            if not rest:
+                return {}, "usage: /scratchpad search <query>"
+            return {"_action": "read", "query": rest}, ""
+        if sub in ("write", "append"):
+            parts = [part.strip() for part in rest.split("|", 1)]
+            if len(parts) != 2 or not parts[0]:
+                return {}, f"usage: /scratchpad {sub} <name> | <content>"
+            return {
+                "_action": "write",
+                "name": parts[0],
+                "content": parts[1],
+                "mode": "append" if sub == "append" else "replace",
+            }, ""
+        if sub in ("delete", "rm"):
+            if not rest:
+                return {}, "usage: /scratchpad delete <name>"
+            return {"_action": "delete", "name": rest}, ""
+        return {"_action": "read", "name": stripped}, ""
     if cmd in ("/symcheck", "/symbol_verify"):
         parts = [part.strip() for part in arg.split("|", 1)]
         if not parts or not parts[0]:

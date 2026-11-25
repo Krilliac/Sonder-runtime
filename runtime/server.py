@@ -57,6 +57,7 @@ import sonder_runtime.application.evaluation_history.use_cases as eval_history_u
 import sonder_runtime.adapters.memory_store as memory_store
 from sonder_runtime.bootstrap import playbook_context
 from sonder_runtime.bootstrap.playbooks import register_tools as _register_playbook_tools
+from sonder_runtime.bootstrap.scratchpad import register_tools as _register_scratchpad_tools
 import sonder_runtime.application.session.transcript_export as session_transcript_export
 from sonder_runtime.application.server_core import (
     agent_guards as _agent_guards_core,
@@ -3626,6 +3627,12 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd in ("/reason", "/reasoning_board"):
         kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
         return usage or reasoning_board(**kw)
+    if cmd in ("/scratchpad", "/scratch"):
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        if usage:
+            return usage
+        sp_action = str(kw.pop("_action", "read"))
+        return scratchpad_write(**kw) if sp_action == "write" else (scratchpad_delete(**kw) if sp_action == "delete" else scratchpad_read(**kw))
     if cmd in ("/symcheck", "/symbol_verify"):
         kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
         return usage or symbol_verify(**kw)
@@ -4569,6 +4576,7 @@ else:
     )
 _PERSISTENT_MCP = mcp
 playbook_note, playbook_read = _register_playbook_tools(mcp, config_getter=lambda: getattr(_APP_GRAPH, "config", None))
+scratchpad_read, scratchpad_write, scratchpad_delete = _register_scratchpad_tools(mcp, config_getter=lambda: getattr(_APP_GRAPH, "config", None))
 
 
 def _bounded_timeout(value) -> int:
@@ -13507,23 +13515,11 @@ def reasoning_board(
         import sonder_runtime.adapters.inspection.reasoning_board as _reasoning_board
         from sonder_runtime.adapters.security import approval_ledger as _al
 
-        owner = str(_al.current_owner() or "local")
-        fact_refs = json.loads(fact_refs_json) if isinstance(fact_refs_json, str) and fact_refs_json.strip() else (fact_refs_json if isinstance(fact_refs_json, list) else None)
-        alternatives = json.loads(alternatives_json) if isinstance(alternatives_json, str) and alternatives_json.strip() else (alternatives_json if isinstance(alternatives_json, list) else None)
-        data = _reasoning_board.reasoning_board(
-            action=action,
-            board_id=board_id,
-            owner=owner,
-            goal=goal,
-            text=text,
-            source=source,
-            hypothesis_id=hypothesis_id,
-            status=status,
-            confidence=confidence,
-            evidence_for=evidence_for,
-            evidence_against=evidence_against,
-            fact_refs=fact_refs,
-            alternatives=alternatives,
+        data = _reasoning_board.run_reasoning_board_from_json(
+            owner=str(_al.current_owner() or "local"), action=action, board_id=board_id,
+            goal=goal, text=text, source=source, hypothesis_id=hypothesis_id, status=status,
+            confidence=confidence, evidence_for=evidence_for, evidence_against=evidence_against,
+            fact_refs_json=fact_refs_json, alternatives_json=alternatives_json,
         )
     except Exception as exc:
         _record_direct_tool("reasoning_board", args, ok=False, started=started, summary=str(exc))
@@ -19557,7 +19553,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "memory_search", "web_search", "toolchain_status",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "scratchpad_read", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "memory_search", "web_search", "toolchain_status",
     "tool_inventory", "output_digest",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
@@ -19583,7 +19579,7 @@ _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     "ensemble_codegen_build_loop",
     "ensemble_answer", "consult", "delegate_task", "spawn_agents",
     "process_list", "process_memory_risk_inspect", "learn_tool", "task_progress", "task_ledger",
-    "task_delete", "task_plan", "task_depend",
+    "task_delete", "task_plan", "task_depend", "scratchpad_write", "scratchpad_delete",
     # Other developer-workflow tools remain absent until their agent dispatch
     # and project-root guards are admitted to this autonomous lane.
 })

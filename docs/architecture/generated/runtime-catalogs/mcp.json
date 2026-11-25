@@ -2471,6 +2471,80 @@
       "name": "schema_validate"
     },
     {
+      "description": "Delete one named note from the owner's persistent Markdown scratchpad",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "scratchpad_delete"
+    },
+    {
+      "description": "Read, list, or search owner-scoped restart-persistent Markdown scratchpad notes",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_lines": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "start_line": {
+            "type": "integer"
+          },
+          "tag": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "scratchpad_read"
+    },
+    {
+      "description": "Create, replace, or append to an owner-scoped restart-persistent Markdown scratchpad note",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "replace",
+              "append"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "scratchpad_write"
+    },
+    {
       "description": "Find scripts under allowed roots",
       "inputSchema": {
         "additionalProperties": false,
