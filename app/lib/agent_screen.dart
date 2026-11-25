@@ -118,7 +118,7 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
   bool _manualRefreshing = false, _loadingMore = false, _clearing = false;
   bool _initialConsumed = false;
   bool _wide = true;
-  int _listCursor = 0, _generation = 0;
+  int _listCursor = 0, _generation = 0, _apiGeneration = 0;
   int _loadedPages = 1;
   Timer? _timer;
   Timer? _watchTimer;
@@ -141,6 +141,70 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
       completer.complete();
     });
     return completer.future;
+  }
+
+  static bool _sameApiIdentity(SonderApi a, SonderApi b) =>
+      a.baseUrl == b.baseUrl &&
+      a.apiKey == b.apiKey &&
+      a.accountSession == b.accountSession;
+
+  @override
+  void didUpdateWidget(covariant AgentScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.registerLeaveGuard != widget.registerLeaveGuard) {
+      oldWidget.registerLeaveGuard?.call(null);
+      widget.registerLeaveGuard?.call(_confirmLeave);
+    }
+    if (!_sameApiIdentity(oldWidget.api, widget.api)) {
+      _apiGeneration++;
+      _stopWatch();
+      for (final id in _scrolls.keys.toList()) {
+        _retireScroll(id);
+      }
+      _scrollOffsets.clear();
+      for (final controller in _drafts.values) {
+        controller.clear();
+      }
+      _lanes.clear();
+      _snapshots.clear();
+      _events.clear();
+      _pending.clear();
+      _commandErrors.clear();
+      _openTools.clear();
+      _openDetails.clear();
+      _reportOpen.clear();
+      _createdOrder.clear();
+      _background = const BackgroundWork();
+      _backgroundError = null;
+      _backgroundPaused = false;
+      _backgroundRefreshing = false;
+      _backgroundActionErrors.clear();
+      _reports.clear();
+      _reportParents.clear();
+      _reportCursors.clear();
+      _reportHasMore.clear();
+      _reportErrors.clear();
+      _reportLoading.clear();
+      _selected = null;
+      _selectedBackground = null;
+      _listError = null;
+      _listFailure = null;
+      _detailError = null;
+      _detailFailure = null;
+      _listPaused = false;
+      _loading = true;
+      _refreshing = false;
+      _hasMore = false;
+      _manualRefreshing = false;
+      _loadingMore = false;
+      _clearing = false;
+      _initialConsumed = false;
+      _listCursor = 0;
+      _loadedPages = 1;
+      _awayFromEnd.value = false;
+      unawaited(_loadLanes(manual: true));
+      unawaited(_loadBackground(manual: true));
+    }
   }
 
   @override
@@ -215,18 +279,21 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
 
   Future<void> _loadLanes({bool more = false, bool manual = false}) async {
     if (_refreshing || !_active || (_listPaused && !manual)) return;
+    final apiGeneration = _apiGeneration;
+    final api = widget.api;
     if (manual) _listPaused = false;
     _refreshing = true;
     try {
-      var page = await widget.api.agentLanes(cursor: more ? _listCursor : 0);
+      var page = await api.agentLanes(cursor: more ? _listCursor : 0);
       final lanes = [...page.lanes];
       if (!more) {
         for (var i = 1; i < _loadedPages && page.hasMore; i++) {
-          page = await widget.api.agentLanes(cursor: page.nextCursor);
+          if (apiGeneration != _apiGeneration) return;
+          page = await api.agentLanes(cursor: page.nextCursor);
           lanes.addAll(page.lanes);
         }
       }
-      if (!mounted) return;
+      if (!mounted || apiGeneration != _apiGeneration) return;
       setState(() {
         for (final lane in lanes) {
           _mergeLane(lane);
@@ -244,14 +311,16 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
           _select(initial);
         } else {
           try {
-            final snapshot = await widget.api.agentInspect(initial);
-            if (mounted && !_initialConsumed) {
+            final snapshot = await api.agentInspect(initial);
+            if (mounted &&
+                !_initialConsumed &&
+                apiGeneration == _apiGeneration) {
               _mergeLane(snapshot.lane);
               _initialConsumed = true;
               _select(initial);
             }
           } catch (error) {
-            if (mounted) {
+            if (mounted && apiGeneration == _apiGeneration) {
               setState(() {
                 _listFailure =
                     RequestFailure.read(error, resource: 'agent conversation');
@@ -263,7 +332,7 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
         }
       }
     } catch (error) {
-      if (mounted) {
+      if (mounted && apiGeneration == _apiGeneration) {
         setState(() {
           _listFailure =
               RequestFailure.read(error, resource: 'agent conversations');
@@ -272,8 +341,10 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
         });
       }
     } finally {
-      _refreshing = false;
-      if (mounted) setState(() => _loading = false);
+      if (apiGeneration == _apiGeneration) {
+        _refreshing = false;
+        if (mounted) setState(() => _loading = false);
+      }
     }
   }
 
@@ -281,20 +352,22 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
     if (!_active || _backgroundRefreshing || (_backgroundPaused && !manual)) {
       return;
     }
+    final apiGeneration = _apiGeneration;
+    final api = widget.api;
     _backgroundRefreshing = true;
     if (manual) _backgroundPaused = false;
     try {
       // Agents is a host-wide activity view: a selected Chat project scopes
       // new delegation/cancellation commands, but must not hide other work.
-      final value = await widget.api.backgroundWork();
-      if (mounted) {
+      final value = await api.backgroundWork();
+      if (mounted && apiGeneration == _apiGeneration) {
         setState(() {
           _background = value;
           _backgroundError = null;
         });
       }
     } catch (error) {
-      if (mounted) {
+      if (mounted && apiGeneration == _apiGeneration) {
         setState(() {
           final failure = RequestFailure.read(
             error,
@@ -306,7 +379,9 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
         });
       }
     } finally {
-      _backgroundRefreshing = false;
+      if (apiGeneration == _apiGeneration) {
+        _backgroundRefreshing = false;
+      }
     }
   }
 
@@ -416,12 +491,14 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
   Future<void> _loadReports(String id, {bool more = false}) async {
     final lane = _lanes[id];
     if (lane == null || !_reportLoading.add(id)) return;
+    final apiGeneration = _apiGeneration;
+    final api = widget.api;
     try {
       // Reports are addressed to the parent session, which can belong to an
       // external harness. Show only reports authored by this selected lane.
-      final page = await widget.api.agentReports(lane.parentSessionId,
+      final page = await api.agentReports(lane.parentSessionId,
           cursor: more ? (_reportCursors[id] ?? 0) : 0);
-      if (!mounted) return;
+      if (!mounted || apiGeneration != _apiGeneration) return;
       setState(() {
         for (final report in page.reports) {
           if (report.laneId != id) continue;
@@ -439,12 +516,14 @@ class _AgentScreenState extends State<AgentScreen> with WidgetsBindingObserver {
         _reportErrors.remove(id);
       });
     } catch (_) {
-      if (mounted) {
+      if (mounted && apiGeneration == _apiGeneration) {
         setState(
             () => _reportErrors[id] = 'Could not refresh reports to parent.');
       }
     } finally {
-      _reportLoading.remove(id);
+      if (apiGeneration == _apiGeneration) {
+        _reportLoading.remove(id);
+      }
     }
   }
 

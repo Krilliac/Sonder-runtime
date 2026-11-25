@@ -88,6 +88,28 @@ class _AppControlScreenState extends State<AppControlScreen> {
     }
   }
 
+  @override
+  void didUpdateWidget(covariant AppControlScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.client != widget.client) {
+      oldWidget.client.removeListener(_changed);
+      client.synchronize();
+      _revision = client.contextRevision;
+      _project.text = client.project ?? widget.initialProject;
+      _password.clear();
+      _title.clear();
+      _replacing = false;
+      _notice = null;
+      _warning = false;
+      client.addListener(_changed);
+      if (client.hasSession) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _refresh();
+        });
+      }
+    }
+  }
+
   void _changed() {
     if (!mounted) return;
     if (_revision != client.contextRevision) {
@@ -346,13 +368,21 @@ class _AppControlScreenState extends State<AppControlScreen> {
                             icon: const Icon(Icons.add, size: 18),
                             label: const Text('Create conversation'))),
                     const SizedBox(height: SonderSpace.xxl),
-                    Row(children: [
-                      Expanded(
+                    Wrap(
+                      alignment: WrapAlignment.spaceBetween,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: SonderSpace.sm,
+                      runSpacing: SonderSpace.xxs,
+                      children: [
+                        Semantics(
+                          header: true,
                           child: Text('Server conversations',
-                              style: Theme.of(context).textTheme.titleMedium)),
-                      Text('${client.bindings.length} on this page',
-                          style: Theme.of(context).textTheme.bodySmall)
-                    ]),
+                              style: Theme.of(context).textTheme.titleMedium),
+                        ),
+                        Text('${client.bindings.length} on this page',
+                            style: Theme.of(context).textTheme.bodySmall),
+                      ],
+                    ),
                     const SizedBox(height: SonderSpace.md),
                     if (!client.bindingsLoaded)
                       const Padding(

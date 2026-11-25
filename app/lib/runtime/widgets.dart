@@ -166,8 +166,12 @@ class _CommandLine extends StatelessWidget {
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         Flexible(
-          child: SelectableText(command,
-              maxLines: 1, style: tokens.mono(12.5, color: tokens.text)),
+          child: Semantics(
+            label: command,
+            excludeSemantics: true,
+            child: SelectableText(command,
+                maxLines: 1, style: tokens.mono(12.5, color: tokens.text)),
+          ),
         ),
         IconButton(
           tooltip: 'Copy $label',

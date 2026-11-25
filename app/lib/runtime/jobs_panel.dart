@@ -4,6 +4,8 @@
 /// failures.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../api.dart';
@@ -47,6 +49,7 @@ class JobsList extends StatelessWidget {
       children: [
         LazyRuntimeList<JobSummary>(
           key: const Key('jobs-details'),
+          sourceKey: source,
           title: 'Recent jobs',
           what: 'jobs',
           load: source.jobs,
@@ -82,6 +85,7 @@ class FanoutList extends StatelessWidget {
       children: [
         LazyRuntimeList<FanoutSummary>(
           key: const Key('fanout-details'),
+          sourceKey: source,
           title: 'Recent fanout runs',
           what: 'fanout runs',
           load: source.fanoutRuns,
@@ -115,6 +119,7 @@ class ComputeNodesList extends StatelessWidget {
       children: [
         LazyRuntimeList<ComputeNode>(
           key: const Key('compute-details'),
+          sourceKey: source,
           title: 'Nodes',
           what: 'compute nodes',
           load: source.computeNodes,
@@ -139,7 +144,9 @@ class ComputeNodesList extends StatelessWidget {
 }
 
 /// A disclosure that loads its rows the first time it opens, and again on
-/// Refresh.
+/// Refresh. When [sourceKey] changes (a server or account switch), any
+/// previously loaded items, errors and in-flight reads from the old server
+/// are discarded, and an open disclosure reloads from the new source.
 class LazyRuntimeList<T> extends StatefulWidget {
   final String title;
 
@@ -149,6 +156,9 @@ class LazyRuntimeList<T> extends StatefulWidget {
   final String empty;
   final Widget Function(T item) row;
 
+  /// Identity of the backing data source; changing it resets cached rows.
+  final Object? sourceKey;
+
   const LazyRuntimeList({
     super.key,
     required this.title,
@@ -156,6 +166,7 @@ class LazyRuntimeList<T> extends StatefulWidget {
     required this.load,
     required this.empty,
     required this.row,
+    this.sourceKey,
   });
 
   @override
@@ -166,22 +177,44 @@ class _LazyRuntimeListState<T> extends State<LazyRuntimeList<T>> {
   List<T>? _items;
   Object? _error;
   bool _loading = false;
+  bool _expanded = false;
+  int _generation = 0;
+
+  @override
+  void didUpdateWidget(covariant LazyRuntimeList<T> oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.sourceKey != null && widget.sourceKey != oldWidget.sourceKey) {
+      _generation++;
+      _items = null;
+      _error = null;
+      _loading = false;
+      if (_expanded) {
+        final generation = _generation;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && generation == _generation) unawaited(_fetch());
+        });
+      }
+    }
+  }
 
   Future<void> _fetch() async {
     if (_loading) return;
+    final generation = ++_generation;
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
       final items = await widget.load();
-      if (!mounted) return;
+      if (!mounted || generation != _generation) return;
       setState(() => _items = items);
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || generation != _generation) return;
       setState(() => _error = error);
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && generation == _generation) {
+        setState(() => _loading = false);
+      }
     }
   }
 
@@ -237,6 +270,7 @@ class _LazyRuntimeListState<T> extends State<LazyRuntimeList<T>> {
             )
           : null,
       onChanged: (open) {
+        _expanded = open;
         if (open && _items == null && !_loading) _fetch();
       },
       child: Column(

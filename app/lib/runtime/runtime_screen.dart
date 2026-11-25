@@ -248,6 +248,11 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   Object? _ecosystemError;
   bool _loadingExtras = false;
 
+  /// Bumped when the server, key or account changes. A status refresh or
+  /// background poll that started under an older generation is discarded
+  /// silently so stale snapshots or errors never overwrite the new server.
+  int _statusGeneration = 0;
+
   /// Bumped when the server, key or account changes. An extras load that
   /// started under an older generation is discarded silently.
   int _extrasGeneration = 0;
@@ -306,11 +311,50 @@ class _RuntimeScreenState extends State<RuntimeScreen>
 
   DateTime get _now => widget.now ?? DateTime.now();
 
+  static bool _sameServerIdentity(Settings a, Settings b) =>
+      a.serverUrl == b.serverUrl &&
+      a.apiKey == b.apiKey &&
+      a.accountSession == b.accountSession;
+
+  static bool _sameLauncherIdentity(Settings a, Settings b) =>
+      a.effectiveLauncherUrl == b.effectiveLauncherUrl &&
+      a.launcherToken == b.launcherToken;
+
   @override
   void didUpdateWidget(covariant RuntimeScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final serverChanged =
+        !_sameServerIdentity(oldWidget.settings, widget.settings);
+    final launcherChanged =
+        !_sameLauncherIdentity(oldWidget.settings, widget.settings);
     if (oldWidget.settings != widget.settings) {
       _api = _apiFor(widget.settings);
+    }
+    if (serverChanged) {
+      _statusGeneration++;
+      _info = widget.initialInfo;
+      _lastInfoAt = _info == null ? null : _now;
+      _offline = false;
+      _serverError = null;
+      _updateStatus = null;
+      _extensionRegistry = null;
+      _runOutcomes.clear();
+      _console.clear();
+      _tracked.clear();
+      _commandOf.clear();
+      _loading = false;
+      _polling = false;
+      _pollCount = 0;
+    }
+    if (launcherChanged) {
+      _stopLauncherWait = true;
+      _launcherActionEpoch += 1;
+      _waitingForLauncherOperation = false;
+      _launcherActionInFlight = false;
+      _launcherInfo = null;
+      _launcherOperation = null;
+      _launcherError = '';
+      _ignoredLauncherOperationId = '';
     }
     if (oldWidget.dataSource != widget.dataSource ||
         oldWidget.settings != widget.settings) {
@@ -329,6 +373,9 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       _loadingExtras = false;
       _extrasGeneration++;
       unawaited(_loadExtras());
+    }
+    if ((serverChanged || launcherChanged) && widget.liveUpdates) {
+      unawaited(_refresh());
     }
   }
 
@@ -487,19 +534,24 @@ class _RuntimeScreenState extends State<RuntimeScreen>
   Future<void> _pollSystemInfo() async {
     if (!mounted || !_appActive || _loading || _polling) return;
     if (!_visible) return;
+    final generation = _statusGeneration;
+    final api = _api;
+    final launcherApi = _launcherApi;
+    final usesLauncher = widget.settings.usesHostLauncher;
     _polling = true;
     SystemInfo? info;
     LauncherStatus? launcherInfo;
     try {
-      if (widget.settings.usesHostLauncher) {
+      if (usesLauncher) {
         try {
-          launcherInfo = await _launcherApi.status();
+          launcherInfo = await launcherApi.status();
         } catch (_) {
           // Launcher diagnostics are shown by the explicit Refresh path.
         }
       }
+      if (!mounted || !_appActive || generation != _statusGeneration) return;
       final launcherStatus = launcherInfo;
-      if (mounted && _appActive && launcherStatus != null) {
+      if (launcherStatus != null) {
         setState(() => _recordLauncherStatus(launcherStatus));
         final activeOperation = launcherStatus.activeOperation;
         if (activeOperation != null) {
@@ -508,17 +560,18 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       }
       var reached = true;
       try {
-        info = await _api.systemInfo();
+        info = await api.systemInfo();
       } catch (error) {
         // The explicit Refresh path reports connection errors. Background
         // polls preserve the last useful snapshot under an "as of" banner.
         reached = !_unreachable(error);
       }
-      if (mounted && _appActive) {
+      if (mounted && _appActive && generation == _statusGeneration) {
         setState(() {
           if (info != null) {
             _info = info;
             _lastInfoAt = DateTime.now();
+            _serverError = null;
           }
           _offline = !reached;
         });
@@ -528,26 +581,34 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     } catch (_) {
       // Keep polling best-effort so a sleeping host does not destabilize UI.
     } finally {
-      _polling = false;
+      if (generation == _statusGeneration) _polling = false;
     }
   }
 
   Future<void> _refresh() async {
+    final generation = _statusGeneration;
+    final api = _api;
+    final launcherApi = _launcherApi;
+    final usesLauncher = widget.settings.usesHostLauncher;
     setState(() => _loading = true);
     try {
       final localInfo = await LocalManager.inspect();
+      if (!mounted || !_appActive || generation != _statusGeneration) return;
       SystemInfo? info;
       LauncherStatus? launcherInfo;
       String serverError = '';
       String launcherError = '';
-      if (widget.settings.usesHostLauncher) {
+      if (usesLauncher) {
         try {
-          launcherInfo = await _launcherApi.status();
+          launcherInfo = await launcherApi.status();
         } on SonderException catch (e) {
           launcherError = e.message;
+        } catch (e) {
+          launcherError =
+              RequestFailure.read(e, resource: 'host launcher').message;
         }
       }
-      if (!mounted || !_appActive) return;
+      if (!mounted || !_appActive || generation != _statusGeneration) return;
       final launcherStatus = launcherInfo;
       if (launcherStatus != null) {
         setState(() => _recordLauncherStatus(launcherStatus));
@@ -558,25 +619,29 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       }
       var unreachable = false;
       try {
-        info = await _api.systemInfo();
+        info = await api.systemInfo();
       } on SonderException catch (e) {
         serverError = e.message;
         unreachable = _unreachable(e);
+      } catch (e) {
+        unreachable = _unreachable(e);
+        serverError =
+            RequestFailure.read(e, resource: 'runtime status').message;
       }
       UpdateStatus? updateStatus;
       try {
-        updateStatus = await _api.fetchUpdateStatus();
+        updateStatus = await api.fetchUpdateStatus();
       } catch (_) {
         // Update status is best-effort: a non-admin key or older build
         // simply hides the category.
       }
       ExtensionRegistryStatus? extensionRegistry;
       try {
-        extensionRegistry = await _api.fetchExtensionRegistry();
+        extensionRegistry = await api.fetchExtensionRegistry();
       } catch (_) {
         // Optional admin projection: older/non-admin servers hide it.
       }
-      if (!mounted || !_appActive) return;
+      if (!mounted || !_appActive || generation != _statusGeneration) return;
       if (info != null) unawaited(_loadExtras());
       setState(() {
         if (info != null) {
@@ -591,9 +656,19 @@ class _RuntimeScreenState extends State<RuntimeScreen>
         _launcherError = launcherError;
       });
     } catch (e) {
-      if (mounted) setState(() => _serverError = e.toString());
+      if (mounted && generation == _statusGeneration) {
+        final unreachable = _unreachable(e);
+        setState(() {
+          _offline = unreachable;
+          _serverError = unreachable
+              ? null
+              : RequestFailure.read(e, resource: 'runtime status').message;
+        });
+      }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && generation == _statusGeneration) {
+        setState(() => _loading = false);
+      }
     }
   }
 
@@ -624,7 +699,8 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     } on SonderException catch (error) {
       outcome = ActionOutcome.failed(error.message);
     } catch (error) {
-      outcome = ActionOutcome.failed('$error');
+      outcome = ActionOutcome.failed(
+          RequestFailure.read(error, resource: 'runtime action').message);
     }
     if (!mounted) return;
     setState(() => _tracked[id] = _Tracked.done(outcome));
@@ -645,7 +721,8 @@ class _RuntimeScreenState extends State<RuntimeScreen>
       return ActionOutcome.failed('$command failed', detail: e.message);
     } catch (e) {
       // Whatever went wrong, the entry that sent it must stop "working".
-      return ActionOutcome.failed('$command failed', detail: '$e');
+      return ActionOutcome.failed('$command failed',
+          detail: RequestFailure.read(e, resource: 'command').message);
     }
   }
 
@@ -1680,8 +1757,11 @@ class _RuntimeScreenState extends State<RuntimeScreen>
     LocalActionResult result;
     try {
       result = await action();
+    } on SonderException catch (error) {
+      result = LocalActionResult(false, error.message);
     } catch (error) {
-      result = LocalActionResult(false, '$error');
+      result = LocalActionResult(
+          false, RequestFailure.read(error, resource: label.toLowerCase()).message);
     }
     if (!mounted) return;
     final stopped = !result.ok && _stoppedWaitingByUser && id == 'server';

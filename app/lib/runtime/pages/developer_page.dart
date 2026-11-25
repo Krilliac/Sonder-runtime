@@ -34,10 +34,12 @@ class _DeveloperPage extends StatelessWidget {
           RuntimeCardBody(
             child: LayoutBuilder(builder: (context, constraints) {
               const gap = SonderSpace.sm;
-              const cell = 136.0;
+              final scale =
+                  MediaQuery.textScalerOf(context).scale(1.0).clamp(1.0, 2.5);
+              final cell = 136.0 * scale;
               final columns = ((constraints.maxWidth + gap) / (cell + gap))
                   .floor()
-                  .clamp(2, 6);
+                  .clamp(1, 6);
               final width =
                   (constraints.maxWidth - gap * (columns - 1)) / columns;
               Widget sized(Widget child) =>
@@ -130,24 +132,23 @@ class _ConsoleSection extends StatelessWidget {
           : null,
       children: [
         RuntimeCardBody(
-          child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-            Expanded(
-              child: TextField(
-                key: const Key('runtime-command'),
-                controller: s._consoleInput,
-                autocorrect: false,
-                style: SonderTokens.of(context).mono(13),
-                decoration: const InputDecoration(
-                  isDense: true,
-                  hintText: '/diagnostics',
-                  labelText: 'Command',
-                ),
-                onSubmitted: (value) =>
-                    s._runConsole(value).catchError((Object _) {}),
+          child: LayoutBuilder(builder: (context, constraints) {
+            final scale =
+                MediaQuery.textScalerOf(context).scale(1.0).clamp(1.0, 2.5);
+            final field = TextField(
+              key: const Key('runtime-command'),
+              controller: s._consoleInput,
+              autocorrect: false,
+              style: SonderTokens.of(context).mono(13),
+              decoration: const InputDecoration(
+                isDense: true,
+                hintText: '/diagnostics',
+                labelText: 'Command',
               ),
-            ),
-            const SizedBox(width: SonderSpace.sm),
-            AsyncActionButton(
+              onSubmitted: (value) =>
+                  s._runConsole(value).catchError((Object _) {}),
+            );
+            final send = AsyncActionButton(
               buttonKey: const Key('runtime-command-send'),
               label: 'Send',
               icon: Icons.send_outlined,
@@ -156,8 +157,26 @@ class _ConsoleSection extends StatelessWidget {
               style: ActionButtonStyle.filled,
               onPressed: () => s._runConsole(s._consoleInput.text),
               onError: (_, __) {},
-            ),
-          ]),
+            );
+            if (constraints.maxWidth < 260 * scale) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  field,
+                  const SizedBox(height: SonderSpace.sm),
+                  Align(alignment: Alignment.centerRight, child: send),
+                ],
+              );
+            }
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Expanded(child: field),
+                const SizedBox(width: SonderSpace.sm),
+                send,
+              ],
+            );
+          }),
         ),
         if (s._console.isEmpty)
           const RuntimeEmptyRow('Replies show here, newest first.',
@@ -185,18 +204,44 @@ class _ConsoleEntryView extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-            Text('${statusGlyphs['prompt']} ',
-                style: tokens.mono(13, color: tokens.accentText)),
-            Expanded(
+          LayoutBuilder(builder: (context, constraints) {
+            final scale =
+                MediaQuery.textScalerOf(context).scale(1.0).clamp(1.0, 2.5);
+            final prompt = Text('${statusGlyphs['prompt']} ',
+                style: tokens.mono(13, color: tokens.accentText));
+            final command = Semantics(
+              label: entry.command,
+              excludeSemantics: true,
               child: SelectableText(entry.command,
                   maxLines: 1, style: tokens.mono(13, weight: FontWeight.w500)),
-            ),
-            Text(clockLabel(entry.at),
-                style: tokens.mono(12, color: tokens.muted)),
-            const SizedBox(width: SonderSpace.md),
-            StatusMark(kind, word: word, size: 12),
-          ]),
+            );
+            final clock = Text(clockLabel(entry.at),
+                style: tokens.mono(12, color: tokens.muted));
+            final mark = StatusMark(kind, word: word, size: 12);
+            if (constraints.maxWidth < 320 * scale) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [prompt, Expanded(child: command)]),
+                  const SizedBox(height: SonderSpace.xxs),
+                  Wrap(
+                    spacing: SonderSpace.md,
+                    runSpacing: SonderSpace.xxs,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [clock, mark],
+                  ),
+                ],
+              );
+            }
+            return Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+              prompt,
+              Expanded(child: command),
+              const SizedBox(width: SonderSpace.sm),
+              clock,
+              const SizedBox(width: SonderSpace.md),
+              mark,
+            ]);
+          }),
           if (!entry.running && output != null && output.trim().isNotEmpty) ...[
             const SizedBox(height: SonderSpace.sm),
             RawOutput(output, label: 'Reply'),

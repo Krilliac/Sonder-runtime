@@ -124,7 +124,10 @@ class _Legend extends StatelessWidget {
                       color: kind.color(tokens), weight: FontWeight.w600)),
             ),
             const SizedBox(width: SonderSpace.xs),
-            Text(words, style: text.bodySmall?.copyWith(color: tokens.text2)),
+            Flexible(
+              child: Text(words,
+                  style: text.bodySmall?.copyWith(color: tokens.text2)),
+            ),
           ]),
       ],
     );
@@ -320,13 +323,14 @@ class _ChildRow extends StatelessWidget {
     final elapsed = elapsedText(child.elapsedSeconds);
     final note = child.preview.isNotEmpty ? child.preview : child.activity;
     final slot = reserveAction || onCancel != null || onOpen != null;
+    final stacked = narrow || MediaQuery.textScalerOf(context).scale(1.0) > 1.25;
     final row = ConstrainedBox(
       constraints: const BoxConstraints(minHeight: 48),
       child: Padding(
         padding: EdgeInsets.fromLTRB(SonderSpace.lg, SonderSpace.md,
             slot ? _slot + SonderSpace.xs : SonderSpace.lg, SonderSpace.md),
         child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          if (!narrow)
+          if (!stacked)
             Padding(
               padding: const EdgeInsets.only(top: SonderSpace.xxs),
               child: StatusMark(s.kind, word: s.word, size: 12, width: 104),
@@ -335,7 +339,7 @@ class _ChildRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (narrow) ...[
+                if (stacked) ...[
                   StatusMark(s.kind, word: s.word, size: 12),
                   const SizedBox(height: SonderSpace.xxs),
                 ],

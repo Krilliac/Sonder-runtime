@@ -27,6 +27,7 @@ class _ModelsPage extends StatelessWidget {
         runtimeUrl: s.widget.settings.serverUrl,
         canStartProcesses: LocalManager.canRunLocalTools,
         onLaunch: s._launchObservatory,
+        onRetry: s._loadExtras,
         usesCredential: s._usesCredential,
         parts: const {EcosystemPart.inference},
       ),

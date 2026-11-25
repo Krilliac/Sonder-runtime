@@ -399,7 +399,7 @@ class _CategoryScaffoldState extends State<CategoryScaffold> {
                     style: text.bodyMedium?.copyWith(color: tokens.text2)),
                 const SizedBox(height: SonderSpace.lg),
               ],
-              if (widget.banner != null && !narrow) ...[
+              if (widget.banner != null) ...[
                 widget.banner!,
                 const SizedBox(height: SonderSpace.lg),
               ],
