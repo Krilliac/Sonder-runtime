@@ -30,6 +30,7 @@ sonder_runtime/adapters/command_completion.py
 sonder_runtime/adapters/command_parsing.py
 sonder_runtime/adapters/command_surface.py
 sonder_runtime/adapters/compute_fabric/__init__.py
+sonder_runtime/adapters/compute_fabric/http_client.py
 sonder_runtime/adapters/compute_fabric/local_snapshot.py
 sonder_runtime/adapters/config_validation.py
 sonder_runtime/adapters/content_services.py
@@ -75,6 +76,7 @@ sonder_runtime/adapters/health_alerts/notifiers.py
 sonder_runtime/adapters/health_alerts/schtasks.py
 sonder_runtime/adapters/health_alerts/state_store.py
 sonder_runtime/adapters/host_tools/__init__.py
+sonder_runtime/adapters/host_tools/guards.py
 sonder_runtime/adapters/host_tools/linux.py
 sonder_runtime/adapters/image_generation.py
 sonder_runtime/adapters/inference/__init__.py
@@ -91,6 +93,7 @@ sonder_runtime/adapters/inference/log_safe.py
 sonder_runtime/adapters/inference/model_gateway_factory.py
 sonder_runtime/adapters/inference/ollama.py
 sonder_runtime/adapters/inference/ollama_cloud_metadata.py
+sonder_runtime/adapters/inference/ollama_endpoint.py
 sonder_runtime/adapters/inference/ollama_model_root.py
 sonder_runtime/adapters/inference/openai_compat.py
 sonder_runtime/adapters/inference/openai_protocol_probe.py
@@ -149,9 +152,11 @@ sonder_runtime/adapters/model_inventory.py
 sonder_runtime/adapters/model_list_consumers.py
 sonder_runtime/adapters/model_lists.py
 sonder_runtime/adapters/model_lists_editor.py
+sonder_runtime/adapters/model_request_admission.py
 sonder_runtime/adapters/model_tool_grants.py
 sonder_runtime/adapters/model_tool_policy.py
 sonder_runtime/adapters/model_tool_policy_editor.py
+sonder_runtime/adapters/model_transport.py
 sonder_runtime/adapters/observability/__init__.py
 sonder_runtime/adapters/observability/chat_formatting.py
 sonder_runtime/adapters/observability/distillation_formatting.py
@@ -193,11 +198,15 @@ sonder_runtime/adapters/persistence/sqlite/workflow_checkpoints.py
 sonder_runtime/adapters/persistence/sqlite_factory.py
 sonder_runtime/adapters/playbook_search.py
 sonder_runtime/adapters/preflight_executor.py
+sonder_runtime/adapters/process_liveness.py
 sonder_runtime/adapters/process_probe.py
+sonder_runtime/adapters/process_termination.py
 sonder_runtime/adapters/process_tree.py
 sonder_runtime/adapters/protected_write_scope.py
 sonder_runtime/adapters/provider_bindings.py
 sonder_runtime/adapters/provider_dispatch/__init__.py
+sonder_runtime/adapters/provider_dispatch/fallback.py
+sonder_runtime/adapters/provider_dispatch/gateway.py
 sonder_runtime/adapters/recall_gateway.py
 sonder_runtime/adapters/reference_lookup_multi.py
 sonder_runtime/adapters/reference_lookup_service.py
@@ -233,6 +242,7 @@ sonder_runtime/adapters/task_formatting.py
 sonder_runtime/adapters/task_store.py
 sonder_runtime/adapters/testing/__init__.py
 sonder_runtime/adapters/tier_escalation.py
+sonder_runtime/adapters/tls_contexts.py
 sonder_runtime/adapters/training/__init__.py
 sonder_runtime/adapters/training/alias_lifecycle.py
 sonder_runtime/adapters/training/artifacts.py
@@ -280,6 +290,7 @@ sonder_runtime/application/capabilities/observability.py
 sonder_runtime/application/chat/__init__.py
 sonder_runtime/application/chat/admission_wait_status.py
 sonder_runtime/application/chat/bidi.py
+sonder_runtime/application/chat/handle_chat.py
 sonder_runtime/application/chat/handoff_receipts.py
 sonder_runtime/application/chat/honesty.py
 sonder_runtime/application/chat/model_fitness.py
@@ -338,6 +349,7 @@ sonder_runtime/application/execution/effect_replay.py
 sonder_runtime/application/execution/facade.py
 sonder_runtime/application/execution/gateway_calls.py
 sonder_runtime/application/execution/tool_service.py
+sonder_runtime/application/execution/worker_bindings.py
 sonder_runtime/application/execution/world_control.py
 sonder_runtime/application/execution/world_providers.py
 sonder_runtime/application/extensions/__init__.py
@@ -353,6 +365,7 @@ sonder_runtime/application/inference_membership/__init__.py
 sonder_runtime/application/inspection/__init__.py
 sonder_runtime/application/inspection/use_cases.py
 sonder_runtime/application/instruction_discovery/__init__.py
+sonder_runtime/application/jobs/durable_registry.py
 sonder_runtime/application/jobs/generic_jobs.py
 sonder_runtime/application/jobs/session_lifecycle.py
 sonder_runtime/application/lifecycle_hooks/__init__.py
@@ -413,8 +426,10 @@ sonder_runtime/application/ports/health_alerts.py
 sonder_runtime/application/ports/host_tools.py
 sonder_runtime/application/ports/inference_membership.py
 sonder_runtime/application/ports/jobs.py
+sonder_runtime/application/ports/lane_continuation.py
 sonder_runtime/application/ports/memory.py
 sonder_runtime/application/ports/model_bootstrap.py
+sonder_runtime/application/ports/model_gateway.py
 sonder_runtime/application/ports/model_gateway_contract.py
 sonder_runtime/application/ports/permission_policy.py
 sonder_runtime/application/ports/preferences.py
@@ -427,6 +442,8 @@ sonder_runtime/application/ports/repl_notices.py
 sonder_runtime/application/ports/repl_services.py
 sonder_runtime/application/ports/repository_intelligence.py
 sonder_runtime/application/ports/runtime_checkpoints.py
+sonder_runtime/application/ports/runtime_owner.py
+sonder_runtime/application/ports/runtime_threads.py
 sonder_runtime/application/ports/sandbox.py
 sonder_runtime/application/ports/session_repository.py
 sonder_runtime/application/ports/specialized_lifecycle.py
@@ -503,6 +520,7 @@ sonder_runtime/application/session/continuity.py
 sonder_runtime/application/session/effort_settings.py
 sonder_runtime/application/session/event_turns.py
 sonder_runtime/application/session/projections.py
+sonder_runtime/application/session/query_export.py
 sonder_runtime/application/session/temperature_settings.py
 sonder_runtime/application/session/transcript_export.py
 sonder_runtime/application/session/transcript_view.py
@@ -523,10 +541,12 @@ sonder_runtime/application/testing/__init__.py
 sonder_runtime/application/tools/__init__.py
 sonder_runtime/application/tools/audit.py
 sonder_runtime/application/tools/catalog_artifacts.py
+sonder_runtime/application/tools/gateway_contract.py
 sonder_runtime/application/tools/receipt_digest.py
 sonder_runtime/application/tools/resource_policy.py
 sonder_runtime/application/tools/scheduling.py
 sonder_runtime/application/tools/settled_replay.py
+sonder_runtime/application/tools/typed_gateway.py
 sonder_runtime/application/training/__init__.py
 sonder_runtime/application/training/adapter_catalog.py
 sonder_runtime/application/training/attended_execution.py

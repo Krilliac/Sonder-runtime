@@ -1,9 +1,11 @@
 """Bounded process-tree teardown for adapters that own child processes."""
 from __future__ import annotations
 
+from collections.abc import Callable
 import os
 import signal
 import subprocess
+from typing import Any
 
 from .process_liveness import PROCESS_ALIVE, PROCESS_DEAD, probe_process
 from .process_tree import is_real_popen, terminate_tree
@@ -27,12 +29,12 @@ class ProcessTreeSupervisor:
     def __init__(
         self,
         *,
-        os_module=os,
-        signal_module=signal,
-        subprocess_module=subprocess,
+        os_module: Any = os,
+        signal_module: Any = signal,
+        subprocess_module: Any = subprocess,
         platform_name: str | None = None,
         timeout_seconds: float = 5.0,
-        process_probe=probe_process,
+        process_probe: Callable[[object, str | None], tuple[str, str | None]] = probe_process,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -88,7 +90,9 @@ class ProcessTreeSupervisor:
             detail="unsupported platform; full process-tree cleanup is unproven",
         )
 
-    def _confirm_exited_group(self, request):
+    def _confirm_exited_group(
+        self, request: ProcessTreeCleanupRequest
+    ) -> ProcessTreeCleanupReceipt:
         """Prove absence after root reaping; kill surviving group members."""
         if request.process_group_id != request.process_id:
             return ProcessTreeCleanupReceipt(
@@ -178,11 +182,11 @@ class ProcessTreeSupervisor:
 
 
 def terminate_process_tree(
-    proc,
+    proc: Any,
     *,
-    os_module=os,
-    signal_module=signal,
-    subprocess_module=subprocess,
+    os_module: Any = os,
+    signal_module: Any = signal,
+    subprocess_module: Any = subprocess,
 ) -> None:
     """Best-effort teardown of a process and its ordinary descendants.
 

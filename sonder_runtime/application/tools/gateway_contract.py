@@ -61,7 +61,8 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Mapping, Protocol
+from collections.abc import Callable, Mapping
+from typing import Any, Protocol
 from uuid import uuid4
 
 from ...domain.security import redaction as _redaction
@@ -228,8 +229,21 @@ class ApprovalGate(Protocol):
     def approve(self, request: ToolGatewayRequest) -> bool: ...
 
 
+class ToolInvocationResult(Protocol):
+    @property
+    def success(self) -> bool: ...
+    @property
+    def output(self) -> Any: ...
+    @property
+    def error_code(self) -> str: ...
+    @property
+    def error(self) -> str: ...
+    @property
+    def metadata(self) -> Mapping[str, Any]: ...
+
+
 class ToolInvoker(Protocol):
-    def invoke(self, request: ToolGatewayRequest) -> "ToolInvocationOutput": ...
+    def invoke(self, request: ToolGatewayRequest) -> ToolInvocationResult: ...
 
 
 class OutputRedactor(Protocol):
@@ -244,7 +258,7 @@ class RedactedOutput:
     applied: bool
 
 
-def _unique_object(pairs: list) -> dict:
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     """A JSON object whose keys are all distinct; a repeated key is refused.
 
     ``json.loads`` keeps only the last value of a repeated key, so the
@@ -265,7 +279,7 @@ def _exact_float(token: str) -> float:
     return value
 
 
-def _parse_json_container(output: Any) -> dict | list | None:
+def _parse_json_container(output: Any) -> dict[str, Any] | list[Any] | None:
     """The object or array a JSON-text output encodes, else ``None``.
 
     Only a string that starts like a JSON object or array and parses as one,
@@ -322,8 +336,8 @@ def _keeps_text_redacted_words(raw: str, raw_text: str, candidate: str) -> bool:
     return bool((_words(raw) - _words(raw_text)) & _words(candidate))
 
 
-def _redact_json_keys(value: Any, redact_text, *, secret: bool = False,
-                      _depth: int = 0, _budget: list | None = None) -> Any:
+def _redact_json_keys(value: Any, redact_text: Callable[[str], str], *, secret: bool = False,
+                      _depth: int = 0, _budget: list[int] | None = None) -> Any:
     """Key-aware pass over a parsed JSON output, before the structural redactor.
 
     The text patterns that once saw ``"password": "hunter22"`` as one line see
@@ -340,7 +354,7 @@ def _redact_json_keys(value: Any, redact_text, *, secret: bool = False,
     if _depth > _redaction.MAX_WALK_DEPTH or _budget[0] < 0:
         return _redaction.REDACTED
     if isinstance(value, dict):
-        cleaned: dict = {}
+        cleaned: dict[Any, Any] = {}
         for key, item in value.items():
             name = key if isinstance(key, str) else str(key)
             label = redact_text(name) if isinstance(key, str) else key
@@ -511,14 +525,16 @@ class ToolGateway:
         """
         from .typed_gateway import PortBackedToolInvoker, RegistrySchemaValidator
 
-        invoker_kwargs = {}
-        if context_factory is not None:
-            invoker_kwargs["context_factory"] = context_factory
+        invoker = (
+            PortBackedToolInvoker(registry, policy, executor, context_factory=context_factory)
+            if context_factory is not None
+            else PortBackedToolInvoker(registry, policy, executor)
+        )
         return cls(
             RegistrySchemaValidator(registry),
             permissions,
             approvals,
-            PortBackedToolInvoker(registry, policy, executor, **invoker_kwargs),
+            invoker,
             redactor,
             receipts,
             audit=audit,
@@ -591,18 +607,19 @@ class ToolGateway:
                     % ", ".join(sorted(unscoped_effects))
                 )
             policy_match = _match_text(_authorize(self._permissions, request))
-            if request.permission.reconciliation == "idempotent" and not request.permission.traits.replay_safe:
+            traits = request.permission.traits or ToolTraits()
+            if request.permission.reconciliation == "idempotent" and not traits.replay_safe:
                 raise Forbidden("tool replay requires host-declared idempotent=TRUE")
             if request.permission.approval is ApprovalMode.REQUIRED:
                 if not request.approval_token or not self._approvals.approve(request):
                     raise Forbidden("tool approval is required")
             self._check_control(request)
             admission = (nullcontext() if self._concurrency is None else self._concurrency.admit(
-                request.permission.traits.can_parallelize, lambda: self._check_control(request)
+                traits.can_parallelize, lambda: self._check_control(request)
             ))
             with admission:
                 if journal_binding is not None and (
-                    request.permission.effects or not request.permission.traits.is_read_only
+                    request.permission.effects or not traits.is_read_only
                 ):
                     stage = "journal"
                     try:

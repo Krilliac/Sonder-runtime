@@ -15,7 +15,8 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from http.client import HTTPMessage
+from typing import Any, IO
 
 from ...application.compute_fabric.jobs import (
     MAX_COMPUTE_ARTIFACT_BYTES,
@@ -36,11 +37,19 @@ from ..tls_contexts import default_https_context, https_handler
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
         return None
 
 
-def _default_opener(request: urllib.request.Request, *, timeout: float):
+def _default_opener(request: urllib.request.Request, *, timeout: float) -> Any:
     return urllib.request.build_opener(_NoRedirect(), https_handler()).open(
         request, timeout=timeout,
     )
@@ -58,7 +67,9 @@ class PinnedHttpsResponse:
     body: bytes
 
 
-def _direct_https_connection(host: str, port: int, timeout: float, context):
+def _direct_https_connection(
+    host: str, port: int, timeout: float, context: ssl.SSLContext
+) -> http.client.HTTPSConnection:
     """Create one direct connection; unlike urllib this never consults proxies."""
     return http.client.HTTPSConnection(host, port=port, timeout=timeout, context=context)
 
@@ -171,10 +182,12 @@ class PinnedHttpsClient:
         try:
             get_all = getattr(headers, "get_all", None)
             if callable(get_all):
-                values = get_all("Content-Length") or ()
+                values = get_all("Content-Length")
+                if not isinstance(values, (list, tuple)):
+                    return False
                 return len(values) == 1 and values[0] == str(len(body))
             get = getattr(headers, "get", None)
-            return callable(get) and get("Content-Length") == str(len(body))
+            return callable(get) and bool(get("Content-Length") == str(len(body)))
         except Exception:
             return False
 
