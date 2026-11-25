@@ -573,7 +573,7 @@
       ]
     },
     {
-      "file_count": 459,
+      "file_count": 460,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -992,6 +992,7 @@
         "sonder_runtime/application/subagents/continuation_codec.py",
         "sonder_runtime/application/subagents/durable_continuation.py",
         "sonder_runtime/application/tasks/__init__.py",
+        "sonder_runtime/application/tasks/account_scope.py",
         "sonder_runtime/application/tasks/use_cases.py",
         "sonder_runtime/application/testing/__init__.py",
         "sonder_runtime/application/testing/legacy_runs.py",

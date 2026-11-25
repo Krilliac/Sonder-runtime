@@ -200,6 +200,22 @@ def handle_work_intent(
     if not worker_cap and not classified_intent:
         return None
     action = "natural-work\0%s\0%s" % (project, content)
+    task_scope = None if context is None else serve_mod._task_account_scope(context)
+
+    def _route_work(**extra: Any) -> Any:
+        scope_ctx = (
+            serve_mod.server.scoped_task_account_boundary(task_scope)
+            if task_scope is not None
+            else contextlib.nullcontext()
+        )
+        with scope_ctx:
+            return serve_mod.server.route_work_request(
+                content,
+                project=project,
+                _classified_intent=classified_intent,
+                **extra,
+            )
+
     if with_receipt:
         action += f"\0session={session_id}"
         acknowledgement = work_ack_fn(
@@ -258,10 +274,7 @@ def handle_work_intent(
                     http_work_runs_mod.link_run,
                     acknowledgement,
                     activity_tracker_mod.current_response_id() or "",
-                    lambda: serve_mod.server.route_work_request(
-                        content,
-                        project=project,
-                        _classified_intent=classified_intent,
+                    lambda: _route_work(
                         _admitted_decision=decision,
                         **({"_tool_tier": tool_tier} if tool_tier else {}),
                     ),
@@ -334,10 +347,7 @@ def handle_work_intent(
         context,
         idempotency_key,
         action,
-        lambda: serve_mod.server.route_work_request(
-            content,
-            project=project,
-            _classified_intent=classified_intent,
+        lambda: _route_work(
             **({"_tool_tier": tool_tier} if tool_tier else {}),
         ),
     )
@@ -800,6 +810,7 @@ def run_http_work_slash(
     fanout_role: Callable[[Any], str],
     developer_authorized: Callable[[Any], bool],
     invoke: Callable[[str, int, str], Any],
+    task_scope_of: Callable[[Any], str | None] | None = None,
 ) -> Any:
     """Handle HTTP ``/work`` and ``/agent`` with optional secondary multi-model/fleet modes."""
     from sonder_runtime.application.agents.delegation import rejected_project_refusal
@@ -810,21 +821,30 @@ def run_http_work_slash(
     task_boundary_error = account_boundary_refusal("workbench_agent", {}, context)
     if task_boundary_error:
         return task_boundary_error
+    task_scope = (
+        None if (context is None or task_scope_of is None) else task_scope_of(context)
+    )
     work_project = project if workspace_project is None else workspace_project
     rejected = rejected_project_refusal(work_project, server.served_work_project)
     if rejected:
         return rejected
 
     def _run() -> Any:
-        prepared, prep_err = server._prepare_agent_mode_run(
-            arg,
-            request_owner="" if context is None else fanout_owner(context),
-            request_role="" if context is None else fanout_role(context),
-            allow_fanout=False if context is None else developer_authorized(context),
+        scope_ctx = (
+            server.scoped_task_account_boundary(task_scope)
+            if task_scope is not None
+            else contextlib.nullcontext()
         )
-        if prep_err:
-            return prep_err
-        return invoke(prepared.prompt, prepared.max_steps, work_project)
+        with scope_ctx:
+            prepared, prep_err = server._prepare_agent_mode_run(
+                arg,
+                request_owner="" if context is None else fanout_owner(context),
+                request_role="" if context is None else fanout_role(context),
+                allow_fanout=False if context is None else developer_authorized(context),
+            )
+            if prep_err:
+                return prep_err
+            return invoke(prepared.prompt, prepared.max_steps, work_project)
 
     return idempotent_action(
         context,
