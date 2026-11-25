@@ -597,6 +597,58 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (message.reasoning.trim().isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: SonderSpace.sm),
+            child: Builder(builder: (context) {
+              final tokens = SonderTokens.of(context);
+              final thinkingActive = message.content.isEmpty;
+              return Container(
+                key: const Key('streaming-reasoning'),
+                padding: const EdgeInsets.fromLTRB(
+                    SonderSpace.md, SonderSpace.sm, SonderSpace.md, SonderSpace.sm),
+                decoration: BoxDecoration(
+                  color: tokens.panel,
+                  borderRadius: const BorderRadius.horizontal(
+                      right: Radius.circular(SonderRadius.row)),
+                  border: Border(
+                    left: BorderSide(
+                      color: thinkingActive ? tokens.accent : tokens.muted,
+                      width: 2,
+                    ),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.psychology_outlined,
+                          size: 14,
+                          color: thinkingActive ? tokens.accent : tokens.muted,
+                        ),
+                        const SizedBox(width: SonderSpace.xs),
+                        Text(
+                          thinkingActive ? 'Thinking…' : 'Reasoning',
+                          style: tokens.mono(
+                            11.5,
+                            color: thinkingActive ? tokens.text2 : tokens.muted,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: SonderSpace.xs),
+                    SelectableText(
+                      message.reasoning.trimRight(),
+                      style: tokens.mono(12, color: tokens.muted),
+                    ),
+                  ],
+                ),
+              );
+            }),
+          ),
         if (message.content.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(bottom: SonderSpace.sm),
@@ -634,7 +686,7 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
           key: ValueKey<String>('live-${entry.id}'),
           live: widget.live,
           onStop: actions.onStop,
-          outputLength: message.content.length,
+          outputLength: message.content.length + message.reasoning.length,
         ),
       ],
     );

@@ -1293,6 +1293,7 @@ class ChatController extends ChangeNotifier {
     _schedulePoll();
 
     final buffer = StringBuffer();
+    final reasoningBuffer = StringBuffer();
     _turnSub = turn.events.listen(
       (event) {
         if (_disposed ||
@@ -1318,6 +1319,12 @@ class ChatController extends ChangeNotifier {
             }
           case TurnTool(:final tool):
             _handleTurnTool(turn, tool, turnGeneration);
+          case TurnReasoningDelta(:final text):
+            if (live.value?.waitStatus != null) {
+              live.value = live.value?.copyWith(clearWaitStatus: true);
+            }
+            reasoningBuffer.write(text);
+            _updatePendingReasoning(reasoningBuffer.toString());
           case TurnDelta(:final text):
             if (live.value?.waitStatus != null) {
               live.value = live.value?.copyWith(clearWaitStatus: true);
@@ -1325,7 +1332,15 @@ class ChatController extends ChangeNotifier {
             buffer.write(text);
             _updatePending(buffer.toString());
           case TurnDone(:final reply):
-            _finishOk(turn, reply, expectedGeneration: turnGeneration);
+            final effectiveReply =
+                reply.reasoning.isEmpty && reasoningBuffer.isNotEmpty
+                    ? ChatReply(
+                        text: reply.text,
+                        reasoning: reasoningBuffer.toString().trim(),
+                        metadata: reply.metadata,
+                      )
+                    : reply;
+            _finishOk(turn, effectiveReply, expectedGeneration: turnGeneration);
         }
       },
       onError: (Object e, StackTrace _) {
@@ -1815,6 +1830,13 @@ class ChatController extends ChangeNotifier {
     if (_turnThreadId != _currentThreadId) return;
     _replace(
         _pendingId, (e) => e.withMessage(e.message.copyWith(content: partial)));
+    _notify();
+  }
+
+  void _updatePendingReasoning(String partial) {
+    if (_turnThreadId != _currentThreadId) return;
+    _replace(_pendingId,
+        (e) => e.withMessage(e.message.copyWith(reasoning: partial)));
     _notify();
   }
 

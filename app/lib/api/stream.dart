@@ -124,6 +124,27 @@ class ChatStreamDelta extends ChatStreamEvent {
   const ChatStreamDelta(this.text, this.accumulated);
 }
 
+/// New reasoning/thinking text streamed live before or alongside the answer.
+class ChatStreamReasoningDelta extends ChatStreamEvent {
+  final String text;
+  final String accumulated;
+  const ChatStreamReasoningDelta(this.text, this.accumulated);
+}
+
+/// One incremental OpenAI-format `delta.tool_calls` entry streamed live.
+class ChatStreamToolCallDelta extends ChatStreamEvent {
+  final int index;
+  final String id;
+  final String name;
+  final String argumentsDelta;
+  const ChatStreamToolCallDelta({
+    required this.index,
+    this.id = '',
+    this.name = '',
+    this.argumentsDelta = '',
+  });
+}
+
 /// The turn finished (`[DONE]`, or a non-streamed JSON answer).
 class ChatStreamDone extends ChatStreamEvent {
   final ChatReply reply;
@@ -591,6 +612,7 @@ class ChatStreamAccumulator {
   /// Longest answer accepted; more throws [streamTooLargeCode].
   final int maxAnswerChars;
   final StringBuffer _text = StringBuffer();
+  final StringBuffer _reasoning = StringBuffer();
 
   ChatStreamAccumulator({this.maxAnswerChars = defaultMaxStreamAnswerChars});
   final Map<String, dynamic> completion = {};
@@ -599,12 +621,21 @@ class ChatStreamAccumulator {
   /// Tool event parsed from the most recent [apply] call, if any.
   ChatStreamToolEvent? lastToolEvent;
 
+  /// Reasoning fragment parsed from the most recent [apply] call, if any.
+  String lastReasoningFragment = '';
+
+  /// Structured `delta.tool_calls` items parsed from the most recent [apply] call.
+  List<ChatStreamToolCallDelta> lastToolCallDeltas = const [];
+
   String get text => _text.toString();
+  String get reasoning => _reasoning.toString();
 
   /// Apply one decoded chunk. Returns the new content fragment (may be
   /// empty). Throws [SonderException] for an `object: error` frame.
   String apply(Map<String, dynamic> chunk) {
     lastToolEvent = null;
+    lastReasoningFragment = '';
+    lastToolCallDeltas = const [];
     if (chunk['object'] == 'error') {
       final error = chunk['error'] is Map
           ? Map<String, dynamic>.from(chunk['error'] as Map)
@@ -645,12 +676,51 @@ class ChatStreamAccumulator {
     if (choices is List && choices.isNotEmpty && choices.first is Map) {
       final choice = Map<String, dynamic>.from(choices.first as Map);
       final delta = choice['delta'];
-      if (delta is Map && delta['content'] is String) {
-        fragment = delta['content'] as String;
-        if (_text.length + fragment.length > maxAnswerChars) {
-          throw _tooLarge('an answer');
+      if (delta is Map) {
+        final rawReasoning = delta['reasoning_content'] is String &&
+                (delta['reasoning_content'] as String).isNotEmpty
+            ? delta['reasoning_content'] as String
+            : (delta['reasoning'] is String &&
+                    (delta['reasoning'] as String).isNotEmpty
+                ? delta['reasoning'] as String
+                : '');
+        if (rawReasoning.isNotEmpty) {
+          if (_reasoning.length + rawReasoning.length > maxAnswerChars) {
+            throw _tooLarge('reasoning text');
+          }
+          _reasoning.write(rawReasoning);
+          lastReasoningFragment = rawReasoning;
         }
-        _text.write(fragment);
+        final rawTools = delta['tool_calls'];
+        if (rawTools is List && rawTools.isNotEmpty) {
+          final parsedDeltas = <ChatStreamToolCallDelta>[];
+          for (final item in rawTools) {
+            if (item is! Map) continue;
+            final idxRaw = item['index'];
+            final idx = idxRaw is int ? idxRaw : 0;
+            if (idx < 0 || idx >= 64) continue;
+            final fn = item['function'] is Map
+                ? Map<String, dynamic>.from(item['function'] as Map)
+                : const <String, dynamic>{};
+            parsedDeltas.add(ChatStreamToolCallDelta(
+              index: idx,
+              id: item['id'] is String ? item['id'] as String : '',
+              name: fn['name'] is String ? fn['name'] as String : '',
+              argumentsDelta:
+                  fn['arguments'] is String ? fn['arguments'] as String : '',
+            ));
+          }
+          if (parsedDeltas.isNotEmpty) {
+            lastToolCallDeltas = List.unmodifiable(parsedDeltas);
+          }
+        }
+        if (delta['content'] is String) {
+          fragment = delta['content'] as String;
+          if (_text.length + fragment.length > maxAnswerChars) {
+            throw _tooLarge('an answer');
+          }
+          _text.write(fragment);
+        }
       }
       final finish = choice['finish_reason'];
       if (finish is String && finish.isNotEmpty) finishReason = finish;
@@ -658,12 +728,20 @@ class ChatStreamAccumulator {
     return fragment;
   }
 
-  ChatReply reply({Map<String, String> headers = const {}}) => chatReplyFrom(
-        content: text,
-        completion: completion,
-        headers: headers,
-        finishReason: finishReason,
-      );
+  ChatReply reply({Map<String, String> headers = const {}}) {
+    final effectiveCompletion = Map<String, dynamic>.of(completion);
+    final existingReasoning =
+        effectiveCompletion['sonder_reasoning']?.toString().trim() ?? '';
+    if (existingReasoning.isEmpty && _reasoning.isNotEmpty) {
+      effectiveCompletion['sonder_reasoning'] = _reasoning.toString();
+    }
+    return chatReplyFrom(
+      content: text,
+      completion: effectiveCompletion,
+      headers: headers,
+      finishReason: finishReason,
+    );
+  }
 }
 
 /// Everything needed to open one streamed turn.
@@ -855,6 +933,14 @@ Stream<ChatStreamEvent> openChatStream(
       if (decoded is! Map) return;
       try {
         final fragment = acc.apply(Map<String, dynamic>.from(decoded));
+        final reasoningFragment = acc.lastReasoningFragment;
+        if (reasoningFragment.isNotEmpty) {
+          controller
+              .add(ChatStreamReasoningDelta(reasoningFragment, acc.reasoning));
+        }
+        for (final tcDelta in acc.lastToolCallDeltas) {
+          controller.add(tcDelta);
+        }
         final toolEvent = acc.lastToolEvent;
         if (toolEvent != null) {
           controller.add(toolEvent);

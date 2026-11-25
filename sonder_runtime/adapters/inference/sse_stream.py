@@ -257,6 +257,8 @@ class _Aggregate:
         self._progress = progress
         self._label = label
         self.parts: list[str] = []
+        self.reasoning_parts: list[str] = []
+        self._tool_calls: dict[int, dict[str, object]] = {}
         self.model: object = None
         self.ident: object = None
         self.finish_reason: object = None
@@ -295,6 +297,17 @@ class _Aggregate:
             self.finish_reason = choice["finish_reason"]
         delta = choice.get("delta")
         piece = delta.get("content") if isinstance(delta, dict) else None
+        reasoning_piece = None
+        tool_call_deltas = None
+        if isinstance(delta, dict):
+            raw_reasoning = delta.get("reasoning_content")
+            if not isinstance(raw_reasoning, str) or not raw_reasoning:
+                raw_reasoning = delta.get("reasoning")
+            if isinstance(raw_reasoning, str) and raw_reasoning:
+                reasoning_piece = raw_reasoning
+            raw_tool_calls = delta.get("tool_calls")
+            if isinstance(raw_tool_calls, list) and raw_tool_calls:
+                tool_call_deltas = raw_tool_calls
         if self._progress is not None and isinstance(delta, dict):
             counted = 0
             for key in ("content", "reasoning_content", "reasoning"):
@@ -303,17 +316,55 @@ class _Aggregate:
                     counted += len(value)
             if counted or delta.get("tool_calls"):
                 self._progress.content()
+        if reasoning_piece is not None:
+            self.reasoning_parts.append(reasoning_piece)
+            if self._live is not None:
+                emit_reasoning = getattr(self._live, "emit_reasoning", None)
+                if callable(emit_reasoning) and not emit_reasoning(reasoning_piece):
+                    raise Cancelled("the streaming client disconnected; generation cancelled")
+        if tool_call_deltas is not None:
+            for item in tool_call_deltas:
+                if not isinstance(item, dict):
+                    continue
+                raw_idx = item.get("index", 0)
+                if isinstance(raw_idx, bool) or not isinstance(raw_idx, int) or raw_idx < 0 or raw_idx >= 64:
+                    continue
+                entry = self._tool_calls.setdefault(
+                    raw_idx,
+                    {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                )
+                if isinstance(item.get("id"), str) and item["id"]:
+                    entry["id"] = item["id"]
+                if isinstance(item.get("type"), str) and item["type"]:
+                    entry["type"] = item["type"]
+                fn = item.get("function")
+                if isinstance(fn, dict):
+                    dst_fn = entry["function"]
+                    if isinstance(dst_fn, dict):
+                        if isinstance(fn.get("name"), str) and fn["name"]:
+                            dst_fn["name"] = fn["name"]
+                        if isinstance(fn.get("arguments"), str) and fn["arguments"]:
+                            dst_fn["arguments"] = str(dst_fn.get("arguments") or "") + fn["arguments"]
+                if self._live is not None:
+                    emit_tc = getattr(self._live, "emit_tool_call_delta", None)
+                    if callable(emit_tc) and not emit_tc(item):
+                        raise Cancelled("the streaming client disconnected; generation cancelled")
         if isinstance(piece, str) and piece:
             self.parts.append(piece)
             if self._live is not None and not self._live.emit(piece):
                 raise Cancelled("the streaming client disconnected; generation cancelled")
 
     def document(self) -> dict:
+        message: dict[str, object] = {"role": "assistant", "content": "".join(self.parts)}
+        if self.reasoning_parts:
+            message["reasoning_content"] = "".join(self.reasoning_parts)
+        if self._tool_calls:
+            message["tool_calls"] = [self._tool_calls[idx] for idx in sorted(self._tool_calls)]
         document: dict[str, object] = {
             "object": "chat.completion",
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": "".join(self.parts)},
+                "message": message,
                 "finish_reason": self.finish_reason,
             }],
         }

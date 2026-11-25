@@ -2456,9 +2456,88 @@ def _print_body(text, width):
         print(line)
 
 
+def _make_repl_live_stream(indicator, *, expose_reasoning=False):
+    """Build a terminal LiveTurnStream for interactive TTY chat turns, or None."""
+    if not (_console_has_operator() and _stdout_is_interactive()):
+        return None
+    if _machine_output.enabled(os.environ) or hasattr(sys.stdout, "emit_event"):
+        return None
+    from sonder_runtime.application.chat import stream_sink as _stream_sink
+
+    state = {
+        "started": False,
+        "in_reasoning": False,
+        "ended_with_newline": True,
+        "seen_tools": set(),
+    }
+
+    def _ensure_header():
+        if state["started"]:
+            return
+        if indicator is not None:
+            indicator.stop()
+        print()
+        print(S.turn_header("answer", _cols()))
+        state["started"] = True
+        state["ended_with_newline"] = True
+
+    def _write_text(piece):
+        safe = S.safe_text(piece)
+        if not safe:
+            return True
+        _ensure_header()
+        if state["in_reasoning"]:
+            if not state["ended_with_newline"]:
+                sys.stdout.write("\n")
+            sys.stdout.write("\n")
+            state["in_reasoning"] = False
+            state["ended_with_newline"] = True
+        sys.stdout.write(safe)
+        sys.stdout.flush()
+        state["ended_with_newline"] = safe.endswith("\n")
+        return True
+
+    def _write_reasoning(piece):
+        safe = S.safe_text(piece)
+        if not safe:
+            return True
+        _ensure_header()
+        if not state["in_reasoning"]:
+            sys.stdout.write(_paint("thinking: ", "muted"))
+            state["in_reasoning"] = True
+        sys.stdout.write(_paint(safe, "muted"))
+        sys.stdout.flush()
+        state["ended_with_newline"] = safe.endswith("\n")
+        return True
+
+    def _write_tool_call(delta):
+        fn = delta.get("function") if isinstance(delta, dict) else None
+        name = fn.get("name") if isinstance(fn, dict) else None
+        if isinstance(name, str) and name.strip():
+            key = (delta.get("index", 0), name.strip())
+            if key not in state["seen_tools"]:
+                state["seen_tools"].add(key)
+                _ensure_header()
+                if not state["ended_with_newline"]:
+                    sys.stdout.write("\n")
+                sys.stdout.write(_paint("▸ calling %s\n" % S.safe_text(name.strip()), "muted"))
+                sys.stdout.flush()
+                state["in_reasoning"] = False
+                state["ended_with_newline"] = True
+        return True
+
+    live = _stream_sink.LiveTurnStream(
+        _write_text,
+        write_reasoning=_write_reasoning if expose_reasoning else None,
+        write_tool_call=_write_tool_call,
+    )
+    live._repl_state = state  # type: ignore[attr-defined]
+    return live
+
+
 def _print_chat_result(text, started_at, *, offer_feedback=False,
                        label="Sonder", error=False, indicator=None,
-                       interaction_id=None, metrics=None):
+                       interaction_id=None, metrics=None, live_stream=None):
     """Present one completed turn.
 
     Piped/scripted use keeps the historical plain output (answer, then a
@@ -2501,15 +2580,50 @@ def _print_chat_result(text, started_at, *, offer_feedback=False,
     width = _cols()
     clean_answer, events, stats = _parse_activity_events(answer)
     clean_answer = _strip_activity(clean_answer)
-    # One empty line sets the reply apart from the line that asked for it.
-    print()
-    print(S.turn_header("error" if error else "answer", width))
-    rows = _tool_row_lines(events, width)
-    for line in rows:
-        print(line)
-    if rows:
+    repl_state = getattr(live_stream, "_repl_state", None) if live_stream is not None else None
+    streamed_any = bool(repl_state and repl_state.get("started"))
+    if streamed_any and not error:
+        if live_stream.forwarded:
+            rest, _revised = live_stream.reconcile(clean_answer)
+            if rest:
+                if repl_state.get("in_reasoning"):
+                    if not repl_state.get("ended_with_newline", True):
+                        sys.stdout.write("\n")
+                    sys.stdout.write("\n")
+                    repl_state["in_reasoning"] = False
+                safe_rest = S.safe_text(rest)
+                sys.stdout.write(safe_rest)
+                sys.stdout.flush()
+                repl_state["ended_with_newline"] = safe_rest.endswith("\n")
+            if not repl_state.get("ended_with_newline", True):
+                print()
+            rows = _tool_row_lines(events, width)
+            if rows:
+                print()
+                for line in rows:
+                    print(line)
+        else:
+            if not repl_state.get("ended_with_newline", True):
+                print()
+            print()
+            rows = _tool_row_lines(events, width)
+            for line in rows:
+                print(line)
+            if rows:
+                print()
+            _print_body(clean_answer, width)
+    else:
+        if streamed_any and not repl_state.get("ended_with_newline", True):
+            print()
+        # One empty line sets the reply apart from the line that asked for it.
         print()
-    _print_body(clean_answer, width)
+        print(S.turn_header("error" if error else "answer", width))
+        rows = _tool_row_lines(events, width)
+        for line in rows:
+            print(line)
+        if rows:
+            print()
+        _print_body(clean_answer, width)
     metrics = metrics if isinstance(metrics, dict) else {}
     server_ms = int(metrics.get("elapsed_ms") or 0)
     rate = ""
@@ -5239,8 +5353,16 @@ def main(*, machine_output=False):
                 started_at = time.monotonic()
                 _TURN_MODEL[0] = current_model()
                 indicator = _begin_chat_turn()
+                from sonder_runtime.application.chat import stream_sink as _repl_stream_sink
+                expose_repl_reasoning = bool(
+                    getattr(server, "reasoning_exposure_enabled", lambda: False)()
+                )
+                repl_live = _make_repl_live_stream(
+                    indicator, expose_reasoning=expose_repl_reasoning,
+                )
                 try:
-                    with _chat_effort.effort_scope(_chat_effort.resolve_turn_effort(session=session_id).value):
+                    with _chat_effort.effort_scope(_chat_effort.resolve_turn_effort(session=session_id).value), \
+                            _repl_stream_sink.armed(repl_live):
                         out = server.sonder(line, trace=trace, strict=strict, persona=persona,
                                             session=session_id, project=project,
                                             tier=active_tier or "", model_override=active_model or "",
@@ -5254,7 +5376,8 @@ def main(*, machine_output=False):
                     # One label; the error header and footer say it failed
                     # (P1-4: never "Sonder error · error").
                     _print_chat_result(out, started_at, label="Sonder", error=True,
-                                       indicator=indicator, metrics=last_turn_metrics)
+                                       indicator=indicator, metrics=last_turn_metrics,
+                                       live_stream=repl_live)
                     continue
 
                 last_iid = server.parse_interaction_id(out)
@@ -5263,7 +5386,7 @@ def main(*, machine_output=False):
                 cleaned = _strip_footer(out)
                 _print_chat_result(cleaned, started_at, offer_feedback=bool(last_iid),
                                    indicator=indicator, interaction_id=last_iid,
-                                   metrics=last_turn_metrics)
+                                   metrics=last_turn_metrics, live_stream=repl_live)
         except KeyboardInterrupt:
             # Ctrl-C during a turn cancels that turn (its cancellation
             # scope was cancelled by the signal handler) and returns to

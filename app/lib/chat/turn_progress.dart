@@ -104,6 +104,15 @@ class TurnProgress {
     return phase != before;
   }
 
+  /// Reasoning/thinking text arrived before the answer.
+  bool reasoned() {
+    final before = phase;
+    _awaitingApproval = false;
+    _activityAt = ++_clock;
+    _activityPhase = 'thinking';
+    return phase != before;
+  }
+
   /// A `sonder_tool` SSE event arrived.
   bool toolEvent(ChatStreamToolEvent event) {
     final before = phase;
