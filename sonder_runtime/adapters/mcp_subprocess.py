@@ -1,6 +1,7 @@
 """Bounded lifecycle ownership for one-shot stdio MCP providers."""
 from __future__ import annotations
 
+import io
 import math
 import os
 import signal
@@ -204,7 +205,7 @@ class McpSubprocessProvider:
         process: Any = None
         workers: list[threading.Thread] = []
         abort_event = threading.Event()
-        termination_requested = False
+        termination_requested = threading.Event()
         try:
             launch_env = self._env if self._env is not None else child_environment()
             process = self._popen(
@@ -228,11 +229,13 @@ class McpSubprocessProvider:
                 and callable(getattr(process.stderr, "read", None))
             )
             if can_stream:
-                stdout, stderr, termination_requested = self._run_streaming(
+                stdout, stderr = self._run_streaming(
                     process,
+                    request,
                     request_bytes,
                     workers=workers,
                     abort_event=abort_event,
+                    termination_requested=termination_requested,
                     cancel_check=cancel_check,
                     deadline_monotonic=deadline_monotonic,
                     max_output_bytes=effective_max_output,
@@ -240,10 +243,11 @@ class McpSubprocessProvider:
                     max_stderr_discard_bytes=effective_max_stderr_discard,
                 )
             else:
-                stdout, stderr, termination_requested = self._run_communicate_fallback(
+                stdout, stderr = self._run_communicate_fallback(
                     process,
                     request,
                     workers=workers,
+                    termination_requested=termination_requested,
                     cancel_check=cancel_check,
                     deadline_monotonic=deadline_monotonic,
                     max_output_bytes=effective_max_output,
@@ -251,15 +255,16 @@ class McpSubprocessProvider:
                 )
         except BaseException:
             abort_event.set()
-            if process is not None and process.poll() is None and not termination_requested:
-                termination_requested = True
+            if process is not None and process.poll() is None and not termination_requested.is_set():
+                termination_requested.set()
                 receipt = self._terminate_and_join(process, workers, "provider failure")
                 self._emit("failed", process.returncode, receipt)
             raise
         finally:
             abort_event.set()
             if process is not None:
-                if process.poll() is None and not termination_requested:
+                if process.poll() is None and not termination_requested.is_set():
+                    termination_requested.set()
                     self._terminate_and_join(process, workers, "provider finalization")
                 else:
                     self._join_workers(workers, self._shutdown_timeout)
@@ -274,16 +279,18 @@ class McpSubprocessProvider:
     def _run_streaming(
         self,
         process: Any,
+        request_text: str,
         request_bytes: bytes,
         *,
         workers: list[threading.Thread],
         abort_event: threading.Event,
+        termination_requested: threading.Event,
         cancel_check: Callable[[], bool] | None,
         deadline_monotonic: float | None,
         max_output_bytes: int,
         max_stderr_bytes: int,
         max_stderr_discard_bytes: int,
-    ) -> tuple[str, str, bool]:
+    ) -> tuple[str, str]:
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
         io_errors: list[BaseException] = []
@@ -352,13 +359,30 @@ class McpSubprocessProvider:
             if stream is None:
                 stdin_done.set()
                 return
-            view = memoryview(request_bytes)
+            text_mode = isinstance(stream, io.TextIOBase) or getattr(stream, "encoding", None) is not None
+            payload: Any = request_text if text_mode else memoryview(request_bytes)
+            total_len = len(payload)
             offset = 0
             try:
-                while offset < len(view) and not abort_event.is_set():
-                    end = min(offset + _IO_CHUNK_BYTES, len(view))
-                    stream.write(view[offset:end])
-                    offset = end
+                while offset < total_len and not abort_event.is_set():
+                    end = min(offset + _IO_CHUNK_BYTES, total_len)
+                    chunk = payload[offset:end]
+                    try:
+                        written = stream.write(chunk)
+                    except TypeError:
+                        if not text_mode:
+                            text_mode = True
+                            payload = request_text
+                            total_len = len(payload)
+                            offset = 0
+                            continue
+                        raise
+                    if isinstance(written, int):
+                        if written <= 0:
+                            raise OSError("zero-byte write to MCP provider stdin")
+                        offset += written
+                    else:
+                        offset = end
                 if not abort_event.is_set():
                     flush = getattr(stream, "flush", None)
                     if callable(flush):
@@ -406,27 +430,27 @@ class McpSubprocessProvider:
                         pass
         except BaseException:
             abort_event.set()
+            termination_requested.set()
             receipt = self._terminate_and_join(process, workers, "provider worker refused")
             self._emit("failed", process.returncode, receipt)
             raise
 
-        call_deadline = time.monotonic() + self._timeout
-        if deadline_monotonic is not None:
-            call_deadline = min(call_deadline, deadline_monotonic)
-
-        while True:
+        def _check_abort_conditions() -> None:
             if self._close_event.is_set() or (cancel_check is not None and cancel_check()):
                 abort_event.set()
+                termination_requested.set()
                 receipt = self._terminate_and_join(process, workers, "provider cancellation")
                 self._emit("cancelled", process.returncode, receipt)
                 raise McpProviderCancelled("MCP provider exchange was cancelled")
             if output_exceeded.is_set():
                 abort_event.set()
+                termination_requested.set()
                 receipt = self._terminate_and_join(process, workers, "provider output limit")
                 self._emit("failed", process.returncode, receipt)
                 raise McpProviderOutputLimit("MCP provider stdout exceeded max_output_bytes")
             if stderr_flood.is_set():
                 abort_event.set()
+                termination_requested.set()
                 receipt = self._terminate_and_join(process, workers, "provider stderr limit")
                 self._emit("failed", process.returncode, receipt)
                 raise McpProviderOutputLimit("MCP provider stderr exceeded max_stderr_discard_bytes")
@@ -435,14 +459,23 @@ class McpSubprocessProvider:
             for label, worker, done_flag in worker_completions:
                 if not worker.is_alive() and not done_flag.is_set():
                     abort_event.set()
+                    termination_requested.set()
                     receipt = self._terminate_and_join(
                         process, workers, f"provider {label} worker aborted"
                     )
                     self._emit("failed", process.returncode, receipt)
                     raise RuntimeError(f"MCP provider {label} worker terminated before running")
+
+        call_deadline = time.monotonic() + self._timeout
+        if deadline_monotonic is not None:
+            call_deadline = min(call_deadline, deadline_monotonic)
+
+        while True:
+            _check_abort_conditions()
             remaining = call_deadline - time.monotonic()
             if remaining <= 0:
                 abort_event.set()
+                termination_requested.set()
                 receipt = self._terminate_and_join(process, workers, "provider deadline")
                 self._emit("timed_out", process.returncode, receipt)
                 raise McpProviderTimeout("MCP provider exceeded its bounded call deadline")
@@ -460,6 +493,11 @@ class McpSubprocessProvider:
                 except subprocess.TimeoutExpired:
                     pass
 
+        # Re-check after loop exit in case a worker set output_exceeded/stderr_flood,
+        # cancellation tripped, or a managed worker exited without running between
+        # the last poll check and process exit.
+        _check_abort_conditions()
+
         if io_errors:
             raise io_errors[0]
         raw_stdout = b"".join(stdout_chunks)
@@ -469,7 +507,7 @@ class McpSubprocessProvider:
         except UnicodeDecodeError as exc:
             raise McpProviderProtocolError("MCP provider stdout is not valid UTF-8") from exc
         stderr_text = raw_stderr.decode("utf-8", errors="replace").replace("\r\n", "\n")
-        return stdout_text, stderr_text, False
+        return stdout_text, stderr_text
 
     def _run_communicate_fallback(
         self,
@@ -477,11 +515,12 @@ class McpSubprocessProvider:
         request: str,
         *,
         workers: list[threading.Thread],
+        termination_requested: threading.Event,
         cancel_check: Callable[[], bool] | None,
         deadline_monotonic: float | None,
         max_output_bytes: int,
         max_stderr_bytes: int,
-    ) -> tuple[str, str, bool]:
+    ) -> tuple[str, str]:
         result: list[object] = []
 
         def communicate() -> None:
@@ -497,6 +536,7 @@ class McpSubprocessProvider:
             worker.start()
             workers.append(worker)
         except BaseException:
+            termination_requested.set()
             receipt = self._terminate(process, "provider worker refused")
             self._emit("failed", process.returncode, receipt)
             raise
@@ -506,11 +546,13 @@ class McpSubprocessProvider:
             call_deadline = min(call_deadline, deadline_monotonic)
         while True:
             if self._close_event.is_set() or (cancel_check is not None and cancel_check()):
+                termination_requested.set()
                 receipt = self._terminate_and_join(process, workers, "provider cancellation")
                 self._emit("cancelled", process.returncode, receipt)
                 raise McpProviderCancelled("MCP provider exchange was cancelled")
             remaining = call_deadline - time.monotonic()
             if remaining <= 0:
+                termination_requested.set()
                 receipt = self._terminate_and_join(process, workers, "provider deadline")
                 self._emit("timed_out", process.returncode, receipt)
                 raise McpProviderTimeout("MCP provider exceeded its bounded call deadline")
@@ -540,7 +582,7 @@ class McpSubprocessProvider:
             encoded_err = stderr_text.encode("utf-8", errors="replace")
             if len(encoded_err) > max_stderr_bytes:
                 stderr_text = encoded_err[:max_stderr_bytes].decode("utf-8", errors="replace")
-        return stdout_text, stderr_text, False
+        return stdout_text, stderr_text
 
     def close(self) -> None:
         """Terminate and reap an active provider, if one exists."""

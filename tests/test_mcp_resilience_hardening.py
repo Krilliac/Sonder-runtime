@@ -1106,3 +1106,293 @@ def test_external_mcp_empty_credential_warning_does_not_log_env_var_name(caplog)
             asyncio.run(bridge.call("docs", "lookup", {}, context=_ctx()))
     assert exc_info.value.code == "CREDENTIAL_UNAVAILABLE"
     assert "SONDER_TOP_SECRET_CRED_ENV" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# 5. QA follow-up regressions (gate cancel+close race, post-exit checks, no double-emit)
+# ---------------------------------------------------------------------------
+
+
+def test_external_mcp_gate_does_not_deadlock_when_waiter_cancels_and_loop_closes_after_handoff():
+    gate = external_mcp._AsyncCallGate()
+    holder_acquired = threading.Event()
+    waiter_queued = threading.Event()
+    handoff_scheduled = threading.Event()
+    dropped_callbacks: list[object] = []
+
+    async def _hold_and_release() -> None:
+        await gate.acquire()
+        holder_acquired.set()
+        assert waiter_queued.wait(timeout=5.0)
+        gate.release()
+        handoff_scheduled.set()
+
+    def _run_waiter_and_close_loop() -> None:
+        assert holder_acquired.wait(timeout=5.0)
+        loop = asyncio.new_event_loop()
+        try:
+            orig_call_soon_threadsafe = loop.call_soon_threadsafe
+
+            def _drop_deliver(cb, *args, **kwargs):
+                if getattr(cb, "__name__", "") == "_deliver":
+                    # Simulate loop closing before the scheduled _deliver runs.
+                    dropped_callbacks.append((cb, args))
+                    return None
+                return orig_call_soon_threadsafe(cb, *args, **kwargs)
+
+            loop.call_soon_threadsafe = _drop_deliver  # type: ignore[method-assign]
+
+            async def _wait_and_cancel() -> None:
+                task = asyncio.create_task(gate.acquire())
+                # Let task enqueue itself on gate._waiters.
+                while True:
+                    with gate._lock:
+                        if gate._waiters:
+                            break
+                    await asyncio.sleep(0.002)
+                waiter_queued.set()
+                assert handoff_scheduled.wait(timeout=5.0)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+            loop.run_until_complete(_wait_and_cancel())
+        finally:
+            loop.close()
+
+    t_holder = threading.Thread(target=lambda: asyncio.run(_hold_and_release()), daemon=True)
+    t_waiter = threading.Thread(target=_run_waiter_and_close_loop, daemon=True)
+    t_holder.start()
+    t_waiter.start()
+    t_holder.join(timeout=5.0)
+    t_waiter.join(timeout=5.0)
+    assert not t_holder.is_alive() and not t_waiter.is_alive()
+    assert len(dropped_callbacks) == 1
+
+    # Gate MUST NOT be deadlocked despite _deliver having been dropped on loop close.
+    async def _next_caller() -> str:
+        await asyncio.wait_for(gate.acquire(), timeout=1.0)
+        gate.release()
+        return "acquired"
+
+    assert asyncio.run(_next_caller()) == "acquired"
+
+
+def test_subprocess_provider_post_loop_rechecks_output_limit_and_skipped_worker_when_already_exited(
+    monkeypatch,
+):
+    # Case A: process is already exited (poll() == 0) while stdout reader exceeds
+    # max_output_bytes on its first read after the top-of-loop check.
+    class _FastOverflowProcess:
+        pid = 9001
+        returncode = 0
+
+        def __init__(self) -> None:
+            self.stdin = io.BytesIO()
+            self.stdout = io.BytesIO(b"A" * 64)
+            self.stderr = io.BytesIO(b"")
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self) -> None:
+            pass
+
+    provider = McpSubprocessProvider(
+        ["fast-overflow"],
+        timeout_seconds=5.0,
+        max_output_bytes=16,
+        popen=lambda *_a, **_k: _FastOverflowProcess(),
+    )
+    with pytest.raises(McpProviderOutputLimit, match="max_output_bytes"):
+        provider.run("")
+    assert provider._process is None
+
+    # Case B: process already exited (poll() == 0) AND first managed worker skips its body.
+    class _SkippedThread:
+        def start(self) -> None:
+            pass
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, _timeout=None) -> None:
+            pass
+
+    calls = {"n": 0}
+
+    def _skip_stdout(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _SkippedThread()
+        return native_owned_thread(*args, **kwargs)
+
+    monkeypatch.setattr(mcp_subprocess, "owned_runtime_thread", _skip_stdout)
+
+    class _ExitedProcess:
+        pid = 9002
+        returncode = 0
+
+        def __init__(self) -> None:
+            self.stdin = io.BytesIO()
+            self.stdout = io.BytesIO(b"{\"ok\":true}\n")
+            self.stderr = io.BytesIO(b"")
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self) -> None:
+            pass
+
+    provider2 = McpSubprocessProvider(
+        ["fast-skip"],
+        timeout_seconds=5.0,
+        popen=lambda *_a, **_k: _ExitedProcess(),
+    )
+    with pytest.raises(RuntimeError, match="terminated before running"):
+        provider2.run("")
+    assert provider2._process is None
+
+
+def test_subprocess_provider_does_not_double_terminate_or_double_emit_on_stubborn_process():
+    events: list[str] = []
+    cleanup_calls: list[str] = []
+    unblock = threading.Event()
+
+    class _BlockingStream:
+        def read(self, _n: int = -1) -> bytes:
+            unblock.wait(timeout=2.0)
+            return b""
+
+        def close(self) -> None:
+            unblock.set()
+
+    class _StubbornProcess:
+        pid = 9003
+        returncode = None
+
+        def __init__(self) -> None:
+            self.stdin = io.BytesIO()
+            self.stdout = _BlockingStream()
+            self.stderr = _BlockingStream()
+
+        def poll(self):
+            # Remains None even after kill() to exercise the double-termination guard.
+            return None
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired(["stubborn"], timeout or 0.1)
+
+        def kill(self) -> None:
+            unblock.set()
+
+    class _RecordingCleanup:
+        def cleanup(self, request):
+            cleanup_calls.append(request.reason)
+            return mcp_subprocess.ProcessTreeCleanupReceipt(
+                request.job_id, True, complete=False, detail="stubborn test process",
+            )
+
+    provider = McpSubprocessProvider(
+        ["stubborn"],
+        timeout_seconds=0.05,
+        shutdown_timeout_seconds=0.1,
+        cleanup=_RecordingCleanup(),
+        observer=lambda ev: events.append(ev.state),
+        popen=lambda *_a, **_k: _StubbornProcess(),
+    )
+    with pytest.raises(McpProviderTimeout):
+        provider.run("")
+
+    assert events == ["started", "timed_out"]
+    assert cleanup_calls == ["provider deadline"]
+    assert provider._process is None
+
+
+def test_subprocess_provider_write_stdin_handles_short_writes_and_text_mode_mock():
+    written_bytes = bytearray()
+
+    class _ShortWriteBinaryStdin:
+        def write(self, data) -> int:
+            raw = bytes(data)
+            take = max(1, len(raw) // 2)
+            written_bytes.extend(raw[:take])
+            return take
+
+        def flush(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class _ShortWriteProcess:
+        pid = 9004
+        returncode = 0
+
+        def __init__(self) -> None:
+            self.stdin = _ShortWriteBinaryStdin()
+            self.stdout = io.BytesIO(b"ok\n")
+            self.stderr = io.BytesIO(b"")
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self) -> None:
+            pass
+
+    payload = "hello-short-write-" * 1000
+    provider = McpSubprocessProvider(
+        ["short-write"],
+        timeout_seconds=5.0,
+        popen=lambda *_a, **_k: _ShortWriteProcess(),
+    )
+    stdout, stderr = provider.run(payload)
+    assert stdout == "ok\n" and stderr == ""
+    assert written_bytes.decode("utf-8") == payload
+
+    # Also verify a text-mode StringIO mock stdin works seamlessly.
+    text_stdin = io.StringIO()
+
+    class _TextStdinProcess:
+        pid = 9005
+        returncode = 0
+
+        def __init__(self) -> None:
+            self.stdin = text_stdin
+            self.stdout = io.BytesIO(b"ok-text\n")
+            self.stderr = io.BytesIO(b"")
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self) -> None:
+            pass
+
+    captured_text: list[str] = []
+    orig_close = text_stdin.close
+
+    def _capture_and_close() -> None:
+        captured_text.append(text_stdin.getvalue())
+        orig_close()
+
+    text_stdin.close = _capture_and_close  # type: ignore[method-assign]
+    provider2 = McpSubprocessProvider(
+        ["text-stdin"],
+        timeout_seconds=5.0,
+        popen=lambda *_a, **_k: _TextStdinProcess(),
+    )
+    stdout2, _ = provider2.run("hello-text-mode")
+    assert stdout2 == "ok-text\n"
+    assert captured_text == ["hello-text-mode"]

@@ -51,13 +51,25 @@ _UNSET = object()
 _RESULT_ATTRS = ("structuredContent", "structured_content", "content", "isError", "is_error")
 
 
+class _GateWaiter:
+    __slots__ = ("loop", "future", "handed_off", "released")
+
+    def __init__(
+        self, loop: asyncio.AbstractEventLoop, future: asyncio.Future[None],
+    ) -> None:
+        self.loop = loop
+        self.future = future
+        self.handed_off = False
+        self.released = False
+
+
 class _AsyncCallGate:
     """Loop-agnostic, thread-safe, cancellation-safe async mutual-exclusion gate."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._held = False
-        self._waiters: deque[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = deque()
+        self._waiters: deque[_GateWaiter] = deque()
 
     async def acquire(self) -> None:
         loop = asyncio.get_running_loop()
@@ -65,27 +77,37 @@ class _AsyncCallGate:
             if not self._held:
                 self._held = True
                 return
-            waiter: asyncio.Future[None] = loop.create_future()
-            entry = (loop, waiter)
+            entry = _GateWaiter(loop, loop.create_future())
             self._waiters.append(entry)
         try:
-            await waiter
+            await entry.future
         except BaseException:
-            handed_off = False
+            should_release = False
             with self._lock:
-                try:
-                    self._waiters.remove(entry)
-                except ValueError:
-                    handed_off = waiter.done() and not waiter.cancelled()
-            if handed_off:
+                if not entry.handed_off:
+                    try:
+                        self._waiters.remove(entry)
+                    except ValueError:
+                        pass
+                elif not entry.released:
+                    entry.released = True
+                    should_release = True
+            if should_release:
                 self.release()
             raise
 
-    def _deliver(self, waiter: asyncio.Future[None]) -> None:
-        if waiter.done():
+    def _deliver(self, entry: _GateWaiter) -> None:
+        should_release = False
+        with self._lock:
+            if entry.released:
+                return
+            if entry.future.done():
+                entry.released = True
+                should_release = True
+            else:
+                entry.future.set_result(None)
+        if should_release:
             self.release()
-            return
-        waiter.set_result(None)
 
     def release(self) -> None:
         while True:
@@ -93,13 +115,18 @@ class _AsyncCallGate:
                 if not self._waiters:
                     self._held = False
                     return
-                loop, waiter = self._waiters.popleft()
-            if waiter.done() or loop.is_closed():
-                continue
+                entry = self._waiters.popleft()
+                if entry.future.done() or entry.loop.is_closed():
+                    continue
+                entry.handed_off = True
             try:
-                loop.call_soon_threadsafe(self._deliver, waiter)
+                entry.loop.call_soon_threadsafe(self._deliver, entry)
                 return
             except RuntimeError:
+                with self._lock:
+                    if entry.released:
+                        return
+                    entry.released = True
                 continue
 
 
