@@ -54,6 +54,7 @@ from sonder_runtime.domain.build.repair import (
     scan_hostile_directives,
     validate_patch,
 )
+from tests._fuzz_timing import assert_scales_linearly
 from tests.test_build_hostile_scan import BENIGN, HOSTILE, SCOPE
 
 SEED = int(os.environ.get("FUZZ_SEED", "20261116"))
@@ -2425,12 +2426,6 @@ _ALL_LEXINGS_RATIO_FLOOR = 0.25  # below this the full-size run is too short for
 _ALL_LEXINGS_BUDGET = 8.0
 
 
-def _lexing_time_once(before: str, text: str) -> float:
-    started = time.perf_counter()
-    scan_added_lexings(before, text, include_ok=OK)
-    return time.perf_counter() - started
-
-
 @pytest.mark.parametrize("shape", sorted(_ALL_LEXING_SHAPES))
 def test_regression_all_lexings_of_a_640_kb_file_stay_under_two_seconds(shape):
     """The whole of ``scan_added_lexings`` (every reading), as a new file and as a half-changed file."""
@@ -2440,20 +2435,18 @@ def test_regression_all_lexings_of_a_640_kb_file_stay_under_two_seconds(shape):
     for label, make_before in (("new file", lambda t: ""), ("half changed", lambda t: t[: len(t) // 2])):
         small_before = make_before(quarter)
         big_before = make_before(text)
-        small = big = float("inf")
-        ratio = 0.0
-        for repeats in (3, 5, 8):
-            for _ in range(repeats):
-                small = min(small, _lexing_time_once(small_before, quarter))
-                big = min(big, _lexing_time_once(big_before, text))
-            ratio = big / max(small, 1e-3)
-            if big < _ALL_LEXINGS_RATIO_FLOOR or ratio < _ALL_LEXINGS_RATIO_LIMIT:
-                break
-        assert big < _ALL_LEXINGS_BUDGET, (
-            f"{shape} ({label}): {big:.2f}s for every lexing of {len(text)} chars ({TAG})")
-        assert big < _ALL_LEXINGS_RATIO_FLOOR or ratio < _ALL_LEXINGS_RATIO_LIMIT, (
-            f"{shape} ({label}): 4x input {len(quarter)} -> {len(text)} chars cost x{ratio:.2f} "
-            f"({small:.2f}s -> {big:.2f}s), super-linear ({TAG})")
+        assert_scales_linearly(
+            lambda pair: scan_added_lexings(pair[0], pair[1], include_ok=OK),
+            (small_before, quarter),
+            (big_before, text),
+            label=f"{shape} ({label})",
+            ratio_limit=_ALL_LEXINGS_RATIO_LIMIT,
+            ceiling_s=_ALL_LEXINGS_BUDGET,
+            skip_ratio_below_s=_ALL_LEXINGS_RATIO_FLOOR,
+            small_len=len(quarter),
+            big_len=len(text),
+            context=TAG,
+        )
 
 
 def test_lexing_work_budget_refuses_a_large_file_that_needs_many_readings():

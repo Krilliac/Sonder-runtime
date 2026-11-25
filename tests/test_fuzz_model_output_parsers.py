@@ -69,6 +69,7 @@ from sonder_runtime.domain.security_eval.verdict import (
     parse_hypotheses,
     parse_verdict,
 )
+from tests._fuzz_timing import assert_scales_linearly, machine_unit, time_once
 
 pytestmark = pytest.mark.unit
 
@@ -1568,38 +1569,23 @@ def _best_time(fn, blob: str, repeats: int = 3) -> float:
 
 
 def _time_once(fn, blob: str) -> float:
-    started = time.perf_counter()
-    try:
-        fn(blob)
-    except (VerdictParseError, ValueError):
-        pass
-    return time.perf_counter() - started
+    return time_once(fn, blob, ignore_errors=(VerdictParseError, ValueError))
 
 
 def _assert_scales_linearly(fn, small_blob: str, big_blob: str, budget: float, *, cap_check: bool = True) -> None:
-    """The cost on ``big_blob`` must grow roughly with its size relative to ``small_blob``, and ``small_blob`` must be in budget.
-
-    Small and big timings are interleaved and the running minima kept over up to three rounds (3, 5, 8 repeats); the
-    check passes at the first round whose ratio is under the limit, so scheduler noise cannot fail it but a real
-    quadratic (x16 here) stays above the limit in every round.
-    """
-    assert len(big_blob) >= 3 * len(small_blob)
+    """The cost on ``big_blob`` must grow roughly with its size relative to ``small_blob``, and ``small_blob`` must be in budget."""
     if cap_check and fn in (parse_verdict, parse_hypotheses):
         # past the cap the input is truncated and the ratio would be vacuous
         assert len(big_blob) <= MAX_TEXT_CHARS, "blob of %d chars is past MAX_TEXT_CHARS" % len(big_blob)
-    small = big = float("inf")
-    ratio = 0.0
-    for repeats in (3, 5, 8):
-        for _ in range(repeats):
-            small = min(small, _time_once(fn, small_blob))
-            big = min(big, _time_once(fn, big_blob))
-        ratio = big / max(small, 1e-3)
-        if ratio < SCALE_RATIO_LIMIT:
-            break
-    factor = round(len(big_blob) / len(small_blob))
-    assert ratio < SCALE_RATIO_LIMIT, "%s: x%d input cost x%.1f (%.0f ms -> %.0f ms), super-linear on %.12r" % (
-        fn.__name__, factor, ratio, small * 1000, big * 1000, small_blob)
-    assert small < budget, "%s took %.0f ms (budget %.0f ms) on %.12r" % (fn.__name__, small * 1000, budget * 1000, small_blob)
+    assert_scales_linearly(
+        fn,
+        small_blob,
+        big_blob,
+        label=f"{fn.__name__} on {small_blob[:12]!r}",
+        ratio_limit=SCALE_RATIO_LIMIT,
+        small_budget_s=budget,
+        ignore_errors=(VerdictParseError, ValueError),
+    )
 
 
 _OPENER_RUN_SHAPES = {
@@ -1660,15 +1646,7 @@ def test_scaling_check_detects_a_fence_quadratic(monkeypatch):
 
 
 def _machine_unit() -> float:
-    """Seconds one fixed pure-Python loop takes on this machine: the yardstick that makes a budget machine-relative."""
-    best = float("inf")
-    for _ in range(5):
-        started = time.perf_counter()
-        total = 0
-        for index in range(200_000):
-            total += index & 3
-        best = min(best, time.perf_counter() - started)
-    return best
+    return machine_unit()
 
 
 # Linear scanning costs up to ~7 machine units on these blobs (a loop of 200k additions is one unit, ~4 ms here);
