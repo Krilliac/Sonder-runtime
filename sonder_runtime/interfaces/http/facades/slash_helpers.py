@@ -8,6 +8,7 @@ lives here with strict typing and clean SPEC-3 boundaries.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -483,17 +484,32 @@ def run_catalogued_tool_gated(
         )
         if refusal:
             return str(refusal)
+    task_scope = serve_mod._task_account_scope(context)
     if tool_name == "sonder":
         refusal = serve_mod._nested_slash_authority_refusal(
             kwargs.get("prompt", ""), "/sonder", context,
         )
         if refusal:
             return str(refusal)
+        if task_scope is not None:
+            raw_prompt = str(kwargs.get("prompt", "") or "").strip()
+            if (
+                not raw_prompt.startswith("/")
+                or str(kwargs.get("tier") or "").strip()
+                or str(kwargs.get("model_override") or "").strip()
+            ):
+                return (
+                    "refused /sonder: hosted account chat must use /v1/chat/completions "
+                    "rather than the local operator /sonder tool."
+                )
     task_boundary_error = serve_mod._account_task_boundary_refusal(
         tool_name, kwargs, context,
     ) or (
-        tool_name in ("master_orchestrate", "sonder")
+        tool_name in ("master_orchestrate", "sonder", "agent", "workbench_agent")
         and serve_mod.server.served_project_refusal(kwargs.get("project", ""))
+    ) or (
+        tool_name == "agent"
+        and serve_mod.server.served_project_refusal(kwargs.get("cwd", ""))
     )
     if task_boundary_error:
         return str(task_boundary_error)
@@ -502,6 +518,20 @@ def run_catalogued_tool_gated(
             return str(serve_mod._served_tool_manifest(context))
         if tool_name == "tool_capability_manifest":
             return str(serve_mod._served_tool_capability_manifest(context))
+    if task_scope is not None and tool_name in ("agent", "workbench_agent") and "session" in kwargs:
+        raw_session = kwargs.get("session")
+        if raw_session is None or (
+            isinstance(raw_session, str) and raw_session.strip().lower() in ("", "none")
+        ):
+            kwargs = {**kwargs, "session": "none"}
+        else:
+            try:
+                kwargs = {
+                    **kwargs,
+                    "session": serve_mod._hosted_storage_id(context, raw_session, "session"),
+                }
+            except HTTPRequestError as exc:
+                return "refused /%s: %s" % (tool_name, exc.message)
     state_token = getattr(state, "token", "")
     if "token" not in kwargs and state_token:
         command = serve_mod.command_catalog.by_name(line.split(None, 1)[0])
@@ -510,15 +540,17 @@ def run_catalogued_tool_gated(
     control_guard = serve_mod._served_control_guard_for(context)
 
     def _run_handler() -> str:
-        if control_guard is None:
-            return str(handler(**kwargs))
-        with serve_mod.server.served_control_guard(control_guard):
+        with contextlib.ExitStack() as stack:
+            if task_scope is not None:
+                stack.enter_context(serve_mod.server.scoped_task_account_boundary(task_scope))
+            if control_guard is not None:
+                stack.enter_context(serve_mod.server.served_control_guard(control_guard))
             return str(handler(**kwargs))
 
     try:
         if (
             tool_name in serve_mod._SCOPED_TASK_TOOLS
-            and serve_mod._task_account_scope(context) is not None
+            and task_scope is not None
         ):
             return str(serve_mod._served_task_tool(tool_name, kwargs, context))
         return str(serve_mod._narrate_http_command(tool_name, kwargs, _run_handler, context))

@@ -1042,6 +1042,7 @@ def handle_chat_completions(
                             client_broker=serve_mod._CLIENT_TOOL_BROKER,
                             client_principal=serve_mod._state_principal(context),
                             client_session=session,
+                            account_scope=serve_mod._task_account_scope(context),
                         )
                         try:
                             with runtime.served_control_guard(prompt_control_guard):

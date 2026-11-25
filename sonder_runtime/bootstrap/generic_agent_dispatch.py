@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from ..adapters.security import role_tool_policy as _role_tool_policy
+from ..application.tasks.account_scope import active_task_account_scope as _active_task_account_scope
 from ..domain.cloud_access import LEGACY_ERROR_PREFIX
 from ..domain.tools.builtin_traits import builtin_traits as _builtin_traits
 
@@ -89,6 +90,8 @@ def generic_only_names(registry: Any, system_operator_tools: Iterable[str], lite
 def generated_help_lines(
     registry: Any, existing: Iterable[str], system_operator_tools: Iterable[str] = (),
 ) -> tuple[str, ...]:
+    if _active_task_account_scope() is not None:
+        return ()
     missing = reachable_names(registry, system_operator_tools) - frozenset(existing)
     lines = []
     for name, tool in sorted(registered_tools(registry).items()):
@@ -132,6 +135,11 @@ def dispatch(
     allow_location=False, unsafe=False,
 ) -> Any:
     """Invoke a registered tool after host gate and per-run policy admission."""
+    if _active_task_account_scope() is not None:
+        return (
+            f"{LEGACY_ERROR_PREFIX} HOST POLICY: tool '{tool_name}' is unavailable "
+            "inside an account-scoped agent run."
+        )
     if tool_name in excluded_names(registry, system_operator_tools):
         return f"{LEGACY_ERROR_PREFIX} HOST POLICY: tool '{tool_name}' is excluded from generic agent dispatch."
     role_refusal = _role_tool_policy.agent_refusal(tool_name)

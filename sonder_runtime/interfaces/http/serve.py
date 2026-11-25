@@ -772,25 +772,14 @@ _ACCOUNT_UNSCOPED_LOOP_ACTIONS = _request_security.ACCOUNT_UNSCOPED_LOOP_ACTIONS
 
 # Kept as an explicit literal frozenset for AST boundary tests.
 _ACCOUNT_GLOBAL_MEMORY_TOOLS = frozenset((
-    "apply_learned",
-    "evaluation_history_status",
-    "learn_from_example",
-    "learning_health_status",
-    "memory_embedding_backfill",
-    "memory_export",
-    "memory_interaction_embedding_backfill",
-    "memory_privacy_review",
-    "memory_quality_report",
-    "memory_search",
-    "recall",
-    "record_outcome",
-    "sonder_forget_fact",
-    "session_export",
-    "sonder_remember_fact",
-    "sonder_sessions",
-    "sonder_stats",
-    "playbook_note",
-    "playbook_read",
+    "apply_learned", "calibration_status", "evaluation_history_status",
+    "extract_grounded", "game_generate_and_test", "game_generation_campaign",
+    "learn_from_example", "learn_tool", "learning_health_status",
+    "memory_embedding_backfill", "memory_export", "memory_interaction_embedding_backfill",
+    "memory_privacy_review", "memory_quality_report", "memory_search",
+    "playbook_note", "playbook_read", "recall", "record_outcome",
+    "session_export", "sonder_authoritative_indexes", "sonder_forget_fact",
+    "sonder_remember_fact", "sonder_sessions", "sonder_stats",
 ))
 
 
@@ -1688,7 +1677,14 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             text = rest.strip()
         if not text:
             return "usage: /ensemble [tiers=a,b] <question>"
-        return server.ensemble_answer(text, tiers=tiers)
+        scope = _task_account_scope(context)
+        boundary = (
+            server.scoped_task_account_boundary(scope)
+            if scope is not None
+            else contextlib.nullcontext()
+        )
+        with boundary:
+            return server.ensemble_answer(text, tiers=tiers)
     if cmd in ("/permissions", "/perms"):
         policy = server.permission_policy(arg.strip())
         return "%s\n\n%s" % (policy, _deployment_gating_summary())
@@ -1769,6 +1765,8 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
     if cmd in ("/selfmod", "/selfmodify"):
         return _control()
     if cmd in ("/goal", "/goals"):
+        if _task_account_scope(context) is not None:
+            return "refused %s: account-scoped goals are not available; use scoped task/checklist or /autopilot commands." % cmd
         return _idempotent_http_action(
             context, idempotency_key, "goal\0%s\0%s" % (project, stripped),
             lambda: _control(),
@@ -1789,6 +1787,7 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
             idempotent_action=_idempotent_http_action, narrate_command=_narrate_http_command,
             fanout_owner=_fanout_request_owner, fanout_role=_fanout_request_role,
             developer_authorized=_developer_authorized,
+            task_scope_of=_task_account_scope,
             invoke=lambda prompt, max_steps, work_project: server.workbench_agent(
                 prompt=prompt, tier="auto", max_steps=max_steps, project=work_project,
             ),
@@ -1817,6 +1816,8 @@ def _handle_slash(content, messages=None, state=None, project="", context=None,
         "/artifactcheck", "/verifyartifact", "/groundartifact",
     ):
         scope = _task_account_scope(context)
+        if scope is not None and cmd in ("/report", "/endreport"):
+            return "refused %s: account-scoped end reports are not available via global activity history; use your scoped /checklist or run reply." % cmd
         if scope is not None and cmd in ("/checklist", "/plan"):
             if arg.strip():
                 return server.scoped_task_tool_dispatch(
