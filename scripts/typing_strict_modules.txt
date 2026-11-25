@@ -460,6 +460,7 @@ sonder_runtime/application/repository_intelligence/navigation.py
 sonder_runtime/application/routing/__init__.py
 sonder_runtime/application/routing/calibration.py
 sonder_runtime/application/routing/context_fit.py
+sonder_runtime/application/routing/execution_mode_service.py
 sonder_runtime/application/routing/identity_cache.py
 sonder_runtime/application/routing/request_capabilities.py
 sonder_runtime/application/runtime_policy/__init__.py
@@ -711,6 +712,7 @@ sonder_runtime/domain/resilience.py
 sonder_runtime/domain/routing/__init__.py
 sonder_runtime/domain/routing/calibration_profiles.py
 sonder_runtime/domain/routing/capability_profiles.py
+sonder_runtime/domain/routing/execution_mode_router.py
 sonder_runtime/domain/routing/fleet_router.py
 sonder_runtime/domain/routing/model_names.py
 sonder_runtime/domain/routing/semantic_tier.py
