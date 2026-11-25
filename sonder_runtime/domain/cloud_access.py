@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 LEGACY_ERROR_PREFIX = "ERROR:"
 LEGACY_CONTACTING_PREFIX = "ERROR contacting "
 _TRUE = frozenset({"1", "true", "yes", "on"})
 
 
-def cloud_allowed(environment) -> bool:
+def cloud_allowed(environment: Mapping[str, object]) -> bool:
     """Return whether an explicit hosted/cloud opt-in is present."""
     return str(environment.get("SONDER_ALLOW_CLOUD", "")).strip().lower() in _TRUE
 

@@ -19,6 +19,8 @@ from dataclasses import dataclass
 import json
 import re
 
+from .common.bounded_json import JsonBoundsExceeded, check_depth
+
 _ANNOTATIONS = frozenset({
     "$schema", "$id", "$comment", "title", "description", "default",
     "examples", "deprecated", "readOnly", "writeOnly",
@@ -324,9 +326,14 @@ def check_reply(text: str, schema: dict[str, object]) -> ReplyCheck:
         return ReplyCheck(None, UNSUPPORTED_SCHEMA, (
             "schema uses keywords this check cannot evaluate: %s" % ", ".join(gaps),
         ), gaps)
+    stripped = _strip_fence(text)
     try:
-        value = json.loads(_strip_fence(text), parse_constant=_reject_constant)
-    except RecursionError:
+        # Pre-check nesting in O(N) before json.loads: on Python 3.14 Linux
+        # (8 MB C stack), json.loads recurses tens of thousands of frames on
+        # inputs like "[" * 30000 instead of raising RecursionError early.
+        check_depth(stripped)
+        value = json.loads(stripped, parse_constant=_reject_constant)
+    except (JsonBoundsExceeded, RecursionError):
         return ReplyCheck(None, "invalid_json", ("reply is nested too deeply to be valid JSON",), ())
     except (TypeError, ValueError) as exc:
         return ReplyCheck(None, "invalid_json", ("reply is not valid JSON: %s" % exc,), ())
