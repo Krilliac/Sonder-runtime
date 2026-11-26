@@ -188,6 +188,8 @@ function Get-RpcFwFilterMap([string]$Kind) {
         'Port' { @(Get-NetFirewallPortFilter -All -PolicyStore ActiveStore -ErrorAction SilentlyContinue) }
         'Address' { @(Get-NetFirewallAddressFilter -All -PolicyStore ActiveStore -ErrorAction SilentlyContinue) }
         'Application' { @(Get-NetFirewallApplicationFilter -All -PolicyStore ActiveStore -ErrorAction SilentlyContinue) }
+        'Interface' { @(Get-NetFirewallInterfaceFilter -All -PolicyStore ActiveStore -ErrorAction SilentlyContinue) }
+        'InterfaceType' { @(Get-NetFirewallInterfaceTypeFilter -All -PolicyStore ActiveStore -ErrorAction SilentlyContinue) }
     }
     $map = @{}
     foreach ($item in @($items)) {
@@ -204,6 +206,8 @@ function Get-RpcFwRuleFilter($Rule, [hashtable]$Map, [string]$Kind) {
             'Port' { $Rule | Get-NetFirewallPortFilter -ErrorAction Stop }
             'Address' { $Rule | Get-NetFirewallAddressFilter -ErrorAction Stop }
             'Application' { $Rule | Get-NetFirewallApplicationFilter -ErrorAction Stop }
+            'Interface' { $Rule | Get-NetFirewallInterfaceFilter -ErrorAction Stop }
+            'InterfaceType' { $Rule | Get-NetFirewallInterfaceTypeFilter -ErrorAction Stop }
         }
     }
     catch {
@@ -214,6 +218,36 @@ function Get-RpcFwRuleFilter($Rule, [hashtable]$Map, [string]$Kind) {
         throw "Refusing to start rpc-server: firewall rule '$($Rule.DisplayName)' [$id] has no readable $Kind filter."
     }
     return $filter
+}
+
+# A peer rule is only peer-only when it is also pinned to one interface: an
+# InterfaceAlias of Any (or a wildcard, an empty or unreadable value) admits the
+# peer address on every adapter, where overlapping addressing or a spoofed or
+# routed packet can match it. The interface-type filter must be readable too
+# (Any is fine once the alias is pinned). Anything missing or unreadable is wide.
+function Get-RpcFwInterfaceState($Rule, [hashtable]$InterfaceMap, [hashtable]$TypeMap) {
+    $state = [pscustomobject]@{ Pinned = $false; Alias = '<unreadable>'; Type = '<unreadable>' }
+    try {
+        $ifaceFilter = Get-RpcFwRuleFilter $Rule $InterfaceMap 'Interface'
+        $typeFilter = Get-RpcFwRuleFilter $Rule $TypeMap 'InterfaceType'
+        $aliasProp = $ifaceFilter.PSObject.Properties['InterfaceAlias']
+        $typeProp = $typeFilter.PSObject.Properties['InterfaceType']
+        if ($null -eq $aliasProp -or $null -eq $typeProp) { return $state }
+        $aliases = @(ConvertTo-RpcFwTokens $aliasProp.Value)
+        $types = @(ConvertTo-RpcFwTokens $typeProp.Value)
+        $state.Alias = $aliases -join ','
+        $state.Type = $types -join ','
+        if ($aliases.Count -eq 0 -or $types.Count -eq 0) { return $state }
+        foreach ($alias in $aliases) {
+            if ($alias -ieq 'Any' -or [System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($alias)) { return $state }
+        }
+        $state.Pinned = $true
+    }
+    catch {
+        $state.Alias = '<unreadable>'
+        $state.Pinned = $false
+    }
+    return $state
 }
 
 function Get-RpcFwRuleKeywords($Rule) {
@@ -392,6 +426,8 @@ function Assert-RpcFirewallLockdown {
     $appMap = Get-RpcFwFilterMap 'Application'
     $portMap = Get-RpcFwFilterMap 'Port'
     $addrMap = Get-RpcFwFilterMap 'Address'
+    $interfaceMap = Get-RpcFwFilterMap 'Interface'
+    $typeMap = Get-RpcFwFilterMap 'InterfaceType'
 
     $peerRules = @()
     $seenRemotePeers = @()
@@ -427,6 +463,11 @@ function Assert-RpcFirewallLockdown {
             }
         }
         $remotePeerOnly = ($null -ne $matchedSinglePeer)
+        $ifaceState = $null
+        if ($remotePeerOnly -and ($programIsRpc -or $coversTcpPort)) {
+            $ifaceState = Get-RpcFwInterfaceState $rule $interfaceMap $typeMap
+            if (-not $ifaceState.Pinned) { $remotePeerOnly = $false }
+        }
 
         if (-not $remotePeerOnly -and ($programIsRpc -or $coversTcpPort)) {
             $wideRules += [pscustomobject]@{
@@ -436,6 +477,7 @@ function Assert-RpcFirewallLockdown {
                 LocalPort     = (ConvertTo-RpcFwTokens $portFilter.LocalPort) -join ','
                 RemoteAddress = (ConvertTo-RpcFwTokens $addrFilter.RemoteAddress) -join ','
                 Keywords      = $keywords -join ','
+                InterfaceNote = $(if ($null -ne $ifaceState) { "; InterfaceAlias=$($ifaceState.Alias); InterfaceType=$($ifaceState.Type) (a peer rule must be pinned to one interface alias)" } else { '' })
                 Program       = $program
                 Source        = ([string]$rule.PolicyStoreSource).Trim()
                 SourceType    = ([string]$rule.PolicyStoreSourceType).Trim()
@@ -462,7 +504,7 @@ function Assert-RpcFirewallLockdown {
     if ($wideRules.Count -gt 0) {
         $listed = ($wideRules | ForEach-Object {
             $kw = if ($_.Keywords) { "; RemoteDynamicKeywordAddresses=$($_.Keywords)" } else { '' }
-            "'$($_.DisplayName)' [Name=$($_.Name); Protocol=$($_.Protocol); LocalPort=$($_.LocalPort); RemoteAddress=$($_.RemoteAddress)$kw; Program=$($_.Program); PolicyStoreSource=$($_.Source); PolicyStoreSourceType=$($_.SourceType)]"
+            "'$($_.DisplayName)' [Name=$($_.Name); Protocol=$($_.Protocol); LocalPort=$($_.LocalPort); RemoteAddress=$($_.RemoteAddress)$kw$($_.InterfaceNote); Program=$($_.Program); PolicyStoreSource=$($_.Source); PolicyStoreSourceType=$($_.SourceType)]"
         }) -join '; '
         $kwNote = ''
         if (@($wideRules | Where-Object { $_.Keywords }).Count -gt 0) {
