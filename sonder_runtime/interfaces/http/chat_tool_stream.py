@@ -134,17 +134,29 @@ def handle_permission_mode_post(
     refused with 403 (``PERMISSION_MODE_ESCALATION_REFUSED``, or
     ``BYPASS_REQUIRES_AUTHENTICATED_ADMIN`` for bypass) while lowering remains
     allowed; authenticated admins keep every mode, with non-bypass modes global
-    (clearing per-session scopes as a safety stop) and bypass scoped to
-    principal/session behind ``confirm_bypass: true``.
+    by default (clearing looser per-session scopes as a safety stop). Passing
+    explicit ``scope: "session"`` limits non-bypass changes to that principal/
+    session under the global ceiling (``set_session_mode``), while ``scope:
+    "global"`` applies globally; when ``scope`` is provided the response echoes
+    ``scope`` and ``session_id``. Bypass is always scoped to principal/session
+    behind ``confirm_bypass: true``.
     """
     wanted = ""
     confirm_bypass = False
+    scope = ""
     session_id = str(handler.headers.get("X-Sonder-Session", "") or "").strip()
     if isinstance(req, dict):
         wanted = str(req.get("mode") or "").strip()
         confirm_bypass = req.get("confirm_bypass") is True
+        scope = str(req.get("scope") or "").strip().lower()
         if not session_id:
             session_id = str(req.get("session_id") or "").strip()
+    if scope not in ("", "session", "global"):
+        handler._send_json_payload(
+            {"error": "scope must be 'session' or 'global'", "modes": _policy_modes(permission_policy)},
+            status=400,
+        )
+        return
     if not wanted:
         handler._send_json_payload(
             {"error": "mode is required", "modes": _policy_modes(permission_policy)},
@@ -181,28 +193,45 @@ def handle_permission_mode_post(
         )
         return
     principal = principal_of(context)
-    scoped = resolved == getattr(permission_policy, "BYPASS", "bypass")
+    is_bypass = resolved == getattr(permission_policy, "BYPASS", "bypass")
+    scoped = is_bypass or scope == "session"
     local_open = is_local_open_context(context)
     refused_type = getattr(permission_policy, "ModeEscalationRefused", None) or permission_policy.mode_escalation_refused()
+    if is_bypass and scope == "global":
+        handler._send_json_payload(
+            {
+                "error": "bypass is entered per session, never as the global mode over HTTP",
+                "modes": _policy_modes(permission_policy),
+            },
+            status=400,
+        )
+        return
     if local_open:
         def apply_mode() -> Any:
             try:
+                if scoped and not is_bypass:
+                    return permission_policy.set_session_mode(resolved)
                 return permission_policy.set_mode_without_escalation(resolved)
             except refused_type as refused:
                 return refused
     else:
-        change = permission_policy.set_mode if scoped else permission_policy.set_global_mode
+        change = (
+            permission_policy.set_mode
+            if is_bypass
+            else (permission_policy.set_session_mode if scoped else permission_policy.set_global_mode)
+        )
 
         def apply_mode() -> Any:
             return change(resolved)
 
+    scope_tag = f"\0{scope}" if scope in ("session", "global") else ""
     try:
         with permission_policy.mode_scope(principal, session_id, local_open=local_open):
             previous = permission_policy.current_mode()
             result = idempotent_action(
                 context,
                 handler.headers.get("Idempotency-Key", ""),
-                f"permission-mode\0{principal}\0{session_id}\0{resolved}",
+                f"permission-mode\0{principal}\0{session_id}\0{resolved}{scope_tag}",
                 apply_mode,
             )
     except ValueError as exc:
@@ -246,6 +275,9 @@ def handle_permission_mode_post(
         if isinstance(result, str) and result:
             payload["mode"] = result
     payload["can_bypass"] = not bypass_http_refusal(context)
+    if scope in ("session", "global"):
+        payload["scope"] = "session" if scoped else "global"
+        payload["session_id"] = session_id if scoped else ""
     handler._send_json_payload(payload)
 
 

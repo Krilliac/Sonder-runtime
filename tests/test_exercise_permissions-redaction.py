@@ -6,14 +6,17 @@ import json
 import os
 import random
 import re
+import threading
 
 import pytest
 
 import permission_modes as pm
 import permission_rules
 import server
+from sonder_runtime.adapters import chat_run_backend
 from sonder_runtime.adapters.filesystem import file_ops, read_only_root_gate
 from sonder_runtime.adapters.security import approval_ledger as ledger_module
+from sonder_runtime.adapters.security.permission_policy import permission_policy
 from sonder_runtime.application.tools.facade import PatternOutputRedactor
 from sonder_runtime.application.tools.gateway_contract import (
     ApprovalMode, ToolGateway, ToolGatewayRequest, ToolInvocationOutput,
@@ -21,6 +24,7 @@ from sonder_runtime.application.tools.gateway_contract import (
 )
 from sonder_runtime.domain.execution import policy as exec_policy
 from sonder_runtime.domain.security import delete_calls, redaction
+from sonder_runtime.interfaces.http import chat_tool_stream
 
 pytestmark = pytest.mark.unit
 
@@ -958,3 +962,179 @@ def test_refuse_secret_glob_prunes_reparse_point_dir_pointing_at_unc_without_smb
         read_only_root_gate._refuse_secret_glob(root, "**/*.py")
     # Control: unrelated glob does not descend into or trip on the pruned dir.
     read_only_root_gate._refuse_secret_glob(root, "ok.py")
+
+
+# --- F09: explicit per-session permission modes ------------------------------
+
+class _PermissionModeHandler:
+    def __init__(self, session: str = ""):
+        self.headers = {"X-Sonder-Session": session} if session else {}
+        self.sent = []
+
+    def _correlation(self) -> str:
+        return "corr-test"
+
+    def _send_json_payload(self, payload, status=200):
+        self.sent.append((status, payload))
+
+
+@pytest.fixture
+def mode_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(pm, "_state_path", lambda: str(tmp_path / "permission_mode.json"))
+    saved = (dict(pm._STATE), dict(pm._SCOPED_MODES), pm._LOADED)
+    pm._reset_for_tests()
+    yield
+    with pm._LOCK:
+        pm._STATE.clear()
+        pm._STATE.update(saved[0])
+        pm._SCOPED_MODES.clear()
+        pm._SCOPED_MODES.update(saved[1])
+        pm._LOADED = saved[2]
+
+
+def _post_mode(handler, body, *, context=None):
+    ctx = {"mode": "account", "principal": "owner"} if context is None else context
+    chat_tool_stream.handle_permission_mode_post(
+        handler, body, ctx,
+        permission_policy=permission_policy,
+        principal_of=lambda _ctx: str((_ctx.get("principal") or _ctx.get("mode") or "owner") if isinstance(_ctx, dict) else "owner"),
+        idempotent_action=lambda _ctx, _key, _name, action: action(),
+        send_idempotency_refusal=lambda _h, _r: False,
+        observe_state=lambda: None,
+        mode_data=lambda: {"mode": pm.current_mode()},
+        approver_of=lambda _ctx: "owner",
+    )
+    return handler.sent[-1]
+
+
+def test_two_sessions_keep_their_own_modes_under_the_global_ceiling(mode_state):
+    status, payload = _post_mode(_PermissionModeHandler(), {"mode": "auto", "scope": "global"})
+    assert status == 200 and payload["scope"] == "global" and payload["mode"] == pm.AUTO
+    assert payload.get("session_id", "") == ""
+    status_a, payload_a = _post_mode(_PermissionModeHandler("sess-A"), {"mode": "manual", "scope": "session"})
+    status_b, payload_b = _post_mode(_PermissionModeHandler("sess-B"), {"mode": "acceptEdits", "scope": "session"})
+    assert (status_a, status_b) == (200, 200)
+    assert payload_a["scope"] == "session" and payload_a["session_id"] == "sess-A"
+    assert payload_a["mode"] == pm.MANUAL
+    assert payload_b["scope"] == "session" and payload_b["session_id"] == "sess-B"
+    with pm.mode_scope("owner", "sess-A"):
+        assert pm.current_mode() == pm.MANUAL
+    with pm.mode_scope("owner", "sess-B"):
+        assert pm.current_mode() == pm.ACCEPT_EDITS
+    with pm.mode_scope("owner", "sess-C"):
+        assert pm.current_mode() == pm.AUTO
+    assert pm.global_mode() == pm.AUTO
+
+
+def test_a_session_can_never_be_raised_above_the_global_mode(mode_state):
+    assert pm.global_mode() == pm.MANUAL
+    status, payload = _post_mode(_PermissionModeHandler("sess-A"), {"mode": "auto", "scope": "session"})
+    assert status == 400 and "global" in payload["error"]
+    with pm.mode_scope("owner", "sess-A"):
+        assert pm.current_mode() == pm.MANUAL
+    assert pm.global_mode() == pm.MANUAL
+
+
+def test_body_session_id_and_scope_session_also_scope_the_change(mode_state):
+    _post_mode(_PermissionModeHandler(), {"mode": "auto", "scope": "global"})
+    status, payload = _post_mode(_PermissionModeHandler(), {"mode": "plan", "session_id": "sess-X", "scope": "session"})
+    assert status == 200 and payload["scope"] == "session" and payload["session_id"] == "sess-X"
+    assert pm.global_mode() == pm.AUTO
+    with pm.mode_scope("owner", "sess-X"):
+        assert pm.current_mode() == pm.PLAN
+    status, payload = _post_mode(_PermissionModeHandler(), {"mode": "manual", "scope": "session"})
+    assert status == 200 and payload["scope"] == "session"
+    assert pm.global_mode() == pm.AUTO
+
+
+def test_omitted_scope_keeps_global_safety_stop_even_with_session_header(mode_state):
+    _post_mode(_PermissionModeHandler(), {"mode": "auto", "scope": "global"})
+    _post_mode(_PermissionModeHandler("sess-B"), {"mode": "bypass", "confirm_bypass": True})
+    status, payload = _post_mode(_PermissionModeHandler("sess-A"), {"mode": "manual"})
+    assert status == 200 and "scope" not in payload
+    assert pm.global_mode() == pm.MANUAL
+    with pm.mode_scope("owner", "sess-B"):
+        assert pm.current_mode() == pm.MANUAL
+
+
+def test_an_unknown_scope_is_refused(mode_state):
+    status, _payload = _post_mode(_PermissionModeHandler(), {"mode": "manual", "scope": "galaxy"})
+    assert status == 400
+
+
+def test_local_open_session_scope_cannot_escalate_above_manual(mode_state):
+    with pm.attended_mode_change():
+        pm.set_global_mode(pm.AUTO)
+    local_ctx = {"mode": "local-open"}
+    status_low, payload_low = _post_mode(
+        _PermissionModeHandler("sess-A"),
+        {"mode": "plan", "scope": "session"},
+        context=local_ctx,
+    )
+    assert status_low == 200 and payload_low["scope"] == "session" and payload_low["mode"] == pm.PLAN
+    assert pm.global_mode() == pm.AUTO
+    status_up, payload_up = _post_mode(
+        _PermissionModeHandler("sess-A"),
+        {"mode": "auto", "scope": "session"},
+        context=local_ctx,
+    )
+    assert status_up == 403
+    assert payload_up["error"]["code"] == "PERMISSION_MODE_ESCALATION_REFUSED"
+    with pm.mode_scope("local-open", "sess-A", local_open=True):
+        assert pm.current_mode() == pm.PLAN
+    assert pm.global_mode() == pm.AUTO
+
+
+def test_a_concurrent_global_lowering_cannot_leave_a_session_above_the_ceiling(mode_state):
+    _post_mode(_PermissionModeHandler(), {"mode": "auto", "scope": "global"})
+    entered, release, results = threading.Event(), threading.Event(), {}
+    original = pm.set_mode
+
+    def slow_set_mode(name):
+        entered.set()
+        release.wait(5)
+        return original(name)
+
+    def session_call():
+        with pm.mode_scope("owner", "sess-A"):
+            try:
+                results["session"] = pm.set_session_mode("auto")
+            except ValueError as error:
+                results["session"] = error
+
+    pm.set_mode = slow_set_mode
+    try:
+        worker = threading.Thread(target=session_call)
+        worker.start()
+        assert entered.wait(5)
+        lowerer = threading.Thread(target=lambda: pm.set_global_mode("manual"))
+        lowerer.start()  # must wait for the session write, then clear it
+        release.set()
+        worker.join(5)
+        lowerer.join(5)
+    finally:
+        pm.set_mode = original
+    assert pm.global_mode() == pm.MANUAL
+    with pm.mode_scope("owner", "sess-A"):
+        assert pm.current_mode() == pm.MANUAL
+
+
+# --- F19: agent gate refusal guidance ----------------------------------------
+
+def test_the_agent_refusal_does_not_say_choose_a_different_tool():
+    for source in ("rule", "unattended", "mode"):
+        decision = pm.Decision(pm.DENY, pm.AUTO, "dangerous", "because", "file_delete",
+                               source=source, call_id="abcd1234efgh5678")
+        text = chat_run_backend.format_agent_gate_refusal("file_delete", decision)
+        assert "Choose a different tool" not in text
+        assert "do not route around this refusal" in text.lower()
+
+
+def test_the_agent_refusal_names_console_and_authenticated_http_routes():
+    decision = pm.Decision(pm.DENY, pm.MANUAL, "mutation", "r", "file_write",
+                           source="unattended", call_id="abcd1234efgh5678")
+    text = chat_run_backend.format_agent_gate_refusal("file_write", decision)
+    assert "/approve abcd1234efgh5678" in text
+    assert "POST /v1/approvals/abcd1234efgh5678" in text
+    assert "POST /v1/approvals/deny/abcd1234efgh5678" in text
+    assert "local-open" in text
