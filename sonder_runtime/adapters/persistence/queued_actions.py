@@ -222,8 +222,14 @@ def connect(path=None):
     path = database_path() if path is None else path
     if str(path) == ":memory:":
         conn = owned_sqlite_connect(path, timeout=5.0)
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.executescript(_SCHEMA)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.executescript(_SCHEMA)
+        except BaseException:
+            conn.close()
+            raise
     else:
         import sonder_runtime.adapters.persistence.migrations as sonder_migrations
 
@@ -231,10 +237,13 @@ def connect(path=None):
         if not status.current:
             sonder_migrations.migrate_store("queued_actions", str(path))
         conn = sonder_migrations.open_connection(str(path), busy_timeout_ms=5000)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
-    if str(path) != ":memory:":
-        conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA journal_mode=WAL")
+        except BaseException:
+            conn.close()
+            raise
     return conn
 
 

@@ -683,7 +683,10 @@ class ChatStreamAccumulator {
             : (delta['reasoning'] is String &&
                     (delta['reasoning'] as String).isNotEmpty
                 ? delta['reasoning'] as String
-                : '');
+                : (delta['thinking'] is String &&
+                        (delta['thinking'] as String).isNotEmpty
+                    ? delta['thinking'] as String
+                    : ''));
         if (rawReasoning.isNotEmpty) {
           if (_reasoning.length + rawReasoning.length > maxAnswerChars) {
             throw _tooLarge('reasoning text');
@@ -697,17 +700,22 @@ class ChatStreamAccumulator {
           for (final item in rawTools) {
             if (item is! Map) continue;
             final idxRaw = item['index'];
-            final idx = idxRaw is int ? idxRaw : 0;
+            final idx = idxRaw is int
+                ? idxRaw
+                : (idxRaw is num ? idxRaw.toInt() : 0);
             if (idx < 0 || idx >= 64) continue;
             final fn = item['function'] is Map
                 ? Map<String, dynamic>.from(item['function'] as Map)
                 : const <String, dynamic>{};
+            final rawArgs = fn['arguments'];
+            final argsDelta = rawArgs is String
+                ? rawArgs
+                : (rawArgs is Map ? jsonEncode(rawArgs) : '');
             parsedDeltas.add(ChatStreamToolCallDelta(
               index: idx,
               id: item['id'] is String ? item['id'] as String : '',
               name: fn['name'] is String ? fn['name'] as String : '',
-              argumentsDelta:
-                  fn['arguments'] is String ? fn['arguments'] as String : '',
+              argumentsDelta: argsDelta,
             ));
           }
           if (parsedDeltas.isNotEmpty) {
@@ -864,7 +872,7 @@ Stream<ChatStreamEvent> openChatStream(
       return;
     }
     controller.add(ChatStreamOpened(headers));
-    final contentType = headers['content-type'] ?? '';
+    final contentType = (headers['content-type'] ?? '').toLowerCase();
     if (!contentType.contains('text/event-stream')) {
       // The server answered without streaming (older build, or a route that
       // ignores `stream`): the body is one completion object.
@@ -882,6 +890,19 @@ Stream<ChatStreamEvent> openChatStream(
         final message = choice['message'];
         final content =
             message is Map ? message['content']?.toString() ?? '' : '';
+        if (message is Map &&
+            (completion['sonder_reasoning']?.toString().trim() ?? '').isEmpty) {
+          final fallbackReasoning = message['reasoning_content'] is String &&
+                  (message['reasoning_content'] as String).trim().isNotEmpty
+              ? message['reasoning_content'] as String
+              : (message['reasoning'] is String &&
+                      (message['reasoning'] as String).trim().isNotEmpty
+                  ? message['reasoning'] as String
+                  : '');
+          if (fallbackReasoning.isNotEmpty) {
+            completion['sonder_reasoning'] = fallbackReasoning;
+          }
+        }
         if (content.isNotEmpty) {
           controller.add(ChatStreamDelta(content, content));
         }
@@ -894,8 +915,10 @@ Stream<ChatStreamEvent> openChatStream(
         finish();
       } on SonderException catch (error) {
         finish(error);
-      } catch (_) {
+      } on FormatException {
         finish(SonderException('Could not parse server response.'));
+      } catch (error) {
+        finish(SonderException.transport(error, current.uri.origin));
       }
       return;
     }
