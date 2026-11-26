@@ -64,6 +64,7 @@ class WorkbenchActivityPanel extends StatelessWidget {
                         : response.checklistTitle,
                     style: text.titleSmall),
               ),
+              const SizedBox(width: SonderSpace.sm),
               Text('$completed/${response.checklist.length}',
                   style: text.bodySmall),
             ]),
@@ -297,18 +298,27 @@ class _ExecutionEventRow extends StatelessWidget {
     } else {
       previewNote = null;
     }
+    final scaled = MediaQuery.textScalerOf(context).scale(1.0) > 1.25;
+    final timestamp = Text(_timestampLabel(event.timestamp),
+        style: tokens.mono(12, color: tokens.muted));
+    final mark = StatusMark(status, word: executionEventWord(status), size: 12);
     return RuntimeRow(
       markWidth: 172,
-      leading: Row(mainAxisSize: MainAxisSize.min, children: [
-        SizedBox(
-          width: 68,
-          child: Text(_timestampLabel(event.timestamp),
-              style: tokens.mono(12, color: tokens.muted)),
-        ),
-        Flexible(
-          child: StatusMark(status, word: executionEventWord(status), size: 12),
-        ),
-      ]),
+      leading: scaled
+          ? Wrap(
+              spacing: SonderSpace.sm,
+              runSpacing: SonderSpace.xxs,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [timestamp, mark],
+            )
+          : Row(mainAxisSize: MainAxisSize.min, children: [
+              ConstrainedBox(
+                constraints: const BoxConstraints(minWidth: 68),
+                child: timestamp,
+              ),
+              const SizedBox(width: SonderSpace.xs),
+              Flexible(child: mark),
+            ]),
       title: RuntimeRowTitle(title),
       subtitle: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

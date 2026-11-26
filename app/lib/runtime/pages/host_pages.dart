@@ -16,6 +16,7 @@ class _ObservatoryPage extends StatelessWidget {
         runtimeUrl: settings.serverUrl,
         canStartProcesses: LocalManager.canRunLocalTools,
         onLaunch: s._launchObservatory,
+        onRetry: s._loadExtras,
         usesCredential: s._usesCredential,
         parts: const {EcosystemPart.observatory},
       ),
