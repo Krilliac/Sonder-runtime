@@ -118,7 +118,10 @@ class OutboxDispatcher:
         self._domain = domain
 
     def dispatch_batch(self, limit: int = 100) -> int:
-        logger.debug(f"dispatch_batch domain={self._domain!r} limit={limit}")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("outbox dispatch limit must be a positive integer")
+        bounded_limit = min(limit, 10_000)
+        logger.debug(f"dispatch_batch domain={self._domain!r} limit={bounded_limit}")
         rows = self._source.execute(
             "SELECT id, event_type, aggregate_type, aggregate_id, "
             "       correlation_id, payload_json, created_at "
@@ -126,7 +129,7 @@ class OutboxDispatcher:
             "WHERE published_at IS NULL "
             "ORDER BY created_at "
             "LIMIT ?",
-            (limit,),
+            (bounded_limit,),
         ).fetchall()
 
         if not rows:
@@ -134,10 +137,10 @@ class OutboxDispatcher:
             return 0
 
         logger.debug(f"dispatch_batch domain={self._domain!r} found {len(rows)} unpublished events")
-        if len(rows) >= limit:
+        if len(rows) >= bounded_limit:
             logger.warning(
                 f"outbox dispatch batch is full, domain={self._domain!r}: "
-                f"fetched {len(rows)}/{limit} events — backlog may be growing"
+                f"fetched {len(rows)}/{bounded_limit} events — backlog may be growing"
             )
         now = datetime.now(timezone.utc).isoformat()
         dispatched = 0
@@ -166,6 +169,16 @@ class OutboxDispatcher:
                 )
                 self._ops.commit()
             except sqlite3.IntegrityError:
+                if self._ops.in_transaction:
+                    self._ops.rollback()
+                # Confirm the conflict is an idempotent duplicate of source_event_id
+                # rather than a constraint violation on a malformed/corrupt row.
+                already_present = self._ops.execute(
+                    "SELECT 1 FROM operation_events WHERE source_event_id = ? LIMIT 1",
+                    (event_id,),
+                ).fetchone()
+                if already_present is None:
+                    raise
                 logger.warning(
                     f"outbox duplicate dispatch detected, domain={self._domain!r} "
                     f"event_id={event_id!r} — likely crash-recovery replay"

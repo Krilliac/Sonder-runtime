@@ -4960,7 +4960,6 @@ def _preserve_reasoning_failure_usage(
 # HTTP chat through the ModelGateway for non-Ollama rungs: the bridge lives in
 # sonder_runtime/adapters/legacy_chat_bridge.py; these wrappers inject policy.
 
-
 def _bridge_provider_for_tier(tier_label, cloud=False):
     """The non-Ollama provider serving a local rung, or None for Ollama."""
     graph = _APP_GRAPH if (_APP_GRAPH is not None or cloud or not str(tier_label or "").strip().lower().startswith("model:")) else _application()
@@ -4973,6 +4972,7 @@ def _bridge_endpoint_is_loopback(provider):
 
 
 _provider_bridge.set_endpoint_locality_probe(_bridge_endpoint_is_loopback)
+_provider_bridge.set_native_tools_probe(lambda provider: _legacy_chat_bridge.native_tools_supported(provider, _APP_GRAPH))
 
 
 def _bridge_operation_context(timeout, cancel_check):
