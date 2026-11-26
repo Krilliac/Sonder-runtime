@@ -177,9 +177,59 @@ def _finish_managed_runtime(
             raise primary_error
         from ..application.ports.runtime_owner import OwnerRefused
 
-        raise OwnerRefused("managed application cleanup is incomplete")
+        detail = [str(item) for item in (*errors, *cleanup_errors)]
+        if receipt is None:
+            detail.append("receipt-missing")
+        elif not receipt.clean:
+            detail.extend(
+                f"{item.component}={item.state}:{item.evidence}"
+                for item in receipt.components
+                if item.state not in {"UNOPENED", "CLOSED"}
+            )
+        suffix = f" ({', '.join(detail)})" if detail else ""
+        raise OwnerRefused("managed application cleanup is incomplete" + suffix)
     evidence("CLEAN", receipt)
     return 0
+
+
+_MAX_TRANSIENT_CONTROL_BUSY = 5
+
+
+def _run_control_loop(
+    *,
+    stopped,
+    is_ready,
+    mark_ready,
+    read_pending,
+    drain,
+    on_error,
+    poll_interval=0.1,
+    max_transient_busy=_MAX_TRANSIENT_CONTROL_BUSY,
+):
+    """Poll owner journal for stop admission, tolerating bounded SQLite busy spikes."""
+    from ..adapters.persistence.runtime_owner import OwnerStorageBusy
+
+    ready = False
+    transient_busy = 0
+    try:
+        while not stopped.wait(poll_interval):
+            if not ready and is_ready():
+                mark_ready()
+                ready = True
+            try:
+                command = read_pending()
+            except OwnerStorageBusy:
+                transient_busy += 1
+                if transient_busy >= max_transient_busy:
+                    raise
+                continue
+            transient_busy = 0
+            if command is not None and command.action == "stop":
+                drain("owned runtime stop")
+                return
+    except BaseException as error:
+        on_error(error)
+        drain("owned control unavailable")
 
 
 def run(root, namespace, job_id):
@@ -485,19 +535,14 @@ def _run(root, workspace, namespace, job_id, anchor):
             return server
 
         def control():
-            ready = False
-            try:
-                while not stopped.wait(0.1):
-                    if not ready and listener and serve.BOUND_PORT == descriptor["port"]:
-                        evidence("READY")
-                        ready = True
-                    command = journal.pending()
-                    if command is not None and command.action == "stop":
-                        lifecycle.get().drain("owned runtime stop")
-                        return
-            except BaseException:
-                errors.append("control-failed")
-                lifecycle.get().drain("owned control unavailable")
+            _run_control_loop(
+                stopped=stopped,
+                is_ready=lambda: bool(listener and serve.BOUND_PORT == descriptor["port"]),
+                mark_ready=lambda: evidence("READY"),
+                read_pending=journal.pending,
+                drain=lambda reason: lifecycle.get().drain(reason),
+                on_error=lambda error: errors.append("control-failed:" + type(error).__name__),
+            )
 
         watcher = workers.thread(
             target=control, name="managed-runtime-control", daemon=True
@@ -518,7 +563,7 @@ def _run(root, workspace, namespace, job_id, anchor):
             stopped.set()
         if watcher_started:
             try:
-                watcher.join(2)
+                watcher.join(5)
             except BaseException as error:
                 cleanup_errors.append("watcher-" + type(error).__name__)
         if lifecycle_configured:

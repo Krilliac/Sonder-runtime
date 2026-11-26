@@ -113,14 +113,22 @@ const observatoryRemoteExplanation =
     'telemetry is served on loopback on the runtime host. Run the '
     'Observatory on that host instead.';
 
-/// True for `localhost`, `127.x.x.x` and `::1`.
+/// True for `localhost`, `127.0.0.0/8` (strict valid octets), and `::1`.
 bool isLoopbackHost(String host) {
-  final h = host.toLowerCase();
-  return h == 'localhost' ||
+  final h = host.trim().toLowerCase();
+  if (h == 'localhost' ||
       h == '::1' ||
       h == '[::1]' ||
-      h == '0:0:0:0:0:0:0:1' ||
-      RegExp(r'^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$').hasMatch(h);
+      h == '0:0:0:0:0:0:0:1') {
+    return true;
+  }
+  final octets = h.split('.');
+  return octets.length == 4 &&
+      octets.first == '127' &&
+      octets.every((part) {
+        final n = int.tryParse(part);
+        return n != null && n >= 0 && n <= 255 && n.toString() == part;
+      });
 }
 
 /// True when [url] parses and names a loopback host.
