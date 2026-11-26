@@ -114,7 +114,9 @@ class CheckpointStore:
     def list_checkpoints(
         self, session_id: str, limit: int = 10,
     ) -> list[Checkpoint]:
-        bounded = max(1, min(int(limit), 1000))
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("limit must be an integer")
+        bounded = max(1, min(limit, 1000))
         with self._lock, self._connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM checkpoints WHERE session_id=? "
