@@ -13,10 +13,18 @@ class LocalManager {
   static const _serverLogName = 'sonder_serve.log';
   static const _logTailBytes = 64 * 1024;
   static const _managedOutputLineLimit = 60;
+  static const _managedOutputLineCharLimit = 2048;
   static const _serverReadyTimeout = Duration(seconds: 25);
+  static const _minServerProbeInterval = Duration(milliseconds: 50);
   static const _maxServerProbeInterval = Duration(seconds: 2);
+  static const _healthReadMaxDuration = Duration(milliseconds: 1500);
   static Process? _managedServer;
   static int? _managedServerPid;
+  static int? _managedServerExitCode;
+  static int _managedTrackGeneration = 0;
+  static StreamSubscription<String>? _managedStdoutSub;
+  static StreamSubscription<String>? _managedStderrSub;
+  static Future<void>? _managedOutputDone;
   static final List<String> _managedServerOutput = <String>[];
 
   static bool get canRunLocalTools =>
@@ -98,19 +106,37 @@ class LocalManager {
   }
 
   static Future<String> readLogTail(String path, {int maxLines = 40}) async {
+    if (maxLines <= 0) return '';
     try {
       final file = File(path);
       if (!await file.exists()) return '';
-      final length = await file.length();
-      final start = length > _logTailBytes ? length - _logTailBytes : 0;
-      final bytes = <int>[];
+      var length = await file.length();
+      if (length <= 0) return '';
+      var start = length > _logTailBytes ? length - _logTailBytes : 0;
+      var bytes = await _readBoundedSlice(file, start, length);
+      // If the log was truncated/rotated between length() and openRead(),
+      // re-read from offset 0 so fresh startup errors are not hidden.
+      if (bytes.isEmpty && start > 0) {
+        length = await file.length();
+        if (length <= 0) return '';
+        start = length > _logTailBytes ? length - _logTailBytes : 0;
+        bytes = await _readBoundedSlice(file, start, length);
+      }
+      if (bytes.isEmpty) return '';
       // The log is opened in binary append mode by the supervisor, so decode
       // leniently rather than throwing on a torn multi-byte sequence.
-      await for (final chunk in file.openRead(start)) {
-        bytes.addAll(chunk);
+      var decoded = utf8.decode(bytes, allowMalformed: true);
+      if (start > 0) {
+        // An offset window usually begins mid-line (and possibly mid-codepoint).
+        // Drop the torn leading fragment whenever later complete lines exist.
+        final firstBreak = decoded.indexOf('\n');
+        if (firstBreak >= 0) {
+          final rest = decoded.substring(firstBreak + 1);
+          if (rest.trim().isNotEmpty) decoded = rest;
+        }
       }
       final lines = const LineSplitter()
-          .convert(utf8.decode(bytes, allowMalformed: true))
+          .convert(decoded)
           .map((line) => line.trimRight())
           .where((line) => line.trim().isNotEmpty)
           .toList();
@@ -122,6 +148,26 @@ class LocalManager {
     } catch (_) {
       return '';
     }
+  }
+
+  static Future<List<int>> _readBoundedSlice(
+    File file,
+    int start,
+    int length,
+  ) async {
+    final end = start + _logTailBytes < length ? start + _logTailBytes : length;
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in file.openRead(start, end)) {
+      final remaining = _logTailBytes - builder.length;
+      if (remaining <= 0) break;
+      if (chunk.length <= remaining) {
+        builder.add(chunk);
+      } else {
+        builder.add(chunk.sublist(0, remaining));
+        break;
+      }
+    }
+    return builder.takeBytes();
   }
 
   /// Recent stdout/stderr of the app-managed launcher process. The direct
@@ -157,14 +203,18 @@ class LocalManager {
             const Duration(milliseconds: 800),
           );
       if (response.statusCode != HttpStatus.ok) return false;
-      final bytes = <int>[];
+      final bytes = BytesBuilder(copy: false);
+      final readWatch = Stopwatch()..start();
       await for (final chunk in response.timeout(
         const Duration(milliseconds: 800),
       )) {
-        bytes.addAll(chunk);
-        if (bytes.length > 4096) return false;
+        if (bytes.length + chunk.length > 4096 ||
+            readWatch.elapsed > _healthReadMaxDuration) {
+          return false;
+        }
+        bytes.add(chunk);
       }
-      final payload = jsonDecode(utf8.decode(bytes));
+      final payload = jsonDecode(utf8.decode(bytes.takeBytes()));
       // A TCP accept let unrelated or wedged listeners block startup and made
       // the UI promise a healthy server; require the launcher's signed identity.
       return launcherHealthPayloadMatches(
@@ -189,17 +239,26 @@ class LocalManager {
     Future<bool> Function()? reachabilityProbe,
     Future<void> Function(Duration)? delay,
     DateTime Function()? clock,
+    bool Function()? shouldAbort,
   }) async {
     final now = clock ?? DateTime.now;
     final deadline = now().add(timeout);
     final probe = reachabilityProbe ?? defaultServerReachable;
     final wait = delay ?? Future<void>.delayed;
-    var nextInterval = interval;
+    var nextInterval =
+        interval <= Duration.zero ? _minServerProbeInterval : interval;
     var firstProbe = true;
     while (true) {
       if (!firstProbe && !now().isBefore(deadline)) return false;
       firstProbe = false;
-      if (await probe()) return true;
+      var reachable = false;
+      try {
+        reachable = await probe();
+      } catch (_) {
+        reachable = false;
+      }
+      if (reachable) return true;
+      if (shouldAbort?.call() == true) return false;
       final remaining = deadline.difference(now());
       if (remaining <= Duration.zero) return false;
       await wait(nextInterval <= remaining ? nextInterval : remaining);
@@ -210,7 +269,7 @@ class LocalManager {
   /// Keep an unavailable signed-health endpoint from filling the local server
   /// log during startup, while still discovering a healthy launcher promptly.
   static Duration _nextServerProbeInterval(Duration current) {
-    if (current <= Duration.zero) return Duration.zero;
+    if (current <= Duration.zero) return _minServerProbeInterval;
     final currentMs = current.inMilliseconds;
     final maxMs = _maxServerProbeInterval.inMilliseconds;
     if (currentMs >= maxMs) return _maxServerProbeInterval;
@@ -381,8 +440,10 @@ class LocalManager {
               allowHosted: allowHosted,
               contextSize: contextSize,
               readyTimeout: readyTimeout,
+              reachabilityProbe: managedReachable,
             );
           }
+          if (_managedServer != null) stopManagedServerNow();
           final process = await Process.start(
             'cmd.exe',
             ['/c', script.path],
@@ -393,6 +454,8 @@ class LocalManager {
           return await _awaitServerReady(
             'Server startup requested. Managed PID ${process.pid}.',
             readyTimeout,
+            reachabilityProbe: managedReachable,
+            watchedPid: process.pid,
           );
         }
       }
@@ -402,6 +465,7 @@ class LocalManager {
           allowHosted: allowHosted,
           contextSize: contextSize,
           readyTimeout: readyTimeout,
+          reachabilityProbe: managedReachable,
         );
       }
       final script = File(
@@ -410,6 +474,7 @@ class LocalManager {
       if (!await script.exists()) {
         return const LocalActionResult(false, 'Server launcher is missing.');
       }
+      if (_managedServer != null) stopManagedServerNow();
       final process = await Process.start(
         '/bin/sh',
         [script.path],
@@ -420,6 +485,8 @@ class LocalManager {
       return await _awaitServerReady(
         'Server startup requested. Managed PID ${process.pid}.',
         readyTimeout,
+        reachabilityProbe: managedReachable,
+        watchedPid: process.pid,
       );
     } catch (e) {
       return _serverStartFailure('Could not start server: $e');
@@ -450,13 +517,29 @@ class LocalManager {
   /// the port is a failure, not a success.
   static Future<LocalActionResult> _awaitServerReady(
     String startedMessage,
-    Duration timeout,
-  ) async {
-    if (await waitForServer(timeout: timeout)) {
+    Duration timeout, {
+    Future<bool> Function()? reachabilityProbe,
+    int? watchedPid,
+  }) async {
+    final exitedEarly =
+        watchedPid == null ? null : () => _managedServerPid != watchedPid;
+    if (await waitForServer(
+      timeout: timeout,
+      reachabilityProbe: reachabilityProbe,
+      shouldAbort: exitedEarly,
+    )) {
       return LocalActionResult(
         true,
         '$startedMessage\nServer is reachable on 127.0.0.1:11435.',
       );
+    }
+    if (watchedPid != null && _managedServerPid != watchedPid) {
+      final code = _managedServerExitCode;
+      final exitNote = code == null
+          ? 'The launcher process exited before the server became reachable.'
+          : 'The launcher process exited early with code $code before the '
+              'server became reachable.';
+      return _serverStartFailure('$startedMessage\n$exitNote');
     }
     return _serverStartFailure(
       '$startedMessage\nThe server did not become reachable on '
@@ -468,6 +551,15 @@ class LocalManager {
   /// output (direct launch) and the tail of the supervisor log (headless
   /// launch). Either one is where a packaging or interpreter fault shows up.
   static Future<LocalActionResult> _serverStartFailure(String summary) async {
+    // When a direct launcher exited early, its final stderr lines may still be
+    // draining through the OS pipe; wait briefly so crash tracebacks are never
+    // dropped on fast exits.
+    if (_managedServerPid == null && _managedOutputDone != null) {
+      await _managedOutputDone!.timeout(
+        const Duration(milliseconds: 500),
+        onTimeout: () {},
+      );
+    }
     final logPath = serverLogPath();
     final logTail = await readServerLogTail();
     final processTail = managedServerOutputTail();
@@ -495,6 +587,7 @@ class LocalManager {
     required bool allowHosted,
     required String contextSize,
     required Duration readyTimeout,
+    Future<bool> Function()? reachabilityProbe,
   }) async {
     final serverEnvironment = await _managedServerEnvironment(
       allowHosted: allowHosted,
@@ -539,6 +632,7 @@ class LocalManager {
     return _awaitServerReady(
       'Server startup requested in managed background mode.',
       readyTimeout,
+      reachabilityProbe: reachabilityProbe,
     );
   }
 
@@ -601,31 +695,71 @@ class LocalManager {
     }
   }
 
+  static void _cancelManagedOutputSubscriptions() {
+    unawaited(_managedStdoutSub?.cancel());
+    unawaited(_managedStderrSub?.cancel());
+    _managedStdoutSub = null;
+    _managedStderrSub = null;
+    _managedOutputDone = null;
+  }
+
   static void _trackManagedServer(Process process) {
+    _cancelManagedOutputSubscriptions();
+    final generation = ++_managedTrackGeneration;
+    _managedServerOutput.clear();
     _managedServer = process;
     _managedServerPid = process.pid;
-    _captureManagedOutput(process.stdout);
-    _captureManagedOutput(process.stderr);
+    _managedServerExitCode = null;
+    final stdoutDone = Completer<void>();
+    final stderrDone = Completer<void>();
+    _managedOutputDone = Future.wait([stdoutDone.future, stderrDone.future])
+        .then((_) {});
+    _managedStdoutSub =
+        _captureManagedOutput(process.stdout, generation, stdoutDone);
+    _managedStderrSub =
+        _captureManagedOutput(process.stderr, generation, stderrDone);
     process.exitCode.then((code) {
-      if (_managedServerPid == process.pid) {
+      if (_managedTrackGeneration == generation &&
+          _managedServerPid == process.pid) {
         _managedServer = null;
         _managedServerPid = null;
+        _managedServerExitCode = code;
         _recordManagedOutput('[launcher exited with code $code]');
       }
     });
   }
 
-  static void _captureManagedOutput(Stream<List<int>> stream) {
-    stream
+  static StreamSubscription<String> _captureManagedOutput(
+    Stream<List<int>> stream,
+    int generation,
+    Completer<void> done,
+  ) {
+    void complete() {
+      if (!done.isCompleted) done.complete();
+    }
+
+    return stream
         .transform(const Utf8Decoder(allowMalformed: true))
         .transform(const LineSplitter())
-        .listen(_recordManagedOutput, onError: (_) {});
+        .listen(
+          (line) {
+            if (_managedTrackGeneration == generation) {
+              _recordManagedOutput(line);
+            }
+          },
+          onError: (_) => complete(),
+          onDone: complete,
+        );
   }
 
+  @visibleForTesting
+  static String sanitizeManagedOutputLineForTest(String line) =>
+      _sanitizeManagedOutputLine(line);
+
   static void _recordManagedOutput(String line) {
-    final text = line.trim();
-    if (text.isEmpty) return;
-    _managedServerOutput.add(text);
+    final cleaned = _sanitizeManagedOutputLine(line);
+    if (cleaned.isEmpty) return;
+    _managedServerOutput.add(cleaned);
     if (_managedServerOutput.length > _managedOutputLineLimit) {
       _managedServerOutput.removeRange(
         0,
@@ -634,10 +768,43 @@ class LocalManager {
     }
   }
 
+  static String _sanitizeManagedOutputLine(String line) {
+    final buf = StringBuffer();
+    for (var i = 0; i < line.length; i++) {
+      final code = line.codeUnitAt(i);
+      if (code == 0x09 || (code >= 0x20 && code != 0x7f)) {
+        buf.writeCharCode(code);
+        if (buf.length >= _managedOutputLineCharLimit) break;
+      }
+    }
+    var text = buf.toString().trim();
+    if (text.isEmpty) return '';
+    if (line.length > _managedOutputLineCharLimit &&
+        text.length >= _managedOutputLineCharLimit - 3) {
+      text = '${text.substring(0, _managedOutputLineCharLimit - 3)}...';
+    }
+    return text;
+  }
+
   /// Registers an already-started launcher as the managed server. Test seam.
   @visibleForTesting
   static void trackManagedServerForTest(Process process) =>
       _trackManagedServer(process);
+
+  /// Waits for a tracked direct-launch process to become reachable, aborting
+  /// early if it exits. Test seam for [_awaitServerReady].
+  @visibleForTesting
+  static Future<LocalActionResult> awaitTrackedServerForTest({
+    required Duration timeout,
+    required Future<bool> Function() reachabilityProbe,
+    int? watchedPid,
+  }) =>
+      _awaitServerReady(
+        'Server startup requested. Managed PID ${watchedPid ?? _managedServerPid ?? 0}.',
+        timeout,
+        reachabilityProbe: reachabilityProbe,
+        watchedPid: watchedPid ?? _managedServerPid,
+      );
 
   /// Synchronous (the app is closing): the launcher is a shell, so the server
   /// is its child. Killing only the shell would orphan the Python server, so
@@ -645,6 +812,11 @@ class LocalManager {
   /// then the shell on Unix.
   static void stopManagedServerNow() {
     final process = _managedServer;
+    _managedTrackGeneration++;
+    _cancelManagedOutputSubscriptions();
+    _managedServer = null;
+    _managedServerPid = null;
+    _managedServerExitCode = null;
     if (process != null) {
       try {
         if (Platform.isWindows) {
@@ -656,8 +828,6 @@ class LocalManager {
       process.kill(ProcessSignal.sigterm);
       process.kill(ProcessSignal.sigkill);
     }
-    _managedServer = null;
-    _managedServerPid = null;
   }
 
   static Future<LocalActionResult> stopServers() async {
@@ -689,6 +859,8 @@ class LocalManager {
     final process = _managedServer;
     final pid = _managedServerPid;
     if (process == null || pid == null) return null;
+    _managedTrackGeneration++;
+    _cancelManagedOutputSubscriptions();
     try {
       if (Platform.isWindows) {
         final result = await Process.run(
@@ -696,15 +868,58 @@ class LocalManager {
           ['/PID', '$pid', '/T', '/F'],
           environment: processEnvironment(),
         ).timeout(const Duration(seconds: 20));
+        if (result.exitCode == 0) {
+          final output = _processOutput(result);
+          return LocalActionResult(
+            true,
+            output.isEmpty ? 'Stopped app-managed PID $pid.' : output,
+          );
+        }
+        // If the tracked process exited right before taskkill ran, treat it as
+        // already stopped instead of surfacing a spurious "not found" failure.
+        final alreadyExited = await process.exitCode
+            .then((_) => true)
+            .timeout(const Duration(milliseconds: 250), onTimeout: () => false);
+        if (alreadyExited) {
+          return LocalActionResult(
+            true,
+            'App-managed PID $pid had already exited.',
+          );
+        }
         final output = _processOutput(result);
         return LocalActionResult(
-          result.exitCode == 0,
-          output.isEmpty ? 'Stopped app-managed PID $pid.' : output,
+          false,
+          output.isEmpty ? 'Could not stop app-managed PID $pid.' : output,
         );
       }
-      final stopped = process.kill(ProcessSignal.sigterm);
+      try {
+        await Process.run('pkill', ['-TERM', '-P', '$pid'])
+            .timeout(const Duration(seconds: 5));
+      } catch (_) {}
+      final termSent = process.kill(ProcessSignal.sigterm);
+      final exitedGracefully = await process.exitCode
+          .then((_) => true)
+          .timeout(const Duration(seconds: 2), onTimeout: () => false);
+      if (!exitedGracefully) {
+        try {
+          await Process.run('pkill', ['-KILL', '-P', '$pid'])
+              .timeout(const Duration(seconds: 5));
+        } catch (_) {}
+        process.kill(ProcessSignal.sigkill);
+        final exitedAfterKill = await process.exitCode
+            .then((_) => true)
+            .timeout(const Duration(seconds: 2), onTimeout: () => false);
+        return LocalActionResult(
+          exitedAfterKill,
+          exitedAfterKill
+              ? 'Stopped app-managed PID $pid.'
+              : 'Stop requested for app-managed PID $pid.',
+        );
+      }
       return LocalActionResult(
-          stopped, 'Stop requested for app-managed PID $pid.');
+        termSent || exitedGracefully,
+        'Stopped app-managed PID $pid.',
+      );
     } finally {
       if (_managedServerPid == pid) {
         _managedServer = null;

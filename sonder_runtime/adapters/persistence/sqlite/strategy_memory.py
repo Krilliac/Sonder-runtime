@@ -70,8 +70,15 @@ def _payload(row: StrategyExperience) -> tuple:
 
 def _experience(row) -> StrategyExperience:
     values = dict(zip(_FIELDS, row))
-    values["usage"] = StrategyUsage(**json.loads(values["usage"]))
-    values["evidence_digests"] = tuple(json.loads(values["evidence_digests"]))
+    try:
+        usage_raw = json.loads(values["usage"])
+        evidence_raw = json.loads(values["evidence_digests"])
+        if not isinstance(usage_raw, dict) or not isinstance(evidence_raw, list):
+            raise ValueError("corrupt strategy experience JSON")
+        values["usage"] = StrategyUsage(**usage_raw)
+        values["evidence_digests"] = tuple(evidence_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("corrupt strategy experience JSON") from exc
     return StrategyExperience(**values)
 
 
@@ -210,6 +217,24 @@ class SQLiteStrategyExperienceRepository:
             "SELECT count(*) FROM strategy_memory_selection "
             "WHERE experience_id=? AND outcome='failed'", (experience_id,),
         ).fetchone()[0])
+
+    def failed_reuses_batch(self, experience_ids: tuple[str, ...] | list[str]) -> dict[str, int]:
+        """Count failed reuses for many experiences in bounded SQL chunks."""
+        unique = tuple(dict.fromkeys(experience_ids))
+        counts = dict.fromkeys(unique, 0)
+        chunk_size = 500
+        for start in range(0, len(unique), chunk_size):
+            chunk = unique[start:start + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self._connection.execute(
+                "SELECT experience_id, count(*) FROM strategy_memory_selection "
+                f"WHERE outcome='failed' AND experience_id IN ({placeholders}) "
+                "GROUP BY experience_id",
+                chunk,
+            ).fetchall()
+            for exp_id, cnt in rows:
+                counts[exp_id] = int(cnt)
+        return counts
 
 
 __all__ = ["SQLiteStrategyExperienceRepository"]

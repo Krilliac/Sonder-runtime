@@ -64,10 +64,14 @@ def init_operations_db(db_path: Path) -> sqlite3.Connection:
     conn = cast("Callable[[str], sqlite3.Connection]", owned_sqlite_connect)(
         str(db_path)
     )
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.executescript(OPERATIONS_DDL)
-    conn.executescript(OPERATIONS_EVENT_DDL)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(OPERATIONS_DDL)
+        conn.executescript(OPERATIONS_EVENT_DDL)
+    except BaseException:
+        conn.close()
+        raise
     logger.debug("operations.db schema applied successfully")
     logger.info(f"operations.db initialized at {db_path}")
     return conn

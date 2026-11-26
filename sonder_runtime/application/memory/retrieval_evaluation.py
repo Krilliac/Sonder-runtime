@@ -8,7 +8,7 @@ performing retrieval, storage, embedding, or model I/O.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil
+from math import ceil, isfinite
 from typing import Iterable, Mapping, Sequence
 
 from ...domain.memory.rules import DEFAULT_RECALL_MIN_SIM
@@ -79,11 +79,16 @@ def evaluate_retrieval(
     zero when no stale labels exist.  Duplicate returned IDs are counted once
     per query, matching retrieval identity rather than token count.
     """
-    cases = tuple(labels)
-    if len(cases) > MAX_EVALUATION_CASES:
-        raise ValueError("too many retrieval evaluation cases")
-    if k is not None and (not isinstance(k, int) or k <= 0 or k > MAX_RESULTS_PER_CASE):
+    if k is not None and (
+        isinstance(k, bool) or not isinstance(k, int) or k <= 0 or k > MAX_RESULTS_PER_CASE
+    ):
         raise ValueError("k must be between 1 and MAX_RESULTS_PER_CASE")
+
+    cases: list[RetrievalLabel] = []
+    for case in labels:
+        if len(cases) >= MAX_EVALUATION_CASES:
+            raise ValueError("too many retrieval evaluation cases")
+        cases.append(case)
 
     total_results = total_relevant = total_expected = 0
     total_contradictory = total_stale_hits = total_stale_expected = 0
@@ -100,17 +105,23 @@ def evaluate_retrieval(
         total_results += len(ids)
         total_relevant += len(ids & case.relevant_ids)
         total_expected += len(case.relevant_ids)
-        total_contradictory += len(
-            ids & case.contradictory_ids
-        ) + sum(item.is_contradictory for item in selected if item.memory_id not in case.contradictory_ids)
+        contradictory_hits = (ids & case.contradictory_ids) | {
+            item.memory_id for item in selected if item.is_contradictory
+        }
+        total_contradictory += len(contradictory_hits)
         total_stale_hits += len(ids & case.stale_ids)
         total_stale_expected += len(case.stale_ids)
         total_context += sum(
             min(MAX_CONTEXT_TOKENS_PER_RESULT, max(0, item.context_tokens))
             for item in selected
         )
-        if case.latency_ms < 0:
-            raise ValueError("latency_ms must not be negative")
+        if (
+            isinstance(case.latency_ms, bool)
+            or not isinstance(case.latency_ms, (int, float))
+            or not isfinite(case.latency_ms)
+            or case.latency_ms < 0
+        ):
+            raise ValueError("latency_ms must be finite and non-negative")
         latencies.append(float(case.latency_ms))
 
     def ratio(numerator: int, denominator: int) -> float:
