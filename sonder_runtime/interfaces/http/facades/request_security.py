@@ -1425,6 +1425,9 @@ def send_json_payload(
     spanda_headers = getattr(handler, "_spanda_headers", None)
     if spanda_headers:
         resolved_headers = {**spanda_headers, **(resolved_headers or {})}
+    route_headers = getattr(handler, "_execution_route_headers", None)
+    if route_headers:
+        resolved_headers = {**route_headers, **(resolved_headers or {})}
     serve_mod._serve_logger.debug(f"_send_json_payload: status={status}")
     body = json.dumps(payload).encode("utf-8")
     settle_unread_body = getattr(handler, "_close_for_unread_body", None)

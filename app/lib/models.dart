@@ -53,6 +53,10 @@ class ChatResponseMetadata {
   /// turn (switched to the overflow model, or stayed), or null.
   final RouteOverflow? overflow;
 
+  /// `sonder_receipt.execution_route`: the difficulty-to-execution-mode routing
+  /// decision for this turn (single, ensemble, fanout, or agent), or null.
+  final ExecutionRoute? executionRoute;
+
   final AgentLaneReceipt? agentLane;
   final OrchestrationReceipt? orchestration;
   final List<ClientToolHandoff> clientToolHandoffs;
@@ -76,6 +80,7 @@ class ChatResponseMetadata {
     this.acknowledgement = '',
     this.refusal,
     this.overflow,
+    this.executionRoute,
     this.agentLane,
     this.orchestration,
     this.clientToolHandoffs = const [],
@@ -108,6 +113,7 @@ class ChatResponseMetadata {
               )
             : null,
         overflow: RouteOverflow.fromJson(json['overflow']),
+        executionRoute: ExecutionRoute.fromJson(json['execution_route']),
         agentLane: json['agent_lane'] is Map
             ? AgentLaneReceipt.fromJson(
                 Map<String, dynamic>.from(json['agent_lane'] as Map),
@@ -153,6 +159,7 @@ class ChatResponseMetadata {
         acknowledgement: acknowledgement,
         refusal: refusal ?? this.refusal,
         overflow: overflow,
+        executionRoute: executionRoute,
         agentLane: agentLane,
         orchestration: orchestration,
         clientToolHandoffs: clientToolHandoffs,
@@ -177,6 +184,7 @@ class ChatResponseMetadata {
       acknowledgement.isEmpty &&
       refusal == null &&
       overflow == null &&
+      executionRoute == null &&
       agentLane == null &&
       orchestration == null &&
       clientToolHandoffs.isEmpty;
@@ -200,6 +208,7 @@ class ChatResponseMetadata {
         if (acknowledgement.isNotEmpty) 'acknowledgement': acknowledgement,
         if (refusal != null) 'refusal': refusal!.toJson(),
         if (overflow != null) 'overflow': overflow!.toJson(),
+        if (executionRoute != null) 'execution_route': executionRoute!.toJson(),
         if (agentLane != null) 'agent_lane': agentLane!.toJson(),
         if (orchestration != null) 'orchestration': orchestration!.toJson(),
         if (clientToolHandoffs.isNotEmpty)
@@ -237,6 +246,7 @@ class ChatResponseMetadata {
       lines.add('refused call: ${refusal!.callId}');
     }
     if (overflow != null) lines.add(overflow!.notice);
+    if (executionRoute != null) lines.add(executionRoute!.diagnosticLine);
     return lines.join('\n');
   }
 }
@@ -338,6 +348,184 @@ class RouteOverflow {
   }
 
   Map<String, Object> toJson() => {'status': status, 'notice': notice};
+}
+
+/// The difficulty-to-execution-mode routing decision for one assistant turn.
+///
+/// Read from `sonder_receipt.execution_route` (PR #881): names the chosen
+/// execution [mode] (`single`, `ensemble`, `fanout`, `agent`), prompt
+/// difficulty [band] (`quick`, `standard`, `hard`, `multi_scope`), normalized
+/// [difficultyScore] (`0.0..1.0`), [recommendedTiers], whether it was
+/// [autoSelected], and the deterministic [reason].
+class ExecutionRoute {
+  final String mode;
+  final String band;
+  final double? difficultyScore;
+  final List<String> recommendedTiers;
+  final String ensembleMode;
+  final String fanoutScope;
+  final bool autoSelected;
+  final String reason;
+  final List<String> signals;
+
+  const ExecutionRoute({
+    required this.mode,
+    this.band = '',
+    this.difficultyScore,
+    this.recommendedTiers = const [],
+    this.ensembleMode = '',
+    this.fanoutScope = '',
+    this.autoSelected = false,
+    this.reason = '',
+    this.signals = const [],
+  });
+
+  static double? _parseScore(Object? value) {
+    final double? parsed;
+    if (value is num) {
+      parsed = value.toDouble();
+    } else if (value is String) {
+      parsed = double.tryParse(value.trim());
+    } else {
+      parsed = null;
+    }
+    if (parsed == null || !parsed.isFinite) return null;
+    if (parsed < 0.0) return 0.0;
+    if (parsed > 1.0) return 1.0;
+    return parsed;
+  }
+
+  static List<String> _stringList(Object? value, int maxItems, int maxChars) {
+    if (value is! List) return const [];
+    return List.unmodifiable(
+      value
+          .map((e) => _boundedMetadataText(e, maxChars))
+          .where((e) => e.isNotEmpty)
+          .take(maxItems),
+    );
+  }
+
+  /// Null unless [value] is a map containing at least a mode or band.
+  static ExecutionRoute? fromJson(Object? value) {
+    if (value is! Map) return null;
+    final mode = _boundedMetadataText(value['mode'], 32).toLowerCase();
+    final band = _boundedMetadataText(value['band'], 32).toLowerCase();
+    if (mode.isEmpty && band.isEmpty) return null;
+    return ExecutionRoute(
+      mode: mode,
+      band: band,
+      difficultyScore: _parseScore(value['difficulty_score']),
+      recommendedTiers: _stringList(value['recommended_tiers'], 8, 32)
+          .map((t) => t.toLowerCase())
+          .toList(growable: false),
+      ensembleMode:
+          _boundedMetadataText(value['ensemble_mode'], 32).toLowerCase(),
+      fanoutScope:
+          _boundedMetadataText(value['fanout_scope'], 32).toLowerCase(),
+      autoSelected: value['auto_selected'] == true,
+      reason: _boundedMetadataText(value['reason'], 512),
+      signals: _stringList(value['signals'], 16, 64),
+    );
+  }
+
+  Map<String, Object> toJson() => {
+        'mode': mode,
+        if (band.isNotEmpty) 'band': band,
+        if (difficultyScore != null) 'difficulty_score': difficultyScore!,
+        if (recommendedTiers.isNotEmpty) 'recommended_tiers': recommendedTiers,
+        if (ensembleMode.isNotEmpty) 'ensemble_mode': ensembleMode,
+        if (fanoutScope.isNotEmpty) 'fanout_scope': fanoutScope,
+        'auto_selected': autoSelected,
+        if (reason.isNotEmpty) 'reason': reason,
+        if (signals.isNotEmpty) 'signals': signals,
+      };
+
+  static String _titleCase(String raw) {
+    if (raw.isEmpty) return '';
+    return raw
+        .split(RegExp(r'[_-]+'))
+        .where((part) => part.isNotEmpty)
+        .map((part) => '${part[0].toUpperCase()}${part.substring(1)}')
+        .join(' ');
+  }
+
+  String get sourceLabel => autoSelected ? 'Auto' : 'Manual';
+
+  String get bandLabel => switch (band) {
+        'quick' => 'Quick',
+        'standard' => 'Standard',
+        'hard' => 'Hard',
+        'multi_scope' => 'Multi-scope',
+        _ => _titleCase(band),
+      };
+
+  String get modeLabel => switch (mode) {
+        'single' => 'Single',
+        'ensemble' => 'Ensemble',
+        'fanout' => 'Fanout',
+        'agent' => 'Agent',
+        _ => _titleCase(mode),
+      };
+
+  /// Formatted difficulty score (`0.72` or `0.725`), or empty when absent.
+  String get scoreText {
+    final score = difficultyScore;
+    if (score == null) return '';
+    final fixed = score.toStringAsFixed(3);
+    return fixed.endsWith('0') ? fixed.substring(0, fixed.length - 1) : fixed;
+  }
+
+  /// Compact pill text:
+  /// - `Auto · Hard · Ensemble (code+reasoning)`
+  /// - `Auto · Quick · fast`
+  /// - `Manual · Standard · Single (code)`
+  String get compactLabel {
+    final tiers = recommendedTiers.join('+');
+    final String routeSegment;
+    if (mode == 'single') {
+      if (tiers.isNotEmpty) {
+        routeSegment = autoSelected ? tiers : 'Single ($tiers)';
+      } else {
+        routeSegment = modeLabel;
+      }
+    } else if (modeLabel.isNotEmpty) {
+      routeSegment = tiers.isNotEmpty ? '$modeLabel ($tiers)' : modeLabel;
+    } else {
+      routeSegment = tiers;
+    }
+    final parts = <String>[
+      sourceLabel,
+      if (bandLabel.isNotEmpty) bandLabel,
+      if (routeSegment.isNotEmpty) routeSegment,
+    ];
+    return parts.join(' · ');
+  }
+
+  /// Multi-line tooltip content showing difficulty score, reason, and signals.
+  String get tooltipText {
+    final lines = <String>[
+      if (compactLabel.isNotEmpty) compactLabel,
+      if (scoreText.isNotEmpty) 'Difficulty score: $scoreText',
+      if (reason.isNotEmpty) 'Reason: $reason',
+      if (signals.isNotEmpty) 'Signals: ${signals.join(', ')}',
+    ];
+    return lines.join('\n');
+  }
+
+  String get semanticLabel {
+    final parts = <String>[
+      'Execution route: $compactLabel',
+      if (scoreText.isNotEmpty) 'difficulty $scoreText',
+      if (reason.isNotEmpty) reason,
+    ];
+    return parts.join(', ');
+  }
+
+  String get diagnosticLine {
+    final scorePart = scoreText.isEmpty ? '' : ' (score $scoreText)';
+    final reasonPart = reason.isEmpty ? '' : ' — $reason';
+    return 'execution route: $compactLabel$scorePart$reasonPart';
+  }
 }
 
 String _workRunIdOrEmpty(Object? value) {

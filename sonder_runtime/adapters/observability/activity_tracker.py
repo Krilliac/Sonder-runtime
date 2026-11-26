@@ -65,6 +65,8 @@ if "_EVENT_RING" not in globals():
     _EVENT_RING = []
 if "_DROPPED_EVENTS" not in globals():
     _DROPPED_EVENTS = 0
+if "_MODEL_METRICS" not in globals():
+    _MODEL_METRICS = {}
 # Model reasoning is kept OUT of the response span on purpose. Spans flow into
 # snapshot() and from there into the sonder_activity field every client
 # receives; reasoning is gated separately and must not ride along.
@@ -882,6 +884,38 @@ def record_model_call(
     tokens_in=0, tokens_out=0, token_source="", request_preview=None,
     response_preview=None,
 ):
+    model_name = _short(model, 120)
+    elapsed_val = max(0, int(elapsed_ms or 0))
+    if model_name:
+        with _LOCK:
+            entry = _MODEL_METRICS.get(model_name)
+            if entry is None:
+                if len(_MODEL_METRICS) >= 128:
+                    oldest = min(
+                        _MODEL_METRICS.items(),
+                        key=lambda item: float(item[1].get("updated_at", 0.0)),
+                    )[0]
+                    _MODEL_METRICS.pop(oldest, None)
+                entry = {
+                    "calls": 0,
+                    "failures": 0,
+                    "latency_ms": None,
+                    "last_ok": bool(ok),
+                    "updated_at": time.time(),
+                }
+                _MODEL_METRICS[model_name] = entry
+            entry["calls"] = int(entry["calls"]) + 1
+            if not ok:
+                entry["failures"] = int(entry["failures"]) + 1
+            if elapsed_val > 0:
+                prev_latency = entry.get("latency_ms")
+                entry["latency_ms"] = (
+                    float(elapsed_val)
+                    if prev_latency is None
+                    else (0.7 * float(prev_latency) + 0.3 * float(elapsed_val))
+                )
+            entry["last_ok"] = bool(ok)
+            entry["updated_at"] = time.time()
     response = _current()
     if response is None:
         return
@@ -1909,6 +1943,24 @@ def format_response(response=None):
     return "\n".join(lines)
 
 
+def recent_model_metrics():
+    """Return bounded in-process per-model latency and failure-rate metrics."""
+    with _LOCK:
+        result = {}
+        for name, entry in _MODEL_METRICS.items():
+            calls = max(0, int(entry.get("calls") or 0))
+            failures = max(0, int(entry.get("failures") or 0))
+            result[name] = {
+                "calls": calls,
+                "failures": failures,
+                "error_rate": (failures / calls) if calls else 0.0,
+                "latency_ms": entry.get("latency_ms"),
+                "last_ok": bool(entry.get("last_ok", True)),
+                "updated_at": float(entry.get("updated_at") or 0.0),
+            }
+        return result
+
+
 def reset_for_tests():
     with _LOCK:
         global _LATEST, _TOTAL_TOOL_CALLS, _LATEST_REASONING, _LATEST_REASONING_OWNER
@@ -1919,6 +1971,7 @@ def reset_for_tests():
         _EVENT_RING.clear()
         _NEXT_EVENT_SEQUENCE = 1
         _DROPPED_EVENTS = 0
+        _MODEL_METRICS.clear()
         _REASONING.clear()
         _REASONING_OWNERS.clear()
         _FEED_OWNERS.clear()

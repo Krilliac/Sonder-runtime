@@ -215,3 +215,19 @@ def test_control_command_parsing_and_permission_boundaries():
     assert "scratchpad_read" in agent_prompts.REPOSITORY_READ_ONLY_TOOLS
     assert "scratchpad_write" not in agent_prompts.REPOSITORY_READ_ONLY_TOOLS
     assert "scratchpad_delete" not in agent_prompts.REPOSITORY_READ_ONLY_TOOLS
+
+
+def test_same_length_human_edit_refreshes_preview_and_sha(tmp_path):
+    store = ScratchpadStore(tmp_path)
+    store.write("owner", "plan", "alpha one")
+    before = store.list_notes("owner")["notes"][0]
+    note_path = next(p for p in tmp_path.rglob("plan.md"))
+    st = note_path.stat()
+    note_path.write_text("omega two", encoding="utf-8")
+    assert len("omega two") == len("alpha one")
+    os.utime(note_path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    after = store.list_notes("owner")["notes"][0]
+    assert after["size_bytes"] == before["size_bytes"]
+    assert after["preview"] == "omega two"
+    assert after["sha256"] != before["sha256"]
+    assert after["mtime_ns"] != before["mtime_ns"]

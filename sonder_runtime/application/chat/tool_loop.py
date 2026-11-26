@@ -241,6 +241,9 @@ class ChatToolTurn:
                         if str(((item.get("function") or {}) if isinstance(item, Mapping) else {}).get("name") or "") != evicted
                     ]
                     existing_payload_names.discard(evicted)
+                    # Drop from the admitted set too so a later call to the evicted tool
+                    # re-resolves its schema and is re-admitted instead of being refused.
+                    self._dynamic_admitted.discard(evicted)
                     self._dynamic_order = [n for n in self._dynamic_order if n != evicted]
                 if len(self._active_tools_payload) < 64:
                     self._active_tools_payload.append(dict(entry))

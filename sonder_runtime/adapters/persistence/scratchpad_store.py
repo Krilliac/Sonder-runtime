@@ -178,7 +178,13 @@ class ScratchpadStore:
             meta = dict(indexed.get(name, {}))
             size_bytes = int(st.st_size)
             mtime_iso = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            if meta.get("size_bytes") != size_bytes or not meta.get("preview"):
+            mtime_ns = int(st.st_mtime_ns)
+            if (
+                meta.get("size_bytes") != size_bytes
+                or meta.get("mtime_ns") != mtime_ns
+                or not meta.get("preview")
+                or not meta.get("sha256")
+            ):
                 try:
                     text = _read_bounded_text(entry, root=self.root, limit=self.policy.max_note_bytes)
                     meta["preview"] = preview_line(text, self.policy.preview_chars)
@@ -189,6 +195,7 @@ class ScratchpadStore:
                     meta["lines"] = 0
             meta["name"] = name
             meta["size_bytes"] = size_bytes
+            meta["mtime_ns"] = mtime_ns
             meta["tags"] = list(meta.get("tags") or [])
             meta["created_at"] = str(meta.get("created_at") or mtime_iso)
             meta["updated_at"] = str(meta.get("updated_at") or mtime_iso)
@@ -249,11 +256,13 @@ class ScratchpadStore:
 
             _write_atomic(note_path, final_bytes, root=self.root, limit=self.policy.max_note_bytes)
             now = _utc_now()
+            written_mtime_ns = int(note_path.lstat().st_mtime_ns)
             prev = entries.get(validated_name, {})
             merged_tags = list(clean_tags) if clean_tags is not None else list(prev.get("tags") or [])
             meta = {
                 "name": validated_name,
                 "size_bytes": len(final_bytes),
+                "mtime_ns": written_mtime_ns,
                 "lines": len(final_text.splitlines()),
                 "tags": merged_tags,
                 "created_at": str(prev.get("created_at") or now),

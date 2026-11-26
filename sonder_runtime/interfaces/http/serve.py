@@ -3505,6 +3505,7 @@ class Handler(BaseHTTPRequestHandler):
                     project=storage_project,
                     require_all_tiers=bool(natural_model.get("require_all_tiers", True)),
                 ),
+                resolve_tier_health=lambda tier_models: server._legacy_chat_bridge.resolve_local_tier_health(tier_models, graph=server._APP_GRAPH, pool=server.OLLAMA_POOL),
             ),
         )
 

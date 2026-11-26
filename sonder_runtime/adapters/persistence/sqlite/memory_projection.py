@@ -173,7 +173,7 @@ class SQLiteMemoryReplicationProjection:
             self._conn.execute("BEGIN IMMEDIATE")
         try:
             yield
-        except Exception:
+        except BaseException:
             if nested:
                 self._conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
                 self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
@@ -488,9 +488,15 @@ class SQLiteMemoryReplicationProjection:
         rebuilt = 0
         with self._transaction():
             for row in rows:
+                try:
+                    decoded_payload = json.loads(row[8])
+                except (TypeError, ValueError) as exc:
+                    raise MemoryProjectionError("stored projection payload is malformed JSON") from exc
+                if not isinstance(decoded_payload, dict):
+                    raise MemoryProjectionError("stored projection payload must be a JSON object")
                 record = MemoryMutation(
                     source_id=row[0], source_epoch=row[1], sequence=row[2], entity_kind=row[3], entity_id=row[4],
-                    version=row[5], operation=row[6], project=row[7], payload=json.loads(row[8]), recorded_at=row[9],
+                    version=row[5], operation=row[6], project=row[7], payload=decoded_payload, recorded_at=row[9],
                 )
                 self._validate_record(record, dict(record.payload))
                 self._materialize(record, dict(record.payload))
@@ -515,13 +521,21 @@ class SQLiteMemoryReplicationProjection:
             "FROM memory_projection_state WHERE " + " AND ".join(clauses) + " ORDER BY sequence LIMIT ?",
             (*params, limit),
         ).fetchall()
-        return tuple(
-            MemoryMutation(
-                source_id=row[0], source_epoch=row[1], sequence=row[2], entity_kind=row[3], entity_id=row[4],
-                version=row[5], operation=row[6], project=row[7], payload=json.loads(row[8]), recorded_at=row[9],
+        mutations = []
+        for row in rows:
+            try:
+                decoded_payload = json.loads(row[8])
+            except (TypeError, ValueError) as exc:
+                raise MemoryProjectionError("stored projection payload is malformed JSON") from exc
+            if not isinstance(decoded_payload, dict):
+                raise MemoryProjectionError("stored projection payload must be a JSON object")
+            mutations.append(
+                MemoryMutation(
+                    source_id=row[0], source_epoch=row[1], sequence=row[2], entity_kind=row[3], entity_id=row[4],
+                    version=row[5], operation=row[6], project=row[7], payload=decoded_payload, recorded_at=row[9],
+                )
             )
-            for row in rows
-        )
+        return tuple(mutations)
 
     def current_records(self, *, source_id: str, project: str | None = None, limit: int = _MAX_ROWS) -> tuple[MemoryMutation, ...]:
         return self._records(source_id=source_id, project=project, operation="upsert", limit=limit)

@@ -343,3 +343,58 @@ def test_scratchpad_index_context_injection_and_cloud_privacy_boundary(tmp_path,
 
     composed = chat_tool_manifest.chat_system(local_sys, "hi", file_guidance=False)
     assert composed.index("OWNER SCRATCHPAD INDEX") < composed.index(tm.HEADER)
+
+
+def test_evicted_dynamic_tool_is_readmitted_on_later_call(monkeypatch):
+    monkeypatch.setattr(pm, "_rule_lookup", lambda _n: None)
+    pm.set_mode(pm.MANUAL)
+    executed: list[str] = []
+    catalog = {"repo_status": _sample_catalog()["repo_status"]}
+    catalog |= {
+        f"dyn_tool_{i}": {
+            "description": f"Dynamic tool {i}.",
+            "input_schema": {"type": "object", "properties": {}},
+        }
+        for i in range(70)
+    }
+    manifest = build_tool_turn_manifest(
+        admitted_tools=["tool_search", "file_read"],
+        user_run_command=True,
+        mode="manual",
+        dynamic_discovery=True,
+    )
+    backend = ChatRunBackend(
+        dispatch_agent_tool=lambda name, args, **_kw: executed.append(name) or f"ran:{name}",
+        catalog_provider=lambda: catalog,
+        permission_policy=pm,
+        blocked_tools=frozenset(),
+    )
+    turn = ChatToolTurn(
+        manifest=manifest,
+        tools_payload=chat_tools_payload(allowed_names=["tool_search", "file_read"]),
+        backend=backend,
+        permission_policy=pm,
+        blocked_tools=frozenset(),
+        allow_dynamic_catalog=True,
+        budget=ChatToolBudget(max_model_calls=5, max_tool_calls=10),
+    )
+    turn._active_tools_payload = list(turn.tools_payload)
+    schemas = [
+        {"type": "function", "function": {"name": n, "description": "d", "parameters": {"type": "object"}}}
+        for n in catalog
+    ]
+    turn._admit_dynamic_schemas(schemas)
+
+    payload_names = {t["function"]["name"] for t in turn._active_tools_payload}
+    assert len(turn._active_tools_payload) == 64
+    evicted = "repo_status"
+    assert evicted not in payload_names
+    assert evicted not in turn._admitted_tool_names()
+
+    result, _ = turn._run_tool_call(
+        {"id": "c1", "function": {"name": evicted, "arguments": {}}}, run_count=0
+    )
+    assert executed == [evicted], result
+    assert evicted in turn._admitted_tool_names()
+    assert len(turn._active_tools_payload) <= 64
+    assert evicted in {t["function"]["name"] for t in turn._active_tools_payload}
