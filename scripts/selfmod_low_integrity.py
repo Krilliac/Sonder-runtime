@@ -263,8 +263,50 @@ def _low_environment(work: Path, low_home: Path) -> dict[str, str]:
         "LOCALAPPDATA": str(low_home / "AppData" / "Local"),
         "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONPYCACHEPREFIX": str(work / "pycache"),
+        "RUFF_CACHE_DIR": str(work / "ruff-cache"),
     })
     return env
+
+
+def _create_isolated_desktop(low_sid):
+    """Create a hidden, low-labeled disposable desktop in the current window station.
+
+    Inheriting a restricted or headless parent desktop causes ``user32.dll`` /
+    ``shell32.dll`` initialization to fail with ``STATUS_DLL_INIT_FAILED``
+    (``0xC0000142``) for low-integrity binaries such as Ruff or Python's
+    ``_ssl`` extension.  A disposable private desktop labeled for low integrity
+    keeps candidate processes off the interactive desktop while allowing
+    ordinary Windows DLL initialization.
+    """
+    import win32con
+    import win32process
+    import win32security
+    import win32service
+
+    desk_name = "SonderSelfmod-" + uuid.uuid4().hex[:16]
+    desktop = win32service.CreateDesktop(
+        desk_name, 0, win32con.MAXIMUM_ALLOWED, None
+    )
+    try:
+        sacl = win32security.ACL()
+        sacl.AddMandatoryAce(win32security.ACL_REVISION, 0, 0, low_sid)
+        win32security.SetSecurityInfo(
+            desktop,
+            win32security.SE_WINDOW_OBJECT,
+            win32security.LABEL_SECURITY_INFORMATION,
+            None, None, None, sacl,
+        )
+        winsta = win32service.GetUserObjectInformation(
+            win32process.GetProcessWindowStation(),
+            win32service.UOI_NAME,
+        )
+    except Exception:
+        try:
+            desktop.CloseDesktop()
+        except Exception:
+            pass
+        raise
+    return desktop, f"{winsta}\\{desk_name}"
 
 
 _MIB = 1024 ** 2
@@ -416,6 +458,14 @@ def _run_low_integrity(
         manifest.write_text(json.dumps(before, sort_keys=True), encoding="utf-8")
         _label(manifest, "WinMediumLabelSid", win32security.SYSTEM_MANDATORY_LABEL_NO_READ_UP | win32security.SYSTEM_MANDATORY_LABEL_NO_WRITE_UP)
         token = _low_token()
+        low_sid = win32security.CreateWellKnownSid(
+            win32security.WinLowLabelSid, None
+        )
+        desktop = lp_desktop = None
+        try:
+            desktop, lp_desktop = _create_isolated_desktop(low_sid)
+        except Exception:
+            desktop = lp_desktop = None
         job = process_handle = thread_handle = None
         try:
             # pywin32 requires a name; a fresh unshared random name prevents
@@ -438,7 +488,24 @@ def _run_low_integrity(
             limits["ProcessMemoryLimit"] = process_memory_mb * _MIB
             limits["JobMemoryLimit"] = job_memory_mb * _MIB
             win32job.SetInformationJobObject(job, win32job.JobObjectExtendedLimitInformation, limits)
+            ui_limits = (
+                win32job.JOB_OBJECT_UILIMIT_DESKTOP
+                | win32job.JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
+                | win32job.JOB_OBJECT_UILIMIT_EXITWINDOWS
+                | win32job.JOB_OBJECT_UILIMIT_GLOBALATOMS
+                | win32job.JOB_OBJECT_UILIMIT_HANDLES
+                | win32job.JOB_OBJECT_UILIMIT_READCLIPBOARD
+                | win32job.JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS
+                | win32job.JOB_OBJECT_UILIMIT_WRITECLIPBOARD
+            )
+            win32job.SetInformationJobObject(
+                job,
+                win32job.JobObjectBasicUIRestrictions,
+                {"UIRestrictionsClass": ui_limits},
+            )
             startup = win32process.STARTUPINFO()
+            if lp_desktop:
+                startup.lpDesktop = lp_desktop
             flags = win32con.CREATE_NO_WINDOW | win32con.CREATE_UNICODE_ENVIRONMENT | win32con.CREATE_SUSPENDED
             # The candidate checkout is the current directory.  Execute this
             # trusted file by absolute path with isolated Python startup so a
@@ -475,6 +542,11 @@ def _run_low_integrity(
             for handle in (thread_handle, process_handle, job, token):
                 if handle is not None:
                     win32api.CloseHandle(handle)
+            if desktop is not None:
+                try:
+                    desktop.CloseDesktop()
+                except Exception:
+                    pass
         # The low child controls these files.  Its result JSON is diagnostic
         # only; the trusted process handle supplies the exit status.  Read a
         # bounded tail without following a candidate-created reparse point or

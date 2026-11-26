@@ -194,12 +194,12 @@ def _hybrid_order(task, scored, *, project, include_all_projects, limit,
             continue
         if not isinstance(task_text, str) or not task_text:
             continue
-        created = _parse_timestamp(row.get("ts"))
-        if created is None:
-            # A malformed stored timestamp must not gain a fabricated
-            # recency advantage over well-formed recall candidates. Preserve
-            # legacy ordering-key rows as recallable evidence.
-            created = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        parsed_ts = _parse_timestamp(row.get("ts"))
+        created = (
+            parsed_ts
+            if parsed_ts is not None
+            else datetime(1970, 1, 1, tzinfo=timezone.utc)
+        )
         outcome = row.get("outcome_signal")
         source = row.get("outcome_source")
         provenance = tuple(
@@ -224,9 +224,9 @@ def _hybrid_order(task, scored, *, project, include_all_projects, limit,
             provenance=provenance,
             failure_tags=("failed",) if outcome == "failed" else (),
             temporal=(
-                TemporalTruth(valid_from=created, confidence=1.0,
-                              last_revalidated_at=created)
-                if _parse_timestamp(row.get("ts")) is not None else None
+                TemporalTruth(valid_from=parsed_ts, confidence=1.0,
+                              last_revalidated_at=parsed_ts)
+                if parsed_ts is not None else None
             ),
         ))
         rows_by_id[interaction_id] = (similarity, rank, row)

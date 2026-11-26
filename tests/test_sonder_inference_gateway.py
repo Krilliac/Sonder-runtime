@@ -218,7 +218,10 @@ def test_model_selection_prefers_option_then_tier_map_then_default():
 
 @pytest.mark.parametrize("options", [
     {"format": "json"}, {"tools": [{"type": "function"}]},
-    {"response_format": {"type": "json_object"}}, {"temperature": "hot"},
+    {"response_format": "json_object"}, {"response_format": {"type": "xml"}},
+    {"response_format": {"type": "json_schema"}},
+    {"logprobs": "yes"}, {"top_logprobs": 1}, {"logprobs": True, "top_logprobs": 21},
+    {"temperature": "hot"},
     {"stop": ["a", "b", "c", "d", "e"]}, {"num_predict": 1.5}, {"top_k": True},
 ])
 def test_unsupported_or_invalid_options_are_refused_before_any_send(options):
@@ -2194,3 +2197,140 @@ def test_overloaded_is_capacity_and_never_unreachable():
         gw.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
     assert isinstance(caught.value, CapacityExceeded)
     assert not isinstance(caught.value, SonderInferenceUnreachable)
+
+
+def test_response_format_capability_gating_and_forwarding():
+    from sonder_runtime.application.chat import provider_bridge as bridge
+
+    # Unadvertised -> refused before any POST
+    plain_fake = FakeInference(health=_health())
+    with pytest.raises(bridge.UnsupportedProviderFeature, match="structured_output"):
+        _gateway(plain_fake).generate(
+            ModelRequest(
+                prompt="emit json",
+                tier="fast",
+                options={"response_format": {"type": "json_object"}},
+            ),
+            _ctx(),
+        )
+    assert plain_fake.posts == []
+
+    # Advertised -> normalized & forwarded to /v1/chat/completions
+    health = _health()
+    health["backends"] = [{
+        "name": "mock",
+        "available": True,
+        "capabilities": ["chat", "structured_output"],
+    }]
+    capable_fake = FakeInference(health=health)
+    schema_fmt = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "summary",
+            "strict": True,
+            "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+        },
+    }
+    resp = _gateway(capable_fake).generate(
+        ModelRequest(prompt="emit json", tier="fast", options={"response_format": schema_fmt}),
+        _ctx(),
+    )
+    assert resp.text == "hello"
+    assert capable_fake.posts[0][1]["response_format"] == schema_fmt
+
+
+def test_logprobs_capability_gating_forwarding_and_validation():
+    from sonder_runtime.application.chat import provider_bridge as bridge
+
+    plain_fake = FakeInference(health=_health())
+    with pytest.raises(bridge.UnsupportedProviderFeature, match="logprobs"):
+        _gateway(plain_fake).generate(
+            ModelRequest(prompt="hi", tier="fast", options={"logprobs": True, "top_logprobs": 2}),
+            _ctx(),
+        )
+    assert plain_fake.posts == []
+
+    health = _health()
+    health["sonder"] = {"api_version": 1, "features": ["logprobs"]}
+    expected_lp = {
+        "content": [
+            {
+                "token": "hello",
+                "logprob": -0.05,
+                "bytes": [104, 101, 108, 108, 111],
+                "top_logprobs": [{"token": "hello", "logprob": -0.05}],
+            }
+        ]
+    }
+
+    def chat_with_lp(url, payload, headers):
+        doc = _chat("hello")
+        doc["choices"][0]["logprobs"] = expected_lp
+        return doc
+
+    gw = _gateway(FakeInference(health=health, chat=chat_with_lp))
+    resp = gw.generate(
+        ModelRequest(prompt="hi", tier="fast", options={"logprobs": True, "top_logprobs": 2}),
+        _ctx(),
+    )
+    assert resp.logprobs == expected_lp
+    assert gw.last_response_meta["logprobs_tokens"] == 1
+    assert "hello" not in json.dumps(gw.last_response_meta)
+
+    def chat_bad_lp(url, payload, headers):
+        doc = _chat("hello")
+        doc["choices"][0]["logprobs"] = {"content": [{"token": 123, "logprob": "bad"}]}
+        return doc
+
+    with pytest.raises(DependencyUnavailable, match="logprobs"):
+        _gateway(FakeInference(health=health, chat=chat_bad_lp)).generate(
+            ModelRequest(prompt="hi", tier="fast", options={"logprobs": True}),
+            _ctx(),
+        )
+
+
+def test_embeddings_capability_gated_post_and_index_alignment():
+    # Pre-I/O input validation
+    empty_fake = FakeInference()
+    for bad_inputs in ([], [123], ["x"] * 257):
+        with pytest.raises(InvalidInput):
+            _gateway(empty_fake).embed(bad_inputs, _ctx())
+    assert empty_fake.gets == [] and empty_fake.posts == []
+
+    # Health does not advertise embeddings -> refused with fallback hint, 0 POSTs
+    plain = FakeInference(health=_health())
+    with pytest.raises(DependencyUnavailable, match="SONDER_EMBEDDING_PROVIDER=ollama"):
+        _gateway(plain).embed(["alpha"], _ctx())
+    assert plain.posts == []
+
+    # Health advertises embeddings -> /v1/embeddings POST & index ordering
+    health = _health(models=("bge-small",))
+    health["backends"] = [{
+        "name": "mock",
+        "available": True,
+        "capabilities": ["chat", "embeddings"],
+    }]
+
+    def embed_handler(url, payload, headers):
+        assert url.endswith("/v1/embeddings")
+        assert payload == {"model": "mock", "input": ["alpha", "beta"]}
+        return {
+            "object": "list",
+            "model": "bge-small",
+            "data": [
+                {"object": "embedding", "index": 1, "embedding": [0.3, 0.4]},
+                {"object": "embedding", "index": 0, "embedding": [0.1, 0.2]},
+            ],
+            "usage": {"prompt_tokens": 2, "total_tokens": 2},
+            "sonder": {"api_version": 1, "request_id": "emb-1"},
+        }
+
+    gw = _gateway(FakeInference(health=health, chat=embed_handler), model="mock")
+    assert gw.capabilities == frozenset({"chat", "fixed-endpoint"})
+    vectors = gw.embed(["alpha", "beta"], _ctx())
+    assert [(item.vector, item.model) for item in vectors] == [
+        ((0.1, 0.2), "bge-small"),
+        ((0.3, 0.4), "bge-small"),
+    ]
+    assert "embeddings" in gw.capabilities
+    assert "embeddings" in gw.provider_status()["sonder_inference"]["capabilities"]

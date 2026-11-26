@@ -13,7 +13,7 @@ import json
 import os
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -23,10 +23,17 @@ from sonder_runtime.application.routing.execution_mode_service import (
     VALID_EXECUTION_MODES,
     check_execution_mode,
     plan_chat_execution_mode,
+    route_summary_line,
 )
 from sonder_runtime.application.routing.long_context_overflow import (
     notice_scope as overflow_notice_scope,
     receipt_entry as overflow_receipt_entry,
+)
+from sonder_runtime.application.session.provider_attempts import (
+    report_ensemble_event,
+    report_execution_route,
+    report_fanout_event,
+    telemetry_error_code,
 )
 from ..chat_tool_stream import (
     request_mode_scope as chat_request_mode_scope,
@@ -44,6 +51,7 @@ from ..sse import KEEPALIVE_FRAME, SSEKeepAlive
 from ...orchestration_commands import reply_receipt_fields
 from .approvals import turn_refusal_receipt
 from .config_wiring import HTTPRequestError, LiveSessionCaptureFailure
+from .observatory_routes import is_legacy_error_reply
 from .saas_auth import rate_limit_and_meter
 
 
@@ -66,6 +74,120 @@ class ChatTurnDeps:
     run_natural_fanout: Callable[[dict[str, Any]], Any]
     run_natural_ensemble: Callable[[dict[str, Any], str], Any]
     resolve_local_tier_models: Callable[[], dict[str, str]] | None = None
+    resolve_tier_health: Callable[[Mapping[str, str]], Any] | None = None
+
+
+def _sanitize_header_value(value: object) -> str:
+    """Collapse control characters and newlines before placing a value in HTTP headers."""
+    cleaned = "".join(" " if ord(ch) < 32 or ord(ch) == 127 else ch for ch in str(value or ""))
+    return " ".join(cleaned.split())
+
+
+def _split_tier_labels(raw: object) -> list[str]:
+    if isinstance(raw, str):
+        return [part.strip() for part in raw.split(",") if part.strip()]
+    if isinstance(raw, (list, tuple)):
+        return [str(part).strip() for part in raw if str(part).strip()]
+    return []
+
+
+def _run_observed_ensemble(
+    run_fn: Callable[[dict[str, Any], str], Any],
+    request_payload: dict[str, Any],
+    storage_project: str,
+    *,
+    auto_selected: bool,
+) -> Any:
+    tiers = _split_tier_labels(request_payload.get("tiers"))
+    base_fields: dict[str, object] = {
+        "mode": request_payload.get("mode"),
+        "tiers": tiers,
+        "participant_count": len(tiers) if tiers else None,
+        "auto_selected": auto_selected,
+        "require_all_tiers": bool(request_payload.get("require_all_tiers", False)),
+    }
+    report_ensemble_event("started", {**base_fields, "status": "running"})
+    started = time.monotonic()
+    try:
+        result = run_fn(request_payload, storage_project)
+    except BaseException as exc:
+        elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+        report_ensemble_event(
+            "failed",
+            {
+                **base_fields,
+                "elapsed_ms": elapsed_ms,
+                "status": "error",
+                "error_code": telemetry_error_code(exc),
+            },
+        )
+        raise
+    elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+    if is_legacy_error_reply(result):
+        report_ensemble_event(
+            "failed",
+            {
+                **base_fields,
+                "elapsed_ms": elapsed_ms,
+                "status": "error",
+                "error_code": "ERROR_REPLY",
+            },
+        )
+    else:
+        report_ensemble_event(
+            "completed",
+            {**base_fields, "elapsed_ms": elapsed_ms, "status": "ok"},
+        )
+    return result
+
+
+def _run_observed_fanout(
+    run_fn: Callable[[dict[str, Any]], Any],
+    request_payload: dict[str, Any],
+    *,
+    tiers: list[str] | None = None,
+    auto_selected: bool = False,
+) -> Any:
+    tier_list = list(tiers) if tiers else _split_tier_labels(request_payload.get("tiers"))
+    base_fields: dict[str, object] = {
+        "scope": request_payload.get("scope"),
+        "tiers": tier_list,
+        "participant_count": len(tier_list) if tier_list else None,
+        "auto_selected": auto_selected,
+    }
+    report_fanout_event("started", {**base_fields, "status": "running"})
+    started = time.monotonic()
+    try:
+        result = run_fn(request_payload)
+    except BaseException as exc:
+        elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+        report_fanout_event(
+            "failed",
+            {
+                **base_fields,
+                "elapsed_ms": elapsed_ms,
+                "status": "error",
+                "error_code": telemetry_error_code(exc),
+            },
+        )
+        raise
+    elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+    if is_legacy_error_reply(result):
+        report_fanout_event(
+            "failed",
+            {
+                **base_fields,
+                "elapsed_ms": elapsed_ms,
+                "status": "error",
+                "error_code": "ERROR_REPLY",
+            },
+        )
+    else:
+        report_fanout_event(
+            "completed",
+            {**base_fields, "elapsed_ms": elapsed_ms, "status": "ok"},
+        )
+    return result
 
 
 def handle_chat_completions(
@@ -507,6 +629,7 @@ def handle_chat_completions(
     content: Any = ""
     web_routed = False
     execution_routed = False
+    handler._execution_route_headers = None
     turn: Any = None
     response_iid: str | None = None
     response_reasoning = ""
@@ -762,20 +885,51 @@ def handle_chat_completions(
                                 )[0]
                                 if target_model:
                                     resolved_tier_models[str(tier_name)] = str(target_model)
+                    resolved_tier_health: Any = None
+                    if deps.resolve_tier_health is not None:
+                        try:
+                            resolved_tier_health = deps.resolve_tier_health(dict(resolved_tier_models))
+                        except Exception:
+                            logger.debug("resolve_tier_health failed; routing without health hints", exc_info=True)
+                            resolved_tier_health = None
+                    else:
+                        health_resolver = getattr(runtime, "_resolve_local_tier_health", None)
+                        if callable(health_resolver):
+                            try:
+                                resolved_tier_health = health_resolver(dict(resolved_tier_models))
+                            except Exception:
+                                logger.debug("_resolve_local_tier_health failed; routing without health hints", exc_info=True)
+                                resolved_tier_health = None
+                        else:
+                            legacy_bridge = getattr(runtime, "_legacy_chat_bridge", None)
+                            bridge_health_fn = getattr(legacy_bridge, "resolve_local_tier_health", None)
+                            if callable(bridge_health_fn):
+                                try:
+                                    resolved_tier_health = bridge_health_fn(
+                                        dict(resolved_tier_models),
+                                        graph=getattr(runtime, "_APP_GRAPH", None),
+                                        pool=getattr(runtime, "OLLAMA_POOL", None),
+                                    )
+                                except Exception:
+                                    logger.debug("legacy_chat_bridge.resolve_local_tier_health failed; routing without health hints", exc_info=True)
+                                    resolved_tier_health = None
                     candidate_decision = plan_chat_execution_mode(
                         prompt,
                         tier_models=resolved_tier_models,
                         developer_authorized=bool(serve_mod._developer_authorized(context)),
                         has_image=has_request_image,
                         structured_output=False,
+                        tier_health=resolved_tier_health,
                         explicit_model_pin=not allow_control_routes,
                         requested_mode=request_execution_mode,
                         env=os.environ,
                     )
                     if candidate_decision.auto_selected or bool(request_execution_mode):
                         execution_decision = candidate_decision
+                        report_execution_route(execution_decision.to_dict())
                         if candidate_decision.mode == "ensemble":
-                            reply = deps.run_natural_ensemble(
+                            reply = _run_observed_ensemble(
+                                deps.run_natural_ensemble,
                                 {
                                     "kind": "ensemble",
                                     "prompt": prompt,
@@ -784,14 +938,18 @@ def handle_chat_completions(
                                     "require_all_tiers": False,
                                 },
                                 storage_project,
+                                auto_selected=candidate_decision.auto_selected,
                             )
                         elif candidate_decision.mode == "fanout":
-                            reply = deps.run_natural_fanout(
+                            reply = _run_observed_fanout(
+                                deps.run_natural_fanout,
                                 {
                                     "kind": "fanout",
                                     "prompt": prompt,
                                     "scope": candidate_decision.fanout_scope,
-                                }
+                                },
+                                tiers=list(candidate_decision.recommended_tiers),
+                                auto_selected=candidate_decision.auto_selected,
                             )
                         elif candidate_decision.mode == "agent":
                             reply = serve_mod._handle_slash(
@@ -825,14 +983,23 @@ def handle_chat_completions(
                     and natural_model
                     and natural_model["kind"] == "fanout"
                 ):
-                    reply = deps.run_natural_fanout(natural_model)
+                    reply = _run_observed_fanout(
+                        deps.run_natural_fanout,
+                        natural_model,
+                        auto_selected=False,
+                    )
                 if (
                     structured_schema is None
                     and reply is None
                     and natural_model
                     and natural_model["kind"] == "ensemble"
                 ):
-                    reply = deps.run_natural_ensemble(natural_model, storage_project)
+                    reply = _run_observed_ensemble(
+                        deps.run_natural_ensemble,
+                        natural_model,
+                        storage_project,
+                        auto_selected=False,
+                    )
                 if (
                     structured_schema is None
                     and allow_control_routes
@@ -907,6 +1074,23 @@ def handle_chat_completions(
                         if reply.status == "unknown"
                         else reply.text or "Work was not started."
                     )
+                if execution_decision is not None:
+                    route_summary = _sanitize_header_value(route_summary_line(execution_decision))
+                    logger.info(f"execution route: {route_summary}")
+                    handler._execution_route_headers = (
+                        {"X-Sonder-Execution-Route": route_summary}
+                        if route_summary
+                        else None
+                    )
+                    record_event_fn = getattr(runtime.activity_tracker, "record_event", None)
+                    if callable(record_event_fn):
+                        record_event_fn(
+                            "execution_route",
+                            summary=route_summary,
+                            mode=execution_decision.mode,
+                            band=execution_decision.band,
+                            auto_selected=execution_decision.auto_selected,
+                        )
                 if structured_schema is None and reply is not None:
                     if isinstance(reply, str) and "(/v1/generated-models/" in reply:
                         req_host = (handler.headers.get("Host") or "").strip()
@@ -1434,6 +1618,12 @@ def send_stream(
             getattr(handler, "_spanda_headers", None) or {}
         ).items():
             handler.send_header(str(spanda_name), str(spanda_value))
+        for route_name, route_value in (
+            getattr(handler, "_execution_route_headers", None) or {}
+        ).items():
+            clean_val = _sanitize_header_value(route_value)
+            if clean_val:
+                handler.send_header(str(route_name), clean_val)
         handler.send_header("Connection", "close")
         handler.close_connection = True
         handler.end_headers()
@@ -1502,6 +1692,12 @@ def begin_early_stream(
         handler.send_header("X-Sonder-Elapsed-Ms", str(max(0, elapsed_ms)))
         if getattr(handler, "_correlation_id", ""):
             handler.send_header("X-Sonder-Correlation-Id", handler._correlation_id)
+        for route_name, route_value in (
+            getattr(handler, "_execution_route_headers", None) or {}
+        ).items():
+            clean_val = _sanitize_header_value(route_value)
+            if clean_val:
+                handler.send_header(str(route_name), clean_val)
         handler.send_header("Connection", "close")
         handler.end_headers()
         write(KEEPALIVE_FRAME)

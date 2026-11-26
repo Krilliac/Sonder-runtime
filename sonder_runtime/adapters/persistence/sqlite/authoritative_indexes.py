@@ -178,7 +178,7 @@ def _rebuild_transaction(connection):
         connection.execute("BEGIN IMMEDIATE")
     try:
         yield
-    except Exception:
+    except BaseException:
         if nested:
             connection.execute("ROLLBACK TO SAVEPOINT sonder_fact_index_rebuild")
             connection.execute("RELEASE SAVEPOINT sonder_fact_index_rebuild")
@@ -223,17 +223,28 @@ def rebuild_authoritative_fact_indexes(connection, *, project: str | None = None
             "operation,project,payload_json,recorded_at,digest "
             "FROM memory_replication_log " + where + "ORDER BY source_id,sequence", args,
         )
-        for row in cursor:
-            record = MemoryMutation(
-                source_id=row[0], source_epoch=row[1], sequence=row[2],
-                entity_kind=row[3], entity_id=row[4], version=row[5],
-                operation=row[6], project=row[7], payload=json.loads(row[8]),
-                recorded_at=row[9],
-            )
-            if record.digest != row[10]:
-                raise MemoryReplicationError("fact index rebuild found a changed journal record")
-            if record.entity_kind == "fact":
-                materialize_authoritative_fact_index(connection, record)
+        try:
+            for row in cursor:
+                try:
+                    payload = json.loads(row[8])
+                    if not isinstance(payload, dict):
+                        raise MemoryReplicationError("fact index rebuild found a malformed journal record")
+                    record = MemoryMutation(
+                        source_id=row[0], source_epoch=row[1], sequence=row[2],
+                        entity_kind=row[3], entity_id=row[4], version=row[5],
+                        operation=row[6], project=row[7], payload=payload,
+                        recorded_at=row[9],
+                    )
+                except MemoryReplicationError:
+                    raise
+                except (TypeError, ValueError) as exc:
+                    raise MemoryReplicationError("fact index rebuild found a malformed journal record") from exc
+                if record.digest != row[10]:
+                    raise MemoryReplicationError("fact index rebuild found a changed journal record")
+                if record.entity_kind == "fact":
+                    materialize_authoritative_fact_index(connection, record)
+        finally:
+            cursor.close()
     return count
 
 
