@@ -1,11 +1,13 @@
 """Bounded JSON-RPC transport for the provider-neutral MCP contracts."""
 from __future__ import annotations
 
+import inspect
 import json
 import logging
+import math
 import threading
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol, TextIO
+from typing import Any, Callable, Mapping, Protocol, TextIO
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ class McpTransportLimits:
     max_discard_bytes: int = 16 * 1024 * 1024
 
     def __post_init__(self) -> None:
-        if any(isinstance(v, bool) or v <= 0 for v in (
+        if any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in (
             self.max_frame_bytes, self.max_tools, self.max_arguments_bytes,
             self.max_exchange_bytes, self.max_json_depth, self.max_discard_bytes,
         )):
@@ -109,11 +111,49 @@ class BoundedMcpProviderExchange:
             raise ValueError("MCP provider must expose a callable run method")
         self._provider = provider
         self._limits = limits or McpTransportLimits()
+        self._supported_run_kwargs = self._discover_run_kwargs(provider.run)
 
-    def exchange(self, request: str) -> tuple[str, str]:
+    @staticmethod
+    def _discover_run_kwargs(run_fn: Any) -> frozenset[str]:
+        candidates = (
+            "cancel_check",
+            "deadline_monotonic",
+            "max_output_bytes",
+            "max_stderr_bytes",
+        )
+        try:
+            params = inspect.signature(run_fn).parameters
+        except (TypeError, ValueError):
+            return frozenset()
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return frozenset(candidates)
+        return frozenset(
+            name for name in candidates
+            if name in params and params[name].kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        )
+
+    def exchange(
+        self,
+        request: str,
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+        deadline_monotonic: float | None = None,
+    ) -> tuple[str, str]:
         if not isinstance(request, str):
             raise TypeError("MCP provider request must be text")
-        request_bytes = len(request.encode("utf-8"))
+        if deadline_monotonic is not None and (
+            isinstance(deadline_monotonic, bool)
+            or not isinstance(deadline_monotonic, (int, float))
+            or not math.isfinite(deadline_monotonic)
+        ):
+            raise ValueError("MCP provider deadline_monotonic must be a finite number")
+        try:
+            request_bytes = len(request.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise McpTransportError("MCP request is not valid UTF-8") from exc
         logger.debug(f"provider exchange request_bytes={request_bytes}")
         exchange_ratio = request_bytes / self._limits.max_exchange_bytes if self._limits.max_exchange_bytes else 1.0
         if exchange_ratio >= 0.8 and request_bytes <= self._limits.max_exchange_bytes:
@@ -123,10 +163,28 @@ class BoundedMcpProviderExchange:
             )
         if request_bytes > self._limits.max_exchange_bytes:
             raise McpTransportError("MCP request exceeds max_exchange_bytes")
-        stdout, stderr = self._provider.run(request)
+        run_kwargs: dict[str, Any] = {}
+        if "max_output_bytes" in self._supported_run_kwargs:
+            run_kwargs["max_output_bytes"] = self._limits.max_exchange_bytes
+        if "max_stderr_bytes" in self._supported_run_kwargs:
+            run_kwargs["max_stderr_bytes"] = self._limits.max_exchange_bytes
+        if cancel_check is not None and "cancel_check" in self._supported_run_kwargs:
+            run_kwargs["cancel_check"] = cancel_check
+        if deadline_monotonic is not None and "deadline_monotonic" in self._supported_run_kwargs:
+            run_kwargs["deadline_monotonic"] = deadline_monotonic
+        try:
+            stdout, stderr = self._provider.run(request, **run_kwargs)
+        except ValueError as exc:
+            if getattr(exc, "is_output_limit", False):
+                raise McpTransportError("MCP response exceeds max_exchange_bytes") from exc
+            raise
         if not isinstance(stdout, str) or not isinstance(stderr, str):
             raise McpTransportError("MCP provider must return text stdout and stderr")
-        response_bytes = len(stdout.encode("utf-8"))
+        try:
+            response_bytes = len(stdout.encode("utf-8"))
+            stderr_bytes = len(stderr.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise McpTransportError("MCP response is not valid UTF-8") from exc
         resp_ratio = response_bytes / self._limits.max_exchange_bytes if self._limits.max_exchange_bytes else 1.0
         if resp_ratio >= 0.8 and response_bytes <= self._limits.max_exchange_bytes:
             logger.warning(
@@ -135,6 +193,8 @@ class BoundedMcpProviderExchange:
             )
         if response_bytes > self._limits.max_exchange_bytes:
             raise McpTransportError("MCP response exceeds max_exchange_bytes")
+        if stderr_bytes > self._limits.max_exchange_bytes:
+            raise McpTransportError("MCP stderr exceeds max_exchange_bytes")
         logger.debug(f"provider exchange completed response_bytes={response_bytes}")
         return stdout, stderr
 
@@ -174,6 +234,7 @@ class StdioMcpTransport:
         self._server_info_version = server_info_version
         self._negotiation: McpNegotiation | None = None
         self._write_lock = threading.Lock()
+        self._closed = False
         self._catalog = self._build_catalog(tool_catalog)
         if len(self._catalog) > self._limits.max_tools:
             raise McpTransportError("tool catalog exceeds max_tools")
@@ -200,6 +261,8 @@ class StdioMcpTransport:
             tools = source
         result = []
         for tool in tools or ():
+            if len(result) >= self._limits.max_tools:
+                raise McpTransportError("tool catalog exceeds max_tools")
             if isinstance(tool, Mapping):
                 item = dict(tool)
                 item.setdefault("inputSchema", {"type": "object"})
@@ -224,73 +287,142 @@ class StdioMcpTransport:
     def negotiation(self) -> McpNegotiation | None:
         return self._negotiation
 
+    def close(self) -> None:
+        """Mark the transport closed and detach any active subscriptions."""
+        with self._write_lock:
+            self._closed = True
+        if self._router is not None:
+            self._router.unsubscribe(self._connection_id)
+
     def serve(self) -> int:
         logger.info(f"MCP serve loop started connection_id={self._connection_id!r}")
         logger.debug(f"serve loop starting connection_id={self._connection_id!r}")
         count = 0
-        while True:
-            raw = self._input.readline(self._limits.max_frame_bytes + 1)
-            if raw in (b"", ""):
-                break
-            if raw.strip() == b"" if isinstance(raw, bytes) else raw.strip() == "":
-                continue
-            count += 1
-            abort_stream = False
-            try:
-                if self._oversized(raw):
-                    # readline stopped mid-line: discard the rest of this line
-                    # so its tail is never read back as a separate frame.
-                    self._discard_rest_of_line()
-                    raise McpTransportError("MCP frame exceeds max_frame_bytes")
-                response = self._dispatch(self._decode_frame(raw))
-            except McpDiscardLimitExceeded as exc:
-                logger.error(
-                    f"MCP transport discard limit exceeded connection_id={self._connection_id!r}: {exc}",
-                    exc_info=True,
-                )
-                response = self._error(None, -32700, str(exc))
-                abort_stream = True
-            except McpTransportError as exc:
-                logger.error(
-                    f"MCP transport protocol error connection_id={self._connection_id!r}: {exc}",
-                    exc_info=True,
-                )
-                response = self._error(None, -32700, str(exc))
-            if response is not None:
+        try:
+            while True:
                 try:
-                    self._write(response)
-                except McpTransportError as exc:
-                    # An oversized result must not end the session; answer
-                    # the request with a bounded error instead.
+                    raw = self._input.readline(self._limits.max_frame_bytes + 1)
+                except UnicodeDecodeError as exc:
                     logger.error(
-                        f"MCP response dropped connection_id={self._connection_id!r}: {exc}"
+                        f"MCP transport decode error connection_id={self._connection_id!r}: {exc}",
+                        exc_info=True,
                     )
-                    error = self._error(response.get("id"), -32603, str(exc))
-                    try:
-                        self._write(error)
-                    except McpTransportError:
-                        # The echoed id alone can fill a frame (ids are
-                        # unbounded strings); answer without it rather than
-                        # letting the error escape and end the session.
-                        self._write(self._error(None, -32603, str(exc)))
-            if abort_stream:
-                break
-        if self._router is not None:
-            self._router.unsubscribe(self._connection_id)
-        logger.debug(f"serve loop ended connection_id={self._connection_id!r} frames_processed={count}")
-        logger.info(f"MCP serve loop ended connection_id={self._connection_id!r}, frames_processed={count}")
+                    count += 1
+                    self._write_response_or_fallback(
+                        self._error(None, -32700, "MCP frame is not UTF-8")
+                    )
+                    break
+                except (OSError, ValueError) as exc:
+                    logger.warning(
+                        f"MCP input stream closed connection_id={self._connection_id!r}: "
+                        f"{type(exc).__name__}"
+                    )
+                    break
+                if raw in (b"", ""):
+                    break
+                oversized = self._oversized(raw)
+                if not oversized and (
+                    raw.strip() == b"" if isinstance(raw, bytes) else raw.strip() == ""
+                ):
+                    continue
+                count += 1
+                abort_stream = False
+                try:
+                    if oversized:
+                        # readline stopped mid-line: discard the rest of this line
+                        # so its tail is never read back as a separate frame.
+                        initial_bytes = (
+                            len(raw)
+                            if isinstance(raw, bytes)
+                            else len(raw.encode("utf-8", errors="replace"))
+                        )
+                        self._discard_rest_of_line(initial_bytes=initial_bytes)
+                        raise McpTransportError("MCP frame exceeds max_frame_bytes")
+                    response = self._dispatch(self._decode_frame(raw))
+                except McpDiscardLimitExceeded as exc:
+                    logger.error(
+                        f"MCP transport discard limit exceeded connection_id={self._connection_id!r}: {exc}",
+                        exc_info=True,
+                    )
+                    response = self._error(None, -32700, str(exc))
+                    abort_stream = True
+                except McpTransportError as exc:
+                    logger.error(
+                        f"MCP transport protocol error connection_id={self._connection_id!r}: {exc}",
+                        exc_info=True,
+                    )
+                    response = self._error(None, -32700, str(exc))
+                if response is not None:
+                    if not self._write_response_or_fallback(response):
+                        break
+                if abort_stream:
+                    break
+        finally:
+            self.close()
+            logger.debug(f"serve loop ended connection_id={self._connection_id!r} frames_processed={count}")
+            logger.info(f"MCP serve loop ended connection_id={self._connection_id!r}, frames_processed={count}")
         return count
+
+    def _write_response_or_fallback(self, response: dict[str, Any]) -> bool:
+        """Write a response or degrade to a bounded error. Returns False if stream broke."""
+        try:
+            self._write(response)
+            return True
+        except McpTransportError as exc:
+            # An oversized result must not end the session; answer
+            # the request with a bounded error instead.
+            logger.error(
+                f"MCP response dropped connection_id={self._connection_id!r}: {exc}"
+            )
+            fallbacks = (
+                self._error(response.get("id"), -32603, str(exc)),
+                self._error(None, -32603, str(exc)),
+                self._error(None, -32603, "response too large"),
+            )
+            for candidate in fallbacks:
+                try:
+                    self._write(candidate)
+                    return True
+                except McpTransportError:
+                    continue
+                except (OSError, ValueError) as write_exc:
+                    logger.warning(
+                        f"MCP output stream closed connection_id={self._connection_id!r}: "
+                        f"{type(write_exc).__name__}"
+                    )
+                    return False
+            logger.error(
+                f"MCP fallback error exceeded max_frame_bytes connection_id={self._connection_id!r}"
+            )
+            return True
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                f"MCP output stream closed connection_id={self._connection_id!r}: "
+                f"{type(exc).__name__}"
+            )
+            return False
 
     def _oversized(self, raw: str | bytes) -> bool:
         """Whether readline hit the frame bound before the line ended."""
         newline = b"\n" if isinstance(raw, bytes) else "\n"
         return len(raw) > self._limits.max_frame_bytes and not raw.endswith(newline)
 
-    def _discard_rest_of_line(self) -> None:
-        discarded = 0
+    def _discard_rest_of_line(self, *, initial_bytes: int = 0) -> None:
+        discarded = initial_bytes
         limit = self._limits.max_discard_bytes
+        if discarded > limit:
+            raise McpDiscardLimitExceeded(
+                "oversized MCP frame exceeded max_discard_bytes; aborting stream"
+            )
         while True:
-            chunk = self._input.readline(self._limits.max_frame_bytes + 1)
+            try:
+                chunk = self._input.readline(self._limits.max_frame_bytes + 1)
+            except UnicodeDecodeError as exc:
+                raise McpDiscardLimitExceeded(
+                    "oversized MCP frame is not valid UTF-8; aborting stream"
+                ) from exc
+            except (OSError, ValueError):
+                return
             if chunk in (b"", ""):
                 return
             discarded += (
@@ -348,29 +480,37 @@ class StdioMcpTransport:
         try:
             result = self._call(method, params)
         except McpNegotiationError as exc:
-            return self._error(request_id, -32001, str(exc))
+            return None if notification else self._error(request_id, -32001, str(exc))
         except McpTransportError as exc:
-            return self._error(request_id, -32602, str(exc))
+            return None if notification else self._error(request_id, -32602, str(exc))
         except McpTaskInvalidInput as exc:
-            return self._error(request_id, -32602, str(exc))
+            return None if notification else self._error(request_id, -32602, str(exc))
         except McpTaskNotFound as exc:
-            return self._error(request_id, -32601, str(exc))
+            return None if notification else self._error(request_id, -32601, str(exc))
         except _MethodNotFound as exc:
+            if notification:
+                logger.debug(
+                    f"ignoring unsupported MCP notification method={method!r}, "
+                    f"connection_id={self._connection_id!r}"
+                )
+                return None
             return self._error(request_id, -32601, "method not found: %s" % exc.args[0])
         except KeyError as exc:
-            return self._error(request_id, -32601, str(exc))
+            if method == "tools/call" and len(exc.args) == 1 and exc.args[0] == params.get("name"):
+                return None if notification else self._error(request_id, -32601, str(exc))
+            logger.error(
+                f"unhandled KeyError in MCP handler method={method!r}, "
+                f"connection_id={self._connection_id!r}",
+                exc_info=True,
+            )
+            return None if notification else self._error(request_id, -32603, "internal MCP handler error")
         except Exception:
             logger.error(
                 f"unhandled exception in MCP handler method={method!r}, "
                 f"connection_id={self._connection_id!r}",
                 exc_info=True,
             )
-            logger.warning(
-                f"internal MCP handler error on method={method!r}, "
-                f"connection_id={self._connection_id!r}",
-                exc_info=True,
-            )
-            return self._error(request_id, -32603, "internal MCP handler error")
+            return None if notification else self._error(request_id, -32603, "internal MCP handler error")
         if notification:
             return None
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
@@ -458,7 +598,12 @@ class StdioMcpTransport:
         if method == "sonder/subscribe":
             event = params.get("event")
             logger.debug(f"sonder/subscribe event={event!r} connection_id={self._connection_id!r}")
-            if self._router is None or not isinstance(event, str) or not event:
+            if (
+                self._router is None
+                or not isinstance(event, str)
+                or not event.strip()
+                or len(event) > 128
+            ):
                 raise McpTransportError("subscription router and event are required")
             self._router.subscribe(self._connection_id, event, self._on_notification)
             return {"subscribed": event}
@@ -502,15 +647,37 @@ class StdioMcpTransport:
         if len(encoded.encode("utf-8")) > self._limits.max_frame_bytes:
             raise McpTransportError("MCP response exceeds max_frame_bytes")
         with self._write_lock:
+            if self._closed:
+                raise McpTransportError("MCP transport is closed")
             self._output.write(encoded + "\n")
             flush = getattr(self._output, "flush", None)
             if callable(flush):
                 flush()
 
     def _on_notification(self, event: str, payload: Mapping[str, Any]) -> None:
+        with self._write_lock:
+            if self._closed:
+                return
         logger.debug(f"sending notification event={event!r} connection_id={self._connection_id!r}")
-        self._write({"jsonrpc": "2.0", "method": "notifications/event",
-                     "params": {"event": event, "payload": dict(payload)}})
+        try:
+            self._write({"jsonrpc": "2.0", "method": "notifications/event",
+                         "params": {"event": event, "payload": dict(payload)}})
+        except McpTransportError as exc:
+            logger.warning(
+                f"dropping MCP notification event={event!r} "
+                f"connection_id={self._connection_id!r}: {exc}"
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                f"closing broken MCP transport during notification "
+                f"connection_id={self._connection_id!r}: {type(exc).__name__}"
+            )
+            self.close()
+        except Exception as exc:
+            logger.warning(
+                f"dropping MCP notification event={event!r} "
+                f"connection_id={self._connection_id!r}: {type(exc).__name__}"
+            )
 
 
 __all__ = ["McpTransportError", "McpTransportLimits", "StdioMcpTransport"]
