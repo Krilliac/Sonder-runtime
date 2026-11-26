@@ -4,11 +4,20 @@ Scopes bind in the execution thread. A returned JSON response is transport
 evidence, not an accepted answer; validation/repair and transcript ownership
 remain with the caller. Missing terminal evidence means an unknown outcome.
 """
+from __future__ import annotations
+
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+import inspect
+import math
 
 from ...domain.common.errors import IntegrityFailure, InternalFailure, SonderError
+
+_MAX_DURATION_MS = 86_400_000.0
+_MAX_RATE = 1_000_000.0
+_MAX_TOKEN_COUNT = 1_000_000_000
 
 
 _owner = ContextVar("provider_attempt_owner", default=None)
@@ -70,8 +79,109 @@ def report_route_overflow(fields) -> None:
         pass
 
 
-def _count(value):
-    return value if type(value) is int and value >= 0 else None
+def report_execution_route(fields: Mapping[str, object] | None) -> None:
+    """Tell the observer which content-free execution route was chosen.
+
+    Observers without ``execution_route_decided`` ignore it; it never raises.
+    """
+    hook = getattr(_attempt_observer, "execution_route_decided", None)
+    if not callable(hook):
+        return
+    try:
+        hook(dict(fields or {}))
+    except Exception:
+        pass
+
+
+def report_fanout_event(
+    phase: str,
+    fields: Mapping[str, object] | None = None,
+    *,
+    run_id: str | None = None,
+) -> None:
+    """Tell the observer a content-free ``fanout.<phase>`` lifecycle event.
+
+    Observers without ``fanout_event`` ignore it; it never raises.
+    """
+    hook = getattr(_attempt_observer, "fanout_event", None)
+    if not callable(hook):
+        return
+    try:
+        hook(str(phase), dict(fields or {}), run_id=run_id)
+    except Exception:
+        pass
+
+
+def report_ensemble_event(
+    phase: str,
+    fields: Mapping[str, object] | None = None,
+    *,
+    run_id: str | None = None,
+) -> None:
+    """Tell the observer a content-free ``ensemble.<phase>`` lifecycle event.
+
+    Observers without ``ensemble_event`` ignore it; it never raises.
+    """
+    hook = getattr(_attempt_observer, "ensemble_event", None)
+    if not callable(hook):
+        return
+    try:
+        hook(str(phase), dict(fields or {}), run_id=run_id)
+    except Exception:
+        pass
+
+
+def _count(value) -> int | None:
+    return value if type(value) is int and 0 <= value <= _MAX_TOKEN_COUNT else None
+
+
+def _finite_number(value, *, maximum: float) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    if not math.isfinite(result) or result < 0.0 or result > maximum:
+        return None
+    return result
+
+
+def _ms(value) -> float | None:
+    measured = _finite_number(value, maximum=_MAX_DURATION_MS)
+    return None if measured is None else round(measured, 3)
+
+
+def _ns_to_ms(value) -> float | None:
+    ns = _finite_number(value, maximum=_MAX_DURATION_MS * 1_000_000.0)
+    return None if ns is None else round(ns / 1_000_000.0, 3)
+
+
+def _rate(value) -> float | None:
+    measured = _finite_number(value, maximum=_MAX_RATE)
+    return None if measured is None else round(measured, 3)
+
+
+def _derived_rate(count, duration_ms: float | None) -> float | None:
+    measured_count = _finite_number(count, maximum=float(_MAX_TOKEN_COUNT))
+    if measured_count is None or duration_ms is None or duration_ms <= 0.0:
+        return None
+    return _rate(measured_count * 1000.0 / duration_ms)
+
+
+def _accepts_keyword(fn, name: str) -> bool:
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        or (
+            param.name == name
+            and param.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        )
+        for param in params
+    )
 
 
 def _response_evidence(result):
@@ -92,6 +202,129 @@ def _response_evidence(result):
         if completion is None:
             completion = _count(usage.get("completion_tokens"))
     return model, prompt, completion
+
+
+def _response_timings(
+    result,
+    *,
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+) -> dict[str, object]:
+    """Extract bounded, content-free inference timings from a provider reply.
+
+    Understands both Ollama nanosecond durations/cache counts and
+    OpenAI-compatible / Sonder-Inference ``timings`` + ``usage`` shapes,
+    guarding ``prompt_eval_tps`` against KV-cache-hit inflation.  Returns an
+    empty dict when the reply reported no timing or cache evidence.  Text
+    fields are never read.
+    """
+    if not isinstance(result, dict):
+        return {}
+    raw_timings = result.get("timings")
+    timings: dict[str, object] = dict(raw_timings) if isinstance(raw_timings, dict) else {}
+    usage = result.get("usage")
+    if isinstance(usage, dict):
+        sonder_meta = usage.get("sonder")
+        if isinstance(sonder_meta, dict) and isinstance(sonder_meta.get("timings"), dict):
+            for key, value in sonder_meta["timings"].items():
+                if key not in timings:
+                    timings[key] = value
+    else:
+        usage = {}
+
+    cached = _count(result.get("prompt_eval_cached_count"))
+    if cached is None:
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict):
+            cached = _count(details.get("cached_tokens"))
+    if cached is None:
+        cached = _count(timings.get("cache_n"))
+    if cached is not None and prompt_tokens is not None and cached > prompt_tokens:
+        cached = None
+    uncached = (
+        prompt_tokens - cached
+        if prompt_tokens is not None and cached is not None
+        else None
+    )
+
+    ttft_ms = _ms(timings.get("ttft_ms"))
+    if ttft_ms is None:
+        ttft_ms = _ms(result.get("ttft_ms"))
+    prompt_eval_ms = _ms(timings.get("prompt_ms"))
+    if prompt_eval_ms is None:
+        prompt_eval_ms = _ms(timings.get("prompt_eval_ms"))
+    if prompt_eval_ms is None:
+        prompt_eval_ms = _ns_to_ms(result.get("prompt_eval_duration"))
+    eval_ms = _ms(timings.get("predicted_ms"))
+    if eval_ms is None:
+        eval_ms = _ms(timings.get("eval_ms"))
+    if eval_ms is None:
+        eval_ms = _ns_to_ms(result.get("eval_duration"))
+    load_ms = _ms(timings.get("load_ms"))
+    if load_ms is None:
+        load_ms = _ns_to_ms(result.get("load_duration"))
+    queue_ms = _ms(timings.get("queue_ms"))
+    if queue_ms is None:
+        queue_ms = _ms(timings.get("queue_wait_ms"))
+    if queue_ms is None:
+        queue_ms = _ns_to_ms(result.get("queue_duration"))
+    backend_total_ms = _ms(timings.get("total_ms"))
+    if backend_total_ms is None:
+        backend_total_ms = _ns_to_ms(result.get("total_duration"))
+
+    # Guard prompt_eval_tps against cache-hit inflation: when cached tokens
+    # are positive, derive strictly from uncached tokens / prompt_eval_ms.
+    reported_prompt_tps = _rate(timings.get("prompt_per_second"))
+    prompt_n = _count(timings.get("prompt_n"))
+    prompt_eval_tps: float | None = None
+    if cached is not None and cached > 0:
+        if uncached is not None:
+            if uncached > 0:
+                prompt_eval_tps = _derived_rate(uncached, prompt_eval_ms)
+        elif prompt_n is not None and prompt_n > 0:
+            derived = _derived_rate(prompt_n, prompt_eval_ms)
+            if derived is not None:
+                if reported_prompt_tps is not None and reported_prompt_tps <= derived * 1.05:
+                    prompt_eval_tps = reported_prompt_tps
+                else:
+                    prompt_eval_tps = derived
+    elif not (uncached == 0 and cached == 0 and prompt_tokens == 0):
+        prompt_eval_tps = (
+            reported_prompt_tps
+            if reported_prompt_tps is not None
+            else _derived_rate(
+                prompt_n if prompt_n is not None else prompt_tokens,
+                prompt_eval_ms,
+            )
+        )
+
+    reported_decode_tps = _rate(timings.get("predicted_per_second"))
+    predicted_n = _count(timings.get("predicted_n"))
+    decode_tps = (
+        reported_decode_tps
+        if reported_decode_tps is not None
+        else _derived_rate(
+            predicted_n if predicted_n is not None else completion_tokens,
+            eval_ms,
+        )
+    )
+
+    out: dict[str, object] = {}
+    for key, value in (
+        ("ttft_ms", ttft_ms),
+        ("prompt_cached_tokens", cached),
+        ("prompt_uncached_tokens", uncached),
+        ("prompt_eval_ms", prompt_eval_ms),
+        ("eval_ms", eval_ms),
+        ("load_ms", load_ms),
+        ("queue_ms", queue_ms),
+        ("backend_total_ms", backend_total_ms),
+        ("prompt_eval_tps", prompt_eval_tps),
+        ("decode_tps", decode_tps),
+    ):
+        if value is not None:
+            out[key] = value
+    return out
 
 
 # Legacy transport failures carry a ``kind`` (ModelCallError); telemetry
@@ -166,10 +399,21 @@ def _observed(provider, operation, payload, send):
         raise
     try:
         model, prompt_tokens, completion_tokens = _response_evidence(result)
-        observer.provider_send_finished(
-            handle, model=model, prompt_tokens=prompt_tokens,
+        timings = _response_timings(
+            result,
+            prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
         )
+        if timings and _accepts_keyword(observer.provider_send_finished, "timings"):
+            observer.provider_send_finished(
+                handle, model=model, prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens, timings=timings,
+            )
+        else:
+            observer.provider_send_finished(
+                handle, model=model, prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
     except Exception:
         pass
     return result
