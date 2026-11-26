@@ -1216,7 +1216,7 @@ def _requirements_link_error(root):
         req_path.exists() and _secret_scan_adapter.confined_path(req_path, Path(root)) is None
     ):
         return "refusing to read requirements.txt: it is a link or resolves outside the root"
-    content = requirements_guard.requirements_content_error(root)
+    content = requirements_guard.requirements_content_error(root, is_protected=_is_protected_read_target)
     if content:
         return "refusing requirements.txt: %s" % content
     return None

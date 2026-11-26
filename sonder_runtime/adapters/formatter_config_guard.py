@@ -56,7 +56,16 @@ _MAX_CONFIG_BYTES = 256 * 1024
 _MAX_DIRECTORIES = 20000
 _PRUNED = frozenset({"node_modules", ".git"})
 _NODE_PACKAGES = {"prettier": "prettier", "biome": "@biomejs/biome"}
-_CHECKED_TOOLS = frozenset(_NODE_PACKAGES)
+# Formatters whose check mode evaluates project-controlled code and cannot be made safe by
+# inspecting a few config files: ``dotnet format`` evaluates the project through MSBuild
+# (Directory.Build.props/targets, analyzers); ``cargo fmt`` reads .cargo/config.toml aliases
+# from cwd and its parents and rust-toolchain.toml (``path`` selects a toolchain binary).
+_REFUSED_TOOLS = {
+    "dotnet": "dotnet format evaluates the project through MSBuild (Directory.Build.*, analyzers)",
+    "rustfmt": "cargo fmt reads .cargo/config.toml aliases and rust-toolchain.toml overrides",
+}
+_CHECKED_TOOLS = frozenset(_NODE_PACKAGES) | frozenset(_REFUSED_TOOLS)
+_GLOB_CHARS = frozenset("*?[]{}!")
 
 
 def _read_text(path: Path) -> str | None:
@@ -97,17 +106,27 @@ def _data_config_error(path: Path) -> str | None:
             parsed = tomllib.loads(text)
         except ValueError:
             return "%s could not be parsed" % path.name
-        return "%s loads formatter plugins" % path.name if _has_plugins_key(parsed) else None
-    if suffix in (".yaml", ".yml", ".json5", ".toml"):
-        return "%s may load formatter plugins" % path.name if _text_may_name_plugins(text) else None
+        return _mapping_error(path.name, parsed)
+    if suffix in (".yaml", ".yml", ".json5", ".toml") or path.name == ".prettierrc":
+        # No YAML/JSON5 parser: only a text that parses as a JSON object is inspected. Anything
+        # else may be a bare string, which Prettier loads as a shared config module.
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return "%s is not a JSON object, so it could name a shared config module" % path.name
+        return _mapping_error(path.name, parsed)
     try:
         parsed = json.loads(text)
     except ValueError:
-        # An extension-less .prettierrc may be YAML; a .json file must be valid JSON.
-        if path.name == ".prettierrc":
-            return "%s may load formatter plugins" % path.name if _text_may_name_plugins(text) else None
         return "%s could not be parsed" % path.name
-    return "%s loads formatter plugins" % path.name if _has_plugins_key(parsed) else None
+    return _mapping_error(path.name, parsed)
+
+
+def _mapping_error(name: str, parsed: object) -> str | None:
+    """Prettier treats a string config as a shared config module and loads it."""
+    if not isinstance(parsed, dict):
+        return "%s is not a mapping (a string names a shared config module that Prettier loads)" % name
+    return "%s loads formatter plugins" % name if _has_plugins_key(parsed) else None
 
 
 def _package_json_error(path: Path) -> str | None:
@@ -201,12 +220,55 @@ def _bundled_formatter_error(tool: str, directories: list[Path]) -> str | None:
     return None
 
 
+def _npmrc_error(root: Path) -> str | None:
+    """A project ``.npmrc`` (``script-shell``, ``node-options``) is run by npx from the local prefix.
+
+    npm's local prefix is the nearest folder at or above cwd holding ``package.json`` or
+    ``node_modules`` (cwd itself when none does). Every folder from the root up to it is checked.
+    """
+    def is_prefix(folder: Path) -> bool:
+        return os.path.lexists(folder / "package.json") or os.path.lexists(folder / "node_modules")
+
+    folders = [root]
+    if not is_prefix(root):
+        above: list[Path] = []
+        for parent in root.parents:
+            above.append(parent)
+            if is_prefix(parent):
+                folders.extend(above)
+                break
+    for folder in folders:
+        if os.path.lexists(folder / ".npmrc"):
+            return ".npmrc in %s: npx would apply its script-shell and node-options settings" % (
+                folder.name or str(folder))
+    return None
+
+
+def _target_error(root: Path, target: str) -> str | None:
+    """In check mode the formatter must be handed one existing path, never a pattern."""
+    if not target or target == ".":
+        return None
+    if any(ch in _GLOB_CHARS for ch in target):
+        return "the path contains glob characters; the formatter would expand it past the checked folders"
+    if not os.path.lexists(root / target):
+        return "the path does not exist"
+    return None
+
+
 def executable_config_error(tool: str, root: Path | str, target: str = "") -> str | None:
     """Why a protected check of ``tool`` must not run here, or None."""
     if tool not in _CHECKED_TOOLS:
         return None
     root = Path(root)
     prefix = "refusing to run %s in check mode: " % tool
+    if tool in _REFUSED_TOOLS:
+        return prefix + _REFUSED_TOOLS[tool]
+    target_reason = _target_error(root, target)
+    if target_reason:
+        return prefix + target_reason
+    npmrc = _npmrc_error(root)
+    if npmrc:
+        return prefix + npmrc
     directories, walk_error = _walk_directories(root, target)
     if walk_error:
         return prefix + walk_error
