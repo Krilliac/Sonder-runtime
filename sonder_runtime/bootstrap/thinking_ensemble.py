@@ -222,9 +222,6 @@ def deliberate_for_turn(
     reach_fn = check_reachable or thinking_tier_reachable
     if not reach_fn(server, thinking_tier, thinking_model):
         return None
-    chat_request = getattr(server, "_chat_request", None)
-    if not callable(chat_request):
-        return None
 
     delib_prompt = _domain.build_thinking_prompt(
         prompt,
@@ -270,7 +267,7 @@ def deliberate_for_turn(
                 else contextlib.nullcontext()
             )
             with ctx_mgr:
-                _out, raw_msg = chat_request(
+                _out, raw_msg = server._chat_request(
                     payload,
                     model=thinking_model,
                     cloud=False,
@@ -278,7 +275,7 @@ def deliberate_for_turn(
                     return_message=True,
                     text_only=True,
                 )
-    except _SOFT_ERRORS as exc:
+    except (AttributeError, *_SOFT_ERRORS) as exc:
         _logger.debug(
             "thinking-tier deliberation skipped (%s / %s): %s",
             thinking_tier,
