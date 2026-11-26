@@ -11,6 +11,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 
 MAX_FILE_CHARS = 260
@@ -115,7 +116,7 @@ class Diagnostic:
         )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
-    def dedupe_key(self) -> tuple:
+    def dedupe_key(self) -> tuple[str, str, str, int | None, int | None, str, str]:
         return (self.tool, self.severity, self.file, self.line, self.col,
                 self.code, self.message)
 
@@ -191,7 +192,7 @@ class DiagnosticSet:
         return dict(self.counts).get(severity, 0)
 
 
-def diagnostic_to_wire(diagnostic: Diagnostic) -> dict:
+def diagnostic_to_wire(diagnostic: Diagnostic) -> dict[str, Any]:
     return {
         "tool": diagnostic.tool,
         "severity": diagnostic.severity,
@@ -205,7 +206,7 @@ def diagnostic_to_wire(diagnostic: Diagnostic) -> dict:
     }
 
 
-def group_to_wire(group: DiagnosticGroup) -> dict:
+def group_to_wire(group: DiagnosticGroup) -> dict[str, Any]:
     return {
         "signature": group.signature,
         "tool": group.tool,
