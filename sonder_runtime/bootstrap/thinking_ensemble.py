@@ -25,6 +25,7 @@ from sonder_runtime.application.agents import delegation_runtime as _delegation
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
 from sonder_runtime.application.tasks.account_scope import active_task_account_scope
 from sonder_runtime.domain import thinking_controls as _thinking_controls
+from sonder_runtime.domain.cloud_access import has_legacy_error_prefix
 from sonder_runtime.domain.routing import thinking_ensemble as _domain
 
 _logger = logging.getLogger(__name__)
@@ -407,7 +408,7 @@ def maybe_auto_ensemble_offload(
     except _SOFT_ERRORS as exc:
         _logger.debug("auto-ensemble offload skipped (%s + %s): %s", lane, thinking_tier, exc)
         return None
-    if not answer or answer.startswith("ERROR:"):
+    if not answer or has_legacy_error_prefix(answer):
         return None
     return answer
 
