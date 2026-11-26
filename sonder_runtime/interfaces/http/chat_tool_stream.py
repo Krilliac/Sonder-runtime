@@ -1,6 +1,7 @@
 """Pure HTTP chat-tool SSE frame/waiter, slash message, and permission-mode helpers."""
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -10,8 +11,10 @@ from sonder_runtime.application.chat.bidi import detect_bidi_chars
 
 DEFAULT_APPROVAL_WAIT_SECONDS = 120.0
 _WAIT_POLL_INTERVAL_SECONDS = 0.25
+_MIN_POLL_INTERVAL_SECONDS = 0.005
+_MAX_POLL_INTERVAL_SECONDS = 1.0
 _WAITER_LOCK = threading.Lock()
-_CALL_WAITERS: dict[str, threading.Event] = {}
+_CALL_WAITERS: dict[str, set[threading.Event]] = {}
 
 
 def slash_messages(
@@ -269,34 +272,68 @@ def turn_refusal_receipt(
     return refusal_receipt_fn(decision, mode_label=label, modes_allowing=modes, count=len(refusals))
 
 
+def _normalize_waiter_key(call_id: Any) -> str:
+    if not isinstance(call_id, str):
+        return ""
+    key = call_id.strip().lower()
+    if not key or len(key) > 256:
+        return ""
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in key):
+        return ""
+    return key
+
+
 def register_call_waiter(call_id: str) -> threading.Event:
-    """Register an event woken when ``call_id`` is approved or denied over HTTP."""
-    key = str(call_id or "").strip().lower()
+    """Register an event woken when ``call_id`` is approved, denied, or cancelled."""
+    key = _normalize_waiter_key(call_id)
     event = threading.Event()
     if key:
         with _WAITER_LOCK:
-            _CALL_WAITERS[key] = event
+            _CALL_WAITERS.setdefault(key, set()).add(event)
     return event
 
 
 def unregister_call_waiter(call_id: str, event: threading.Event | None = None) -> None:
-    key = str(call_id or "").strip().lower()
+    key = _normalize_waiter_key(call_id)
     if not key:
         return
     with _WAITER_LOCK:
-        if event is None or _CALL_WAITERS.get(key) is event:
+        waiters = _CALL_WAITERS.get(key)
+        if not waiters:
+            return
+        if event is None:
+            _CALL_WAITERS.pop(key, None)
+            return
+        waiters.discard(event)
+        if not waiters:
             _CALL_WAITERS.pop(key, None)
 
 
 def notify_call_decision(call_id: str) -> None:
-    """Wake any chat-tool turn waiting on ``call_id``."""
-    key = str(call_id or "").strip().lower()
+    """Wake every chat-tool turn waiting on ``call_id``."""
+    key = _normalize_waiter_key(call_id)
     if not key:
         return
     with _WAITER_LOCK:
-        event = _CALL_WAITERS.get(key)
-    if event is not None:
+        events = tuple(_CALL_WAITERS.get(key, ()))
+    for event in events:
         event.set()
+
+
+def cancel_call_waiters(call_id: str | None = None) -> int:
+    """Wake waiting approval event(s) immediately on turn cancellation."""
+    if call_id is not None:
+        key = _normalize_waiter_key(call_id)
+        if not key:
+            return 0
+        with _WAITER_LOCK:
+            events = tuple(_CALL_WAITERS.get(key, ()))
+    else:
+        with _WAITER_LOCK:
+            events = tuple(ev for group in _CALL_WAITERS.values() for ev in group)
+    for event in events:
+        event.set()
+    return len(events)
 
 
 def write_tool_chunk(
@@ -308,25 +345,7 @@ def write_tool_chunk(
     payload: Mapping[str, Any],
 ) -> bool:
     """Write one ``sonder_tool`` SSE frame through ``early.lock``."""
-    early = getattr(handler, "_early_stream", None)
-    if early is None or early.client_gone:
-        return False
-    frame_id = getattr(early, "completion_id", None) or iid
-    if not getattr(early, "completion_id", None):
-        early.completion_id = frame_id
-    frame = chunk(frame_id, model, {}, sonder_tool=dict(payload)).encode("utf-8")
-    with early.lock:
-        if early.client_gone:
-            return False
-        try:
-            handler.wfile.write(frame)
-            flush = getattr(handler.wfile, "flush", None)
-            if callable(flush):
-                flush()
-        except (OSError, ValueError):
-            early.client_gone = True
-            return False
-    return True
+    return _write_early_chunk(handler, chunk, iid=iid, model=model, field="sonder_tool", payload=payload)
 
 
 def write_agent_chunk(
@@ -363,24 +382,67 @@ def _write_early_chunk(
     payload: Mapping[str, Any],
 ) -> bool:
     early = getattr(handler, "_early_stream", None)
-    if early is None or early.client_gone:
+    if early is None or getattr(early, "client_gone", False):
         return False
-    frame_id = getattr(early, "completion_id", None) or iid
-    if not getattr(early, "completion_id", None):
-        early.completion_id = frame_id
-    frame = chunk(frame_id, model, {}, **{field: dict(payload)}).encode("utf-8")
-    with early.lock:
-        if early.client_gone:
+    lock = getattr(early, "lock", None)
+    if lock is None:
+        return False
+    with lock:
+        if getattr(early, "client_gone", False):
+            return False
+        wfile = getattr(handler, "wfile", None)
+        if wfile is None:
+            early.client_gone = True
+            return False
+        frame_id = getattr(early, "completion_id", None) or iid
+        if not getattr(early, "completion_id", None):
+            early.completion_id = frame_id
+        try:
+            frame = chunk(frame_id, model, {}, **{field: dict(payload)}).encode("utf-8")
+        except (TypeError, ValueError):
             return False
         try:
-            handler.wfile.write(frame)
-            flush = getattr(handler.wfile, "flush", None)
+            wfile.write(frame)
+            flush = getattr(wfile, "flush", None)
             if callable(flush):
                 flush()
         except (OSError, ValueError):
             early.client_gone = True
             return False
     return True
+
+
+def _safe_wait_timeout(timeout_seconds: Any) -> float:
+    if isinstance(timeout_seconds, bool):
+        return DEFAULT_APPROVAL_WAIT_SECONDS
+    try:
+        value = float(timeout_seconds)
+    except (TypeError, ValueError):
+        return DEFAULT_APPROVAL_WAIT_SECONDS
+    if not math.isfinite(value):
+        return DEFAULT_APPROVAL_WAIT_SECONDS
+    return max(0.05, value)
+
+
+def _safe_poll_interval(poll_interval: Any) -> float:
+    if isinstance(poll_interval, bool):
+        return _WAIT_POLL_INTERVAL_SECONDS
+    try:
+        value = float(poll_interval)
+    except (TypeError, ValueError):
+        return _WAIT_POLL_INTERVAL_SECONDS
+    if not math.isfinite(value) or value <= 0.0:
+        return _WAIT_POLL_INTERVAL_SECONDS
+    return max(_MIN_POLL_INTERVAL_SECONDS, min(_MAX_POLL_INTERVAL_SECONDS, value))
+
+
+def _check_aborted(is_aborted: Callable[[], bool] | None) -> bool:
+    if is_aborted is None:
+        return False
+    try:
+        return bool(is_aborted())
+    except Exception:
+        return True
 
 
 def wait_for_approval(
@@ -394,15 +456,20 @@ def wait_for_approval(
     poll_interval: float = _WAIT_POLL_INTERVAL_SECONDS,
 ) -> str:
     """Wait up to ``timeout_seconds`` for ``call_id`` approval or denial."""
+    if _check_aborted(is_aborted):
+        return "aborted"
     if ledger.open_for(tool, digest):
         return "approved"
     if ledger.denied_for(tool, digest):
         return "denied"
+    safe_timeout = _safe_wait_timeout(timeout_seconds)
+    safe_poll = _safe_poll_interval(poll_interval)
     event = register_call_waiter(call_id)
-    deadline = time.monotonic() + max(0.05, float(timeout_seconds))
+    deadline = time.monotonic() + safe_timeout
     try:
         while True:
-            if is_aborted is not None and is_aborted():
+            event.clear()
+            if _check_aborted(is_aborted):
                 return "aborted"
             if ledger.open_for(tool, digest):
                 return "approved"
@@ -411,8 +478,7 @@ def wait_for_approval(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return "expired"
-            event.wait(min(poll_interval, remaining))
-            event.clear()
+            event.wait(min(safe_poll, remaining))
     finally:
         unregister_call_waiter(call_id, event)
 
@@ -422,6 +488,7 @@ __all__ = [
     "DEFAULT_APPROVAL_WAIT_SECONDS",
     "ESCALATION_HTTP_LOCAL_OPEN_REFUSAL",
     "bypass_http_refusal",
+    "cancel_call_waiters",
     "detect_bidi_chars",
     "handle_permission_mode_get",
     "handle_permission_mode_post",
