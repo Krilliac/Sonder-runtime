@@ -570,7 +570,12 @@ class _PlaceholderTile extends StatelessWidget {
               Row(children: [
                 Icon(icon, size: 16, color: tokens.text2),
                 const SizedBox(width: SonderSpace.sm),
-                Text(label, style: text.labelMedium),
+                Expanded(
+                  child: Text(label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: text.labelMedium),
+                ),
               ]),
               const SizedBox(height: SonderSpace.md),
               const Skeleton(width: 96, height: 20),
@@ -613,11 +618,16 @@ class _ActivityRowEmpty extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
+    final scaled = MediaQuery.textScalerOf(context).scale(1.0) > 1.0;
     return Padding(
       padding: const EdgeInsets.symmetric(
           horizontal: SonderSpace.lg, vertical: SonderSpace.md),
       child: Row(children: [
-        const RuntimeStatusWord(StatusKind.note, width: 104),
+        if (scaled)
+          const StatusMark(StatusKind.note, size: 12.5)
+        else
+          const RuntimeStatusWord(StatusKind.note, width: 104),
+        if (scaled) const SizedBox(width: SonderSpace.sm),
         Expanded(
           child: Text('No recent activity',
               style: Theme.of(context)
@@ -638,6 +648,7 @@ class _ActivityRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
+    final scale = MediaQuery.textScalerOf(context).scale(1.0).clamp(1.0, 2.5);
     final time = Text(line.time, style: tokens.mono(12, color: tokens.muted));
     final mark = StatusMark(line.status, word: line.word, size: 12);
     final body = Text(line.text,
@@ -653,16 +664,41 @@ class _ActivityRow extends StatelessWidget {
         padding: const EdgeInsets.symmetric(
             horizontal: SonderSpace.lg, vertical: SonderSpace.md),
         child: LayoutBuilder(builder: (context, constraints) {
-          if (constraints.maxWidth < 420) {
+          if (constraints.maxWidth < 420 * scale) {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(children: [
-                  SizedBox(width: 52, child: time),
-                  Flexible(child: mark),
-                ]),
+                if (scale > 1.0)
+                  Wrap(
+                    spacing: SonderSpace.sm,
+                    runSpacing: SonderSpace.xxs,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [time, mark],
+                  )
+                else
+                  Row(children: [
+                    SizedBox(width: 52, child: time),
+                    Flexible(child: mark),
+                  ]),
                 const SizedBox(height: SonderSpace.xxs),
                 body,
+              ],
+            );
+          }
+          if (scale > 1.0) {
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                ConstrainedBox(
+                    constraints: BoxConstraints(minWidth: 52 * scale),
+                    child: time),
+                const SizedBox(width: SonderSpace.sm),
+                ConstrainedBox(
+                    constraints: BoxConstraints(minWidth: 104 * scale),
+                    child: mark),
+                const SizedBox(width: SonderSpace.sm),
+                Expanded(child: body),
               ],
             );
           }

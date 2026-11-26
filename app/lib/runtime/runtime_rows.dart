@@ -66,7 +66,9 @@ class RuntimeRow extends StatelessWidget {
           vertical: dense ? SonderSpace.sm : SonderSpace.md),
       alignment: Alignment.centerLeft,
       child: LayoutBuilder(builder: (context, constraints) {
-        final narrow = constraints.maxWidth < wideBreakpoint;
+        final scale =
+            MediaQuery.textScalerOf(context).scale(1.0).clamp(1.0, 2.5);
+        final narrow = constraints.maxWidth < wideBreakpoint * scale;
         final mark = leading ??
             (kind == null
                 ? null
@@ -134,7 +136,8 @@ class RuntimeRow extends StatelessWidget {
             ],
           );
         }
-        final indent = mark == null ? 0.0 : markWidth;
+        final effectiveMarkWidth = markWidth * scale;
+        final indent = mark == null ? 0.0 : effectiveMarkWidth;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -152,7 +155,7 @@ class RuntimeRow extends StatelessWidget {
                       textBaseline: TextBaseline.alphabetic,
                       children: [
                         if (mark != null)
-                          SizedBox(width: markWidth, child: mark),
+                          SizedBox(width: effectiveMarkWidth, child: mark),
                         Expanded(child: title),
                       ],
                     ),
@@ -377,6 +380,21 @@ class StatusValueRow extends StatelessWidget {
       child: row,
     );
     if (trailing == null) return spoken;
+    final scaled = MediaQuery.textScalerOf(context).scale(1.0) > 1.25;
+    if (scaled) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          spoken,
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+                SonderSpace.lg, 0, SonderSpace.lg, SonderSpace.sm),
+            child: trailing!,
+          ),
+        ],
+      );
+    }
     return Row(children: [
       Expanded(child: spoken),
       Padding(
@@ -400,22 +418,37 @@ class RuntimeEmptyRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
+    final scaled = MediaQuery.textScalerOf(context).scale(1.0) > 1.25;
+    final body = Row(children: [
+      Icon(icon, size: 18, color: tokens.muted),
+      const SizedBox(width: SonderSpace.md),
+      Expanded(
+        child: Text(text,
+            style: Theme.of(context)
+                .textTheme
+                .bodyMedium
+                ?.copyWith(color: tokens.text2)),
+      ),
+      if (action != null && !scaled) ...[
+        const SizedBox(width: SonderSpace.sm),
+        action!,
+      ],
+    ]);
     return Container(
       constraints: const BoxConstraints(minHeight: 56),
       padding: const EdgeInsets.symmetric(
           horizontal: SonderSpace.lg, vertical: SonderSpace.md),
-      child: Row(children: [
-        Icon(icon, size: 18, color: tokens.muted),
-        const SizedBox(width: SonderSpace.md),
-        Expanded(
-          child: Text(text,
-              style: Theme.of(context)
-                  .textTheme
-                  .bodyMedium
-                  ?.copyWith(color: tokens.text2)),
-        ),
-        if (action != null) action!,
-      ]),
+      child: action != null && scaled
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                body,
+                const SizedBox(height: SonderSpace.sm),
+                action!,
+              ],
+            )
+          : body,
     );
   }
 }

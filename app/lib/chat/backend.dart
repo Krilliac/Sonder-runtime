@@ -123,6 +123,10 @@ class TurnRequest {
   /// [SessionPersonaSync]).
   final String? persona;
 
+  /// Optional non-default `execution_mode` override (`single`, `ensemble`,
+  /// `fanout`), or null for Auto (omitted from `/v1/chat/completions`).
+  final String? executionMode;
+
   /// `'client'` asks the server not to inject its durable history (server
   /// S5). Set after a session rotation, so a cancelled first turn cannot be
   /// resurrected from the server side.
@@ -141,6 +145,7 @@ class TurnRequest {
     this.sessionTemperature,
     this.sessionReasoningEffort,
     this.persona,
+    this.executionMode,
     this.historyMode,
     this.clientExec = true,
   });
@@ -567,6 +572,7 @@ class _ApiTurn implements ChatTurn {
         sessionTemperature: r.sessionTemperature,
         sessionReasoningEffort: r.sessionReasoningEffort,
         persona: r.persona,
+        executionMode: r.executionMode,
         history: r.historyMode,
         clientExec: r.clientExec,
         cancel: _cancel,

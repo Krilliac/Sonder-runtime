@@ -161,6 +161,33 @@ class WorkspaceNotice extends StatelessWidget {
     final hint = this.hint;
     final body = textTheme.bodyMedium?.copyWith(color: tokens.text);
     final buttons = [if (action != null) action!, ...actions];
+    final stackBadge = MediaQuery.sizeOf(context).width < 340 ||
+        MediaQuery.textScalerOf(context).scale(1.0) > 1.25;
+    final badge = Text('${kind.glyph} $kindWord',
+        style: tokens.mono(13,
+            color: kind.color(tokens),
+            height: 22,
+            weight: kind.role == StatusRole.danger
+                ? FontWeight.w600
+                : FontWeight.w500));
+    final messageColumn = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(title, style: body),
+          if (detail != null && detail.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: SonderSpace.xxs),
+              child: Text(detail,
+                  style: textTheme.bodyMedium?.copyWith(color: tokens.text2)),
+            ),
+          if (hint != null && hint.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: SonderSpace.xxs),
+              child: Text('${SonderStrings.hintLabel} $hint',
+                  style: textTheme.bodySmall?.copyWith(color: tokens.muted)),
+            ),
+        ]);
     return Semantics(
         container: true,
         liveRegion: liveRegion,
@@ -181,47 +208,30 @@ class WorkspaceNotice extends StatelessWidget {
                 Semantics(
                   label: semanticsLabel,
                   excludeSemantics: true,
-                  child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.baseline,
-                      textBaseline: TextBaseline.alphabetic,
-                      children: [
-                        // Titles start in one column for the common words,
-                        // like the REPL's column 11, so a run of notices
-                        // reads as a list.
-                        ConstrainedBox(
-                          constraints: const BoxConstraints(minWidth: 84),
-                          child: Text('${kind.glyph} $kindWord',
-                              style: tokens.mono(13,
-                                  color: kind.color(tokens),
-                                  height: 22,
-                                  weight: kind.role == StatusRole.danger
-                                      ? FontWeight.w600
-                                      : FontWeight.w500)),
-                        ),
-                        const SizedBox(width: SonderSpace.snug),
-                        Expanded(
-                            child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                              Text(title, style: body),
-                              if (detail != null && detail.isNotEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.only(top: SonderSpace.xxs),
-                                  child: Text(detail,
-                                      style: textTheme.bodyMedium
-                                          ?.copyWith(color: tokens.text2)),
-                                ),
-                              if (hint != null && hint.isNotEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.only(top: SonderSpace.xxs),
-                                  child: Text(
-                                      '${SonderStrings.hintLabel} $hint',
-                                      style: textTheme.bodySmall
-                                          ?.copyWith(color: tokens.muted)),
-                                ),
-                            ])),
-                      ]),
+                  child: stackBadge
+                      ? Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            badge,
+                            const SizedBox(height: SonderSpace.xxs),
+                            messageColumn,
+                          ],
+                        )
+                      : Row(
+                          crossAxisAlignment: CrossAxisAlignment.baseline,
+                          textBaseline: TextBaseline.alphabetic,
+                          children: [
+                            // Titles start in one column for the common words,
+                            // like the REPL's column 11, so a run of notices
+                            // reads as a list.
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(minWidth: 84),
+                              child: badge,
+                            ),
+                            const SizedBox(width: SonderSpace.snug),
+                            Expanded(child: messageColumn),
+                          ]),
                 ),
                 if (buttons.isNotEmpty)
                   Padding(
