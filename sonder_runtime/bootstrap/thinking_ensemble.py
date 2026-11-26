@@ -38,6 +38,10 @@ _DEFAULT_THINKING_TIMEOUT = 45
 _SOFT_ERRORS = (OSError, RuntimeError, ValueError, TypeError, LookupError, ModelCallError)
 
 
+AUTO_ENSEMBLE_OFFLOAD_ENV = "SONDER_AUTO_ENSEMBLE_OFFLOAD"
+_TRUE_TOKENS = frozenset({"1", "true", "yes", "on", "enabled"})
+
+
 def thinking_ensemble_enabled(environ: Mapping[str, str] | None = None) -> bool:
     """Return True unless explicitly disabled in process environment."""
     return _domain.thinking_ensemble_enabled(os.environ if environ is None else environ)
@@ -271,12 +275,9 @@ def deliberate_for_turn(
         with thinking_delegation_scope():
             bridge_fn = getattr(server, "_bridge_provider_for_tier", None)
             provider = bridge_fn(thinking_tier) if callable(bridge_fn) else None
-            ctx_mgr: Any = (
-                _provider_bridge.bind_rung(provider, thinking_tier)
-                if provider is not None
-                else contextlib.nullcontext()
-            )
-            with ctx_mgr:
+            # Always bind the thinking tier's own route (None clears any
+            # primary rung inherited from the caller, e.g. a local bridge).
+            with _provider_bridge.bind_rung(provider, thinking_tier):
                 _out, raw_msg = server._chat_request(
                     payload,
                     model=thinking_model,
@@ -368,8 +369,14 @@ def maybe_auto_ensemble_offload(
     fleet_synthesis: bool = False,
     check_reachable: Callable[[Any, str, str], bool] | None = None,
 ) -> str | None:
-    """Auto-ensemble non-learning ``code`` / ``security`` offloads with the bound thinking tier."""
+    """Opt-in auto-ensemble of non-learning ``code`` / ``security`` offloads.
+
+    Off unless ``SONDER_AUTO_ENSEMBLE_OFFLOAD`` is truthy, so the documented
+    plain ``learn=False`` offload (no footer, one generation) is the default.
+    """
     lane = str(tier or "").strip().lower()
+    if str(os.environ.get(AUTO_ENSEMBLE_OFFLOAD_ENV, "") or "").strip().lower() not in _TRUE_TOKENS:
+        return None
     if (
         cloud
         or schema is not None
@@ -406,7 +413,7 @@ def maybe_auto_ensemble_offload(
                 ensemble_fn(
                     combined_prompt,
                     tiers=f"{lane},{thinking_tier}",
-                    mode="code" if lane == "code" else "prose",
+                    mode="prose",
                     num_predict=max(256, int(num_predict or 1024)),
                     num_ctx=int(num_ctx or 0),
                 )
@@ -415,6 +422,9 @@ def maybe_auto_ensemble_offload(
     except _SOFT_ERRORS as exc:
         _logger.debug("auto-ensemble offload skipped (%s + %s): %s", lane, thinking_tier, exc)
         return None
+    marker = answer.find("\n=== ENSEMBLE")
+    if marker >= 0:
+        answer = answer[:marker].rstrip()
     if not answer or has_legacy_error_prefix(answer):
         return None
     return answer

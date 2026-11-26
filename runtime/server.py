@@ -6157,7 +6157,7 @@ def offload(
     'code' tier is also memory-augmented; cloud tiers answer without augmentation
     but are still captured — so a paid frontier model's grounded wins become lessons and
     fine-tuning data for the local model. 'fast'/'general' (mechanical work) and
-    learn=False run the plain path: no capture, no footer, just text.
+    learn=False run the plain path: no capture, no footer, just text (unless the operator opts in to SONDER_AUTO_ENSEMBLE_OFFLOAD=1, which ensembles code/security with the bound thinking tier).
 
     Tiers: fast (default), code, general, optional reasoning/vision, and
     cloud-code / cloud-general (METERED, prompt leaves this machine). Each tier
