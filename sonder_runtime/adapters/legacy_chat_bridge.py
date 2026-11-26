@@ -29,7 +29,7 @@ from sonder_runtime.application.context import (
     current_operation_context,
     local_owner_context,
 )
-from sonder_runtime.domain.common.errors import SonderError
+from sonder_runtime.domain.common.errors import Cancelled, SonderError
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 
 _logger = logging.getLogger("sonder.server")
@@ -690,6 +690,123 @@ def endpoint_is_loopback(provider: str, graph: object) -> bool:
             probe = getattr(gateway, "endpoint_is_loopback", None)
             return callable(probe) and probe() is True
     return False
+
+
+def native_tools_supported(provider: str, graph: object) -> bool:
+    """``provider_bridge``'s native-tool capability probe for the live graph.
+
+    Fails closed without composing a graph when none exists yet or when no
+    ready ``sonder_inference`` gateway advertises native tools.
+    """
+    if str(provider or "").strip().lower() != "sonder_inference":
+        return False
+    gateway = _find_sonder_inference_gateway(graph)
+    if gateway is None:
+        return False
+    probe = getattr(gateway, "supports_native_tools", None)
+    if not callable(probe):
+        return False
+    try:
+        return bool(probe())
+    except Cancelled:
+        raise
+    except Exception:
+        return False
+
+
+def resolve_local_tier_health(
+    tier_models: Mapping[str, str],
+    *,
+    graph: object = None,
+    pool: object = None,
+    now: float | None = None,
+) -> dict[str, dict[str, object]]:
+    """Build advisory per-tier health/latency hints from local runtime state.
+
+    Zero network I/O: combines durable ``fanout_store`` model cooldowns,
+    in-process ``activity_tracker`` latency/error measurements, and cached
+    ``sonder_inference`` readiness snapshots when present.  Fails open (omits
+    entries) rather than stalling or breaking chat turns.
+    """
+    del pool
+    if not tier_models:
+        return {}
+    from .observability import activity_tracker
+    from .persistence import fanout_store
+
+    current_ts = time.time() if now is None else float(now)
+    try:
+        recent_metrics = activity_tracker.recent_model_metrics()
+    except Exception:
+        recent_metrics = {}
+    cached_gateway_state = ""
+    cached_gateway_reason = ""
+    inf_gw = _find_sonder_inference_gateway(graph)
+    if inf_gw is not None:
+        cached_snap = getattr(inf_gw, "_health_cache", None)
+        if cached_snap is not None and getattr(cached_snap, "state", "") == "unavailable":
+            cached_gateway_state = "unavailable"
+            cached_gateway_reason = str(getattr(cached_snap, "detail", "") or "sonder-inference unavailable")
+
+    hints: dict[str, dict[str, object]] = {}
+    for raw_tier, raw_model in tier_models.items():
+        tier = str(raw_tier or "").strip().lower()
+        model = str(raw_model or "").strip()
+        if not tier or not model:
+            continue
+        available = True
+        healthy = True
+        latency_ms: float | None = None
+        error_rate = 0.0
+        reasons: list[str] = []
+
+        try:
+            stored = fanout_store.get_model_health(model)
+        except Exception:
+            stored = None
+        if isinstance(stored, Mapping):
+            disabled_until = stored.get("disabled_until")
+            try:
+                if disabled_until is not None and float(disabled_until) > current_ts:
+                    available = False
+                    healthy = False
+                    reasons.append(str(stored.get("last_error") or "health cooldown active"))
+            except (TypeError, ValueError):
+                pass
+            try:
+                avail_failures = int(stored.get("availability_failure_count") or 0)
+            except (TypeError, ValueError):
+                avail_failures = 0
+            if avail_failures >= 3 and healthy:
+                healthy = False
+                reasons.append(str(stored.get("last_error") or "repeated availability failures"))
+
+        metric = recent_metrics.get(model) or recent_metrics.get(model[:120])
+        if isinstance(metric, Mapping):
+            raw_lat = metric.get("latency_ms")
+            if isinstance(raw_lat, (int, float)) and not isinstance(raw_lat, bool):
+                latency_ms = float(raw_lat)
+            raw_err = metric.get("error_rate")
+            if isinstance(raw_err, (int, float)) and not isinstance(raw_err, bool):
+                error_rate = max(0.0, float(raw_err))
+
+        if cached_gateway_state == "unavailable" and provider_for_tier(tier, False, graph) == "sonder_inference":
+            available = False
+            healthy = False
+            reasons.append(cached_gateway_reason)
+
+        entry: dict[str, object] = {
+            "available": available,
+            "healthy": healthy,
+            "error_rate": error_rate,
+        }
+        if latency_ms is not None:
+            entry["latency_ms"] = latency_ms
+        clean_reason = "; ".join(part.strip() for part in reasons if part and part.strip())
+        if clean_reason:
+            entry["reason"] = clean_reason[:160]
+        hints[tier] = entry
+    return hints
 
 
 def prompt_identity_model(model: str, tier_label: object, provider: str | None,

@@ -13,7 +13,7 @@ import json
 import os
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -23,6 +23,7 @@ from sonder_runtime.application.routing.execution_mode_service import (
     VALID_EXECUTION_MODES,
     check_execution_mode,
     plan_chat_execution_mode,
+    route_summary_line,
 )
 from sonder_runtime.application.routing.long_context_overflow import (
     notice_scope as overflow_notice_scope,
@@ -73,6 +74,13 @@ class ChatTurnDeps:
     run_natural_fanout: Callable[[dict[str, Any]], Any]
     run_natural_ensemble: Callable[[dict[str, Any], str], Any]
     resolve_local_tier_models: Callable[[], dict[str, str]] | None = None
+    resolve_tier_health: Callable[[Mapping[str, str]], Any] | None = None
+
+
+def _sanitize_header_value(value: object) -> str:
+    """Collapse control characters and newlines before placing a value in HTTP headers."""
+    cleaned = "".join(" " if ord(ch) < 32 or ord(ch) == 127 else ch for ch in str(value or ""))
+    return " ".join(cleaned.split())
 
 
 def _split_tier_labels(raw: object) -> list[str]:
@@ -621,6 +629,7 @@ def handle_chat_completions(
     content: Any = ""
     web_routed = False
     execution_routed = False
+    handler._execution_route_headers = None
     turn: Any = None
     response_iid: str | None = None
     response_reasoning = ""
@@ -876,12 +885,41 @@ def handle_chat_completions(
                                 )[0]
                                 if target_model:
                                     resolved_tier_models[str(tier_name)] = str(target_model)
+                    resolved_tier_health: Any = None
+                    if deps.resolve_tier_health is not None:
+                        try:
+                            resolved_tier_health = deps.resolve_tier_health(dict(resolved_tier_models))
+                        except Exception:
+                            logger.debug("resolve_tier_health failed; routing without health hints", exc_info=True)
+                            resolved_tier_health = None
+                    else:
+                        health_resolver = getattr(runtime, "_resolve_local_tier_health", None)
+                        if callable(health_resolver):
+                            try:
+                                resolved_tier_health = health_resolver(dict(resolved_tier_models))
+                            except Exception:
+                                logger.debug("_resolve_local_tier_health failed; routing without health hints", exc_info=True)
+                                resolved_tier_health = None
+                        else:
+                            legacy_bridge = getattr(runtime, "_legacy_chat_bridge", None)
+                            bridge_health_fn = getattr(legacy_bridge, "resolve_local_tier_health", None)
+                            if callable(bridge_health_fn):
+                                try:
+                                    resolved_tier_health = bridge_health_fn(
+                                        dict(resolved_tier_models),
+                                        graph=getattr(runtime, "_APP_GRAPH", None),
+                                        pool=getattr(runtime, "OLLAMA_POOL", None),
+                                    )
+                                except Exception:
+                                    logger.debug("legacy_chat_bridge.resolve_local_tier_health failed; routing without health hints", exc_info=True)
+                                    resolved_tier_health = None
                     candidate_decision = plan_chat_execution_mode(
                         prompt,
                         tier_models=resolved_tier_models,
                         developer_authorized=bool(serve_mod._developer_authorized(context)),
                         has_image=has_request_image,
                         structured_output=False,
+                        tier_health=resolved_tier_health,
                         explicit_model_pin=not allow_control_routes,
                         requested_mode=request_execution_mode,
                         env=os.environ,
@@ -1036,6 +1074,23 @@ def handle_chat_completions(
                         if reply.status == "unknown"
                         else reply.text or "Work was not started."
                     )
+                if execution_decision is not None:
+                    route_summary = _sanitize_header_value(route_summary_line(execution_decision))
+                    logger.info(f"execution route: {route_summary}")
+                    handler._execution_route_headers = (
+                        {"X-Sonder-Execution-Route": route_summary}
+                        if route_summary
+                        else None
+                    )
+                    record_event_fn = getattr(runtime.activity_tracker, "record_event", None)
+                    if callable(record_event_fn):
+                        record_event_fn(
+                            "execution_route",
+                            summary=route_summary,
+                            mode=execution_decision.mode,
+                            band=execution_decision.band,
+                            auto_selected=execution_decision.auto_selected,
+                        )
                 if structured_schema is None and reply is not None:
                     if isinstance(reply, str) and "(/v1/generated-models/" in reply:
                         req_host = (handler.headers.get("Host") or "").strip()
@@ -1563,6 +1618,12 @@ def send_stream(
             getattr(handler, "_spanda_headers", None) or {}
         ).items():
             handler.send_header(str(spanda_name), str(spanda_value))
+        for route_name, route_value in (
+            getattr(handler, "_execution_route_headers", None) or {}
+        ).items():
+            clean_val = _sanitize_header_value(route_value)
+            if clean_val:
+                handler.send_header(str(route_name), clean_val)
         handler.send_header("Connection", "close")
         handler.close_connection = True
         handler.end_headers()
@@ -1631,6 +1692,12 @@ def begin_early_stream(
         handler.send_header("X-Sonder-Elapsed-Ms", str(max(0, elapsed_ms)))
         if getattr(handler, "_correlation_id", ""):
             handler.send_header("X-Sonder-Correlation-Id", handler._correlation_id)
+        for route_name, route_value in (
+            getattr(handler, "_execution_route_headers", None) or {}
+        ).items():
+            clean_val = _sanitize_header_value(route_value)
+            if clean_val:
+                handler.send_header(str(route_name), clean_val)
         handler.send_header("Connection", "close")
         handler.end_headers()
         write(KEEPALIVE_FRAME)
