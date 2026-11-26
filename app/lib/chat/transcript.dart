@@ -16,6 +16,7 @@ import '../workspace_ui.dart'
 import 'backend.dart';
 import 'classify.dart';
 import 'controller.dart';
+import 'execution_route_badge.dart';
 import 'live_line.dart';
 import 'refusal.dart';
 import 'route_overflow_chip.dart';
@@ -846,6 +847,13 @@ class _TranscriptTurnState extends State<TranscriptTurn> {
             Align(
               alignment: Alignment.centerLeft,
               child: RouteOverflowChip(overflow: m!.overflow!),
+            ),
+            const SizedBox(height: SonderSpace.sm),
+          ],
+          if (m?.executionRoute != null) ...[
+            Align(
+              alignment: Alignment.centerLeft,
+              child: ExecutionRouteBadge(route: m!.executionRoute!),
             ),
             const SizedBox(height: SonderSpace.sm),
           ],
