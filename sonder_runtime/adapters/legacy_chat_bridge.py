@@ -11,11 +11,15 @@ application graph), so a live reload of ``server.py`` never forks this state.
 """
 from __future__ import annotations
 
+from collections import OrderedDict, deque
+from collections.abc import Callable, Iterable, Mapping
 import dataclasses
 import logging
 import os
+import threading
 import time
-from typing import Callable
+from typing import cast
+import weakref
 from urllib.parse import urlsplit, urlunsplit
 
 from sonder_runtime.adapters.model_transport import ModelCallError
@@ -26,8 +30,556 @@ from sonder_runtime.application.context import (
     local_owner_context,
 )
 from sonder_runtime.domain.common.errors import SonderError
+from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 
 _logger = logging.getLogger("sonder.server")
+
+# Bounded TTL / single-flight cache for Sonder Inference model advertisement
+# lookups on the legacy chat hot path.  Warm hits never touch the network;
+# stale positive entries trigger a non-blocking single-flight background
+# refresh; cold or hard-expired misses coalesce onto one probe bounded by a
+# strict short wait budget so a slow or unreachable remote worker never stalls
+# chat turns.
+MODEL_PROBE_POSITIVE_TTL_SECONDS = 30.0
+MODEL_PROBE_NEGATIVE_TTL_SECONDS = 5.0
+MODEL_PROBE_STALE_TTL_SECONDS = 120.0
+MODEL_PROBE_WAIT_TIMEOUT_SECONDS = 0.5
+MODEL_PROBE_MAX_CACHE_ENTRIES = 128
+MODEL_PROBE_MAX_MODELS_PER_SCOPE = 2048
+MODEL_PROBE_MAX_INFLIGHT = 16
+_MODEL_PROBE_MAX_NAME_LENGTH = 256
+
+_ScopeKey = tuple[int, str, str, tuple[str, ...]]
+
+
+def _safe_url_origin(raw: object) -> str:
+    """Extract a credential-free ``scheme://host[:port]`` origin for keying/logs."""
+    if not isinstance(raw, str):
+        return ""
+    text = raw.strip()
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text)
+        port = parts.port
+    except ValueError:
+        return ""
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return ""
+    host = parts.hostname.lower()
+    if ":" in host:
+        host = "[%s]" % host
+    if port is not None:
+        host = "%s:%d" % (host, port)
+    return urlunsplit((parts.scheme.lower(), host, "", "", ""))
+
+
+def _extract_model_name(raw: object) -> str:
+    """Normalize a model entry (either a string id or a ``{"id": ...}`` mapping)."""
+    if isinstance(raw, Mapping):
+        raw = raw.get("id")
+    if not isinstance(raw, str):
+        return ""
+    text = raw.strip()
+    if not text or len(text) > _MODEL_PROBE_MAX_NAME_LENGTH:
+        return ""
+    return text
+
+
+def _iter_non_string(value: object) -> Iterable[object]:
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes, Mapping)):
+        return value
+    return ()
+
+
+def _gateway_probe_scope(gw: object) -> _ScopeKey:
+    """Derive a safe cache key scoped to gateway identity and configured endpoints.
+
+    Never reads or stores credentials, query parameters, or fragments.
+    """
+    endpoint_origin = ""
+    worker_origins: tuple[str, ...] = ()
+    settings_fn = getattr(gw, "settings", None)
+    if not callable(settings_fn):
+        settings_fn = getattr(gw, "_resolved_config", None)
+    if callable(settings_fn):
+        try:
+            config = settings_fn()
+        except Exception as exc:  # noqa: BLE001 - invalid/unready config still scopes safely
+            endpoint_origin = "(config-error:%s)" % type(exc).__name__
+        else:
+            display = getattr(config, "display_base_url", None)
+            raw_base = display or getattr(config, "base_url", "")
+            endpoint_origin = _safe_url_origin(raw_base)
+            raw_workers = getattr(config, "workers", None)
+            if isinstance(raw_workers, (list, tuple)):
+                origins: list[str] = []
+                for spec in raw_workers:
+                    raw_url = getattr(spec, "display_url", None) or getattr(spec, "url", "")
+                    origin = _safe_url_origin(raw_url)
+                    if origin:
+                        origins.append(origin)
+                worker_origins = tuple(sorted(set(origins)))
+    gw_type = "%s.%s" % (type(gw).__module__, type(gw).__qualname__)
+    return (id(gw), gw_type, endpoint_origin, worker_origins)
+
+
+def _gateway_identity_ref(
+    gw: object,
+) -> tuple[str, weakref.ReferenceType[object] | None]:
+    """Weak identity token preventing ``id(gw)`` reuse aliasing after GC."""
+    try:
+        return ("gw", weakref.ref(gw))
+    except TypeError:
+        pass
+    # Non-weakrefable test doubles (e.g. SimpleNamespace) often attach a unique
+    # callable directly on their instance ``__dict__``; track that callable
+    # weakly so GC'd namespaces cannot alias fresh ones at the same address.
+    # For ``__slots__`` classes with normal methods, ``getattr`` allocates an
+    # ephemeral bound ``MethodType`` whose weakref dies immediately — fall back
+    # to ``("none", None)`` so cache hits remain effective.
+    instance_dict = getattr(gw, "__dict__", None)
+    if isinstance(instance_dict, Mapping) and "unified_worker_status" in instance_dict:
+        unified = instance_dict["unified_worker_status"]
+        if callable(unified):
+            try:
+                return ("unified", weakref.ref(unified))
+            except TypeError:
+                pass
+    return ("none", None)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _CatalogEntry:
+    exact_cf: frozenset[str]
+    prefixes_cf: frozenset[str]
+    probed_ok: bool
+    updated_at: float
+    failed_at: float | None
+    ref_kind: str
+    ref: weakref.ReferenceType[object] | None
+
+    def matches_gateway(self, gw: object) -> bool:
+        if self.ref_kind == "gw":
+            return self.ref is not None and self.ref() is gw
+        if self.ref_kind == "unified":
+            return (
+                self.ref is not None
+                and self.ref() is getattr(gw, "unified_worker_status", None)
+            )
+        return True
+
+    def matches_model(self, wanted: str) -> bool:
+        if not self.probed_ok:
+            return False
+        wanted_cf = wanted.casefold()
+        if wanted_cf in self.exact_cf:
+            return True
+        if ":" not in wanted:
+            return wanted_cf in self.prefixes_cf
+        return False
+
+
+def _build_catalog_entry(
+    models: Iterable[str],
+    *,
+    probed_ok: bool,
+    updated_at: float,
+    failed_at: float | None,
+    ref_kind: str,
+    ref: weakref.ReferenceType[object] | None,
+) -> _CatalogEntry:
+    exact_cf = frozenset(item.casefold() for item in models if item)
+    prefixes_cf = frozenset(
+        item_cf.split(":", 1)[0] for item_cf in exact_cf if ":" in item_cf
+    )
+    return _CatalogEntry(
+        exact_cf=exact_cf,
+        prefixes_cf=prefixes_cf,
+        probed_ok=probed_ok,
+        updated_at=updated_at,
+        failed_at=failed_at,
+        ref_kind=ref_kind,
+        ref=ref,
+    )
+
+
+class _InFlightProbe:
+    __slots__ = ("done", "generation", "deadline", "timed_out", "entry", "worker")
+
+    def __init__(self, generation: int, deadline: float) -> None:
+        self.done = threading.Event()
+        self.generation = generation
+        self.deadline = deadline
+        self.timed_out = False
+        self.entry: _CatalogEntry | None = None
+        self.worker: threading.Thread | None = None
+
+
+def _probe_gateway_models(gw: object) -> tuple[tuple[str, ...], bool]:
+    """Probe ``gw`` for models advertised by ``sonder_inference`` workers or health.
+
+    Preserves the gateway's own endpoint-policy and security boundaries; never
+    opens raw sockets or logs credentials.
+    """
+    candidates: list[str] = []
+    seen_cf: set[str] = set()
+    status_ok = False
+    has_unhealthy_worker = False
+
+    def _add_model(raw: object) -> None:
+        name = _extract_model_name(raw)
+        if not name:
+            return
+        cf = name.casefold()
+        if cf in seen_cf or len(candidates) >= MODEL_PROBE_MAX_MODELS_PER_SCOPE:
+            return
+        seen_cf.add(cf)
+        candidates.append(name)
+
+    unified = getattr(gw, "unified_worker_status", None)
+    if callable(unified):
+        try:
+            status = unified()
+        except Exception as exc:  # noqa: BLE001 - probe failures become negative cache entries
+            _logger.debug(
+                "sonder_inference worker status probe failed: %s",
+                type(exc).__name__,
+            )
+            status = None
+        else:
+            if isinstance(status, Mapping):
+                status_ok = True
+                for row in _iter_non_string(status.get("workers")):
+                    if isinstance(row, Mapping) and row.get("source") == "sonder_inference_worker":
+                        if row.get("healthy") is False:
+                            has_unhealthy_worker = True
+                        for raw in _iter_non_string(row.get("models")):
+                            _add_model(raw)
+
+    if not candidates:
+        health_fn = getattr(gw, "health", None)
+        if callable(health_fn):
+            try:
+                snap = health_fn()
+            except Exception as exc:  # noqa: BLE001 - probe failures become negative cache entries
+                _logger.debug(
+                    "sonder_inference health probe failed: %s",
+                    type(exc).__name__,
+                )
+            else:
+                state = getattr(snap, "state", None)
+                doc = getattr(snap, "document", None)
+                if isinstance(doc, Mapping):
+                    for raw in _iter_non_string(doc.get("models")):
+                        _add_model(raw)
+                if state == "unavailable":
+                    status_ok = False
+                elif candidates or state in ("ready", "degraded", None):
+                    status_ok = True
+
+    if not candidates and has_unhealthy_worker:
+        status_ok = False
+    return tuple(candidates), status_ok
+
+
+class _ModelAdvertisementCache:
+    """Thread-safe bounded LRU TTL cache with single-flight background probes."""
+
+    def __init__(
+        self,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        positive_ttl_seconds: float = MODEL_PROBE_POSITIVE_TTL_SECONDS,
+        negative_ttl_seconds: float = MODEL_PROBE_NEGATIVE_TTL_SECONDS,
+        stale_ttl_seconds: float = MODEL_PROBE_STALE_TTL_SECONDS,
+        wait_timeout_seconds: float = MODEL_PROBE_WAIT_TIMEOUT_SECONDS,
+        max_entries: int = MODEL_PROBE_MAX_CACHE_ENTRIES,
+        max_inflight: int = MODEL_PROBE_MAX_INFLIGHT,
+    ) -> None:
+        if positive_ttl_seconds < 0.0 or negative_ttl_seconds < 0.0 or stale_ttl_seconds < 0.0:
+            raise ValueError("probe cache TTLs must be non-negative")
+        if wait_timeout_seconds <= 0.0:
+            raise ValueError("probe wait timeout must be positive")
+        if max_entries < 1 or max_inflight < 1:
+            raise ValueError("probe cache capacities must be at least 1")
+        self._monotonic = monotonic
+        self._positive_ttl_seconds = float(positive_ttl_seconds)
+        self._negative_ttl_seconds = float(negative_ttl_seconds)
+        self._stale_ttl_seconds = float(stale_ttl_seconds)
+        self._wait_timeout_seconds = float(wait_timeout_seconds)
+        self._max_entries = int(max_entries)
+        self._max_inflight = int(max_inflight)
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[_ScopeKey, _CatalogEntry] = OrderedDict()
+        self._inflight: dict[_ScopeKey, _InFlightProbe] = {}
+        self._generation = 0
+
+    @property
+    def size(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    @property
+    def inflight_count(self) -> int:
+        with self._lock:
+            self._reap_dead_inflight_locked()
+            return len(self._inflight)
+
+    def _reap_dead_inflight_locked(self) -> None:
+        """Evict flights whose started thread exited without invoking ``_run_probe``.
+
+        ``_ManagedThread.run()`` returns early without calling ``target`` if its
+        ``OwnedRuntimeThreads`` owner stops between ``start()`` and ``run()``.
+        """
+        dead_keys = [
+            key
+            for key, fl in self._inflight.items()
+            if fl.worker is not None and not fl.worker.is_alive() and not fl.done.is_set()
+        ]
+        for key in dead_keys:
+            fl = self._inflight.pop(key, None)
+            if fl is not None:
+                fl.done.set()
+
+    def reset(self) -> None:
+        """Clear all cached entries and detach any in-flight probes."""
+        with self._lock:
+            self._generation += 1
+            self._entries.clear()
+            stale_flights = list(self._inflight.values())
+            self._inflight.clear()
+        for flight in stale_flights:
+            flight.done.set()
+
+    def _put_entry_locked(self, scope_key: _ScopeKey, entry: _CatalogEntry) -> None:
+        self._entries[scope_key] = entry
+        self._entries.move_to_end(scope_key)
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
+
+    def _record_timeout_locked(
+        self,
+        scope_key: _ScopeKey,
+        existing: _CatalogEntry | None,
+        ref_kind: str,
+        ref: weakref.ReferenceType[object] | None,
+        now: float,
+    ) -> None:
+        if (
+            existing is not None
+            and existing.probed_ok
+            and now - existing.updated_at < self._stale_ttl_seconds
+        ):
+            updated = dataclasses.replace(existing, failed_at=now)
+        else:
+            updated = _CatalogEntry(
+                exact_cf=frozenset(),
+                prefixes_cf=frozenset(),
+                probed_ok=False,
+                updated_at=now,
+                failed_at=now,
+                ref_kind=ref_kind,
+                ref=ref,
+            )
+        self._put_entry_locked(scope_key, updated)
+
+    def _run_probe(
+        self,
+        scope_key: _ScopeKey,
+        gw: object,
+        ref_kind: str,
+        ref: weakref.ReferenceType[object] | None,
+        flight: _InFlightProbe,
+    ) -> None:
+        models: tuple[str, ...] = ()
+        probed_ok = False
+        try:
+            models, probed_ok = _probe_gateway_models(gw)
+        except Exception as exc:  # noqa: BLE001 - background probe must never raise
+            _logger.debug(
+                "sonder_inference background model probe failed: %s",
+                type(exc).__name__,
+            )
+            models = ()
+            probed_ok = False
+        finally:
+            finished_at = self._monotonic()
+            entry = _build_catalog_entry(
+                models,
+                probed_ok=probed_ok,
+                updated_at=finished_at,
+                failed_at=None if probed_ok else finished_at,
+                ref_kind=ref_kind,
+                ref=ref,
+            )
+            with self._lock:
+                flight.entry = entry
+                if self._inflight.get(scope_key) is flight:
+                    self._inflight.pop(scope_key, None)
+                if flight.generation == self._generation:
+                    self._put_entry_locked(scope_key, entry)
+            flight.done.set()
+            # Drop the strong reference only after inflight cleanup completes,
+            # so ``id(gw)`` cannot be reused while ``flight`` is active.
+            del gw
+
+    def _launch_probe_thread(
+        self,
+        scope_key: _ScopeKey,
+        gw: object,
+        ref_kind: str,
+        ref: weakref.ReferenceType[object] | None,
+        flight: _InFlightProbe,
+    ) -> bool:
+        with self._lock:
+            if flight.generation != self._generation:
+                return False
+        try:
+            thread_factory = cast("Callable[..., threading.Thread]", owned_runtime_thread)
+            worker = thread_factory(
+                target=self._run_probe,
+                args=(scope_key, gw, ref_kind, ref, flight),
+                name="sonder-bridge-model-probe",
+                daemon=True,
+            )
+            worker.start()
+            with self._lock:
+                flight.worker = worker
+            return True
+        except Exception as exc:  # noqa: BLE001 - thread startup failure degrades cleanly
+            _logger.debug(
+                "sonder_inference background model probe start refused: %s",
+                type(exc).__name__,
+            )
+            now = self._monotonic()
+            with self._lock:
+                if self._inflight.get(scope_key) is flight:
+                    self._inflight.pop(scope_key, None)
+                if flight.generation == self._generation:
+                    cur = self._entries.get(scope_key)
+                    if cur is not None and not cur.matches_gateway(gw):
+                        cur = None
+                    self._record_timeout_locked(scope_key, cur, ref_kind, ref, now)
+            flight.done.set()
+            return False
+
+    def advertises_model(self, gw: object, model_name: str) -> bool:
+        wanted = str(model_name or "").strip()
+        if not wanted or gw is None:
+            return False
+        scope_key = _gateway_probe_scope(gw)
+        ref_kind, ref = _gateway_identity_ref(gw)
+
+        start_bg: _InFlightProbe | None = None
+        flight: _InFlightProbe | None = None
+        start_new = False
+
+        with self._lock:
+            self._reap_dead_inflight_locked()
+            now = self._monotonic()
+            entry = self._entries.get(scope_key)
+            if entry is not None and not entry.matches_gateway(gw):
+                self._entries.pop(scope_key, None)
+                entry = None
+
+            if entry is not None:
+                self._entries.move_to_end(scope_key)
+                if entry.matches_model(wanted):
+                    age = now - entry.updated_at
+                    if age < self._positive_ttl_seconds:
+                        return True
+                    if age < self._stale_ttl_seconds:
+                        in_cooldown = (
+                            entry.failed_at is not None
+                            and now - entry.failed_at < self._negative_ttl_seconds
+                        )
+                        if (
+                            not in_cooldown
+                            and scope_key not in self._inflight
+                            and len(self._inflight) < self._max_inflight
+                        ):
+                            start_bg = _InFlightProbe(
+                                self._generation,
+                                now + self._wait_timeout_seconds,
+                            )
+                            self._inflight[scope_key] = start_bg
+                    # Fall through past stale_ttl_seconds to bounded single-flight probe.
+                else:
+                    neg_anchor = (
+                        entry.updated_at
+                        if entry.failed_at is None
+                        else max(entry.updated_at, entry.failed_at)
+                    )
+                    if now - neg_anchor < self._negative_ttl_seconds:
+                        return False
+
+            if start_bg is None and (
+                entry is None
+                or not entry.matches_model(wanted)
+                or now - entry.updated_at >= self._stale_ttl_seconds
+            ):
+                existing_flight = self._inflight.get(scope_key)
+                if existing_flight is not None:
+                    if existing_flight.timed_out or existing_flight.deadline <= now:
+                        existing_flight.timed_out = True
+                        self._record_timeout_locked(scope_key, entry, ref_kind, ref, now)
+                        return False
+                    flight = existing_flight
+                else:
+                    if len(self._inflight) >= self._max_inflight:
+                        self._record_timeout_locked(scope_key, entry, ref_kind, ref, now)
+                        return False
+                    flight = _InFlightProbe(
+                        self._generation,
+                        now + self._wait_timeout_seconds,
+                    )
+                    self._inflight[scope_key] = flight
+                    start_new = True
+
+        # Non-blocking background refresh for stale-while-revalidate positive hit.
+        if flight is None:
+            if start_bg is not None:
+                self._launch_probe_thread(scope_key, gw, ref_kind, ref, start_bg)
+            return True
+
+        if start_new:
+            if not self._launch_probe_thread(scope_key, gw, ref_kind, ref, flight):
+                return False
+
+        remaining = min(
+            self._wait_timeout_seconds,
+            max(0.0, flight.deadline - self._monotonic()),
+        )
+        flight.done.wait(timeout=remaining)
+
+        with self._lock:
+            if flight.done.is_set() and flight.entry is not None:
+                return flight.entry.matches_model(wanted)
+            if (
+                flight.worker is not None
+                and not flight.worker.is_alive()
+                and not flight.done.is_set()
+            ):
+                if self._inflight.get(scope_key) is flight:
+                    self._inflight.pop(scope_key, None)
+                flight.done.set()
+            flight.timed_out = True
+            if flight.generation == self._generation:
+                timeout_now = self._monotonic()
+                cur = self._entries.get(scope_key)
+                if cur is not None and not cur.matches_gateway(gw):
+                    cur = None
+                self._record_timeout_locked(scope_key, cur, ref_kind, ref, timeout_now)
+            return False
+
+
+_MODEL_ADVERTISEMENT_CACHE = _ModelAdvertisementCache()
+
+
+def reset_model_advertisement_cache() -> None:
+    """Clear the cached ``sonder_inference`` model advertisement probes (for tests/reloads)."""
+    _MODEL_ADVERTISEMENT_CACHE.reset()
 
 
 def provider_bindings(graph: object) -> object:
@@ -45,73 +597,47 @@ def provider_bindings(graph: object) -> object:
         raise ModelCallError("configuration", str(exc), status=503) from exc
 
 
-def _sonder_inference_advertises_model(graph: object, model_name: str) -> bool:
-    """Return True when the graph's ``sonder_inference`` gateway advertises ``model_name``."""
-    from collections.abc import Mapping
-
-    wanted = str(model_name or "").strip()
-    if not wanted or graph is None:
-        return False
+def _find_sonder_inference_gateway(graph: object) -> object | None:
+    """Locate the ``sonder_inference`` gateway (exposing ``unified_worker_status``)."""
+    if graph is None:
+        return None
     root_gw = getattr(graph, "model_gateway", None)
     if root_gw is None:
-        return False
+        return None
     seen: set[int] = set()
-    queue: list[object] = [root_gw]
-    gw = None
+    queue: deque[object] = deque([root_gw])
     while queue:
-        cand = queue.pop(0)
+        cand = queue.popleft()
         if cand is None or id(cand) in seen:
             continue
         seen.add(id(cand))
         if callable(getattr(cand, "unified_worker_status", None)):
-            gw = cand
-            break
+            return cand
         for map_attr in ("providers", "_providers"):
             providers = getattr(cand, map_attr, None)
             if isinstance(providers, Mapping):
                 preferred = providers.get("sonder_inference")
                 if preferred is not None:
-                    queue.insert(0, preferred)
-                for k, v in providers.items():
-                    if k != "sonder_inference":
-                        queue.append(v)
+                    queue.appendleft(preferred)
+                for key, value in providers.items():
+                    if key != "sonder_inference":
+                        queue.append(value)
         for attr in ("primary", "_primary", "fallback", "_fallback", "_gateway", "gateway"):
             nested = getattr(cand, attr, None)
             if nested is not None:
                 queue.append(nested)
+    return None
+
+
+def _sonder_inference_advertises_model(graph: object, model_name: str) -> bool:
+    """Return True when the graph's ``sonder_inference`` gateway advertises ``model_name``."""
+    wanted = str(model_name or "").strip()
+    if not wanted or graph is None:
+        return False
+    gw = _find_sonder_inference_gateway(graph)
     if gw is None:
         return False
-    candidates: list[str] = []
-    try:
-        status = gw.unified_worker_status()
-    except Exception:
-        status = None
-    if isinstance(status, Mapping):
-        for row in status.get("workers") or ():
-            if isinstance(row, Mapping) and row.get("source") == "sonder_inference_worker":
-                for raw in row.get("models") or ():
-                    text = str(raw or "").strip()
-                    if text:
-                        candidates.append(text)
-    if not candidates:
-        try:
-            snap = gw.health()
-            doc = getattr(snap, "document", None)
-            if isinstance(doc, Mapping):
-                for raw in doc.get("models") or ():
-                    text = str(raw or "").strip()
-                    if text:
-                        candidates.append(text)
-        except Exception:
-            pass
-    wanted_cf = wanted.casefold()
-    for item in candidates:
-        if item.casefold() == wanted_cf:
-            return True
-    if ":" not in wanted:
-        prefix = wanted_cf + ":"
-        return any(item.casefold().startswith(prefix) for item in candidates)
-    return False
+    return _MODEL_ADVERTISEMENT_CACHE.advertises_model(gw, wanted)
 
 
 def provider_for_tier(tier_label: object, cloud: bool, graph: object) -> str | None:

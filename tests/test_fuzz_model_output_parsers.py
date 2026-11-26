@@ -69,6 +69,7 @@ from sonder_runtime.domain.security_eval.verdict import (
     parse_hypotheses,
     parse_verdict,
 )
+from tests._fuzz_timing import assert_scales_linearly, machine_unit, time_once
 
 pytestmark = pytest.mark.unit
 
@@ -105,7 +106,9 @@ class _Run:
 
     def call(self, fn, args: tuple, allowed: tuple, budget: float = 2.0):
         """Return ``(returned, value_or_error)``; ``returned`` is None when the call failed the contract."""
-        start = time.perf_counter()
+        # CPU time, not wall clock: sibling xdist workers on shared CI runners must not fail per-call budgets.
+        # On Windows process_time ticks in 15.6 ms steps, well below the 50 ms p99 and 100 ms blob budgets.
+        start = time.process_time()
         try:
             value = fn(*args)
             outcome = (True, value)
@@ -114,7 +117,7 @@ class _Run:
         except Exception as exc:  # noqa: BLE001 - the point is to catch any other type
             self.failures.append("%s raised %s: %.80s on %.200r" % (fn.__name__, type(exc).__name__, exc, args))
             return None, None
-        elapsed = time.perf_counter() - start
+        elapsed = time.process_time() - start
         self.timings.append(elapsed)
         if elapsed >= budget:
             self.failures.append("%s took %.0f ms (budget %.0f ms) on input of %d chars %.80r" % (
@@ -1102,6 +1105,41 @@ def test_check_reply_hostile_blobs_stay_in_budget():
     assert not run.failures, _where(run.failures)
 
 
+def test_check_reply_deep_nesting_is_bounded_and_linear():
+    """Python 3.14 on Linux (8 MB C stack) lets json.loads descend tens of thousands of brackets;
+    check_depth must reject deep nesting before json.loads in O(N) time."""
+    for text in (
+        "[" * BLOB,
+        "```json\n" + "[" * BLOB + "\n```",
+        "[" * 5000 + "]" * 5000,
+        '{"a":' * 5000 + "1" + "}" * 5000,
+    ):
+        outcome = check_reply(text, {})
+        assert outcome.kind == "invalid_json", outcome
+        assert any("nested too deeply" in err for err in outcome.errors), outcome.errors
+    for label, make in (
+        ("open-brackets", lambda n: "[" * n),
+        ("fenced-open-brackets", lambda n: "```json\n" + "[" * n + "\n```"),
+        ("nested-objects", lambda n: '{"a":' * (n // 5)),
+    ):
+        _assert_scales_linearly(
+            lambda raw: check_reply(raw, {}),
+            make(BLOB),
+            make(BLOB * SCALE_FACTOR),
+            BLOB_BUDGET,
+        )
+        assert label  # keep loop variable exercised for diagnostics
+
+
+def test_extract_agent_json_deep_balanced_nesting_is_bounded():
+    """Deep balanced JSON must be rejected with ValueError before json.loads recurses into it."""
+    for text in ("[" * BLOB, '{"a":' * 5000 + "1" + "}" * 5000):
+        with pytest.raises(ValueError):
+            extract_agent_json(text)
+    # Prose containing deep brackets before a valid decision object still recovers the object.
+    assert extract_agent_json("[" * 500 + ' {"tool": "status", "args": {}}') == {"tool": "status", "args": {}}
+
+
 # --------------------------------------------------------------------------- computer_use.rules
 
 _MODIFIERS = ("ctrl", "alt", "shift")
@@ -1500,10 +1538,12 @@ def test_strip_think_matches_the_regex_reference_on_random_fragment_strings():
 def test_strip_think_long_opener_run_after_a_closed_block_is_linear():
     from sonder_runtime.domain.security_eval.verdict import _strip_think
 
-    text = "<think></think>x" + "<think>" * 200_000
-    started = time.perf_counter()
-    assert _strip_think(text) == "x"
-    assert time.perf_counter() - started < BLOB_BUDGET
+    small = "<think></think>x" + "<think>" * 50_000
+    big = "<think></think>x" + "<think>" * 200_000
+    assert _strip_think(small) == "x"
+    assert _strip_think(big) == "x"
+    unit = _machine_unit()
+    _assert_scales_linearly(_strip_think, small, big, max(BLOB_BUDGET, 30 * unit), cap_check=False)
 
 
 def test_scanner_skips_implausible_openers_without_spending_the_failure_cap():
@@ -1529,38 +1569,23 @@ def _best_time(fn, blob: str, repeats: int = 3) -> float:
 
 
 def _time_once(fn, blob: str) -> float:
-    started = time.perf_counter()
-    try:
-        fn(blob)
-    except VerdictParseError:
-        pass
-    return time.perf_counter() - started
+    return time_once(fn, blob, ignore_errors=(VerdictParseError, ValueError))
 
 
-def _assert_scales_linearly(fn, small_blob: str, big_blob: str, budget: float) -> None:
-    """The cost on ``big_blob`` must grow roughly with its size relative to ``small_blob``, and ``small_blob`` must be in budget.
-
-    Small and big timings are interleaved and the running minima kept over up to three rounds (3, 5, 8 repeats); the
-    check passes at the first round whose ratio is under the limit, so scheduler noise cannot fail it but a real
-    quadratic (x16 here) stays above the limit in every round.
-    """
-    assert len(big_blob) >= 3 * len(small_blob)
-    if fn is not parse_critique:
+def _assert_scales_linearly(fn, small_blob: str, big_blob: str, budget: float, *, cap_check: bool = True) -> None:
+    """The cost on ``big_blob`` must grow roughly with its size relative to ``small_blob``, and ``small_blob`` must be in budget."""
+    if cap_check and fn in (parse_verdict, parse_hypotheses):
         # past the cap the input is truncated and the ratio would be vacuous
         assert len(big_blob) <= MAX_TEXT_CHARS, "blob of %d chars is past MAX_TEXT_CHARS" % len(big_blob)
-    small = big = float("inf")
-    ratio = 0.0
-    for repeats in (3, 5, 8):
-        for _ in range(repeats):
-            small = min(small, _time_once(fn, small_blob))
-            big = min(big, _time_once(fn, big_blob))
-        ratio = big / max(small, 1e-3)
-        if ratio < SCALE_RATIO_LIMIT:
-            break
-    factor = round(len(big_blob) / len(small_blob))
-    assert ratio < SCALE_RATIO_LIMIT, "%s: x%d input cost x%.1f (%.0f ms -> %.0f ms), super-linear on %.12r" % (
-        fn.__name__, factor, ratio, small * 1000, big * 1000, small_blob)
-    assert small < budget, "%s took %.0f ms (budget %.0f ms) on %.12r" % (fn.__name__, small * 1000, budget * 1000, small_blob)
+    assert_scales_linearly(
+        fn,
+        small_blob,
+        big_blob,
+        label=f"{fn.__name__} on {small_blob[:12]!r}",
+        ratio_limit=SCALE_RATIO_LIMIT,
+        small_budget_s=budget,
+        ignore_errors=(VerdictParseError, ValueError),
+    )
 
 
 _OPENER_RUN_SHAPES = {
@@ -1578,6 +1603,18 @@ def test_scanner_opener_runs_stay_in_budget(shape):
     for fn in (parse_verdict, parse_hypotheses, parse_critique):
         budget = BLOB_BUDGET if fn is parse_critique else SCANNER_BLOB_BUDGET
         _assert_scales_linearly(fn, make(BLOB), make(BLOB * SCALE_FACTOR), budget)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param(lambda n: '{"a":' * (n // 5), id="nested-objects"),
+        pytest.param(lambda n: '{"a":' * (n // 5) + "}", id="nested-objects-trailing-close"),
+    ],
+)
+def test_parse_critique_nested_objects_scale_linearly(shape):
+    unit = _machine_unit()
+    _assert_scales_linearly(parse_critique, shape(BLOB), shape(BLOB * SCALE_FACTOR), max(BLOB_BUDGET, 25 * unit))
 
 
 @pytest.mark.parametrize("name", sorted(_scaled_blobs(70)))
@@ -1609,15 +1646,7 @@ def test_scaling_check_detects_a_fence_quadratic(monkeypatch):
 
 
 def _machine_unit() -> float:
-    """Seconds one fixed pure-Python loop takes on this machine: the yardstick that makes a budget machine-relative."""
-    best = float("inf")
-    for _ in range(5):
-        started = time.perf_counter()
-        total = 0
-        for index in range(200_000):
-            total += index & 3
-        best = min(best, time.perf_counter() - started)
-    return best
+    return machine_unit()
 
 
 # Linear scanning costs up to ~7 machine units on these blobs (a loop of 200k additions is one unit, ~4 ms here);
