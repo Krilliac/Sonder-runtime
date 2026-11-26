@@ -110,6 +110,7 @@ MCP_TOOL_MANIFEST = {
     "record_outcome": "Feed grounded outcomes back into learning.",
     "sonder_stats/sonder_sessions/sonder_remember_fact/sonder_forget_fact": "Memory observability and durable facts.",
     "playbook_note/playbook_read": "Write proposed owner-curated Markdown playbook notes or read approved topic entries.",
+    "scratchpad_read/scratchpad_write/scratchpad_delete": "Read, list, search, write/append, or delete owner-scoped restart-persistent free-form Markdown scratchpad notes.",
 }
 
 

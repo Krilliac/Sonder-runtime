@@ -4006,6 +4006,95 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "scratchpad_delete",
+      "surfaces": {
+        "cli": "scratchpad_delete",
+        "client": "scratchpad_delete",
+        "mcp": "scratchpad_delete",
+        "openai": "scratchpad_delete"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_lines": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "start_line": {
+            "type": "integer"
+          },
+          "tag": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "scratchpad_read",
+      "surfaces": {
+        "cli": "scratchpad_read",
+        "client": "scratchpad_read",
+        "mcp": "scratchpad_read",
+        "openai": "scratchpad_read"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "replace",
+              "append"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "scratchpad_write",
+      "surfaces": {
+        "cli": "scratchpad_write",
+        "client": "scratchpad_write",
+        "mcp": "scratchpad_write",
+        "openai": "scratchpad_write"
+      }
+    },
+    {
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
           "extra_roots": {
             "type": "string"
           },
