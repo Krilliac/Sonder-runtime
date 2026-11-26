@@ -258,12 +258,53 @@ def _format_captured_stream(sink, total_bytes, limit=MAX_OUTPUT):
     return head + "\n... [trimmed %d bytes] ...\n" % (total_bytes - limit) + tail
 
 
+# Characters cmd.exe interprets in a batch file's command line. CreateProcess
+# runs a .cmd/.bat through cmd.exe, which re-parses arguments ("BatBadBut");
+# subprocess quoting does not escape for those, so an unsafe character could run
+# a second command.
+_BATCH_UNSAFE_ARGUMENT = re.compile(r'["%!^&|<>()\r\n]')
+
+
+def _windows_executable(cmd):
+    """``cmd`` with a bare or path-prefixed program resolved via PATH and PATHEXT.
+
+    CreateProcess appends only ``.exe``, so ``npx``/``npm``/``pnpm``/``yarn``
+    (shipped as ``.cmd``) were not found without ``shutil.which``. Raises
+    ``ValueError`` when ``cmd`` is empty or when the target is a ``.cmd``/``.bat``
+    script and any argument contains a character ``cmd.exe`` would interpret.
+    """
+    if not cmd:
+        raise ValueError("command must not be empty")
+    first = str(cmd[0])
+    found = shutil.which(first) or first
+    if found.rstrip(" .").lower().endswith((".cmd", ".bat")):
+        for argument in cmd[1:]:
+            if _BATCH_UNSAFE_ARGUMENT.search(str(argument)):
+                raise ValueError(
+                    "refusing to run %s: argument %r holds a character cmd.exe would "
+                    "interpret in a batch file" % (first, str(argument))
+                )
+    return [found, *cmd[1:]]
+
+
 def _run(cmd, *, cwd, timeout=DEFAULT_TIMEOUT, stdin_bytes=b"", env=None):
     started = time.time()
+    if os.name == "nt":
+        try:
+            launch = _windows_executable(cmd)
+        except ValueError as exc:
+            return {
+                "ok": False, "returncode": -1, "timed_out": False,
+                "elapsed_ms": int((time.time() - started) * 1000),
+                "stdout": "", "stderr": str(exc),
+                "command": [str(c) for c in cmd],
+            }
+    else:
+        launch = list(cmd)
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
         proc = subprocess.Popen(
-            cmd,
+            launch,
             cwd=str(cwd),
             stdin=subprocess.PIPE if stdin_bytes else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -746,7 +787,9 @@ _LINT_TOOLS = {
     # Runtime-local fallbacks.  Do not resolve these through another venv or
     # assume a global executable: the interpreter running the harness owns the
     # import/module lookup.
-    "pyflakes": {"check": [sys.executable, "-m", "pyflakes"], "fix": None},
+    # -I: with cwd=root a project-local pyflakes.py would shadow the module and
+    # run under the runtime interpreter.
+    "pyflakes": {"check": [sys.executable, "-I", "-m", "pyflakes"], "fix": None},
     "py_compile": {"check": [sys.executable, "-I", "-m", "compileall", "-q"], "fix": None},
     "pylint": {"check": ["pylint"], "fix": None},
     "eslint": {"check": ["npx", "eslint"], "fix": ["npx", "eslint", "--fix"]},
@@ -786,8 +829,23 @@ _FORMATTERS = {
     "rubocop": ["rubocop", "-A"],
 }
 
+# Read-only check form of every supported formatter: ``check_only=True`` uses
+# this argv and never falls back to a writing command.
+_FORMATTER_CHECKS = {
+    "ruff": ["ruff", "format", "--check"],
+    "black": ["black", "--check"],
+    "prettier": ["npx", "prettier", "--check"],
+    "biome": ["npx", "@biomejs/biome", "format"],
+    "rustfmt": ["cargo", "fmt", "--check"],
+    "gofmt": ["gofmt", "-l"],
+    "clang-format": ["clang-format", "--dry-run", "--Werror"],
+    "dart": ["dart", "format", "--output=none", "--set-exit-if-changed"],
+    "dotnet": ["dotnet", "format", "--verify-no-changes"],
+}
+
 _TYPECHECKERS = {
-    "mypy": [sys.executable, "-m", "mypy"],
+    # -I: prevent a project-local mypy.py from shadowing python -m mypy.
+    "mypy": [sys.executable, "-I", "-m", "mypy"],
     "pyright": ["npx", "pyright"],
     "tsc": ["npx", "tsc", "--noEmit"],
     "dart": ["dart", "analyze"],
@@ -946,23 +1004,38 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
         refused = protected_write_scope.scope_refusal("format_code", root, root / path if path else root)
         if refused:
             return {"ok": False, "error": refused, "tool": tool, "mode": "format"}
-    cmd = list(cmd_template)
     if check_only:
-        if tool in ("ruff", "black"):
-            cmd.append("--check")
-        elif tool == "prettier":
-            cmd[-1] = "--check"
-        elif tool == "rustfmt":
-            cmd.append("--check")
-        elif tool == "dart":
-            cmd.extend(["--output=none", "--set-exit-if-changed"])
-        elif tool == "dotnet":
-            cmd.append("--verify-no-changes")
+        # The live-checkout and protected-scope guards above run only for writes,
+        # so check mode must never fall back to a writing formatter command.
+        check_template = _FORMATTER_CHECKS.get(tool)
+        if not check_template:
+            return {
+                "ok": False,
+                "error": "formatter has no check-only mode: %s" % tool,
+                "tool": tool,
+                "mode": "check",
+            }
+        cmd = list(check_template)
+    else:
+        cmd = list(cmd_template)
     if path:
         cmd.append(path)
-    elif tool in ("ruff", "black", "dart"):
+    elif tool in ("ruff", "black", "dart") or (check_only and tool in ("gofmt", "prettier", "biome")):
+        # ``gofmt -l``, ``prettier --check`` and ``biome format`` with no path
+        # read empty stdin or check nothing instead of walking the root.
         cmd.append(".")
+    elif check_only and tool == "clang-format":
+        # ``clang-format --dry-run`` has no directory mode and exits 0 on empty stdin.
+        return {
+            "ok": False,
+            "error": "path required: clang-format checks named files only",
+            "tool": tool,
+            "mode": "check",
+        }
     result = _run(cmd, cwd=root, timeout=timeout)
+    if check_only and tool == "gofmt" and result.get("ok") and result.get("stdout", "").strip():
+        # ``gofmt -l`` lists files needing formatting and still exits 0.
+        result["ok"] = False
     result["tool"] = tool
     result["mode"] = "check" if check_only else "format"
     return result
@@ -1069,6 +1142,70 @@ def _parse_and_validate_packages(packages_json, *, allow_empty=False):
     return cleaned, None
 
 
+_PROJECT_VENV_DIRECTORIES = (".venv", "venv")
+
+
+def _project_python(root):
+    """The interpreter of the project's own virtual environment under ``root``, or None.
+
+    Project ``pip`` commands must never target ``sys.executable`` (Sonder's own
+    interpreter). Only a real directory venv inside ``root`` with a real
+    ``pyvenv.cfg`` and real bin/Scripts dir that is not the runtime prefix
+    qualifies. The python binary itself may be a symlink on POSIX.
+    """
+    root = Path(root)
+    try:
+        runtime_prefix = Path(sys.prefix).resolve()
+    except OSError:
+        runtime_prefix = Path(sys.prefix)
+    runtime_key = os.path.normcase(str(runtime_prefix))
+    bin_dir_name = "Scripts" if os.name == "nt" else "bin"
+    exe_name = "python.exe" if os.name == "nt" else "python"
+    for name in _PROJECT_VENV_DIRECTORIES:
+        venv = root / name
+        try:
+            if file_ops.is_reparse_point(venv) or not venv.is_dir():
+                continue
+            real = venv.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not file_ops._is_inside(real, root) or os.path.normcase(str(real)) == runtime_key:
+            continue
+        cfg = venv / "pyvenv.cfg"
+        bin_dir = venv / bin_dir_name
+        if file_ops.is_reparse_point(cfg) or not cfg.is_file():
+            continue
+        if file_ops.is_reparse_point(bin_dir) or not bin_dir.is_dir():
+            continue
+        python = bin_dir / exe_name
+        if python.is_file():
+            return str(python)
+    return None
+
+
+def _project_pip(root):
+    """``([python, "-I", "-m", "pip"], None)`` for the project's venv, or ``(None, error)``."""
+    python = _project_python(root)
+    if python is None:
+        return None, {
+            "ok": False,
+            "error": "no project virtual environment (.venv or venv with pyvenv.cfg) under the root; "
+                     "refusing to run pip in the Sonder runtime's own interpreter",
+            "manager": "pip",
+        }
+    return [python, "-I", "-m", "pip"], None
+
+
+def _requirements_link_error(root):
+    """Return an error message if ``root/requirements.txt`` is a link escaping root, else None."""
+    req_path = Path(root) / "requirements.txt"
+    if file_ops.is_reparse_point(req_path) or (
+        req_path.exists() and _secret_scan_adapter.confined_path(req_path, Path(root)) is None
+    ):
+        return "refusing to read requirements.txt: it is a link or resolves outside the root"
+    return None
+
+
 def dependency_add(root=".", packages_json="[]", dev=False, timeout=60, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
@@ -1084,7 +1221,10 @@ def dependency_add(root=".", packages_json="[]", dev=False, timeout=60, extra_ro
 
     mgr = _detect_package_manager(root)
     if mgr == "pip":
-        cmd = [sys.executable, "-m", "pip", "install", "--"] + packages
+        pip, pip_err = _project_pip(root)
+        if pip_err:
+            return pip_err
+        cmd = pip + ["install", "--"] + packages
     elif mgr == "uv":
         cmd = ["uv", "add"] + (["--dev"] if dev else []) + ["--"] + packages
     elif mgr == "npm":
@@ -1131,7 +1271,10 @@ def dependency_remove(root=".", packages_json="[]", timeout=60, extra_roots=""):
 
     mgr = _detect_package_manager(root)
     if mgr == "pip":
-        cmd = [sys.executable, "-m", "pip", "uninstall", "-y", "--"] + packages
+        pip, pip_err = _project_pip(root)
+        if pip_err:
+            return pip_err
+        cmd = pip + ["uninstall", "-y", "--"] + packages
     elif mgr == "uv":
         cmd = ["uv", "remove", "--"] + packages
     elif mgr == "npm":
@@ -1176,10 +1319,16 @@ def dependency_update(root=".", packages_json="[]", timeout=120, extra_roots="")
 
     mgr = _detect_package_manager(root)
     if mgr == "pip":
+        pip, pip_err = _project_pip(root)
+        if pip_err:
+            return pip_err
         if packages:
-            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "--"] + packages
+            cmd = pip + ["install", "--upgrade", "--"] + packages
         else:
-            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "-r", "requirements.txt"]
+            req_err = _requirements_link_error(root)
+            if req_err:
+                return {"ok": False, "error": req_err, "manager": "pip"}
+            cmd = pip + ["install", "--upgrade", "-r", "requirements.txt"]
     elif mgr == "uv":
         cmd = ["uv", "lock", "--upgrade"]
     elif mgr == "npm":
@@ -1217,8 +1366,28 @@ def dependency_audit(root=".", timeout=60, extra_roots=""):
     timeout = _bounded_int(timeout, 60, 5, MAX_TIMEOUT)
     mgr = _detect_package_manager(root)
     if mgr == "pip":
-        cmd = [sys.executable, "-m", "pip", "audit"] if shutil.which("pip-audit") else [sys.executable, "-m", "pip", "check"]
-        result = _run(cmd, cwd=root, timeout=timeout)
+        # ``pip audit`` is not a pip command, and ``pip check`` audits Sonder's
+        # own runtime environment. Use ``pip-audit --no-deps --disable-pip`` on
+        # a confined ``requirements.txt`` so sdist build hooks never run here.
+        req_err = _requirements_link_error(root)
+        pip_audit = shutil.which("pip-audit")
+        if req_err:
+            result = {"ok": False, "error": req_err}
+        elif not pip_audit:
+            result = {"ok": False, "error": "pip-audit not installed; run: pip install pip-audit"}
+        elif (root / "requirements.txt").is_file():
+            result = _run(
+                [pip_audit, "-r", "requirements.txt", "--no-deps", "--disable-pip"],
+                cwd=root, timeout=timeout,
+            )
+        elif (root / "pyproject.toml").is_file():
+            result = {
+                "ok": False,
+                "error": "pip-audit audits a pyproject.toml only by installing its dependencies, "
+                         "which can run package build code; add a pinned requirements.txt",
+            }
+        else:
+            result = {"ok": False, "error": "no requirements.txt to audit"}
     elif mgr in ("npm", "pnpm", "yarn"):
         cmd = ["npm", "audit", "--json"] if mgr == "npm" else [mgr, "audit"]
         result = _run(cmd, cwd=root, timeout=timeout)
@@ -1346,7 +1515,9 @@ def git_checkout(root=".", ref="", timeout=10, extra_roots=""):
     refused = _live_refusal("git_checkout", root)
     if refused:
         return refused
-    return _run_git(root, ["checkout", ref], timeout=timeout)
+    # Trailing ``--`` forces git to treat ``ref`` as a tree-ish/branch rather than
+    # reverting working tree paths (for example ``git checkout .``).
+    return _run_git(root, ["checkout", ref, "--"], timeout=timeout)
 
 
 @_guarded_git_mutation("git_stash")
@@ -1620,23 +1791,72 @@ def build_clean(root=".", timeout=30, extra_roots=""):
 # Refactoring helpers
 # ---------------------------------------------------------------------------
 
+def _has_reparse_component(path, root):
+    """True when any component strictly below ``root`` is a symlink or junction."""
+    current = Path(path)
+    root_key = os.path.normcase(str(Path(root)))
+    while os.path.normcase(str(current)) != root_key and current.parent != current:
+        if file_ops.is_reparse_point(current):
+            return True
+        current = current.parent
+    return False
+
+
 def _refactor_source_files(root, glob):
-    """Yield ``(path, rel)`` for regular files the refactoring helpers read.
+    """Yield ``(path, rel)`` for regular files the refactoring helpers inspect.
 
     Dot-directories are skipped only BELOW the root.  Testing the absolute
     path skipped every file whenever the root itself had a dot-prefixed
     ancestor (``~/.claude/worktrees/...``), so both helpers matched nothing.
+    Reparse points (symlinks/junctions) below ``root`` are yielded before any
+    ``is_file``/``stat`` call so callers refuse or skip them without following.
     """
-    for path in root.glob(glob):
+    glob_text = str(glob or "").strip()
+    if not glob_text or any(ch in glob_text for ch in ("\0", "\r", "\n")):
+        return
+    glob_path = Path(glob_text)
+    if glob_path.is_absolute() or glob_text.startswith(("\\\\", "//")) or ".." in glob_path.parts:
+        return
+    for path in root.glob(glob_text):
         try:
             rel_path = path.relative_to(root)
         except ValueError:
             continue
         if any(part.startswith(".") for part in rel_path.parts):
             continue
-        if not path.is_file() or path.stat().st_size > 2_000_000:
+        if _has_reparse_component(path, root):
+            yield path, str(rel_path)
+            continue
+        try:
+            if not path.is_file() or path.stat().st_size > 2_000_000:
+                continue
+        except OSError:
             continue
         yield path, str(rel_path)
+
+
+def _protected_source(path, root):
+    """The real location of a refactoring source file it may read, else None.
+
+    Mirrors the file tools' read guard: reparse points, files resolving outside
+    ``root``, credential stores and protected secret/control-plane paths are
+    never read.
+    """
+    if _has_reparse_component(path, root):
+        return None
+    real = _secret_scan_adapter.confined_path(path, root)
+    if real is None:
+        return None
+    if (
+        file_ops.credential_read_component(path)
+        or file_ops.credential_read_component(real)
+        or file_ops.is_credential_store(path)
+        or file_ops.is_credential_store(real)
+    ):
+        return None
+    if file_ops._is_protected_read_path(path) or file_ops._is_protected_read_path(real):
+        return None
+    return real
 
 
 def _read_source(path):
@@ -1686,6 +1906,17 @@ def _apply_staged_rewrites(staged):
         raise
 
 
+def _rename_refusal(error, dry_run, old_name, new_name):
+    return {
+        "ok": False,
+        "error": error,
+        "dry_run": dry_run,
+        "old_name": old_name,
+        "new_name": new_name,
+        "files_changed": 0,
+    }
+
+
 def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=True, timeout=30, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not old_name or not new_name:
@@ -1697,8 +1928,23 @@ def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=Tr
     pattern = re.compile(r'\b' + re.escape(old_name) + r'\b')
 
     for path, rel in _refactor_source_files(root, glob):
+        # Enforce read guards before opening: skipping a protected file could
+        # leave a half-renamed tree or reveal which symbols it holds.
+        real = _protected_source(path, root)
+        if real is None:
+            if _has_reparse_component(path, root) or _secret_scan_adapter.confined_path(path, root) is None:
+                return _rename_refusal(
+                    "refusing to rename across %s: it is a link or lies outside the root; "
+                    "narrow the glob to exclude it" % rel,
+                    dry_run, old_name, new_name,
+                )
+            return _rename_refusal(
+                "refusing to rename: the glob reaches a credential store or a protected "
+                "secret/control-plane file; narrow the glob to exclude it",
+                dry_run, old_name, new_name,
+            )
         try:
-            content = _read_source(path)
+            content = _read_source(real)
         except (UnicodeDecodeError, OSError):
             continue
         matches = list(pattern.finditer(content))
@@ -1711,24 +1957,16 @@ def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=Tr
             line_no = content[:m.start()].count("\n") + 1
             line = content.splitlines()[line_no - 1].strip()
             preview.append({"file": rel, "line": line_no, "text": line})
-        staged.append((path, content, new_content))
+        staged.append((real, content, new_content))
 
     if not dry_run and staged:
         refused = protected_write_scope.files_refusal("rename_symbol", root, [path for path, _old, _new in staged])
         if refused:
-            return {"ok": False, "error": refused, "dry_run": dry_run, "old_name": old_name,
-                    "new_name": new_name, "files_changed": 0}
+            return _rename_refusal(refused, dry_run, old_name, new_name)
         try:
             _apply_staged_rewrites(staged)
         except OSError as exc:
-            return {
-                "ok": False,
-                "error": "rename failed and was rolled back: %s" % exc,
-                "dry_run": dry_run,
-                "old_name": old_name,
-                "new_name": new_name,
-                "files_changed": 0,
-            }
+            return _rename_refusal("rename failed and was rolled back: %s" % exc, dry_run, old_name, new_name)
 
     return {
         "ok": True,
@@ -1750,8 +1988,11 @@ def extract_references(root=".", symbol="", glob="**/*.py", timeout=30, extra_ro
     pattern = re.compile(r'\b' + re.escape(symbol) + r'\b')
     refs = []
     for path, rel in _refactor_source_files(root, glob):
+        real = _protected_source(path, root)
+        if real is None:
+            continue
         try:
-            content = path.read_text(encoding="utf-8")
+            content = real.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
         lines = content.splitlines()
@@ -1768,38 +2009,67 @@ def extract_references(root=".", symbol="", glob="**/*.py", timeout=30, extra_ro
 # Diff / patch helpers
 # ---------------------------------------------------------------------------
 
+
+def _prepare_diff_side(root, requested, label):
+    """Confine and read-guard one operand of ``diff_files`` before ``is_file``."""
+    text = str(requested or "").strip()
+    if not text:
+        return None, None, {"ok": False, "error": "both left and right paths are required"}
+    if any(ch in text for ch in ("\0", "\r", "\n")):
+        return None, None, {"ok": False, "error": "left and right must resolve inside the root directory"}
+    try:
+        file_ops._reject_network_path(text)
+    except PermissionError:
+        return None, None, {"ok": False, "error": "left and right must resolve inside the root directory"}
+    if file_ops._foreign_absolute(text):
+        return None, None, {"ok": False, "error": "left and right must resolve inside the root directory"}
+    candidate = Path(text)
+    joined = Path(os.path.normpath(str(candidate if candidate.is_absolute() else root / candidate)))
+    if joined != root and not file_ops._is_inside(joined, root):
+        return None, None, {"ok": False, "error": "left and right must resolve inside the root directory"}
+    if _has_reparse_component(joined, root):
+        return None, None, {"ok": False, "error": "left and right must resolve inside the root directory"}
+    try:
+        resolved = joined.resolve()
+        rel = resolved.relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return None, None, {"ok": False, "error": "left and right must resolve inside the root directory"}
+    if (
+        file_ops.credential_read_component(joined)
+        or file_ops.credential_read_component(resolved)
+        or file_ops._is_protected_read_path(joined)
+        or file_ops._is_protected_read_path(resolved)
+    ):
+        return None, None, {
+            "ok": False,
+            "error": "refusing to diff %s file %s: it is secret or control state" % (label, requested),
+        }
+    return resolved, rel, None
+
+
 def diff_files(root=".", left="", right="", context=3, timeout=10, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     if not left or not right:
         return {"ok": False, "error": "both left and right paths are required"}
-    left_path = (root / left).resolve()
-    right_path = (root / right).resolve()
+    context = _bounded_int(context, 3, 0, 1000)
+    timeout = _bounded_int(timeout, 10, 1, MAX_TIMEOUT)
+    left_path, left_rel, err = _prepare_diff_side(root, left, "left")
+    if err:
+        return err
+    right_path, right_rel, err = _prepare_diff_side(root, right, "right")
+    if err:
+        return err
     if not left_path.is_file():
         return {"ok": False, "error": "left file not found: %s" % left}
     if not right_path.is_file():
         return {"ok": False, "error": "right file not found: %s" % right}
-    # Pass the paths RELATIVE to root. `git diff --no-index` echoes whatever it
-    # is given into the `diff --git a/... b/...` header, so absolute arguments
-    # printed the operator's full host path -- where the project lives on disk,
-    # and the account name in it -- into every diff a confined agent read back.
-    # Resolving relative to the root also closes the hole this exposed: `left`
-    # and `right` were joined to the root and never checked, so `../..` walked
-    # straight out of it on any caller that does not go through the agent
-    # surface's own scope check.
-    try:
-        left_rel = left_path.relative_to(root)
-        right_rel = right_path.relative_to(root)
-    except ValueError:
-        return {
-            "ok": False,
-            "error": "left and right must resolve inside the root directory",
-        }
 
     result = _run(
         [_git(), "diff", "--no-index", "-U%d" % context, "--", str(left_rel), str(right_rel)],
         cwd=root, timeout=timeout,
     )
-    result["ok"] = True
+    if not result.get("timed_out") and result.get("returncode") in (0, 1):
+        result["ok"] = True
     return result
 
 
