@@ -270,6 +270,9 @@ def test_checkpoint_store_degrades_corrupt_context_and_clamps_limit(tmp_path):
     assert cp2 is not None and cp2.context == {}
     # Negative limit must clamp to 1, never SQLite LIMIT -1 (unlimited).
     assert len(store.list_checkpoints("s1", limit=-1)) == 1
+    for bad_limit in (True, False):
+        with pytest.raises(ValueError, match="integer"):
+            store.list_checkpoints("s1", limit=bad_limit)
 
 
 def test_composition_store_bounds_limits_and_closes_on_setup_failure(
@@ -284,6 +287,13 @@ def test_composition_store_bounds_limits_and_closes_on_setup_failure(
         assert len(composition_store.active_bindings(limit=-1)) == 1
         assert len(composition_store.lookup_targets("goal", "g1", limit=2)) == 2
         assert len(composition_store.lookup_sources("task", "t-0", limit=1)) == 1
+        for bad_limit in (True, False):
+            with pytest.raises(ValueError, match="integer"):
+                composition_store.active_bindings(limit=bad_limit)
+            with pytest.raises(ValueError, match="integer"):
+                composition_store.lookup_targets("goal", "g1", limit=bad_limit)
+            with pytest.raises(ValueError, match="integer"):
+                composition_store.lookup_sources("task", "t-0", limit=bad_limit)
     finally:
         composition_store.close_current_thread()
 
