@@ -206,6 +206,7 @@ def deliberate_for_turn(
     lane: str = "",
     num_predict: int = _DEFAULT_THINKING_NUM_PREDICT,
     timeout: int = _DEFAULT_THINKING_TIMEOUT,
+    cancel_check: Callable[[], bool] | None = None,
     check_reachable: Callable[[Any, str, str], bool] | None = None,
 ) -> ThinkingDelegationResult | None:
     """Consult the bound local thinking tier for a pre-turn reasoning brief (fail-soft)."""
@@ -282,9 +283,10 @@ def deliberate_for_turn(
                     payload,
                     model=thinking_model,
                     cloud=False,
-                    timeout=max(5, int(timeout or _DEFAULT_THINKING_TIMEOUT)),
+                    timeout=max(1, int(timeout or _DEFAULT_THINKING_TIMEOUT)),
                     return_message=True,
                     text_only=True,
+                    cancel_check=cancel_check,
                 )
     except (AttributeError, *_SOFT_ERRORS) as exc:
         _logger.debug(
@@ -319,6 +321,27 @@ def deliberate_for_turn(
     )
 
 
+def attach_thinking_brief(
+    effective_system: str,
+    result: ThinkingDelegationResult | None,
+    *,
+    tier: str = "",
+    lane: str = "",
+) -> str:
+    """Append the advisory brief of an earlier deliberation to ``effective_system``."""
+    if result is None:
+        return effective_system
+    block = _domain.format_thinking_brief(
+        result.brief,
+        thinking_tier=result.tier,
+        thinking_model=result.model,
+        lane=(lane or tier or "").strip().lower(),
+    )
+    if not block:
+        return effective_system
+    return f"{effective_system}\n\n{block}" if effective_system else block
+
+
 def augment_system_with_thinking(
     server: Any,
     effective_system: str,
@@ -329,6 +352,8 @@ def augment_system_with_thinking(
     cloud: bool = False,
     history: Sequence[Mapping[str, Any]] | None = None,
     lane: str = "",
+    timeout: int = _DEFAULT_THINKING_TIMEOUT,
+    cancel_check: Callable[[], bool] | None = None,
     check_reachable: Callable[[Any, str, str], bool] | None = None,
 ) -> tuple[str, ThinkingDelegationResult | None]:
     """Attach an advisory thinking brief from the bound thinking tier before the tool manifest."""
@@ -340,20 +365,63 @@ def augment_system_with_thinking(
         cloud=cloud,
         history=history,
         lane=lane,
+        timeout=timeout,
+        cancel_check=cancel_check,
         check_reachable=check_reachable,
     )
-    if result is None:
-        return effective_system, None
-    block = _domain.format_thinking_brief(
-        result.brief,
-        thinking_tier=result.tier,
-        thinking_model=result.model,
-        lane=(lane or tier or "").strip().lower(),
-    )
-    if not block:
-        return effective_system, result
-    combined = f"{effective_system}\n\n{block}" if effective_system else block
-    return combined, result
+    return attach_thinking_brief(effective_system, result, tier=tier, lane=lane), result
+
+
+class TurnDeliberation:
+    """One chat turn's thinking deliberation: made at most once, shared by every local rung.
+
+    State is per turn and single-threaded (the escalation loop of one request).
+    ``system`` builds a rung's final system prompt; with ``defer`` the brief is
+    left out so the caller can key the request cache on the brief-free prompt,
+    and ``resolve_deferred`` adds it only after a cache miss.
+    """
+
+    def __init__(self, server: Any, prompt: str, history: Sequence[Mapping[str, Any]] | None) -> None:
+        self._server = server
+        self._prompt = prompt
+        self._history = history
+        self._done = False
+        self._result: ThinkingDelegationResult | None = None
+        self._pending: tuple[Any, ...] | None = None
+
+    def _deliberate(self, tier_label: str, model: str) -> ThinkingDelegationResult | None:
+        if not self._done:
+            self._done = True
+            self._result = deliberate_for_turn(
+                self._server, self._prompt, tier=tier_label, model=model, cloud=False,
+                history=self._history,
+            )
+        return self._result
+
+    def system(
+        self,
+        base_system: str,
+        tier_label: str,
+        model: str,
+        has_chat_tools: bool,
+        off_box: bool,
+        defer: bool,
+        finish: Callable[[str], str],
+    ) -> str:
+        """Final chat system: optional brief, honesty note, then ``finish`` (the one tools block, last)."""
+        from sonder_runtime.application.chat.honesty import no_verification_claims_system
+
+        self._pending = (base_system, tier_label, model, has_chat_tools, off_box, finish) if defer else None
+        brief = None if (off_box or defer) else self._deliberate(tier_label, model)
+        composed = attach_thinking_brief(base_system, brief, tier=tier_label)
+        return finish(composed if has_chat_tools else no_verification_claims_system(composed))
+
+    def resolve_deferred(self) -> str:
+        """The deferred rung's system prompt with the brief (deliberating if not yet done)."""
+        if self._pending is None:
+            raise RuntimeError("no deferred system prompt to resolve")
+        base_system, tier_label, model, has_chat_tools, off_box, finish = self._pending
+        return self.system(base_system, tier_label, model, has_chat_tools, off_box, False, finish)
 
 
 def maybe_auto_ensemble_offload(
@@ -494,6 +562,8 @@ def status_dict(
 
 __all__ = [
     "ThinkingDelegationResult",
+    "TurnDeliberation",
+    "attach_thinking_brief",
     "augment_system_with_thinking",
     "deliberate_for_turn",
     "in_thinking_delegation",
