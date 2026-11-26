@@ -1137,3 +1137,119 @@ def test_splice_function_rejects_a_result_that_does_not_parse(monkeypatch):
     monkeypatch.setattr(nightly_selfmod.ast, "parse", parse)
     assert nightly_selfmod._splice_function(original, "def a():\n    return 2\n") is None
     assert len(calls) == 3
+
+
+def test_proposal_prompt_puts_function_inventory_before_module_header(tmp_path, monkeypatch):
+    seen_prompts = []
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "runtime" / "sample.py").write_text(
+        "def alpha(x):\n    return x\n\ndef beta(y):\n    return y\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(nightly_selfmod, "_recent_objectives", lambda: [])
+    monkeypatch.setattr(nightly_selfmod, "_eligible_candidate_files", lambda: ("runtime/sample.py",))
+    monkeypatch.setattr(
+        nightly_selfmod, "_ask",
+        lambda _server, prompt, **_kwargs: seen_prompts.append(prompt) or "NONE",
+    )
+
+    assert nightly_selfmod.propose_objective(object(), lambda _msg: None) is None
+    assert len(seen_prompts) == 1
+    prompt = seen_prompts[0]
+    assert "The replaceable top-level functions are:\nalpha, beta\n" in prompt
+    assert "=== runtime/sample.py ===" in prompt
+
+
+def test_lint_command_uses_ratchet_or_isolated_blocking_ruff(tmp_path, monkeypatch):
+    monkeypatch.setattr(nightly_selfmod, "_ruff_command", lambda _py: ["ruff"])
+    fallback = nightly_selfmod._lint_command("python", "runtime/feedback.py", tmp_path)
+    assert fallback == [
+        "ruff", "check", "--no-cache", "--isolated",
+        "--target-version", "py312",
+        "--select", "F821,F822,F811,PLE,B023",
+        "runtime/feedback.py",
+    ]
+
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "check_lint_ratchet.py").write_text("# ratchet\n", encoding="utf-8")
+    ratchet = nightly_selfmod._lint_command("python", "runtime/feedback.py", tmp_path)
+    assert ratchet == ["python", "scripts/check_lint_ratchet.py"]
+
+    monkeypatch.setattr(nightly_selfmod, "_ruff_command", lambda _py: None)
+    assert nightly_selfmod._lint_command("python", "runtime/feedback.py", tmp_path) is None
+
+
+def test_selfmod_forever_imports_without_pythonpath_and_defaults_to_code_tier():
+    repo = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    probe = subprocess.run(
+        [
+            sys.executable, "-c",
+            "import sys; sys.argv=['selfmod_forever.py', '--help']; "
+            "import scripts.selfmod_forever as sf; "
+            "assert str((sf.REPO / 'runtime')) in sys.path",
+        ],
+        cwd=repo, env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+    help_run = subprocess.run(
+        [sys.executable, str(repo / "scripts" / "selfmod_forever.py"), "--help"],
+        cwd=repo, env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert help_run.returncode == 0, help_run.stdout + help_run.stderr
+    assert "qwen2.5-coder:14b" not in help_run.stdout
+
+
+def test_grounding_prefers_uniquely_named_function_even_when_why_shares_domain_words():
+    source = (
+        "def create_goal(goal):\n"
+        "    return {'goal': goal, 'status': 'open'}\n\n"
+        "def update_goal(goal, status):\n"
+        "    return {'goal': goal, 'status': status}\n"
+    )
+    assert nightly_selfmod._objective_target_function(
+        "In `update_goal`, guard against empty status updates.",
+        "`update_goal` writes `status` onto the `goal` record even when blank.",
+        source,
+    ) == "update_goal"
+    # Naming two functions stays ambiguous and is rejected.
+    assert nightly_selfmod._objective_target_function(
+        "Update both `create_goal` and `update_goal` to check status.",
+        "Both write `status`.",
+        source,
+    ) is None
+
+
+def test_propose_objective_uses_prose_ensemble_mode_and_parses_before_footer(tmp_path, monkeypatch):
+    seen_kwargs = []
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "runtime" / "sample.py").write_text(
+        "def alpha(x):\n    return x\n\ndef beta(y):\n    return y\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(nightly_selfmod, "_recent_objectives", lambda: [])
+    monkeypatch.setattr(nightly_selfmod, "_eligible_candidate_files", lambda: ("runtime/sample.py",))
+
+    def fake_ask(_server, _prompt, **kwargs):
+        seen_kwargs.append(kwargs)
+        return (
+            "**OBJECTIVE:** Guard empty input in `alpha`.\n"
+            "**WHY:** `alpha` forwards blank values unchanged.\n"
+            "\n=== ENSEMBLE (2 models answered) ===\n"
+            "  code (bonsai-27b-pq2) in 4000ms\n"
+            "  reasoning (qwen3-coder-next-80b:latest) in 20000ms\n"
+        )
+
+    monkeypatch.setattr(nightly_selfmod, "_ask", fake_ask)
+    proposed = nightly_selfmod.propose_objective(
+        object(), lambda _msg: None, return_function=True,
+    )
+    assert seen_kwargs and seen_kwargs[0]["mode"] == "prose"
+    assert proposed == (
+        "runtime/sample.py",
+        "Guard empty input in `alpha`. (`alpha` forwards blank values unchanged.)",
+        "alpha",
+    )

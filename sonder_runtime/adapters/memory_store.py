@@ -675,8 +675,9 @@ def init_db(conn):
         # redoes the work.
         conn.execute("PRAGMA user_version=%d" % stamp)
         conn.commit()
-    except Exception:
-        conn.rollback()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
         raise
 
 
@@ -770,33 +771,47 @@ def delete_interaction(conn, interaction_id):
     `lesson_exists_for_interaction` still answered True for a row that was
     gone. lessons_fts is a plain fts5 table with no delete triggers, so its
     mirror row has to be removed explicitly (see delete_lesson)."""
-    distilled = [
-        row["id"]
-        for row in conn.execute(
-            "SELECT id FROM lessons WHERE source_interaction=?",
+    nested = bool(conn.in_transaction)
+    conn.execute(
+        "SAVEPOINT sonder_delete_interaction" if nested else "BEGIN IMMEDIATE"
+    )
+    try:
+        distilled = [
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM lessons WHERE source_interaction=?",
+                (interaction_id,),
+            ).fetchall()
+        ]
+        for lesson_id in distilled:
+            _delete_lesson_rows(conn, lesson_id)
+        # A tombstone derived from this interaction is still a learning trace: it
+        # can reject a future candidate even though its lesson was already pruned.
+        # Purging the interaction must remove that denial record too.
+        conn.execute(
+            "DELETE FROM lesson_tombstones WHERE source_interaction=?",
             (interaction_id,),
-        ).fetchall()
-    ]
-    for lesson_id in distilled:
-        _delete_lesson_rows(conn, lesson_id)
-    # A tombstone derived from this interaction is still a learning trace: it
-    # can reject a future candidate even though its lesson was already pruned.
-    # Purging the interaction must remove that denial record too.
-    conn.execute(
-        "DELETE FROM lesson_tombstones WHERE source_interaction=?",
-        (interaction_id,),
-    )
-    conn.execute(
-        "DELETE FROM outcomes WHERE interaction_id=?", (interaction_id,)
-    )
-    conn.execute(
-        "DELETE FROM lesson_usage WHERE interaction_id=?", (interaction_id,)
-    )
-    conn.execute(
-        "DELETE FROM lesson_distillations WHERE interaction_id=?",
-        (interaction_id,),
-    )
-    conn.execute("DELETE FROM interactions WHERE id=?", (interaction_id,))
+        )
+        conn.execute(
+            "DELETE FROM outcomes WHERE interaction_id=?", (interaction_id,)
+        )
+        conn.execute(
+            "DELETE FROM lesson_usage WHERE interaction_id=?", (interaction_id,)
+        )
+        conn.execute(
+            "DELETE FROM lesson_distillations WHERE interaction_id=?",
+            (interaction_id,),
+        )
+        conn.execute("DELETE FROM interactions WHERE id=?", (interaction_id,))
+    except BaseException:
+        if nested:
+            conn.execute("ROLLBACK TO sonder_delete_interaction")
+            conn.execute("RELEASE sonder_delete_interaction")
+        elif conn.in_transaction:
+            conn.rollback()
+        raise
+    if nested:
+        conn.execute("RELEASE sonder_delete_interaction")
     conn.commit()
 
 
@@ -2036,13 +2051,16 @@ def lessons_needing_embedding_refresh(
         "ORDER BY ts ASC, rowid ASC"
     )
     selected = []
-    for row in rows:
-        if _embedding_row_needs_refresh(
-            row, model, revision=revision, dimension=dimension,
-        ):
-            selected.append(dict(row))
-            if len(selected) >= limit:
-                break
+    try:
+        for row in rows:
+            if _embedding_row_needs_refresh(
+                row, model, revision=revision, dimension=dimension,
+            ):
+                selected.append(dict(row))
+                if len(selected) >= limit:
+                    break
+    finally:
+        rows.close()
     return selected
 
 
@@ -2053,12 +2071,15 @@ def count_lessons_needing_embedding_refresh(
         "SELECT embedding, embedding_model, embedding_revision, embedding_dim "
         "FROM lessons ORDER BY rowid ASC"
     )
-    return sum(
-        1 for row in rows
-        if _embedding_row_needs_refresh(
-            row, model, revision=revision, dimension=dimension,
+    try:
+        return sum(
+            1 for row in rows
+            if _embedding_row_needs_refresh(
+                row, model, revision=revision, dimension=dimension,
+            )
         )
-    )
+    finally:
+        rows.close()
 
 
 def refresh_lesson_embedding(
@@ -2115,56 +2136,59 @@ def embedding_provenance_stats(
         "dimension_mismatch": 0,
         "dimensions": {},
     }
-    for row in rows:
-        result["lessons"] += 1
-        actual_dimension, blob_error = _embedding_blob_integrity(row["embedding"])
-        if blob_error == "missing":
-            result["missing"] += 1
-            continue
-        result["embedded"] += 1
-        dimension_invalid = blob_error in ("invalid_type", "invalid_length")
-        if blob_error is None:
-            result["valid"] += 1
-        elif blob_error in ("nonfinite", "zero_norm"):
-            result["vector_invalid"] += 1
+    try:
+        for row in rows:
+            result["lessons"] += 1
+            actual_dimension, blob_error = _embedding_blob_integrity(row["embedding"])
+            if blob_error == "missing":
+                result["missing"] += 1
+                continue
+            result["embedded"] += 1
+            dimension_invalid = blob_error in ("invalid_type", "invalid_length")
+            if blob_error is None:
+                result["valid"] += 1
+            elif blob_error in ("nonfinite", "zero_norm"):
+                result["vector_invalid"] += 1
 
-        stored_model = row["embedding_model"]
-        stored_revision = row["embedding_revision"]
-        if not stored_model:
-            result["legacy_model"] += 1
-        elif stored_model != model:
-            result["model_mismatch"] += 1
-        if (
-            revision is not None
-            and stored_model == model
-            and (stored_revision or None) != (revision or None)
-        ):
-            result["revision_mismatch"] += 1
+            stored_model = row["embedding_model"]
+            stored_revision = row["embedding_revision"]
+            if not stored_model:
+                result["legacy_model"] += 1
+            elif stored_model != model:
+                result["model_mismatch"] += 1
+            if (
+                revision is not None
+                and stored_model == model
+                and (stored_revision or None) != (revision or None)
+            ):
+                result["revision_mismatch"] += 1
 
-        stored_dimension, metadata_error = _stored_embedding_dimension(
-            row["embedding_dim"]
-        )
-        if metadata_error == "missing":
-            result["dimension_missing"] += 1
-        elif metadata_error == "invalid":
-            dimension_invalid = True
-        if dimension_invalid:
-            result["dimension_invalid"] += 1
+            stored_dimension, metadata_error = _stored_embedding_dimension(
+                row["embedding_dim"]
+            )
+            if metadata_error == "missing":
+                result["dimension_missing"] += 1
+            elif metadata_error == "invalid":
+                dimension_invalid = True
+            if dimension_invalid:
+                result["dimension_invalid"] += 1
 
-        if actual_dimension is not None:
-            key = str(actual_dimension)
-            result["dimensions"][key] = result["dimensions"].get(key, 0) + 1
-        if (
-            actual_dimension is not None
-            and stored_dimension is not None
-            and stored_dimension != actual_dimension
-        ) or (
-            actual_dimension is not None
-            and expected_dimension is not None
-            and stored_model == model
-            and actual_dimension != expected_dimension
-        ):
-            result["dimension_mismatch"] += 1
+            if actual_dimension is not None:
+                key = str(actual_dimension)
+                result["dimensions"][key] = result["dimensions"].get(key, 0) + 1
+            if (
+                actual_dimension is not None
+                and stored_dimension is not None
+                and stored_dimension != actual_dimension
+            ) or (
+                actual_dimension is not None
+                and expected_dimension is not None
+                and stored_model == model
+                and actual_dimension != expected_dimension
+            ):
+                result["dimension_mismatch"] += 1
+    finally:
+        rows.close()
     return result
 
 
@@ -2207,13 +2231,16 @@ def interactions_needing_task_embedding_refresh(
         "ORDER BY ts ASC, rowid ASC"
     )
     selected = []
-    for row in rows:
-        if _interaction_task_embedding_needs_refresh(
-            row, model, revision=revision, dimension=dimension,
-        ):
-            selected.append(dict(row))
-            if len(selected) >= limit:
-                break
+    try:
+        for row in rows:
+            if _interaction_task_embedding_needs_refresh(
+                row, model, revision=revision, dimension=dimension,
+            ):
+                selected.append(dict(row))
+                if len(selected) >= limit:
+                    break
+    finally:
+        rows.close()
     return selected
 
 
@@ -2226,12 +2253,15 @@ def count_interactions_needing_task_embedding_refresh(
         "task_embedding_revision, task_embedding_dim FROM interactions "
         "ORDER BY rowid ASC"
     )
-    return sum(
-        1 for row in rows
-        if _interaction_task_embedding_needs_refresh(
-            row, model, revision=revision, dimension=dimension,
+    try:
+        return sum(
+            1 for row in rows
+            if _interaction_task_embedding_needs_refresh(
+                row, model, revision=revision, dimension=dimension,
+            )
         )
-    )
+    finally:
+        rows.close()
 
 
 def refresh_interaction_task_embedding(
@@ -2297,68 +2327,83 @@ def interaction_task_embedding_provenance_stats(
         "dimension_mismatch": 0,
         "dimensions": {},
     }
-    for row in rows:
-        result["interactions"] += 1
-        needs_refresh = _interaction_task_embedding_needs_refresh(
-            row, model, revision=revision, dimension=expected_dimension,
-        )
-        if needs_refresh:
-            result["refresh_required"] += 1
-        else:
-            result["compatible"] += 1
-
-        actual_dimension, blob_error = _embedding_blob_integrity(
-            row["task_embedding"]
-        )
-        if blob_error == "missing":
-            result["missing"] += 1
-            continue
-        result["embedded"] += 1
-        dimension_invalid = blob_error in ("invalid_type", "invalid_length")
-        if blob_error is None:
-            result["valid"] += 1
-        elif blob_error in ("nonfinite", "zero_norm"):
-            result["vector_invalid"] += 1
-
-        stored_model = row["task_embedding_model"]
-        stored_revision = row["task_embedding_revision"]
-        if not stored_model:
-            result["legacy_model"] += 1
-        elif stored_model != model:
-            result["model_mismatch"] += 1
-        if (
-            revision is not None
-            and stored_model == model
-            and (stored_revision or None) != (revision or None)
-        ):
-            result["revision_mismatch"] += 1
-
-        stored_dimension, metadata_error = _stored_embedding_dimension(
-            row["task_embedding_dim"]
-        )
-        if metadata_error == "missing":
-            result["dimension_missing"] += 1
-        elif metadata_error == "invalid":
-            dimension_invalid = True
-        if dimension_invalid:
-            result["dimension_invalid"] += 1
-
-        if actual_dimension is not None:
-            key = str(actual_dimension)
-            result["dimensions"][key] = (
-                result["dimensions"].get(key, 0) + 1
+    try:
+        for row in rows:
+            result["interactions"] += 1
+            actual_dimension, blob_error = _embedding_blob_integrity(
+                row["task_embedding"]
             )
-        if (
-            actual_dimension is not None
-            and stored_dimension is not None
-            and stored_dimension != actual_dimension
-        ) or (
-            actual_dimension is not None
-            and expected_dimension is not None
-            and stored_model == model
-            and actual_dimension != expected_dimension
-        ):
-            result["dimension_mismatch"] += 1
+            stored_model = row["task_embedding_model"]
+            stored_revision = row["task_embedding_revision"]
+            stored_dimension, metadata_error = _stored_embedding_dimension(
+                row["task_embedding_dim"]
+            )
+            needs_refresh = (
+                blob_error is not None
+                or not stored_model
+                or stored_model != model
+                or (
+                    revision is not None
+                    and (stored_revision or None) != (revision or None)
+                )
+                or metadata_error is not None
+                or stored_dimension != actual_dimension
+                or (
+                    expected_dimension is not None
+                    and actual_dimension != expected_dimension
+                )
+            )
+            if needs_refresh:
+                result["refresh_required"] += 1
+            else:
+                result["compatible"] += 1
+
+            if blob_error == "missing":
+                result["missing"] += 1
+                continue
+            result["embedded"] += 1
+            dimension_invalid = blob_error in ("invalid_type", "invalid_length")
+            if blob_error is None:
+                result["valid"] += 1
+            elif blob_error in ("nonfinite", "zero_norm"):
+                result["vector_invalid"] += 1
+
+            if not stored_model:
+                result["legacy_model"] += 1
+            elif stored_model != model:
+                result["model_mismatch"] += 1
+            if (
+                revision is not None
+                and stored_model == model
+                and (stored_revision or None) != (revision or None)
+            ):
+                result["revision_mismatch"] += 1
+
+            if metadata_error == "missing":
+                result["dimension_missing"] += 1
+            elif metadata_error == "invalid":
+                dimension_invalid = True
+            if dimension_invalid:
+                result["dimension_invalid"] += 1
+
+            if actual_dimension is not None:
+                key = str(actual_dimension)
+                result["dimensions"][key] = (
+                    result["dimensions"].get(key, 0) + 1
+                )
+            if (
+                actual_dimension is not None
+                and stored_dimension is not None
+                and stored_dimension != actual_dimension
+            ) or (
+                actual_dimension is not None
+                and expected_dimension is not None
+                and stored_model == model
+                and actual_dimension != expected_dimension
+            ):
+                result["dimension_mismatch"] += 1
+    finally:
+        rows.close()
     return result
 
 
@@ -2412,28 +2457,46 @@ def tombstone_lesson(conn, lesson_id, *, commit=True):
     deletion must be able to erase a lesson completely, whereas the pruner is
     rejecting a value as redundant and must prevent re-distillation.
     """
-    row = conn.execute(
-        "SELECT text, embedding, embedding_model, embedding_revision, "
-        "embedding_dim, source_interaction FROM lessons WHERE id=?",
-        (lesson_id,),
-    ).fetchone()
-    if row is None:
-        return False
-    digest = normalized_lesson_text_digest(row["text"])
-    if digest is not None:
-        conn.execute(
-            "INSERT OR IGNORE INTO lesson_tombstones("
-            "text_sha256, embedding, embedding_model, embedding_revision, "
-            "embedding_dim, reason, source_lesson_id, source_interaction) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                digest, row["embedding"], row["embedding_model"],
-                row["embedding_revision"], row["embedding_dim"],
-                "near_duplicate_pruned", str(lesson_id),
-                row["source_interaction"],
-            ),
-        )
-    deleted = _delete_lesson_rows(conn, lesson_id)
+    nested = bool(conn.in_transaction)
+    conn.execute(
+        "SAVEPOINT sonder_tombstone_lesson" if nested else "BEGIN IMMEDIATE"
+    )
+    try:
+        row = conn.execute(
+            "SELECT text, embedding, embedding_model, embedding_revision, "
+            "embedding_dim, source_interaction FROM lessons WHERE id=?",
+            (lesson_id,),
+        ).fetchone()
+        if row is None:
+            if nested:
+                conn.execute("RELEASE sonder_tombstone_lesson")
+            elif conn.in_transaction:
+                conn.rollback()
+            return False
+        digest = normalized_lesson_text_digest(row["text"])
+        if digest is not None:
+            conn.execute(
+                "INSERT OR IGNORE INTO lesson_tombstones("
+                "text_sha256, embedding, embedding_model, embedding_revision, "
+                "embedding_dim, reason, source_lesson_id, source_interaction) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    digest, row["embedding"], row["embedding_model"],
+                    row["embedding_revision"], row["embedding_dim"],
+                    "near_duplicate_pruned", str(lesson_id),
+                    row["source_interaction"],
+                ),
+            )
+        deleted = _delete_lesson_rows(conn, lesson_id)
+    except BaseException:
+        if nested:
+            conn.execute("ROLLBACK TO sonder_tombstone_lesson")
+            conn.execute("RELEASE sonder_tombstone_lesson")
+        elif conn.in_transaction:
+            conn.rollback()
+        raise
+    if nested:
+        conn.execute("RELEASE sonder_tombstone_lesson")
     if commit:
         conn.commit()
     return deleted
@@ -2825,8 +2888,11 @@ def interaction_outcome_evidence(conn, *, limit=200_001, field_limit=32_769):
         _INTERACTION_OUTCOME_EVIDENCE_SQL,
         (field_limit, field_limit, limit),
     )
-    for row in rows:
-        yield dict(row)
+    try:
+        for row in rows:
+            yield dict(row)
+    finally:
+        rows.close()
 
 
 # --- conversation sessions -------------------------------------------------
@@ -2911,8 +2977,16 @@ def update_session_project_summary(
 
 def session_history(conn, session_id, max_turns=12):
     """Last `max_turns` (task, response) pairs for a session, oldest-first."""
-    pairs = [(t["task"], t["response"]) for t in session_turns(conn, session_id)]
-    return pairs[-max_turns:] if max_turns and max_turns > 0 else pairs
+    if max_turns and max_turns > 0:
+        rows = conn.execute(
+            "SELECT task, response FROM ("
+            "SELECT task, response, ts, rowid FROM interactions "
+            "WHERE session_id=? ORDER BY ts DESC, rowid DESC LIMIT ?"
+            ") ORDER BY ts ASC, rowid ASC",
+            (session_id, int(max_turns)),
+        ).fetchall()
+        return [(row["task"], row["response"]) for row in rows]
+    return [(t["task"], t["response"]) for t in session_turns(conn, session_id)]
 
 
 def session_turn_count(conn, session_id):
@@ -3399,9 +3473,12 @@ def good_interaction_candidate_page(
         raise ValueError("recall candidate byte limit must be an integer")
     if isinstance(time_limit_s, bool) or not isinstance(time_limit_s, (int, float)):
         raise ValueError("recall candidate time limit must be numeric")
+    time_limit_float = float(time_limit_s)
+    if not math.isfinite(time_limit_float):
+        raise ValueError("recall candidate time limit must be finite")
     row_limit = max(1, min(RECALL_CANDIDATE_ROW_LIMIT, row_limit))
     byte_limit = max(1, min(RECALL_CANDIDATE_BYTE_LIMIT, byte_limit))
-    time_limit_s = max(0.0, min(RECALL_CANDIDATE_TIME_LIMIT_S, float(time_limit_s)))
+    time_limit_s = max(0.0, min(RECALL_CANDIDATE_TIME_LIMIT_S, time_limit_float))
     if not isinstance(require_embedding, bool):
         raise ValueError("require_embedding must be boolean")
     if max_created_at is not None and (
@@ -3589,11 +3666,12 @@ def good_interaction_candidate_page(
     termination = "complete"
     previous_busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
     request_busy_timeout = max(1, int(time_limit_s * 1000))
-    conn.execute("PRAGMA busy_timeout=%d" % min(
-        int(previous_busy_timeout), request_busy_timeout,
-    ))
-    conn.set_progress_handler(_deadline_reached, 1000)
+    query_cursor = None
     try:
+        conn.execute("PRAGMA busy_timeout=%d" % min(
+            int(previous_busy_timeout), request_busy_timeout,
+        ))
+        conn.set_progress_handler(_deadline_reached, 1000)
         query_cursor = conn.execute(sql, tuple(params))
         while True:
             if _deadline_reached():
@@ -3651,6 +3729,8 @@ def good_interaction_candidate_page(
             timed_out = True
             termination = "time_limit"
     finally:
+        if query_cursor is not None:
+            query_cursor.close()
         conn.set_progress_handler(None, 0)
         conn.execute("PRAGMA busy_timeout=%d" % int(previous_busy_timeout))
 
@@ -3975,17 +4055,42 @@ def delete_task(conn, task_id, account_scope=None):
         raise ValueError("no unique task '%s'" % task_id)
     scope_predicate, scope_values = _task_scope_predicate(scope)
     where_scope = (" AND " + scope_predicate) if scope_predicate else ""
-    children = conn.execute(
-        "SELECT id FROM tasks WHERE parent_id=?%s" % where_scope,
-        tuple([resolved] + scope_values),
-    ).fetchall()
-    child_ids = [r["id"] for r in children]
-    all_ids = [resolved] + child_ids
-    placeholders = ",".join("?" * len(all_ids))
-    conn.execute("DELETE FROM task_events WHERE task_id IN (%s)" % placeholders, all_ids)
-    conn.execute("DELETE FROM task_deps WHERE task_id IN (%s) OR depends_on IN (%s)"
-                 % (placeholders, placeholders), all_ids + all_ids)
-    conn.execute("DELETE FROM tasks WHERE id IN (%s)" % placeholders, all_ids)
+    nested = bool(conn.in_transaction)
+    conn.execute("SAVEPOINT sonder_delete_task" if nested else "BEGIN IMMEDIATE")
+    try:
+        children = conn.execute(
+            "SELECT id FROM tasks WHERE parent_id=?%s" % where_scope,
+            tuple([resolved] + scope_values),
+        ).fetchall()
+        child_ids = [r["id"] for r in children]
+        all_ids = [resolved] + child_ids
+        # Chunk IN (...) clauses so a parent with >499 children never hits
+        # SQLite's bind-variable limit on task_deps (2*N parameters).
+        chunk_size = 200
+        for start in range(0, len(all_ids), chunk_size):
+            chunk = all_ids[start:start + chunk_size]
+            placeholders = ",".join("?" * len(chunk))
+            conn.execute(
+                "DELETE FROM task_events WHERE task_id IN (%s)" % placeholders,
+                chunk,
+            )
+            conn.execute(
+                "DELETE FROM task_deps WHERE task_id IN (%s) OR depends_on IN (%s)"
+                % (placeholders, placeholders),
+                chunk + chunk,
+            )
+            conn.execute(
+                "DELETE FROM tasks WHERE id IN (%s)" % placeholders, chunk,
+            )
+    except BaseException:
+        if nested:
+            conn.execute("ROLLBACK TO sonder_delete_task")
+            conn.execute("RELEASE sonder_delete_task")
+        elif conn.in_transaction:
+            conn.rollback()
+        raise
+    if nested:
+        conn.execute("RELEASE sonder_delete_task")
     conn.commit()
     log_task_event(conn, resolved, "deleted", "task and %d children removed" % len(child_ids))
     return {"deleted": resolved, "children_removed": len(child_ids)}
@@ -4001,34 +4106,48 @@ def add_task_dep(conn, task_id, depends_on, account_scope=None):
         raise ValueError("no unique task '%s'" % depends_on)
     if resolved == dep_resolved:
         raise ValueError("a task cannot depend on itself")
-    # Reject an edge that would close a dependency cycle.  A cycle leaves every
-    # task on it permanently blocked with no diagnosis: each one waits for a
-    # predecessor that transitively waits for it.  Walk the existing edges from
-    # the proposed dependency; if this task is reachable, the new edge would
-    # complete a loop.  The walk is bounded so a corrupt graph cannot spin.
-    frontier = [dep_resolved]
-    seen = set()
-    while frontier:
-        current = frontier.pop()
-        if current == resolved:
-            raise ValueError(
-                "dependency would create a cycle: '%s' already depends on '%s'"
-                % (dep_resolved[:8], resolved[:8])
+    # Run cycle detection and the edge insert inside one write transaction so
+    # two concurrent writers cannot both pass the check and create a cycle.
+    nested = bool(conn.in_transaction)
+    conn.execute("SAVEPOINT sonder_add_task_dep" if nested else "BEGIN IMMEDIATE")
+    try:
+        # Reject an edge that would close a dependency cycle.  A cycle leaves every
+        # task on it permanently blocked with no diagnosis: each one waits for a
+        # predecessor that transitively waits for it.  Walk the existing edges from
+        # the proposed dependency; if this task is reachable, the new edge would
+        # complete a loop.  The walk is bounded so a corrupt graph cannot spin.
+        frontier = [dep_resolved]
+        seen = set()
+        while frontier:
+            current = frontier.pop()
+            if current == resolved:
+                raise ValueError(
+                    "dependency would create a cycle: '%s' already depends on '%s'"
+                    % (dep_resolved[:8], resolved[:8])
+                )
+            if current in seen:
+                continue
+            seen.add(current)
+            if len(seen) > 10_000:
+                raise ValueError("task dependency graph is too large to verify")
+            frontier.extend(
+                row["depends_on"] for row in conn.execute(
+                    "SELECT depends_on FROM task_deps WHERE task_id=?", (current,)
+                ).fetchall()
             )
-        if current in seen:
-            continue
-        seen.add(current)
-        if len(seen) > 10_000:
-            raise ValueError("task dependency graph is too large to verify")
-        frontier.extend(
-            row["depends_on"] for row in conn.execute(
-                "SELECT depends_on FROM task_deps WHERE task_id=?", (current,)
-            ).fetchall()
+        conn.execute(
+            "INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES(?, ?)",
+            (resolved, dep_resolved),
         )
-    conn.execute(
-        "INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES(?, ?)",
-        (resolved, dep_resolved),
-    )
+    except BaseException:
+        if nested:
+            conn.execute("ROLLBACK TO sonder_add_task_dep")
+            conn.execute("RELEASE sonder_add_task_dep")
+        elif conn.in_transaction:
+            conn.rollback()
+        raise
+    if nested:
+        conn.execute("RELEASE sonder_add_task_dep")
     conn.commit()
     log_task_event(conn, resolved, "dep_added", "depends on %s" % dep_resolved[:8])
     return {"task_id": resolved, "depends_on": dep_resolved}
