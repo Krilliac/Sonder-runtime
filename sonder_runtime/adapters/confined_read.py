@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from pathlib import Path
 from typing import Callable
 
@@ -238,7 +239,7 @@ class PinnedDirectory:
             with os.fdopen(descriptor, "wb", closefd=False) as handle:
                 handle.write(text.encode("utf-8"))
             try:
-                if os.name == "nt":
+                if sys.platform == "win32":  # not os.name: the type checker narrows on sys.platform only
                     mode = os.stat(os.path.join(self._path, name)).st_mode
                     os.chmod(os.path.join(self._path, temp), stat.S_IMODE(mode))
                 else:
@@ -301,6 +302,8 @@ class PinnedDirectory:
 
 def _open_directory_windows(path: str) -> int:
     """Open a directory without following a link and without ``FILE_SHARE_DELETE``."""
+    if sys.platform != "win32":
+        raise ConfinedReadRefused("Windows directory handles are only available on Windows")
     import ctypes
     import msvcrt
 
