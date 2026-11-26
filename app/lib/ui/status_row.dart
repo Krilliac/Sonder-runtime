@@ -89,7 +89,44 @@ class StatusRow extends StatelessWidget {
         color: stale ? tokens.muted : tokens.text, fontWeight: FontWeight.w500);
     final semantics = '${word ?? kind.word}, $label: $value';
     return LayoutBuilder(builder: (context, constraints) {
-      final narrow = constraints.maxWidth < stackBelow;
+      final scale = MediaQuery.textScalerOf(context).scale(1.0).clamp(1.0, 2.5);
+      final compact = scale > 1.0 || constraints.maxWidth < 260;
+      final narrow = constraints.maxWidth < stackBelow * scale;
+      final trailing = this.trailing;
+      if (compact) {
+        final content = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Wrap(
+              spacing: SonderSpace.sm,
+              runSpacing: SonderSpace.xxs,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                StatusMark(kind, word: word),
+                Text(label, style: labelStyle),
+              ],
+            ),
+            const SizedBox(height: SonderSpace.xxs),
+            Text(value, style: valueStyle),
+          ],
+        );
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: SonderSpace.tight),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Semantics(
+                  label: semantics, excludeSemantics: true, child: content),
+              if (trailing != null) ...[
+                const SizedBox(height: SonderSpace.xs),
+                trailing,
+              ],
+            ],
+          ),
+        );
+      }
       final Widget content;
       if (narrow) {
         content = Column(
@@ -124,7 +161,6 @@ class StatusRow extends StatelessWidget {
               Expanded(child: Text(value, style: valueStyle)),
             ]);
       }
-      final trailing = this.trailing;
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: SonderSpace.tight),
         child: Row(children: [

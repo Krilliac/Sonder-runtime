@@ -183,15 +183,27 @@ def _try_lock(descriptor):
     if os.name == "nt":
         import msvcrt
 
-        # msvcrt locks a byte range; make sure byte 0 exists to lock.
-        if os.fstat(descriptor).st_size < 1:
-            os.write(descriptor, b"0")
-            os.fsync(descriptor)
+        # Acquire byte 0 BEFORE ensuring the file has a byte to hold.
+        # Windows LockFile / msvcrt.locking locks byte ranges past EOF on a
+        # 0-byte file, whereas writing byte 0 before locking races with an
+        # active holder's mandatory lock and raises PermissionError (EACCES).
         os.lseek(descriptor, 0, os.SEEK_SET)
         try:
             msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
         except OSError:
             return False
+        try:
+            if os.fstat(descriptor).st_size < 1:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                os.write(descriptor, b"0")
+                os.fsync(descriptor)
+        except BaseException:
+            try:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            raise
         return True
     import fcntl
 

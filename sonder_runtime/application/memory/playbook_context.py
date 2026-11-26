@@ -78,17 +78,20 @@ class PlaybookContext:
             try:
                 store = self._get_store()
                 raw = store.approved_index() if store is not None else ""
-                lines, seen = [], set()
+                lines, seen, used_bytes = [], set(), 0
+                max_index_bytes = _limit(store, "max_index_bytes", 4096, 4096)
+                max_topics = _limit(store, "max_topics", 64, 128)
                 for line in str(raw).splitlines():
                     match = _LINE.fullmatch(line)
                     if match is None or match[2] in seen:
                         continue
-                    candidate = "\n".join([*lines, line]) + "\n"
-                    if len(candidate.encode("utf-8")) > _limit(store, "max_index_bytes", 4096, 4096):
+                    line_bytes = len(line.encode("utf-8")) + 1
+                    if used_bytes + line_bytes > max_index_bytes:
                         break
                     lines.append(line)
                     seen.add(match[2])
-                    if len(lines) >= _limit(store, "max_topics", 64, 128):
+                    used_bytes += line_bytes
+                    if len(lines) >= max_topics:
                         break
                 index = "\n".join(lines) + "\n" if lines else ""
             except (OSError, ValueError, RuntimeError):
@@ -124,17 +127,24 @@ class PlaybookContext:
             if (topic is None and score) or topic == match[2]:
                 ranked.append((score, match[2]))
         ranked.sort(key=lambda item: (-item[0], item[1]))
+        word_set = set(words)
         blocks, selected = [], []
         max_bytes = _limit(store, "max_context_bytes", 12288, 32768)
         for _, slug in ranked[:_limit(store, "max_topics_per_turn", 3, 8)]:
+            if store is None:
+                continue
             try:
-                entries = store.read(slug, approved_only=True)[:128]
-            except (OSError, ValueError, RuntimeError):
+                raw_entries = store.read(slug, approved_only=True)
+                entries = list(raw_entries[:128]) if raw_entries is not None else []
+            except (OSError, ValueError, RuntimeError, TypeError):
                 _LOG.warning("Playbook topic unavailable; skipped")
                 continue
-            approved = [entry for entry in entries if entry.get("status") == "approved"]
+            approved = [
+                entry for entry in entries
+                if isinstance(entry, dict) and entry.get("status") == "approved"
+            ]
             approved.sort(key=lambda entry: (
-                -len(set(words) & set(_tokens(str(entry.get("title", "")) + " " + str(entry.get("body", ""))))),
+                -len(word_set & set(_tokens(str(entry.get("title", "")) + " " + str(entry.get("body", ""))))),
                 str(entry.get("id", "")),
             ))
             ids = []

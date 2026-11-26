@@ -57,6 +57,7 @@ def check_epoch(db_path: Path) -> int | None:
         return None
     conn = owned_sqlite_connect(str(db_path))
     try:
+        conn.execute("PRAGMA busy_timeout=5000")
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()}
@@ -271,74 +272,85 @@ def run_bridge_migration(
         _backup_db(sonder_home / name, backup_dir)
     checkpoint("after_backup")
 
-    # 2. Initialize new databases
-    automation_db_path = sonder_home / "automation.db"
-    automation_conn = init_automation_db(automation_db_path)
-    active_connections.append(automation_conn)
+    try:
+        # 2. Initialize new databases
+        automation_db_path = sonder_home / "automation.db"
+        automation_conn = init_automation_db(automation_db_path)
+        active_connections.append(automation_conn)
 
-    # Ensure operations.db has the new projection tables
-    ops_db_path = sonder_home / "operations.db"
-    ops_conn = init_operations_db(ops_db_path)
-    active_connections.append(ops_conn)
+        # Ensure operations.db has the new projection tables
+        ops_db_path = sonder_home / "operations.db"
+        ops_conn = init_operations_db(ops_db_path)
+        active_connections.append(ops_conn)
 
-    # Create new selfmod.db and training.db
-    selfmod_conn = init_selfmod_db(sonder_home / "selfmod.db")
-    training_conn = init_training_db(sonder_home / "training.db")
-    active_connections.extend((selfmod_conn, training_conn))
-    checkpoint("after_domain_initialization")
+        # Create new selfmod.db and training.db
+        selfmod_conn = init_selfmod_db(sonder_home / "selfmod.db")
+        active_connections.append(selfmod_conn)
+        training_conn = init_training_db(sonder_home / "training.db")
+        active_connections.append(training_conn)
+        checkpoint("after_domain_initialization")
 
-    # 3. Migrate tasks from memory.db → automation.db
-    tasks_migrated = 0
-    memory_db_path = sonder_home / "memory.db"
-    if memory_db_path.exists():
-        memory_conn = owned_sqlite_connect(str(memory_db_path))
-        active_connections.append(memory_conn)
-        tasks_migrated = _migrate_tasks(memory_conn, automation_conn)
-        # Add outbox to memory.db
-        add_outbox_to_memory_db(memory_conn)
-        memory_epoch(memory_conn)
-        _stamp_epoch(memory_conn, version)
-        memory_row_count = sum(
-            _count_rows(memory_conn, t) for t in
-            ["interactions", "outcomes", "lessons", "sessions", "facts", "preferences"]
-        )
-        memory_conn.close()
-    else:
-        memory_row_count = 0
-        # Fresh installs still participate in the epoch contract.  There is
-        # no legacy data to copy, but the final runtime requires every domain
-        # database in the adopted set to carry an explicit epoch marker.
-        memory_conn = owned_sqlite_connect(str(memory_db_path))
-        active_connections.append(memory_conn)
-        memory_epoch(memory_conn)
-        _stamp_epoch(memory_conn, version)
-        memory_conn.close()
-    checkpoint("after_data_adoption")
+        # 3. Migrate tasks from memory.db → automation.db
+        tasks_migrated = 0
+        memory_db_path = sonder_home / "memory.db"
+        if memory_db_path.exists():
+            memory_conn = owned_sqlite_connect(str(memory_db_path))
+            active_connections.append(memory_conn)
+            memory_conn.execute("PRAGMA busy_timeout=5000")
+            tasks_migrated = _migrate_tasks(memory_conn, automation_conn)
+            # Add outbox to memory.db
+            add_outbox_to_memory_db(memory_conn)
+            memory_epoch(memory_conn)
+            _stamp_epoch(memory_conn, version)
+            memory_row_count = sum(
+                _count_rows(memory_conn, t) for t in
+                ["interactions", "outcomes", "lessons", "sessions", "facts", "preferences"]
+            )
+            memory_conn.close()
+            active_connections.remove(memory_conn)
+        else:
+            memory_row_count = 0
+            # Fresh installs still participate in the epoch contract.  There is
+            # no legacy data to copy, but the final runtime requires every domain
+            # database in the adopted set to carry an explicit epoch marker.
+            memory_conn = owned_sqlite_connect(str(memory_db_path))
+            active_connections.append(memory_conn)
+            memory_conn.execute("PRAGMA busy_timeout=5000")
+            memory_epoch(memory_conn)
+            _stamp_epoch(memory_conn, version)
+            memory_conn.close()
+            active_connections.remove(memory_conn)
+        checkpoint("after_data_adoption")
 
-    # Add outbox to updates.db if it exists
-    updates_db_path = sonder_home / "updates.db"
-    if updates_db_path.exists():
-        updates_conn = owned_sqlite_connect(str(updates_db_path))
-        active_connections.append(updates_conn)
-        add_outbox_to_updates_db(updates_conn)
-        updates_epoch(updates_conn)
-        _stamp_epoch(updates_conn, version)
-        updates_conn.close()
+        # Add outbox to updates.db if it exists
+        updates_db_path = sonder_home / "updates.db"
+        if updates_db_path.exists():
+            updates_conn = owned_sqlite_connect(str(updates_db_path))
+            active_connections.append(updates_conn)
+            updates_conn.execute("PRAGMA busy_timeout=5000")
+            add_outbox_to_updates_db(updates_conn)
+            updates_epoch(updates_conn)
+            _stamp_epoch(updates_conn, version)
+            updates_conn.close()
+            active_connections.remove(updates_conn)
 
-    # 4. Stamp epoch on all new databases
-    _stamp_epoch(automation_conn, version)
-    _stamp_epoch(ops_conn, version)
-    _stamp_epoch(selfmod_conn, version)
-    _stamp_epoch(training_conn, version)
+        # 4. Stamp epoch on all new databases
+        _stamp_epoch(automation_conn, version)
+        _stamp_epoch(ops_conn, version)
+        _stamp_epoch(selfmod_conn, version)
+        _stamp_epoch(training_conn, version)
 
-    automation_row_count = _count_rows(automation_conn, "automation_runs")
-    checkpoint("after_epoch_stamp")
-
-    # Close all connections
-    automation_conn.close()
-    ops_conn.close()
-    selfmod_conn.close()
-    training_conn.close()
+        automation_row_count = _count_rows(automation_conn, "automation_runs")
+        checkpoint("after_epoch_stamp")
+    finally:
+        # Close all remaining connections on both normal exit and any exception
+        # so Windows file handles are never leaked on mid-migration failure.
+        for connection in list(active_connections):
+            try:
+                connection.close()
+            except Exception:
+                pass
+        active_connections.clear()
 
     # 5. Write adoption receipt
     receipt = MigrationReceipt(

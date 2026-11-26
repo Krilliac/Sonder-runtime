@@ -205,23 +205,29 @@ class StatTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = SonderTokens.of(context);
     final text = Theme.of(context).textTheme;
+    final scaled = MediaQuery.textScalerOf(context).scale(1.0) > 1.25;
+    final titleRow = Row(children: [
+      Icon(icon, size: 16, color: tokens.text2),
+      const SizedBox(width: SonderSpace.sm),
+      Expanded(
+        child: Text(label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: text.labelMedium),
+      ),
+      if (kind != null && !scaled) StatusPill(kind!, word: word, dense: true),
+    ]);
     final body = Padding(
       padding: const EdgeInsets.all(SonderSpace.lg),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Row(children: [
-            Icon(icon, size: 16, color: tokens.text2),
-            const SizedBox(width: SonderSpace.sm),
-            Expanded(
-              child: Text(label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: text.labelMedium),
-            ),
-            if (kind != null) StatusPill(kind!, word: word, dense: true),
-          ]),
+          titleRow,
+          if (kind != null && scaled) ...[
+            const SizedBox(height: SonderSpace.xs),
+            StatusPill(kind!, word: word, dense: true),
+          ],
           const SizedBox(height: SonderSpace.md),
           SonderSwitcher(
             child: Text(
@@ -285,7 +291,9 @@ class StatGrid extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(builder: (context, constraints) {
       final width = constraints.maxWidth;
-      var columns = ((width + gap) / (minTileWidth + gap)).floor();
+      final scale = MediaQuery.textScalerOf(context).scale(1.0).clamp(1.0, 2.5);
+      final effectiveMin = minTileWidth * scale;
+      var columns = ((width + gap) / (effectiveMin + gap)).floor();
       columns = columns.clamp(1, maxColumns);
       // Tiles in one row share its height, so bottoms line up even when
       // only some tiles carry a meter.

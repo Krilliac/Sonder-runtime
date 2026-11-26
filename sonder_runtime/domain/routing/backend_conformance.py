@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
+from typing import Any, cast
 
 from .capability_profiles import Capability
 
@@ -102,7 +103,17 @@ class BackendIdentity:
         if (not isinstance(value, Mapping)
                 or set(value) != set(cls.__dataclass_fields__)):
             raise ValueError("exact backend identity is required")
-        return cls(**{field: value[field] for field in cls.__dataclass_fields__})
+        return cls(
+            backend=cast(str, value["backend"]),
+            model=cast(str, value["model"]),
+            model_digest=cast(str, value["model_digest"]),
+            quantization=cast(str, value["quantization"]),
+            backend_version=cast(str, value["backend_version"]),
+            tokenizer_digest=cast(str, value["tokenizer_digest"]),
+            template_digest=cast(str, value["template_digest"]),
+            context_tokens=cast(int, value["context_tokens"]),
+            hardware=cast(str, value["hardware"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -199,11 +210,17 @@ class BackendConformanceRecord:
                 str(item.get("reason_code", "")),
             ))
         raw_identity = value.get("identity")
-        identity = BackendIdentity.from_dict(raw_identity) if raw_identity is not None else None
+        identity: BackendIdentity | None
+        if raw_identity is None:
+            identity = None
+        else:
+            if not isinstance(raw_identity, Mapping):
+                raise ValueError("exact backend identity is required")
+            identity = BackendIdentity.from_dict(raw_identity)
         return cls(
             backend=str(value.get("backend", "")), model=str(value.get("model", "")),
-            checked_at=float(value.get("checked_at", -1)), results=tuple(results),
-            probe_version=int(value.get("probe_version", 1)),
+            checked_at=float(cast(Any, value.get("checked_at", -1))), results=tuple(results),
+            probe_version=int(cast(Any, value.get("probe_version", 1))),
             synthetic=value.get("synthetic") is True,
             identity=identity,
         )
