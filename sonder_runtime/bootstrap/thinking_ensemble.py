@@ -345,10 +345,17 @@ def deliberate_for_turn(
             thinking_model,
             exc,
         )
-        _report_delegation(
-            thinking_tier, thinking_model, effective_lane, started, 0,
-            "timeout" if isinstance(exc, TimeoutError) else "unreachable",
-        )
+        # server._chat_request re-raises transport timeouts as
+        # ModelCallError("timeout"), a URLError (not a TimeoutError), so the
+        # kind attribute must be consulted as well as the exception type.
+        kind = getattr(exc, "kind", "")
+        if isinstance(exc, TimeoutError) or kind == "timeout":
+            outcome = "timeout"
+        elif kind == "cancelled":
+            outcome = "skipped"
+        else:
+            outcome = "unreachable"
+        _report_delegation(thinking_tier, thinking_model, effective_lane, started, 0, outcome)
         return None
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
