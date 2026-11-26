@@ -79,12 +79,19 @@ def _connection():
     if conn is not None and getattr(_LOCAL, "comp_path", None) == path:
         return conn
     if conn is not None:
+        _LOCAL.comp_conn = None
+        _LOCAL.comp_path = None
         with _suppress_sqlite():
             conn.close()
     conn = owned_sqlite_connect(path, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript(_SCHEMA)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(_SCHEMA)
+    except BaseException:
+        conn.close()
+        raise
     _LOCAL.comp_conn = conn
     _LOCAL.comp_path = path
     return conn
@@ -95,9 +102,10 @@ def _row_dict(row) -> dict:
         return {}
     d = dict(row)
     try:
-        d["metadata"] = json.loads(d.pop("metadata_json", "{}"))
+        parsed = json.loads(d.pop("metadata_json", "{}"))
     except (TypeError, ValueError):
-        d["metadata"] = {}
+        parsed = {}
+    d["metadata"] = parsed if isinstance(parsed, dict) else {}
     return d
 
 
@@ -150,40 +158,52 @@ def bind(
     return _row_dict(row)
 
 
-def lookup_targets(source_type: str, source_id: str, target_type: str = "") -> list[dict]:
+def _bounded_limit(limit: int, *, maximum: int) -> int:
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ValueError("limit must be an integer")
+    return max(1, min(limit, maximum))
+
+
+def lookup_targets(
+    source_type: str, source_id: str, target_type: str = "", *, limit: int = 200,
+) -> list[dict]:
+    bounded = _bounded_limit(limit, maximum=500)
     try:
         conn = _connection()
         if target_type:
             rows = conn.execute(
                 "SELECT * FROM bindings WHERE source_type=? AND source_id=? "
-                "AND target_type=? AND status='active' ORDER BY created",
-                (source_type, source_id, target_type),
+                "AND target_type=? AND status='active' ORDER BY created LIMIT ?",
+                (source_type, source_id, target_type, bounded),
             ).fetchall()
         else:
             rows = conn.execute(
                 "SELECT * FROM bindings WHERE source_type=? AND source_id=? "
-                "AND status='active' ORDER BY created",
-                (source_type, source_id),
+                "AND status='active' ORDER BY created LIMIT ?",
+                (source_type, source_id, bounded),
             ).fetchall()
     except sqlite3.Error:
         return []
     return [_row_dict(r) for r in rows]
 
 
-def lookup_sources(target_type: str, target_id: str, source_type: str = "") -> list[dict]:
+def lookup_sources(
+    target_type: str, target_id: str, source_type: str = "", *, limit: int = 200,
+) -> list[dict]:
+    bounded = _bounded_limit(limit, maximum=500)
     try:
         conn = _connection()
         if source_type:
             rows = conn.execute(
                 "SELECT * FROM bindings WHERE target_type=? AND target_id=? "
-                "AND source_type=? AND status='active' ORDER BY created",
-                (target_type, target_id, source_type),
+                "AND source_type=? AND status='active' ORDER BY created LIMIT ?",
+                (target_type, target_id, source_type, bounded),
             ).fetchall()
         else:
             rows = conn.execute(
                 "SELECT * FROM bindings WHERE target_type=? AND target_id=? "
-                "AND status='active' ORDER BY created",
-                (target_type, target_id),
+                "AND status='active' ORDER BY created LIMIT ?",
+                (target_type, target_id, bounded),
             ).fetchall()
     except sqlite3.Error:
         return []
@@ -214,12 +234,13 @@ def _close(binding_id: str, status: str, reason: str) -> dict:
 
 
 def active_bindings(limit: int = 50) -> list[dict]:
+    bounded = _bounded_limit(limit, maximum=200)
     try:
         conn = _connection()
         rows = conn.execute(
             "SELECT * FROM bindings WHERE status='active' "
             "ORDER BY created DESC LIMIT ?",
-            (min(limit, 200),),
+            (bounded,),
         ).fetchall()
     except sqlite3.Error:
         return []

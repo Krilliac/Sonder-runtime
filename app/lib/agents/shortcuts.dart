@@ -35,8 +35,9 @@ class _ShortcutRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
     // AlertDialog measures its content intrinsically, so the stacking
-    // decision reads the window width rather than a LayoutBuilder.
-    final stacked = MediaQuery.sizeOf(context).width < 560;
+    // decision reads the window width and text scale rather than a LayoutBuilder.
+    final scale = MediaQuery.textScalerOf(context).scale(1.0).clamp(1.0, 2.5);
+    final stacked = MediaQuery.sizeOf(context).width < 560 * scale;
     final keys = _Keys(this.keys);
     final label = Text(action, style: text.bodyMedium);
     return Padding(

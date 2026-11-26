@@ -16,8 +16,29 @@ from ...application.ports.runtime_owner import (
 )
 
 
+_SQLITE_BUSY_CODES = frozenset({
+    getattr(sqlite3, "SQLITE_BUSY", 5),
+    getattr(sqlite3, "SQLITE_LOCKED", 6),
+})
+
+
+class OwnerStorageBusy(OwnerRefused):
+    """Transient SQLite busy/locked contention on the owner journal."""
+
+
+def _is_sqlite_busy(error: sqlite3.Error) -> bool:
+    code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(code, int) and (
+        code in _SQLITE_BUSY_CODES or (code & 0xFF) in _SQLITE_BUSY_CODES
+    ):
+        return True
+    text = str(error).lower()
+    return "locked" in text or "busy" in text
+
+
 class SQLiteRuntimeOwnerJournal:
     MAX_OPERATIONS = 1024
+    BUSY_TIMEOUT_SECONDS = 5
 
     def __init__(self, path, *, namespace, create=False):
         self.path = Path(path).absolute()
@@ -46,27 +67,40 @@ class SQLiteRuntimeOwnerJournal:
         self.status()
 
     @contextmanager
-    def _transaction(self, command=None):
+    def _transaction(self, command=None, *, read_only=False):
         if not self.path.is_file():
             raise OwnerRefused("owner journal is missing")
-        connection = owned_sqlite_connect(
-            self.path.as_uri() + "?mode=rw", uri=True, timeout=1, isolation_level=None
-        )
+        mode = "ro" if read_only else "rw"
+        connection = None
         try:
-            connection.execute("PRAGMA synchronous=FULL")
-            connection.execute("BEGIN IMMEDIATE")
+            connection = owned_sqlite_connect(
+                self.path.as_uri() + "?mode=" + mode,
+                uri=True,
+                timeout=self.BUSY_TIMEOUT_SECONDS,
+                isolation_level=None,
+            )
+            if read_only:
+                connection.execute("BEGIN DEFERRED")
+            else:
+                connection.execute("PRAGMA synchronous=FULL")
+                connection.execute("BEGIN IMMEDIATE")
             yield connection
             connection.commit()
-        except sqlite3.Error:
-            connection.rollback()
+        except sqlite3.Error as error:
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
             if command is not None:
                 raise OwnerCommitAmbiguous(command) from None
+            if _is_sqlite_busy(error):
+                raise OwnerStorageBusy("owner storage is unavailable") from None
             raise OwnerRefused("owner storage is unavailable") from None
         except BaseException:
-            connection.rollback()
+            if connection is not None and connection.in_transaction:
+                connection.rollback()
             raise
         finally:
-            connection.close()
+            if connection is not None:
+                connection.close()
 
     def _owner(self, connection):
         if connection.execute("PRAGMA user_version").fetchone()[0] != 1:
@@ -79,7 +113,7 @@ class SQLiteRuntimeOwnerJournal:
         return row
 
     def status(self):
-        with self._transaction() as connection:
+        with self._transaction(read_only=True) as connection:
             row = self._owner(connection)
             return dict(
                 namespace=row[0],
@@ -90,7 +124,7 @@ class SQLiteRuntimeOwnerJournal:
             )
 
     def selected_config(self):
-        with self._transaction() as connection:
+        with self._transaction(read_only=True) as connection:
             owner = self._owner(connection)
             row = connection.execute(
                 "SELECT payload FROM config WHERE digest=?", (owner[4],)
@@ -102,7 +136,7 @@ class SQLiteRuntimeOwnerJournal:
             return json.loads(row[0])
 
     def pending(self):
-        with self._transaction() as connection:
+        with self._transaction(read_only=True) as connection:
             owner = self._owner(connection)
             if owner[3] is None:
                 return None
@@ -275,7 +309,7 @@ class SQLiteManagedRuntimeOwnerJournal(SQLiteRuntimeOwnerJournal):
         return row
 
     def status(self):
-        with self._transaction() as connection:
+        with self._transaction(read_only=True) as connection:
             owner = self._owner(connection)
             identity = connection.execute("SELECT epoch,incarnation,config_revision,selector_revision FROM managed_identity WHERE id=1").fetchone()
             if identity is None:
@@ -291,7 +325,7 @@ class SQLiteManagedRuntimeOwnerJournal(SQLiteRuntimeOwnerJournal):
 
     def pending(self):
         from ...application.ports.managed_runtime_owner import PreparedManagedOwnerOperation
-        with self._transaction() as connection:
+        with self._transaction(read_only=True) as connection:
             owner = self._owner(connection)
             if owner[3] is None:
                 return None
@@ -355,7 +389,7 @@ class SQLiteManagedRuntimeOwnerJournal(SQLiteRuntimeOwnerJournal):
 
     def phase_evidence(self, command, phase):
         command = self._command(command)
-        with self._transaction() as connection:
+        with self._transaction(read_only=True) as connection:
             self._owner(connection)
             self._existing(connection, command)
             row = connection.execute("SELECT evidence FROM managed_phase WHERE operation_id=? AND phase=?", (command.operation_id, phase)).fetchone()

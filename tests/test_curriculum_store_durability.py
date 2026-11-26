@@ -145,3 +145,112 @@ def test_lock_refuses_symlinked_lock_path(tmp_path):
     with pytest.raises(OSError):
         with durable_locks.exclusive_file_lock(link, timeout=0.2):
             pass
+
+
+def test_nt_try_lock_locks_before_writing_byte_zero(monkeypatch):
+    """Cross-platform regression test for the Windows 0-byte lock write race.
+
+    Writing byte 0 before calling msvcrt.locking raised PermissionError when
+    another process held the mandatory byte-0 lock on a newly created file.
+    """
+    import types
+
+    from sonder_runtime.adapters.filesystem import durable_locks as durable_locks_impl
+
+    events = []
+    held = {"locked": True}
+    file_size = {"n": 0}
+
+    fake_msvcrt = types.SimpleNamespace(LK_NBLCK=1, LK_UNLCK=2)
+
+    def fake_locking(fd, mode, nbytes):
+        events.append(("locking", mode, nbytes))
+        if mode == fake_msvcrt.LK_NBLCK:
+            if held["locked"]:
+                raise PermissionError(13, "Permission denied")
+            held["locked"] = True
+        elif mode == fake_msvcrt.LK_UNLCK:
+            held["locked"] = False
+
+    fake_msvcrt.locking = fake_locking
+
+    def fake_write(fd, data):
+        events.append(("write", data))
+        if held["locked"] and ("locking", fake_msvcrt.LK_NBLCK, 1) not in events:
+            raise PermissionError(13, "Permission denied")
+        file_size["n"] += len(data)
+        return len(data)
+
+    monkeypatch.setattr(durable_locks_impl.os, "name", "nt")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    monkeypatch.setattr(durable_locks_impl.os, "lseek", lambda fd, pos, how: 0)
+    monkeypatch.setattr(
+        durable_locks_impl.os,
+        "fstat",
+        lambda fd: types.SimpleNamespace(st_size=file_size["n"]),
+    )
+    monkeypatch.setattr(durable_locks_impl.os, "write", fake_write)
+    monkeypatch.setattr(durable_locks_impl.os, "fsync", lambda fd: events.append(("fsync",)))
+
+    # Contended 0-byte file: must return False without attempting os.write.
+    assert durable_locks_impl._try_lock(99) is False
+    assert events == [("locking", fake_msvcrt.LK_NBLCK, 1)]
+
+    # Uncontended 0-byte file: must lock FIRST, then write b"0" and fsync.
+    events.clear()
+    held["locked"] = False
+    assert durable_locks_impl._try_lock(99) is True
+    assert events == [
+        ("locking", fake_msvcrt.LK_NBLCK, 1),
+        ("write", b"0"),
+        ("fsync",),
+    ]
+
+    # Failure during post-lock initialization must release the acquired lock.
+    events.clear()
+    held["locked"] = False
+    file_size["n"] = 0
+
+    def failing_write(fd, data):
+        events.append(("write_fail", data))
+        raise OSError("disk full")
+
+    monkeypatch.setattr(durable_locks_impl.os, "write", failing_write)
+    with pytest.raises(OSError, match="disk full"):
+        durable_locks_impl._try_lock(99)
+    assert held["locked"] is False
+    assert ("locking", fake_msvcrt.LK_UNLCK, 1) in events
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows mandatory byte-range locking semantics")
+def test_windows_contended_zero_byte_lock_returns_false_not_permission_error(tmp_path):
+    """Reproduces the exact Windows race window on a live 0-byte lock file."""
+    import msvcrt
+
+    from sonder_runtime.adapters.filesystem import durable_locks as durable_locks_impl
+
+    lock_path = tmp_path / "fresh.lock"
+    flags = os.O_RDWR | os.O_CREAT
+    fd1 = os.open(lock_path, flags, 0o600)
+    fd2 = os.open(lock_path, flags, 0o600)
+    try:
+        assert os.fstat(fd1).st_size == 0
+        os.lseek(fd1, 0, os.SEEK_SET)
+        msvcrt.locking(fd1, msvcrt.LK_NBLCK, 1)
+        try:
+            # fd1 holds byte 0 while file size is still 0. Before the fix,
+            # _try_lock(fd2) called os.write(fd2, b"0") and raised PermissionError.
+            assert durable_locks_impl._try_lock(fd2) is False
+        finally:
+            os.lseek(fd1, 0, os.SEEK_SET)
+            msvcrt.locking(fd1, msvcrt.LK_UNLCK, 1)
+
+        # Once fd1 releases, fd2 acquires cleanly and initializes byte 0.
+        assert durable_locks_impl._try_lock(fd2) is True
+        try:
+            assert os.fstat(fd2).st_size == 1
+        finally:
+            durable_locks_impl._unlock(fd2)
+    finally:
+        os.close(fd1)
+        os.close(fd2)

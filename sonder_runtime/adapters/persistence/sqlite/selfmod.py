@@ -91,11 +91,15 @@ CREATE TABLE IF NOT EXISTS schema_epoch (
 def init_selfmod_db(db_path: Path) -> sqlite3.Connection:
     logger.debug(f"initializing selfmod.db at {db_path!r}")
     conn = owned_sqlite_connect(str(db_path))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(SELFMOD_DDL)
-    conn.executescript(OUTBOX_DDL)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.executescript(SELFMOD_DDL)
+        conn.executescript(OUTBOX_DDL)
+    except BaseException:
+        conn.close()
+        raise
     logger.debug("selfmod.db schema applied successfully")
     logger.info(f"selfmod.db initialized at {db_path}")
     return conn
