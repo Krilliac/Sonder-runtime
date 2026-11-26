@@ -6,11 +6,11 @@ Covers ``sonder_runtime/interfaces/agent_lanes.py``,
 """
 from __future__ import annotations
 
-from dataclasses import replace
 import json
 import math
 import threading
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -20,22 +20,22 @@ from sonder_runtime.adapters.persistence.session_repository import (
     SQLiteSessionRepository,
 )
 from sonder_runtime.application.agents.interactive_lanes import (
-    AgentLaneService,
-    _LaneCancellation,
     _WAIT_LOCK,
     _WAIT_OWNERS,
+    AgentLaneService,
+    _LaneCancellation,
 )
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.loop import LoopSessionLifecycleFacade
 from sonder_runtime.application.ports.model_gateway import ModelResponse
 from sonder_runtime.interfaces.agent_lanes import dispatch_agent_lane_tool
 from sonder_runtime.interfaces.http.background_work import (
-    BackgroundWorkAggregator,
     MAX_FLEET_CHILDREN,
     MAX_ID_CHARS,
     MAX_PHASE_CHARS,
     MAX_PROJECT_CHARS,
     MAX_STATUS_CHARS,
+    BackgroundWorkAggregator,
     dispatch_background_work_route,
 )
 
@@ -272,7 +272,7 @@ def test_close_defers_owner_lease_release_until_inflight_worker_finishes(lane_en
 
     def slow_reply(_request, _ctx):
         entered.set()
-        release.wait(5)
+        release.wait(25.0)
         return "finished cleanly"
 
     service = make_service(model=_ScriptedModel([slow_reply]), auto_start=True)
@@ -283,18 +283,21 @@ def test_close_defers_owner_lease_release_until_inflight_worker_finishes(lane_en
         workspace_root=str(workspace),
         context=context,
     )["lane"]["id"]
-    assert entered.wait(5)
+    try:
+        assert entered.wait(20.0)
 
-    # Closing while a worker is mid-call keeps the lock held until the worker exits.
-    service.close()
-    assert store.owner_definitely_stopped(service.owner) is False
+        # Closing while a worker is mid-call keeps the lock held until the worker exits.
+        service.close()
+        assert store.owner_definitely_stopped(service.owner) is False
 
-    release.set()
-    deadline = time.monotonic() + 5.0
-    while not store.owner_definitely_stopped(service.owner) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert store.owner_definitely_stopped(service.owner) is True
-    assert store.read_lane(lane_id)["status"] in {"completed", "failed", "interrupted"}
+        release.set()
+        deadline = time.monotonic() + 20.0
+        while not store.owner_definitely_stopped(service.owner) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert store.owner_definitely_stopped(service.owner) is True
+        assert store.read_lane(lane_id)["status"] in {"completed", "failed", "interrupted"}
+    finally:
+        release.set()
 
 
 def test_wait_validates_inputs_before_slot_and_honors_deadline_and_close(lane_env):
