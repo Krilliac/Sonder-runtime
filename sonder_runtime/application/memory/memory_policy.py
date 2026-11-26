@@ -207,7 +207,7 @@ def evaluate_write(
     kind = memory_class if isinstance(memory_class, MemoryClass) else MemoryClass(memory_class)
     policy = _resolve_class_policy(kind, policy)
     reasons: list[str] = []
-    if not isinstance(confidence, (int, float)) or not math.isfinite(confidence):
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not math.isfinite(confidence):
         reasons.append("confidence must be finite")
     elif not 0.0 <= confidence <= 1.0:
         reasons.append("confidence must be between 0 and 1")
@@ -287,13 +287,25 @@ def evaluate_retrieval(
         reasons.append("secret content is never retrievable")
     if policy.private_by_default and privacy_kind is PrivacyClass.PRIVATE and not requested_scope:
         reasons.append("private memory requires an explicit scope")
-    if not 0.0 <= confidence <= 1.0 or not math.isfinite(confidence):
+    confidence_valid = (
+        not isinstance(confidence, bool)
+        and isinstance(confidence, (int, float))
+        and math.isfinite(confidence)
+        and 0.0 <= confidence <= 1.0
+    )
+    if not confidence_valid:
         reasons.append("confidence is invalid")
-    if not 0.0 <= freshness <= 1.0 or not math.isfinite(freshness):
+    freshness_valid = (
+        not isinstance(freshness, bool)
+        and isinstance(freshness, (int, float))
+        and math.isfinite(freshness)
+        and 0.0 <= freshness <= 1.0
+    )
+    if not freshness_valid:
         reasons.append("freshness is invalid")
     if temporal is not None and not temporal.is_valid_at(now):
         reasons.append("outside temporal validity interval")
-    if not include_stale and policy.default_max_age is not None and freshness <= 0.0:
+    if not include_stale and policy.default_max_age is not None and freshness_valid and freshness <= 0.0:
         reasons.append("stale memory excluded")
     return RetrievalDecision(
         memory_id=memory_id,
@@ -441,9 +453,19 @@ class TemporalTruth:
             raise ValueError("temporal relationships require non-empty ids")
         if set(self.supersedes) & set(self.contradicts):
             raise ValueError("a relation cannot be both superseded and contradicted")
-        if not 0.0 <= self.source_trust <= 1.0 or not math.isfinite(self.source_trust):
+        if (
+            isinstance(self.source_trust, bool)
+            or not isinstance(self.source_trust, (int, float))
+            or not math.isfinite(self.source_trust)
+            or not 0.0 <= self.source_trust <= 1.0
+        ):
             raise ValueError("source_trust must be between 0 and 1")
-        if not 0.0 <= self.confidence <= 1.0 or not math.isfinite(self.confidence):
+        if (
+            isinstance(self.confidence, bool)
+            or not isinstance(self.confidence, (int, float))
+            or not math.isfinite(self.confidence)
+            or not 0.0 <= self.confidence <= 1.0
+        ):
             raise ValueError("confidence must be between 0 and 1")
         if self.decay_half_life is not None and self.decay_half_life <= timedelta(0):
             raise ValueError("decay_half_life must be positive")
@@ -485,7 +507,7 @@ class EmbeddingIdentity:
     def __post_init__(self) -> None:
         for name in ("model", "revision", "normalization", "truncation", "serving_implementation"):
             _nonempty(getattr(self, name), name)
-        if not isinstance(self.dimensions, int) or self.dimensions <= 0:
+        if isinstance(self.dimensions, bool) or not isinstance(self.dimensions, int) or self.dimensions <= 0:
             raise ValueError("dimensions must be a positive integer")
 
     @property
@@ -499,7 +521,10 @@ class EmbeddingIdentity:
     def validate_vector(self, vector: Sequence[float]) -> None:
         if len(vector) != self.dimensions:
             raise ValueError("embedding dimension does not match identity")
-        if not vector or any(not isinstance(x, (int, float)) or not math.isfinite(x) for x in vector):
+        if not vector or any(
+            isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x)
+            for x in vector
+        ):
             raise ValueError("embedding must contain finite numeric values")
         if self.normalization == "l2":
             norm = math.sqrt(sum(float(x) * float(x) for x in vector))

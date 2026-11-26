@@ -9,14 +9,23 @@ from typing import Any
 from sonder_runtime.application.routing.execution_mode_service import (
     ENV_AUTO_ENSEMBLE_TIERS,
     ENV_AUTO_EXECUTION_MODE,
+    ENV_FAST_TIER_LATENCY_MS,
+    ENV_SLOW_TIER_LATENCY_MS,
+    normalize_tier_health,
     plan_chat_execution_mode,
     policy_from_env,
 )
 from sonder_runtime.domain.routing.execution_mode_router import (
+    DEFAULT_FAST_TIER_LATENCY_MS,
+    DEFAULT_SLOW_TIER_LATENCY_MS,
     ExecutionContext,
+    ExecutionDecision,
     ExecutionModePolicy,
+    TierHealthHint,
     check_execution_mode,
+    classify_tier_health,
     plan_execution_mode,
+    route_summary_line,
     score_difficulty,
 )
 from sonder_runtime.interfaces.http.facades import chat_routes
@@ -629,3 +638,589 @@ def test_http_chat_routes_auto_ensemble_and_validation(monkeypatch):
     assert len(sl_calls) == 1
     assert sl_calls[0].startswith("/agent ")
     assert payloads[-1][1]["sonder_receipt"]["execution_route"]["mode"] == "agent"
+
+
+def test_domain_calibration_code_audit_math_architecture_and_debugging():
+    # Code audit + subtle bug signals -> hard
+    band_audit, score_audit, sig_audit, _, _ = score_difficulty(
+        "Perform a code audit on this router module to find subtle bugs and edge cases."
+    )
+    assert band_audit == "hard"
+    assert score_audit >= 0.60
+    assert "code_audit" in sig_audit
+
+    # Pure math/proof with deep multi-concept density -> hard
+    band_math, score_math, sig_math, _, _ = score_difficulty(
+        "Prove by induction that the recurrence T(n) = 2T(n/2) + n has asymptotic time complexity "
+        "and provide a counterexample when the base case is dropped."
+    )
+    assert band_math == "hard"
+    assert score_math >= 0.60
+    assert "formal_math_proof" in sig_math
+    assert "formal_math_proof:deep" in sig_math
+
+    # Single-concept math definition lookup -> stays standard (no false escalation)
+    band_math_simple, _, _, _, _ = score_difficulty("What is asymptotic complexity?")
+    assert band_math_simple == "standard"
+
+    # Rich architecture design -> hard
+    band_arch, score_arch, sig_arch, _, _ = score_difficulty(
+        "Design a distributed scheduler architecture with backpressure, idempotency, invariants, and failure modes."
+    )
+    assert band_arch == "hard"
+    assert score_arch >= 0.60
+    assert "architecture_tradeoff" in sig_arch
+    assert "architecture_tradeoff:deep" in sig_arch
+
+    # Deep crash/non-deterministic debugging -> hard
+    band_dbg, score_dbg, sig_dbg, _, _ = score_difficulty(
+        "Diagnose this non-deterministic segfault and access violation 0xC0000005 with a minimal reproducer."
+    )
+    assert band_dbg == "hard"
+    assert score_dbg >= 0.60
+    assert "deep_debug_crash" in sig_dbg
+    assert "root_cause_debug" in sig_dbg
+
+    # Simple casual "why does" question -> stays standard
+    band_casual, score_casual, _, _, _ = score_difficulty("Why does print() add a newline in Python?")
+    assert band_casual == "standard"
+    assert score_casual < 0.60
+
+
+def test_multi_file_signals_and_url_isolation():
+    # 2 distinct file references + audit cue -> hard
+    band_two, score_two, sig_two, _, mut_two = score_difficulty(
+        "Review sonder_runtime/domain/routing/execution_mode_router.py and "
+        "sonder_runtime/application/routing/execution_mode_service.py for subtle bugs and regressions."
+    )
+    assert band_two == "hard"
+    assert score_two >= 0.60
+    assert "multi_file_refs:2" in sig_two
+    assert mut_two is False
+
+    # 3 distinct Windows backslash file paths + read-only audit -> multi_scope (non-mutating -> fanout)
+    band_three, _, sig_three, _, mut_three = score_difficulty(
+        r"Audit sonder_runtime\domain\routing\execution_mode_router.py, "
+        r"sonder_runtime\application\routing\execution_mode_service.py, and "
+        r"tests\test_execution_mode_router.py for race conditions and threat model gaps."
+    )
+    assert band_three == "multi_scope"
+    assert "multi_file_refs:3" in sig_three
+    assert mut_three is False
+
+    # 3 distinct file paths + mutating verb -> multi_scope + wants_mutating_agent
+    band_mut, _, sig_mut, _, mut_flag = score_difficulty(
+        "Refactor foo.py, bar.py, and baz.py to support tier health fallbacks."
+    )
+    assert band_mut == "multi_scope"
+    assert "multi_file_refs:3" in sig_mut
+    assert mut_flag is True
+
+    # Same file repeated with mixed separators/casing counts as 1 file, not 3
+    band_dup, _, sig_dup, _, mut_dup = score_difficulty(
+        r"Check src/router.py, SRC\router.py, and src/ROUTER.py for formatting."
+    )
+    assert band_dup == "standard"
+    assert not any(s.startswith("multi_file_refs:") for s in sig_dup)
+    assert mut_dup is False
+
+    # URLs containing .py and query '?' must not trigger multi_file or multi_question
+    band_url, _, sig_url, _, _ = score_difficulty(
+        "Fetch https://example.com/a.py?x=1?y=2 and https://example.com/b.py?z=3?w=4 and summarize."
+    )
+    assert band_url == "standard"
+    assert not any(s.startswith("multi_question:") for s in sig_url)
+    assert not any(s.startswith("multi_file_refs:") for s in sig_url)
+
+
+def test_pasted_logs_and_dumps_avoid_false_escalation():
+    auto_policy = ExecutionModePolicy(mode="auto", allow_auto_agent=True)
+
+    # 1. Unfenced timestamped server logs full of trap keywords, bullets, and '?' query strings
+    noisy_log = "\n".join(
+        [
+            "Summarize what failed in this log:",
+            "2026-11-25 01:00:01 INFO scheduler started across multiple modules in parallel",
+            "2026-11-25 01:00:02 WARN potential deadlock and race condition in distributed lock",
+            "2026-11-25 01:00:03 ERROR GET /api?a=1&b=2?c=3?d=4 failed threat model check",
+            "2026-11-25 01:00:04 INFO - item 1: memory leak probe ok",
+            "2026-11-25 01:00:05 INFO - item 2: proof verification skipped",
+            "2026-11-25 01:00:06 ERROR - item 3: upstream timeout after 30s",
+        ]
+    )
+    d_log = plan_chat_execution_mode(
+        noisy_log,
+        tier_models=_DUAL_PC_TIERS,
+        developer_authorized=True,
+        policy=auto_policy,
+    )
+    assert d_log.band == "standard"
+    assert d_log.mode == "single"
+    assert "pasted_log_dampened" in d_log.signals
+
+    # 2. Large fenced log block with brief question
+    fenced_log = (
+        "What HTTP status code was returned?\n"
+        "```log\n"
+        + "\n".join(
+            f"[2026-11-25 01:01:{i:02d}] ERROR deadlock race condition distributed?q={i}"
+            for i in range(25)
+        )
+        + "\n```"
+    )
+    d_fenced = plan_chat_execution_mode(
+        fenced_log,
+        tier_models=_DUAL_PC_TIERS,
+        developer_authorized=True,
+        policy=auto_policy,
+    )
+    assert d_fenced.band == "standard"
+    assert d_fenced.mode == "single"
+    assert "pasted_log_dampened" in d_fenced.signals
+
+    # 3. Raw pasted Python traceback with zero surrounding prompt -> standard, not escalated
+    raw_tb = (
+        "Traceback (most recent call last):\n"
+        '  File "sonder_runtime/serve.py", line 120, in dispatch\n'
+        "    return run_deadlock_check(a, b, c)\n"
+        '  File "sonder_runtime/worker.py", line 44, in run_deadlock_check\n'
+        "    raise RuntimeError('distributed race condition')\n"
+        "RuntimeError: distributed race condition"
+    )
+    band_tb, score_tb, sig_tb, _, _ = score_difficulty(raw_tb)
+    assert band_tb == "standard"
+    assert score_tb == 0.35
+    assert sig_tb == ("pasted_log_only",)
+
+    # 4. Compiler error output + simple question -> standard
+    msvc_errors = (
+        "Explain the first compiler error:\n"
+        "src/foo.cpp(42): error C2065: 'deadlock_guard': undeclared identifier\n"
+        "src/foo.cpp(45): error C2065: 'race_state': undeclared identifier\n"
+        "src/foo.cpp(49): warning C4100: unreferenced formal parameter\n"
+    )
+    band_cc, _, sig_cc, _, _ = score_difficulty(msvc_errors)
+    assert band_cc == "standard"
+    assert "pasted_log_dampened" in sig_cc
+
+    # 5. NDJSON log dump + simple extraction ask -> standard
+    ndjson_prompt = (
+        "Count the error entries:\n"
+        '{"timestamp":"2026-11-25T01:00:01Z","level":"INFO","msg":"boot"}\n'
+        '{"timestamp":"2026-11-25T01:00:02Z","level":"ERROR","msg":"deadlock risk"}\n'
+        '{"timestamp":"2026-11-25T01:00:03Z","level":"ERROR","msg":"race condition"}\n'
+    )
+    band_ndjson, _, sig_ndjson, _, _ = score_difficulty(ndjson_prompt)
+    assert band_ndjson == "standard"
+    assert "pasted_log_dampened" in sig_ndjson
+
+    # 6. Genuine hard prompt WITH an attached log still routes to hard ensemble (not fanout!)
+    hard_with_log = (
+        "Think hard and diagnose the root cause of this intermittent deadlock and memory order race condition:\n"
+        "2026-11-25 01:00:01 ERROR worker-1 stalled on lock acquisition\n"
+        "2026-11-25 01:00:02 ERROR worker-2 stalled on lock acquisition\n"
+        "2026-11-25 01:00:03 ERROR worker-3 stalled on lock acquisition\n"
+        "2026-11-25 01:00:04 WARN - bullet 1\n"
+        "2026-11-25 01:00:05 WARN - bullet 2\n"
+        "2026-11-25 01:00:06 WARN - bullet 3\n"
+    )
+    d_hard_log = plan_chat_execution_mode(
+        hard_with_log,
+        tier_models=_DUAL_PC_TIERS,
+        developer_authorized=True,
+        policy=auto_policy,
+    )
+    assert d_hard_log.band == "hard"
+    assert d_hard_log.mode == "ensemble"
+    assert "pasted_log_dampened" in d_hard_log.signals
+
+    # 7. Fenced code block + fix verb sets ensemble_mode="code"
+    code_fix_prompt = (
+        "Think hard and fix the race condition and deadlock in this snippet:\n"
+        "```python\n"
+        "def run(lock_a, lock_b):\n"
+        "    with lock_a:\n"
+        "        with lock_b:\n"
+        "            return 1\n"
+        "```"
+    )
+    band_cf, _, _, ens_cf, _ = score_difficulty(code_fix_prompt)
+    assert band_cf == "hard"
+    assert ens_cf == "code"
+
+
+def test_conversation_depth_and_prompt_length_calibration():
+    auto_policy = ExecutionModePolicy(mode="auto", allow_auto_agent=False)
+
+    # Pure greetings stay quick even in deep conversations
+    for greeting in ("thanks!", "ok", "hey sonder", "cool"):
+        d = plan_chat_execution_mode(
+            greeting,
+            tier_models=_DUAL_PC_TIERS,
+            developer_authorized=True,
+            conversation_depth=15,
+            policy=auto_policy,
+        )
+        assert d.band == "quick", f"expected quick for {greeting!r}, got {d}"
+        assert d.recommended_tiers == ("fast",)
+
+    # Short non-greeting follow-up in a moderate-depth thread avoids dropping to quick
+    band_shallow, _, _, _, _ = score_difficulty("What about edge cases?", conversation_depth=0)
+    band_mid, _, sig_mid, _, _ = score_difficulty("What about edge cases?", conversation_depth=5)
+    assert band_shallow == "quick"
+    assert band_mid == "standard"
+    assert "deep_conversation:moderate" in sig_mid
+
+    # Borderline math derivation escalates from standard to hard in a deep conversation
+    borderline = "Derive the recurrence bound for the variant we just discussed."
+    band_0, score_0, _, _, _ = score_difficulty(borderline, conversation_depth=0)
+    band_12, score_12, sig_12, _, _ = score_difficulty(borderline, conversation_depth=12)
+    assert band_0 == "standard"
+    assert score_0 < 0.60
+    assert band_12 == "hard"
+    assert score_12 >= 0.60
+    assert "deep_conversation:high" in sig_12
+
+    # Very long plain prose with zero domain difficulty cues stays capped in standard
+    plain_long = "Rewrite the following draft note to be friendlier: " + ("hello team we met today. " * 65)
+    band_long, score_long, sig_long, _, _ = score_difficulty(plain_long, conversation_depth=12)
+    assert "very_long_prompt" in sig_long
+    assert band_long == "standard"
+    assert score_long <= 0.55
+
+    # Long prompt WITH a real debugging signal escalates to hard
+    long_debug = (
+        "Diagnose the root cause of this regression in our streaming consumer: "
+        + ("when the client sends a partial frame under load the buffer index drifts. " * 10)
+    )
+    band_ld, score_ld, sig_ld, _, _ = score_difficulty(long_debug, conversation_depth=10)
+    assert band_ld == "hard"
+    assert score_ld >= 0.60
+    assert "long_prompt" in sig_ld
+    assert "root_cause_debug" in sig_ld
+
+    # Negative and boolean conversation_depth values degrade safely to 0
+    band_neg, _, _, _, _ = score_difficulty("thanks!", conversation_depth=-5)
+    assert band_neg == "quick"
+
+
+def test_health_and_latency_aware_tier_fallbacks():
+    auto_policy = ExecutionModePolicy(mode="auto", allow_auto_agent=False)
+    hard_prompt = "Think hard and analyze deadlock and race condition trade-offs in this distributed architecture."
+
+    # 1. classify_tier_health edge cases
+    assert classify_tier_health(TierHealthHint("fast", latency_ms=500.0), auto_policy) == "healthy"
+    assert classify_tier_health(TierHealthHint("fast", latency_ms=5000.0), auto_policy) == "slow"
+    assert classify_tier_health(TierHealthHint("reasoning", latency_ms=5000.0), auto_policy) == "healthy"
+    assert classify_tier_health(TierHealthHint("reasoning", latency_ms=16000.0), auto_policy) == "slow"
+    assert classify_tier_health(
+        TierHealthHint("reasoning", latency_ms=3000.0, slow_threshold_ms=2000.0), auto_policy
+    ) == "slow"
+    assert classify_tier_health(TierHealthHint("code", available=False), auto_policy) == "unavailable"
+    assert classify_tier_health(TierHealthHint("code", healthy=False), auto_policy) == "unavailable"
+    assert classify_tier_health(TierHealthHint("code", error_rate=0.6), auto_policy) == "unavailable"
+    assert classify_tier_health(TierHealthHint("code", error_rate=float("nan")), auto_policy) == "unavailable"
+    assert classify_tier_health(TierHealthHint("code", latency_ms=float("inf")), auto_policy) == "slow"
+
+    # 2. Quick prompt when fast tier is slow -> reroutes to healthy general, keeps fast as late fallback
+    d_fast_slow = plan_chat_execution_mode(
+        "hey sonder",
+        tier_models=_DUAL_PC_TIERS,
+        developer_authorized=True,
+        tier_latency_ms={"fast": 6500.0, "general": 800.0, "code": 900.0},
+        policy=auto_policy,
+    )
+    assert d_fast_slow.mode == "single"
+    assert d_fast_slow.band == "quick"
+    assert d_fast_slow.recommended_tiers == ("general",)
+    assert d_fast_slow.fallback_tiers[-1] == "fast"
+    assert d_fast_slow.degraded_tiers == ("fast",)
+    assert d_fast_slow.health_degraded is True
+    assert "fast slow" in d_fast_slow.reason
+
+    # 3. Quick prompt when ALL tiers are slow -> picks lowest-latency slow tier, orders fallbacks ascending
+    d_all_slow = plan_chat_execution_mode(
+        "hey sonder",
+        tier_models={"fast": "m1", "general": "m2", "code": "m3"},
+        developer_authorized=True,
+        tier_latency_ms={"fast": 7000.0, "general": 22000.0, "code": 17000.0},
+        policy=auto_policy,
+    )
+    assert d_all_slow.mode == "single"
+    assert d_all_slow.recommended_tiers == ("fast",)
+    assert d_all_slow.fallback_tiers == ("code", "general")
+    assert d_all_slow.health_degraded is True
+
+    # 4. Standard prompt when code is unavailable -> falls back to general
+    d_code_down = plan_chat_execution_mode(
+        "Format this JSON file cleanly.",
+        tier_models=_DUAL_PC_TIERS,
+        developer_authorized=True,
+        unavailable_tiers={"code"},
+        policy=auto_policy,
+    )
+    assert d_code_down.mode == "single"
+    assert d_code_down.recommended_tiers == ("general",)
+    assert "code" not in d_code_down.fallback_tiers
+    assert d_code_down.degraded_tiers == ("code",)
+    assert d_code_down.health_degraded is True
+
+    # 5. Hard prompt when reasoning is offline and only 1 distinct healthy model remains -> degrades to single
+    d_node1_down_single = plan_chat_execution_mode(
+        hard_prompt,
+        tier_models={
+            "code": "bonsai-27b-pq2",
+            "general": "bonsai-27b-pq2",
+            "reasoning": "qwen3-coder-next-80b:latest",
+        },
+        developer_authorized=True,
+        tier_health={"reasoning": {"available": False, "reason": "Node1 unreachable"}},
+        policy=auto_policy,
+    )
+    assert d_node1_down_single.mode == "single"
+    assert d_node1_down_single.recommended_tiers == ("code",)
+    assert d_node1_down_single.fallback_tiers == ("general",)
+    assert d_node1_down_single.degraded_tiers == ("reasoning",)
+    assert d_node1_down_single.health_degraded is True
+    assert "Node1 unreachable" in d_node1_down_single.reason
+
+    # 6. Hard prompt when reasoning is offline but fast (9B) + code (27B) are distinct healthy models -> ensemble[code, fast]
+    d_node1_down_fallback_ens = plan_chat_execution_mode(
+        hard_prompt,
+        tier_models=_DUAL_PC_TIERS,
+        developer_authorized=True,
+        unavailable_tiers={"reasoning"},
+        policy=auto_policy,
+    )
+    assert d_node1_down_fallback_ens.mode == "ensemble"
+    assert d_node1_down_fallback_ens.recommended_tiers == ("code", "fast")
+    assert d_node1_down_fallback_ens.degraded_tiers == ("reasoning",)
+    assert d_node1_down_fallback_ens.health_degraded is True
+    assert "bypassed reasoning unavailable" in d_node1_down_fallback_ens.reason
+
+    # 7. Hard prompt when reasoning is slow (25s) with only code+general+reasoning:
+    # degrade_on_slow_tier=True degrades to single (keeping reasoning in fallback_tiers);
+    # degrade_on_slow_tier=False keeps ensemble and annotates degraded (not bypassed).
+    three_tiers = {
+        "code": "bonsai-27b-pq2",
+        "general": "bonsai-27b-pq2",
+        "reasoning": "qwen3-coder-next-80b:latest",
+    }
+    d_slow_degrade = plan_chat_execution_mode(
+        hard_prompt,
+        tier_models=three_tiers,
+        developer_authorized=True,
+        tier_latency_ms={"code": 900.0, "general": 950.0, "reasoning": 25000.0},
+        policy=ExecutionModePolicy(mode="auto", degrade_on_slow_tier=True),
+    )
+    assert d_slow_degrade.mode == "single"
+    assert d_slow_degrade.recommended_tiers == ("code",)
+    assert d_slow_degrade.fallback_tiers == ("general", "reasoning")
+    assert d_slow_degrade.degraded_tiers == ("reasoning",)
+    assert d_slow_degrade.health_degraded is True
+    assert "25000ms" in d_slow_degrade.reason
+
+    d_slow_keep = plan_chat_execution_mode(
+        hard_prompt,
+        tier_models=three_tiers,
+        developer_authorized=True,
+        tier_latency_ms={"code": 900.0, "general": 950.0, "reasoning": 25000.0},
+        policy=ExecutionModePolicy(mode="auto", degrade_on_slow_tier=False),
+    )
+    assert d_slow_keep.mode == "ensemble"
+    assert d_slow_keep.recommended_tiers == ("code", "reasoning")
+    assert d_slow_keep.degraded_tiers == ("reasoning",)
+    assert d_slow_keep.health_degraded is True
+    assert "degraded reasoning slow" in d_slow_keep.reason
+    assert "bypassed" not in d_slow_keep.reason
+
+    # 8. Unrelated tier (fast) unavailable does NOT mark hard ensemble[code+reasoning] as degraded
+    d_unrelated_down = plan_chat_execution_mode(
+        hard_prompt,
+        tier_models=_DUAL_PC_TIERS,
+        developer_authorized=True,
+        unavailable_tiers={"fast"},
+        policy=auto_policy,
+    )
+    assert d_unrelated_down.mode == "ensemble"
+    assert d_unrelated_down.recommended_tiers == ("code", "reasoning")
+    assert d_unrelated_down.health_degraded is False
+    assert d_unrelated_down.degraded_tiers == ()
+    assert "fast" not in d_unrelated_down.fallback_tiers
+
+    # 9. All tiers unavailable -> never crashes, returns best-effort single with empty fallbacks
+    d_all_down = plan_chat_execution_mode(
+        hard_prompt,
+        tier_models={"code": "m1", "reasoning": "m2"},
+        developer_authorized=True,
+        unavailable_tiers={"code", "reasoning"},
+        policy=auto_policy,
+    )
+    assert d_all_down.mode == "single"
+    assert d_all_down.recommended_tiers == ("reasoning",)
+    assert d_all_down.fallback_tiers == ()
+    assert d_all_down.health_degraded is True
+
+    # 10. Direct domain plan_execution_mode without tier_models still degrades when reasoning is unavailable
+    d_direct = plan_execution_mode(
+        ExecutionContext(
+            prompt=hard_prompt,
+            available_tiers=frozenset({"code", "reasoning"}),
+            distinct_ensemble_models=2,
+            distinct_local_models=2,
+            developer_authorized=True,
+            tier_health=(TierHealthHint("reasoning", available=False, reason="socket timeout"),),
+        ),
+        auto_policy,
+    )
+    assert d_direct.mode == "single"
+    assert d_direct.recommended_tiers == ("code",)
+    assert d_direct.degraded_tiers == ("reasoning",)
+    assert d_direct.health_degraded is True
+    assert "socket timeout" in d_direct.reason
+
+    # 11. Image input falls back from unavailable vision tier to general
+    d_img = plan_execution_mode(
+        ExecutionContext(
+            prompt="describe this diagram",
+            available_tiers=frozenset({"vision", "general"}),
+            has_image=True,
+            tier_health=(TierHealthHint("vision", available=False),),
+        ),
+        auto_policy,
+    )
+    assert d_img.mode == "single"
+    assert d_img.recommended_tiers == ("general",)
+    assert d_img.degraded_tiers == ("vision",)
+    assert d_img.health_degraded is True
+
+
+def test_normalize_tier_health_and_env_latency_thresholds():
+    hints = normalize_tier_health(
+        {"Reasoning": {"healthy": True, "error_rate": 0.1, "reason": "warm"}},
+        tier_latency_ms={"reasoning": 1200.0, "fast": 350.0, "bad": -5.0},
+        unavailable_tiers=["code"],
+    )
+    by_tier = {h.tier: h for h in hints}
+    assert sorted(by_tier.keys()) == ["code", "fast", "reasoning"]
+    assert by_tier["code"].available is False
+    assert by_tier["code"].healthy is False
+    assert by_tier["fast"].latency_ms == 350.0
+    assert by_tier["reasoning"].latency_ms == 1200.0
+    assert by_tier["reasoning"].error_rate == 0.1
+    assert by_tier["reasoning"].reason == "warm"
+
+    p_custom = policy_from_env(
+        {
+            ENV_AUTO_EXECUTION_MODE: "auto",
+            ENV_SLOW_TIER_LATENCY_MS: "8000",
+            ENV_FAST_TIER_LATENCY_MS: "1500",
+        }
+    )
+    assert p_custom.slow_tier_latency_ms == 8000.0
+    assert p_custom.fast_tier_latency_ms == 1500.0
+
+    p_invalid = policy_from_env(
+        {
+            ENV_AUTO_EXECUTION_MODE: "auto",
+            ENV_SLOW_TIER_LATENCY_MS: "-100",
+            ENV_FAST_TIER_LATENCY_MS: "not-a-number",
+        }
+    )
+    assert p_invalid.slow_tier_latency_ms == DEFAULT_SLOW_TIER_LATENCY_MS
+    assert p_invalid.fast_tier_latency_ms == DEFAULT_FAST_TIER_LATENCY_MS
+
+
+def test_route_summary_line_formats_decisions_and_receipt_dicts():
+    auto_policy = ExecutionModePolicy(mode="auto", allow_auto_agent=False)
+
+    d_quick = plan_chat_execution_mode(
+        "hey sonder",
+        tier_models=_DUAL_PC_TIERS,
+        developer_authorized=True,
+        policy=auto_policy,
+    )
+    assert route_summary_line(d_quick) == "auto | quick (0.12) | single[fast]"
+    assert route_summary_line(d_quick.to_dict()) == route_summary_line(d_quick)
+    assert d_quick.to_dict()["summary"] == route_summary_line(d_quick)
+
+    d_code_ens = plan_chat_execution_mode(
+        "Think hard and implement a lock-free SPSC queue in C++ avoiding ABA problem and data race bugs.",
+        tier_models=_DUAL_PC_TIERS,
+        developer_authorized=True,
+        policy=auto_policy,
+    )
+    code_summary = route_summary_line(d_code_ens, include_signals=True, max_signals=2)
+    assert code_summary.startswith("auto | hard (")
+    assert "| ensemble:code[code+reasoning] |" in code_summary
+    assert "| signals:" in code_summary
+    assert "+" in code_summary.split("| signals:")[1]
+    assert route_summary_line(d_code_ens.to_dict()) == route_summary_line(d_code_ens)
+
+    d_fanout = plan_chat_execution_mode(
+        "Audit auth, cache, and scheduling across multiple modules in parallel for threat model and race condition gaps.",
+        tier_models=_DUAL_PC_TIERS,
+        developer_authorized=True,
+        policy=auto_policy,
+    )
+    fanout_summary = route_summary_line(d_fanout)
+    assert "| fanout:local[code+reasoning]" in fanout_summary
+
+    d_degraded = plan_chat_execution_mode(
+        "Think hard and analyze deadlock and race condition trade-offs in this distributed architecture.",
+        tier_models={"code": "bonsai-27b-pq2", "general": "bonsai-27b-pq2", "reasoning": "qwen3-80b"},
+        developer_authorized=True,
+        tier_latency_ms={"code": 900.0, "general": 950.0, "reasoning": 25000.0},
+        policy=auto_policy,
+    )
+    deg_summary = route_summary_line(d_degraded, include_reason=True)
+    assert "degraded:reasoning" in deg_summary
+    assert "fallback:general,reasoning" in deg_summary
+    assert "25000ms" in deg_summary
+    assert "\n" not in deg_summary
+
+    # Manual override + multiline reason sanitization
+    manual_decision = ExecutionDecision(
+        mode="single",
+        band="hard",
+        difficulty_score=0.75,
+        recommended_tiers=("code",),
+        ensemble_mode="prose",
+        fanout_scope="local",
+        reason="explicit\nsingle   override",
+        signals=("explicit_hard_cue",),
+        auto_selected=False,
+    )
+    manual_summary = route_summary_line(manual_decision, include_reason=True)
+    assert manual_summary == "manual | hard (0.75) | single[code] | explicit single override"
+
+    # Malformed / partial serialized dict never raises and stays clean single-line ASCII
+    malformed = {
+        "mode": "single",
+        "band": "standard",
+        "difficulty_score": float("nan"),
+        "recommended_tiers": [],
+        "auto_selected": False,
+        "reason": "line1\r\nline2",
+    }
+    malformed_summary = route_summary_line(malformed, include_reason=True)
+    assert malformed_summary == "manual | standard (0.00) | single | line1 line2"
+    assert malformed_summary.isascii()
+
+
+def test_multi_target_audit_distinguishes_targets_from_criteria():
+    # Three distinct targets joined by 'and' before 'for' -> multi_scope
+    band_targets, _, sig_targets, _, _ = score_difficulty(
+        "Audit auth and cache and scheduler for threat model gaps and race conditions."
+    )
+    assert band_targets == "multi_scope"
+    assert "multi_target_audit" in sig_targets
+
+    # Two files reviewed for two criteria -> hard (NOT multi_target_audit)
+    band_two_files, _, sig_two_files, _, _ = score_difficulty(
+        "Review router.py and service.py for subtle bugs and regressions."
+    )
+    assert band_two_files == "hard"
+    assert "multi_target_audit" not in sig_two_files
+
+

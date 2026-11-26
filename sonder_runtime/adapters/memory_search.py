@@ -38,6 +38,8 @@ from typing import Any
 from sonder_runtime.platform.logging import Redactor
 
 _MATCH_FUNCTION = "sonder_bound_project"
+_MAX_MATCHER_CACHE = 4096
+_MAX_SEARCH_LIMIT = 200
 
 
 def _normalized(value: str) -> str:
@@ -55,7 +57,8 @@ def bound_project_matcher(bound_project: str) -> Callable[[object], bool]:
             cached = isinstance(value, str) and bool(value.strip()) and (
                 _normalized(value) == root
             )
-            seen[value] = cached
+            if len(seen) < _MAX_MATCHER_CACHE:
+                seen[value] = cached
         return cached
 
     return matches
@@ -77,8 +80,14 @@ def search_memory(
     if bound_project and not isinstance(bound_project, str):
         # Fail closed: a bound scope must never degrade to the global view.
         raise TypeError("bound_project must be a project root path string")
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ValueError("limit must be a positive integer")
+    limit = max(1, min(limit, _MAX_SEARCH_LIMIT))
     bound = bool(bound_project)
-    like = "%%%s%%" % query.replace("%", r"\%").replace("_", r"\_")
+    escaped_query = (
+        query.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+    )
+    like = "%%%s%%" % escaped_query
     if bound:
         conn.create_function(
             _MATCH_FUNCTION, 1, bound_project_matcher(bound_project),
