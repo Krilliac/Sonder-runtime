@@ -231,3 +231,52 @@ def test_same_length_human_edit_refreshes_preview_and_sha(tmp_path):
     assert after["preview"] == "omega two"
     assert after["sha256"] != before["sha256"]
     assert after["mtime_ns"] != before["mtime_ns"]
+
+
+# ---------------------------------------------------------------------------
+# Tool-executor path parity with the MCP path (owner order and config redactor)
+
+
+def _executor_write(tmp_path, monkeypatch, content, name="parity-note"):
+    from sonder_runtime.adapters.tool_executor import ToolExecutorAdapter
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.application.ports.tool_executor import ToolCall
+
+    monkeypatch.setenv("SONDER_STATE_HOME", str(tmp_path))
+    return ToolExecutorAdapter().execute(
+        ToolCall("scratchpad_write", {"name": name, "content": content}),
+        local_owner_context(correlation_id="scratchpad-executor-parity"),
+    )
+
+
+def test_executor_scratchpad_uses_approval_ledger_owner_like_mcp_path(tmp_path, monkeypatch):
+    from sonder_runtime.adapters.security import approval_ledger
+
+    with approval_ledger.owner_scope("alice"):
+        result = _executor_write(tmp_path, monkeypatch, "owned by alice")
+    assert result.ok is True, result.output
+    store = ScratchpadStore(tmp_path)
+    assert store.read("alice", "parity-note")["ok"] is True
+    # Before the fix the executor ignored the ledger owner and wrote to the shared "local" bucket.
+    assert store.read("local", "parity-note")["ok"] is False
+
+
+def test_executor_scratchpad_applies_config_redactor(tmp_path, monkeypatch):
+    import sonder_runtime.platform.logging as platform_logging
+
+    class _Canary:
+        def redact(self, text):
+            return text.replace("CANARY-7Q", "[REDACTED]")
+
+    seen = []
+
+    def fake_redactor_for_config(config, **_kw):
+        seen.append(config)
+        return _Canary()
+
+    monkeypatch.setattr(platform_logging, "redactor_for_config", fake_redactor_for_config)
+    result = _executor_write(tmp_path, monkeypatch, "custom secret CANARY-7Q here")
+    assert result.ok is True, result.output
+    assert seen, "executor did not build the store with the configured redactor"
+    on_disk = "".join(p.read_text(encoding="utf-8") for p in tmp_path.rglob("parity-note.md"))
+    assert on_disk and "CANARY-7Q" not in on_disk
