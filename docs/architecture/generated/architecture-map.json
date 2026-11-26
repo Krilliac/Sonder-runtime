@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 529,
+      "file_count": 530,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -261,6 +261,7 @@
         "sonder_runtime/adapters/inference/served_tier_models.py",
         "sonder_runtime/adapters/inference/sonder_inference_gateway.py",
         "sonder_runtime/adapters/inference/sonder_inference_probe.py",
+        "sonder_runtime/adapters/inference/sonder_responses_client.py",
         "sonder_runtime/adapters/inference/sse_stream.py",
         "sonder_runtime/adapters/inference/startup_prewarm.py",
         "sonder_runtime/adapters/inference/static_membership.py",
@@ -1138,7 +1139,7 @@
       ]
     },
     {
-      "file_count": 345,
+      "file_count": 346,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1417,6 +1418,7 @@
         "sonder_runtime/domain/routing/execution_mode_router.py",
         "sonder_runtime/domain/routing/fleet_router.py",
         "sonder_runtime/domain/routing/model_names.py",
+        "sonder_runtime/domain/routing/prefix_locality.py",
         "sonder_runtime/domain/routing/route_planner.py",
         "sonder_runtime/domain/routing/semantic_tier.py",
         "sonder_runtime/domain/routing/thinking_ensemble.py",

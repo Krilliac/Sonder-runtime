@@ -485,6 +485,8 @@ def _run_one_child(
                 thinking_model=delib.model,
                 lane=child_lane,
             )
+            _expose_fn = getattr(server, "reasoning_exposure_enabled", None)
+            _expose = bool(callable(_expose_fn) and _expose_fn())
             board.emit(
                 agent_id=spec.agent_id,
                 parent_id=parent_agent_id,
@@ -493,7 +495,9 @@ def _run_one_child(
                 tier=delib.tier,
                 model=delib.model,
                 elapsed_ms=delib.elapsed_ms,
-                thinking=compact_text(delib.thinking or delib.brief, limit=240),
+                thinking=(
+                    compact_text(delib.thinking or delib.brief, limit=240) if _expose else ""
+                ),
                 summary=f"thinking brief from {delib.tier} ({delib.model})",
             )
     child_prompt = f"{preamble}{thinking_section}\n\n[DELEGATED TASK]\n{spec.task}"

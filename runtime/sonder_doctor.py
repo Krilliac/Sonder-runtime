@@ -778,6 +778,37 @@ def _inference_tier_context_summary(gateway) -> str:
     return "; tier context: " + ", ".join(known)
 
 
+def _inference_node_gpu_summary(gateway, *, env=None) -> str:
+    """``; gpu pool: ...`` from ``/v1/sonder/node`` (primary + private workers).
+
+    Empty when the endpoint does not publish ``sonder.inference.node/1`` GPU
+    pool metadata (an older Inference or a mock without ``/v1/sonder/node``),
+    so existing doctor output stays unchanged.
+    """
+    try:
+        from sonder_runtime.adapters.inference import gpu_residency
+
+        report = gpu_residency.inspect_inference_nodes(gateway=gateway, env=env)
+    except Exception:  # noqa: BLE001 - optional diagnostics never break doctor
+        return ""
+    summary = str(report.get("summary") or "").strip()
+    return "; " + summary if summary else ""
+
+
+def sonder_inference_node_report(*, env=None, gateway=None, refresh: bool = False) -> dict:
+    """Structured content-free ``/v1/sonder/node`` GPU pool report + doctor verdict."""
+    from sonder_runtime.adapters.inference import gpu_residency
+    from sonder_runtime.bootstrap.doctor_checks import summarize_inference_node_diagnostics
+
+    report = gpu_residency.inspect_inference_nodes(
+        gateway=gateway, env=env, refresh=refresh,
+    )
+    return {
+        **report,
+        "verdict": summarize_inference_node_diagnostics(report),
+    }
+
+
 def _check_sonder_inference(*, env=None, gateway=None) -> dict:
     """Probe the Sonder Inference provider when any binding uses it.
 
@@ -815,6 +846,7 @@ def _check_sonder_inference(*, env=None, gateway=None) -> dict:
     detail = readiness.detail
     if readiness.kind == "ready":
         detail += _inference_tier_context_summary(gateway)
+        detail += _inference_node_gpu_summary(gateway, env=env)
         if readiness.synthetic:
             return {
                 "status": STATUS_WARN,

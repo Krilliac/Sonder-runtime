@@ -374,3 +374,73 @@ def test_runtime_policy_data_exposes_thinking_ensemble_status(monkeypatch):
     assert te["bound_model"] == "qwen3-coder-next-80b:latest"
     assert te["code_ensembles_with"] == "reasoning"
     assert te["security_ensembles_with"] == "reasoning"
+
+
+_PRIVATE_MARKER = "ZXQ-PRIVATE-REASONING-7731"
+
+
+def _run_marker_deliberation(monkeypatch, *, expose: bool):
+    monkeypatch.delenv("SONDER_THINKING_ENSEMBLE", raising=False)
+    board_events: list[dict[str, Any]] = []
+    recorded_events: list[tuple[str, str]] = []
+    recorded_reasoning: list[tuple[str, str]] = []
+    monkeypatch.setattr(te_bootstrap._delegation, "current_board", lambda: object())
+    monkeypatch.setattr(
+        te_bootstrap._delegation,
+        "emit_agent_event",
+        lambda **kw: board_events.append(dict(kw)),
+    )
+    fake_server = SimpleNamespace(
+        TIERS={
+            "code": "sonder:latest",
+            "general": "sonder:latest",
+            "reasoning": "qwen3-coder-next-80b:latest",
+        },
+        OLLAMA_POOL=SimpleNamespace(enabled=False),
+        activity_tracker=SimpleNamespace(
+            record_event=lambda kind, summary="": recorded_events.append((kind, summary)),
+            record_reasoning=lambda text, model="": recorded_reasoning.append((text, model)),
+        ),
+        reasoning_exposure_enabled=lambda: expose,
+        _is_cloud_tier=lambda _t, m="": ":cloud" in str(m),
+        _bridge_provider_for_tier=lambda _t: None,
+        _auto_model_context=lambda _m: 32768,
+        _keep_alive_for=lambda _m: "5m",
+        _chat_request=lambda payload, **kw: (
+            {},
+            {
+                "role": "assistant",
+                "thinking": f"{_PRIVATE_MARKER} lock ordering analysis",
+                "content": "- Check lock order",
+            },
+        ),
+    )
+    res = te_bootstrap.deliberate_for_turn(
+        fake_server,
+        "Refactor the task scheduler lock hierarchy to prevent deadlock",
+        tier="general",
+        model="sonder:latest",
+        cloud=False,
+        check_reachable=lambda *_a: True,
+    )
+    assert res is not None
+    assert board_events, "expected a thinking board event"
+    return board_events, recorded_events, recorded_reasoning
+
+
+def test_thinking_exposure_off_leaks_no_text_into_board_or_events(monkeypatch):
+    board_events, recorded_events, recorded_reasoning = _run_marker_deliberation(
+        monkeypatch, expose=False
+    )
+    assert _PRIVATE_MARKER not in repr(board_events)
+    assert _PRIVATE_MARKER not in repr(recorded_events)
+    assert recorded_reasoning == []
+    assert "Check lock order" not in repr(board_events)
+    assert all(ev["thinking"] == "" for ev in board_events)
+    assert "ms" in board_events[0]["summary"]
+
+
+def test_thinking_exposure_on_carries_text_in_thinking_field(monkeypatch):
+    board_events, _events, recorded_reasoning = _run_marker_deliberation(monkeypatch, expose=True)
+    assert any(_PRIVATE_MARKER in ev["thinking"] for ev in board_events)
+    assert recorded_reasoning and _PRIVATE_MARKER in recorded_reasoning[0][0]

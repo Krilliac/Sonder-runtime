@@ -230,23 +230,47 @@ class StrategyMemoryService:
                 scope.strategy_experiences.complete(run_id, attempt_id, attempt.outcome)
             return stored
 
-    def _assessment(self, scope, experience: StrategyExperience) -> tuple[LearningStage, float, bool]:
+    def _signature_assessment(
+        self, scope, project_digest: str, signature_digest: str,
+    ) -> tuple[LearningStage, dict[str, bool], dict[str, int]]:
+        """Evaluate a signature once with batched observation and reuse lookups."""
         rows = scope.strategy_experiences.by_signature(
-            experience.project_digest, experience.signature_digest, limit=10_001,
+            project_digest, signature_digest, limit=10_001,
         )
         if len(rows) > 10_000:
             raise ValueError("strategy evidence snapshot is incomplete")
+        obs_ids = tuple(
+            row.verifier_observation_id for row in rows if row.verifier_observation_id
+        )
+        get_many = getattr(scope.verifier_observations, "get_many", None)
+        if callable(get_many):
+            obs_map = get_many(obs_ids) if obs_ids else {}
+        else:
+            obs_map = {
+                oid: pair
+                for oid in dict.fromkeys(obs_ids)
+                if (pair := scope.verifier_observations.get(oid)) is not None
+            }
+        exp_ids = tuple(row.experience_id for row in rows)
+        failed_batch = getattr(scope.strategy_experiences, "failed_reuses_batch", None)
+        if callable(failed_batch):
+            failed_map = failed_batch(exp_ids) if exp_ids else {}
+        else:
+            failed_map = {
+                eid: scope.strategy_experiences.failed_reuses(eid)
+                for eid in dict.fromkeys(exp_ids)
+            }
         observations = []
-        verified = False
+        verified_by_id: dict[str, bool] = {}
         for row in rows:
-            pair = scope.verifier_observations.get(row.verifier_observation_id) if row.verifier_observation_id else None
+            pair = obs_map.get(row.verifier_observation_id) if row.verifier_observation_id else None
             trusted = False
             independence = row.experience_id
             if pair is not None:
                 receipt, original = pair
                 trusted = (
                     _digest(receipt.run_id) == row.run_id
-                    and _scope(receipt.project_scope) == experience.project_digest
+                    and _scope(receipt.project_scope) == project_digest
                     and receipt.workspace_scope == receipt.project_scope
                     and receipt.receipt_digest in row.evidence_digests
                     and original.source == ReceiptObservationProducer.SOURCE
@@ -255,11 +279,10 @@ class StrategyMemoryService:
                 )
                 if trusted:
                     independence = original.independent_key
-            if row.experience_id == experience.experience_id:
-                verified = trusted
+            verified_by_id[row.experience_id] = trusted
             observations.append(LearningObservation(
                 observation_id=row.experience_id,
-                content="strategy:" + experience.project_digest + ":" + experience.signature_digest,
+                content="strategy:" + project_digest + ":" + signature_digest,
                 source="verified_strategy" if trusted else "sealed_attempt",
                 independent_key=independence,
                 provenance=("attempt:" + row.attempt_digest,
@@ -269,17 +292,42 @@ class StrategyMemoryService:
                 # A host verifier confirms a result, not held-out policy evaluation.
                 evaluation_passed=False, explicit_confirmation=False,
             ))
-            if scope.strategy_experiences.failed_reuses(row.experience_id):
+            if failed_map.get(row.experience_id, 0):
                 observations.append(LearningObservation(
                     observation_id="reuse-failure-" + row.experience_id,
-                    content="strategy:" + experience.project_digest + ":" + experience.signature_digest,
+                    content="strategy:" + project_digest + ":" + signature_digest,
                     source="failed_reuse", independent_key=row.experience_id,
                     provenance=("experience:" + row.experience_id,), positive=False,
                 ))
         decisions = self._ladder.evaluate(observations)
         stage = decisions[0].stage if decisions else LearningStage.OBSERVATION
+        return stage, verified_by_id, failed_map
+
+    def _assessment(
+        self,
+        scope,
+        experience: StrategyExperience,
+        *,
+        signature_cache: dict[
+            tuple[str, str],
+            tuple[LearningStage, dict[str, bool], dict[str, int]],
+        ] | None = None,
+    ) -> tuple[LearningStage, float, bool]:
+        cache_key = (experience.project_digest, experience.signature_digest)
+        if signature_cache is not None and cache_key in signature_cache:
+            stage, verified_by_id, failed_map = signature_cache[cache_key]
+        else:
+            stage, verified_by_id, failed_map = self._signature_assessment(
+                scope, experience.project_digest, experience.signature_digest,
+            )
+            if signature_cache is not None:
+                signature_cache[cache_key] = (stage, verified_by_id, failed_map)
+        verified = verified_by_id.get(experience.experience_id, False)
         baseline = (0.80 if verified else 0.30) if experience.outcome == "succeeded" else 0.40
-        confidence = baseline * (0.5 ** scope.strategy_experiences.failed_reuses(experience.experience_id))
+        failed_count = failed_map.get(experience.experience_id)
+        if failed_count is None:
+            failed_count = scope.strategy_experiences.failed_reuses(experience.experience_id)
+        confidence = baseline * (0.5 ** failed_count)
         return stage, confidence, verified
 
     def select_for_attempt(self, run_id: str, attempt_id: str, *, project_scope: str,
@@ -316,7 +364,16 @@ class StrategyMemoryService:
                     language=language, subsystem_digest=subsystem_digest,
                     outcome=outcome, limit=MAX_LOOKUP,
                 )
-            assessments = {row.experience_id: self._assessment(scope, row) for row in rows}
+            signature_cache: dict[
+                tuple[str, str],
+                tuple[LearningStage, dict[str, bool], dict[str, int]],
+            ] = {}
+            assessments = {
+                row.experience_id: self._assessment(
+                    scope, row, signature_cache=signature_cache,
+                )
+                for row in rows
+            }
             ranked = list(rows) if existing else sorted(rows, key=lambda row: (
                 -(assessments[row.experience_id][0].value),
                 -(assessments[row.experience_id][1]), row.experience_id,
