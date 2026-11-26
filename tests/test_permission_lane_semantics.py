@@ -104,7 +104,7 @@ def test_non_bypass_scopes_still_persist_next_to_an_in_memory_bypass(_isolated_m
     with pm.mode_scope("account:bob", "s"):
         pm.set_mode(pm.BYPASS)
     saved = json.loads(state_file.read_text(encoding="utf-8"))
-    assert saved["scopes"] == {"account:carol|s": pm.PLAN}
+    assert saved["scopes"] == {pm._scope_key("account:carol", "s"): pm.PLAN}
     # In memory the bypass scope still holds for this process.
     with pm.mode_scope("account:bob", "s"):
         assert pm.current_mode() == pm.BYPASS

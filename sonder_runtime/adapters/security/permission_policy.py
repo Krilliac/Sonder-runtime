@@ -78,6 +78,9 @@ class PermissionPolicyProvider:
     def set_session_mode(self, name: str) -> str:
         return _engine().set_session_mode(name)
 
+    def set_session_mode_lowering_only(self, name: str) -> str:
+        return _engine().set_session_mode_lowering_only(name)
+
     def attended_mode_change(self):
         """Context for a mode change a present person makes (console only)."""
         return _engine().attended_mode_change()
