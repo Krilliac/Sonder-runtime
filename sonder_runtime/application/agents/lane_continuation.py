@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 
+from ..context import narrow_private_node
 from ..ports.managed_authority import ManagedAuthority
 from ..ports.lane_continuation import (
     ApprovalOutcomeUnknown,
@@ -121,6 +122,9 @@ class BoundContinuation:
             workspace_roots=tuple(Path(root) for root in record["workspace_roots"]),
             cloud_allowed=record["cloud_allowed"],
             remote_ollama_allowed=record["remote_allowed"],
+            private_node_allowed=narrow_private_node(
+                context.private_node_allowed, record.get("private_node_allowed"),
+            ),
             deadline_monotonic=min(
                 context.deadline_monotonic or float("inf"),
                 time.monotonic() + max(0, record["expires_at"] - time.time()),
@@ -178,6 +182,8 @@ class BoundContinuation:
                     and not ceiling.cloud_allowed
                     or context.remote_ollama_allowed
                     and not ceiling.remote_ollama_allowed
+                    or context.private_node_allowed is True
+                    and ceiling.private_node_allowed is False
                     or context.deadline_monotonic is None
                     or not math.isfinite(context.deadline_monotonic)
                     or context.deadline_monotonic > ceiling.deadline_monotonic
@@ -203,6 +209,7 @@ class BoundContinuation:
             context.cloud_allowed,
             context.remote_ollama_allowed,
             context.deadline_monotonic,
+            context.private_node_allowed,
         )
 
     @contextmanager
@@ -807,6 +814,8 @@ class LaneContinuationService:
             and not context.cloud_allowed
             or record["remote_allowed"]
             and not context.remote_ollama_allowed
+            or record.get("private_node_allowed") is False
+            and context.private_node_allowed is True
         ):
             raise PermissionError("original host authority is no longer current")
         parent = tx.conn.execute(
@@ -895,6 +904,7 @@ class LaneContinuationService:
                     auth_level=context.auth_level,
                     cloud_allowed=context.cloud_allowed,
                     remote_allowed=context.remote_ollama_allowed,
+                    private_node_allowed=context.private_node_allowed,
                     expires_at=expires,
                     last_wall=now,
                     epoch=1,

@@ -149,6 +149,7 @@ class PreSendFallbackGateway:
                     logger.exception("provider fallback observer failed")
             local_only = dataclasses.replace(
                 context, cloud_allowed=False, remote_ollama_allowed=False,
+                private_node_allowed=False,
             )
             try:
                 response = self._fallback.generate(request, local_only)

@@ -93,6 +93,7 @@ class HostAuthorityCeiling:
     cloud_allowed: bool
     remote_ollama_allowed: bool
     deadline_monotonic: float
+    private_node_allowed: bool | None = None
 
 
 @dataclass(frozen=True)

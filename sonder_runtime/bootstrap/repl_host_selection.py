@@ -226,6 +226,10 @@ class ReplHostSelectionAdapter:
                     context.remote_ollama_allowed and not original.remote_ollama_allowed
                 )
                 or (
+                    context.private_node_allowed is True
+                    and original.private_node_allowed is False
+                )
+                or (
                     original.deadline_monotonic is not None
                     and (
                         context.deadline_monotonic is None
