@@ -9,6 +9,8 @@ timeouts, and nested .env handling in secret_scan.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
 import textwrap
 import time
@@ -16,6 +18,7 @@ import time
 import harness_tools
 import pytest
 
+from sonder_runtime.adapters import confined_read
 from sonder_runtime.adapters import secret_scan as secret_scan_adapter
 from sonder_runtime.adapters.filesystem import file_ops
 
@@ -143,29 +146,18 @@ def test_clang_format_check_without_path_is_refused(tmp_path, no_child):
 
 # ---- pip dependency tools --------------------------------------------------
 
-def _fake_home(root, payload=b"BASE-PYTHON"):
-    """A base interpreter directory OUTSIDE ``root`` laid out as ``python -m venv`` expects."""
-    home = root.parent / (root.name + "_base")
-    launcher = home / "Lib" / "venv" / "scripts" / "nt" / "python.exe" if os.name == "nt" else home / "python"
-    launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_bytes(payload)
-    return home, launcher
-
-
-def _fake_venv(root, name=".venv", *, payload=b"BASE-PYTHON", home=None):
+def _fake_venv(root, name=".venv", *, pth=None):
+    """A venv-shaped folder: pyvenv.cfg, a python binary the runtime must never run, site-packages."""
     venv = root / name
     python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     python.parent.mkdir(parents=True)
-    base, launcher = _fake_home(root, b"BASE-PYTHON")
-    if os.name == "nt":
-        python.write_bytes(payload)
-    else:
-        try:
-            python.symlink_to(launcher) if payload == b"BASE-PYTHON" else python.write_bytes(payload)
-        except OSError:
-            python.write_bytes(payload)
-    (venv / "pyvenv.cfg").write_text("home = %s\n" % (home or base), encoding="utf-8")
-    return python
+    python.write_bytes(b"EVIL-BINARY")
+    site = venv / ("Lib/site-packages" if os.name == "nt" else "lib/python3.12/site-packages")
+    site.mkdir(parents=True)
+    if pth:
+        (site / "evil.pth").write_text(pth, encoding="utf-8")
+    (venv / "pyvenv.cfg").write_text("home = elsewhere\n", encoding="utf-8")
+    return site
 
 
 _PIP_CALLS = (
@@ -173,6 +165,7 @@ _PIP_CALLS = (
     ("dependency_remove", {"packages_json": '["requests"]'}),
     ("dependency_update", {"packages_json": "[]"}),
 )
+_PIP_INSTALL_CALLS = tuple(call for call in _PIP_CALLS if call[0] != "dependency_remove")
 
 
 @pytest.mark.parametrize("tool, kwargs", _PIP_CALLS)
@@ -180,45 +173,54 @@ def test_pip_never_targets_the_runtime_interpreter(tmp_path, no_child, not_live,
     (tmp_path / "requirements.txt").write_text("requests\n", encoding="utf-8")
     result = getattr(harness_tools, tool)(root=str(tmp_path), **kwargs)
     assert result["ok"] is False
-    assert "virtual environment" in result["error"]
+    assert "virtual environment" in result["error"] or "uninstall" in result["error"]
 
 
-@pytest.mark.parametrize("tool, kwargs", _PIP_CALLS)
-def test_pip_runs_in_the_project_venv_isolated(tmp_path, captured, not_live, tool, kwargs):
+@pytest.mark.parametrize("tool, kwargs", _PIP_INSTALL_CALLS)
+def test_pip_runs_the_runtime_pip_into_the_venv_and_never_the_repo_interpreter(
+        tmp_path, captured, not_live, tool, kwargs):
     (tmp_path / "requirements.txt").write_text("requests\n", encoding="utf-8")
-    python = _fake_venv(tmp_path)
+    site = _fake_venv(tmp_path, pth="import os; os.system('echo PTH-EXECUTED')\n")
     getattr(harness_tools, tool)(root=str(tmp_path), **kwargs)
     assert len(captured) == 1
-    assert captured[0][:4] == [str(python), "-I", "-m", "pip"]
-    if tool in ("dependency_add", "dependency_remove"):
-        assert "--" in captured[0]
-    assert sys.executable not in captured[0]
+    assert captured[0][:6] == [sys.executable, "-I", "-m", "pip", "install", "--target"]
+    assert captured[0][6] == str(site)
+    assert not any(part.endswith(("python.exe", "bin/python")) and part != sys.executable for part in captured[0])
 
 
-def test_pip_refuses_a_repo_supplied_interpreter_that_is_not_a_venv_launcher(tmp_path, no_child, not_live):
-    # A hostile repo ships its own .venv/Scripts/python.exe next to a plausible pyvenv.cfg.
+def test_dependency_remove_is_refused_rather_than_run_in_the_repo_interpreter(tmp_path, no_child, not_live):
     (tmp_path / "requirements.txt").write_text("requests\n", encoding="utf-8")
-    _fake_venv(tmp_path, payload=b"EVIL-BINARY")
-    for tool, kwargs in _PIP_CALLS:
-        result = getattr(harness_tools, tool)(root=str(tmp_path), **kwargs)
-        assert result["ok"] is False, tool
-        assert "virtual environment" in result["error"]
+    _fake_venv(tmp_path)
+    result = harness_tools.dependency_remove(root=str(tmp_path), packages_json='["requests"]')
+    assert result["ok"] is False
+    assert "uninstall" in result["error"]
 
 
-def test_pip_refuses_a_venv_whose_home_is_inside_the_repo(tmp_path, no_child, not_live):
+def test_pip_refuses_a_venv_without_pyvenv_cfg_or_site_packages(tmp_path, no_child, not_live):
     (tmp_path / "requirements.txt").write_text("requests\n", encoding="utf-8")
-    inside = tmp_path / "fake_home"
-    inside.mkdir()
-    _fake_venv(tmp_path, home=inside)
-    result = harness_tools.dependency_add(root=str(tmp_path), packages_json='["requests"]')
+    site = _fake_venv(tmp_path)
+    (tmp_path / ".venv" / "pyvenv.cfg").unlink()
+    assert harness_tools.dependency_add(root=str(tmp_path), packages_json='["requests"]')["ok"] is False
+    (tmp_path / ".venv" / "pyvenv.cfg").write_text("home = x\n", encoding="utf-8")
+    shutil.rmtree(site)
+    assert harness_tools.dependency_add(root=str(tmp_path), packages_json='["requests"]')["ok"] is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junction creation is Windows-specific here")
+def test_pip_refuses_a_site_packages_junction_to_outside_the_root(tmp_path, no_child, not_live):
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "requirements.txt").write_text("requests\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    venv = root / ".venv"
+    (venv / "Lib").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = x\n", encoding="utf-8")
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(venv / "Lib" / "site-packages"), str(outside)],
+                   check=True, capture_output=True)
+    result = harness_tools.dependency_add(root=str(root), packages_json='["requests"]')
     assert result["ok"] is False
     assert "virtual environment" in result["error"]
-
-
-def test_pip_refuses_a_venv_with_a_missing_or_unreadable_home(tmp_path, no_child, not_live):
-    (tmp_path / "requirements.txt").write_text("requests\n", encoding="utf-8")
-    _fake_venv(tmp_path, home=tmp_path.parent / "no_such_home_dir")
-    assert harness_tools.dependency_add(root=str(tmp_path), packages_json='["requests"]')["ok"] is False
 
 
 def test_pip_refuses_a_venv_that_is_the_runtime_environment(tmp_path, no_child, not_live, monkeypatch):
@@ -751,11 +753,85 @@ def test_diff_files_diffs_the_bytes_it_read(workspace):
     assert harness_tools.diff_files(root=str(workspace), left="src/a.txt", right="src/a.txt")["returncode"] == 0
 
 
-def test_diff_files_never_hands_git_a_pathname(workspace, monkeypatch):
+def test_diff_files_never_hands_a_child_a_pathname(workspace, monkeypatch):
     (workspace / "src" / "a.txt").write_text("one\n", encoding="utf-8")
     (workspace / "src" / "b.txt").write_text("two\n", encoding="utf-8")
-    monkeypatch.setattr(harness_tools, "_run", lambda *a, **k: pytest.fail("git was handed the paths again"))
-    assert harness_tools.diff_files(root=str(workspace), left="src/a.txt", right="src/b.txt")["ok"] is True
+    real_run = harness_tools._run
+    argvs = []
+
+    def spy(cmd, **kwargs):
+        argvs.append([str(part) for part in cmd])
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(harness_tools, "_run", spy)
+    result = harness_tools.diff_files(root=str(workspace), left="src/a.txt", right="src/b.txt")
+    assert result["ok"] is True and "-one" in result["stdout"] and "+two" in result["stdout"]
+    assert len(argvs) == 1 and argvs[0][:3] == [sys.executable, "-I", "-c"]
+    assert not any("a.txt" in part or "b.txt" in part for part in argvs[0][3:4])
+
+
+def test_diff_files_is_killed_at_the_timeout_on_adversarial_input(workspace):
+    # 60k short lines drawn from ~100 values stay below difflib's autojunk threshold and cost
+    # it several seconds in-process (about 5 s measured), far over the 1 s timeout used here.
+    import random
+
+    generator = random.Random(1)
+    left = "".join("%d\n" % generator.randrange(100) for _ in range(60000))
+    right = "".join("%d\n" % generator.randrange(100) for _ in range(60000))
+    (workspace / "src" / "a.txt").write_text(left, encoding="utf-8")
+    (workspace / "src" / "b.txt").write_text(right, encoding="utf-8")
+    started = time.time()
+    result = harness_tools.diff_files(root=str(workspace), left="src/a.txt", right="src/b.txt", timeout=1)
+    assert result["ok"] is False and result["timed_out"] is True
+    assert "timeout" in result["error"]
+    assert time.time() - started < 10
+
+
+@pytest.mark.skipif(os.name != "nt", reason="pinning by sharing mode is Windows behaviour")
+def test_rename_symbol_holds_the_parent_so_it_cannot_be_swapped_for_a_junction(workspace, monkeypatch):
+    # While the rename holds the target's folder, renaming that folder away (the first step of
+    # replacing it with a junction) must fail; the write then lands inside the root.
+    target = workspace / "src" / "a.py"
+    target.write_text("old = 1\n", encoding="utf-8")
+    outside = workspace.parent / (workspace.name + "_outside")
+    outside.mkdir()
+    attempts = []
+    real_stage = confined_read.PinnedDirectory.stage
+
+    def stage_then_try_swap(self, name, text):
+        temp = real_stage(self, name, text)
+        try:
+            os.rename(str(workspace / "src"), str(workspace / "src_moved"))
+            attempts.append("renamed")
+        except OSError:
+            attempts.append("blocked")
+        return temp
+
+    monkeypatch.setattr(confined_read.PinnedDirectory, "stage", stage_then_try_swap)
+    result = harness_tools.rename_symbol(
+        root=str(workspace), old_name="old", new_name="new", glob="src/*.py", dry_run=False)
+    assert attempts == ["blocked"], attempts
+    assert result["ok"] is True
+    assert "new = 1" in target.read_text(encoding="utf-8")
+    assert not list(outside.iterdir())
+
+
+def test_pinned_directory_refuses_a_directory_outside_the_root(workspace):
+    outside = workspace.parent / (workspace.name + "_elsewhere")
+    outside.mkdir()
+    with pytest.raises(confined_read.ConfinedReadRefused):
+        confined_read.PinnedDirectory(workspace, outside).__enter__()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junction creation is Windows-specific here")
+def test_pinned_directory_refuses_a_junction(workspace):
+    outside = workspace.parent / (workspace.name + "_target")
+    outside.mkdir()
+    link = workspace / "src" / "hop"
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], check=True, capture_output=True)
+    with pytest.raises(confined_read.ConfinedReadRefused):
+        confined_read.PinnedDirectory(workspace, link).__enter__()
+    assert not list(outside.iterdir())
 
 
 def test_diff_files_refuses_when_the_opened_handle_is_protected(workspace, monkeypatch):
@@ -798,3 +874,126 @@ def test_rename_refuses_and_references_skip_a_short_name_shaped_file(workspace):
     assert "short name" in result["error"]
     refs = harness_tools.extract_references(root=str(workspace), symbol="key", glob="src/**/*")
     assert {ref["file"] for ref in refs["references"]} == {os.path.join("src", "ok.txt")}
+
+
+# ---- review round 2: formatter configs below the checked path, bundled formatters ----------
+
+def _guard(tool, root, target=""):
+    from sonder_runtime.adapters import formatter_config_guard
+
+    return formatter_config_guard.executable_config_error(tool, root, target)
+
+
+@pytest.mark.parametrize("target", ["", ".", "src", "src/sub"])
+def test_prettier_guard_checks_every_folder_under_the_checked_path(tmp_path, target):
+    sub = tmp_path / "src" / "sub"
+    sub.mkdir(parents=True)
+    (sub / "prettier.config.js").write_text("module.exports = {}\n", encoding="utf-8")
+    assert "prettier.config.js" in _guard("prettier", tmp_path, target)
+
+
+def test_prettier_guard_ignores_a_sibling_folder_outside_the_checked_file(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.js").write_text("x\n", encoding="utf-8")
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "prettier.config.js").write_text("module.exports = {}\n", encoding="utf-8")
+    assert _guard("prettier", tmp_path, "src/a.js") is None
+    assert _guard("prettier", tmp_path, "") is not None
+
+
+@pytest.mark.parametrize("name, text", [
+    ("package.yaml", "name: x\nprettier: evil-shared-config\n"),
+    ("package.yaml", 'name: x\n"prettier": "evil-shared-config"\n'),
+    ("package.yaml", "name: x\nprettier:\n  plugins:\n    - ./evil.js\n"),
+    (".prettierrc", '{"plug\\u0069ns": ["./evil.js"]}'),
+    (".prettierrc.json", '{"overrides": [{"files": "*", "options": {"plug\\u0069ns": ["./evil.js"]}}]}'),
+    (".prettierrc.json", '{"plugins": ["./evil.js"]}'),
+    (".prettierrc.yaml", 'pl\\x75gins: ["./evil.js"]\n'),
+    (".prettierrc.yaml", "plugins:\n  - ./evil.js\n"),
+    (".prettierrc.json5", "{ 'plugins': ['./evil.js'] }"),
+    (".prettierrc.toml", 'plugins = ["./evil.js"]\n'),
+    (".prettierrc.toml", '"plug\\u0069ns" = ["./evil.js"]\n'),
+    (".prettierrc.json", "{not json"),
+])
+def test_prettier_guard_parses_data_configs_before_trusting_keys(tmp_path, name, text):
+    folder = tmp_path / "pkg"
+    folder.mkdir()
+    (folder / name).write_text(text, encoding="utf-8")
+    assert _guard("prettier", tmp_path, "pkg") is not None, (name, text)
+
+
+@pytest.mark.parametrize("name, text", [
+    (".prettierrc", '{"semi": false}'),
+    (".prettierrc.yaml", "semi: false\n"),
+    (".prettierrc.toml", "semi = false\n"),
+    ("package.json", '{"name": "x", "prettier": {"semi": false}}'),
+    ("package.yaml", "name: x\ndependencies:\n  prettier: 3.0.0\n"),
+])
+def test_prettier_guard_allows_plain_option_configs(tmp_path, name, text):
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    assert _guard("prettier", tmp_path, "") is None, name
+
+
+@pytest.mark.parametrize("relative", [
+    "node_modules/.bin/prettier", "node_modules/.bin/prettier.cmd", "node_modules/prettier/package.json",
+])
+def test_prettier_guard_refuses_a_project_shipped_formatter(tmp_path, relative):
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    assert "ships its own prettier" in _guard("prettier", tmp_path, "")
+
+
+def test_biome_guard_refuses_a_project_shipped_formatter_and_plugin_configs(tmp_path):
+    assert _guard("biome", tmp_path, "") is None
+    (tmp_path / "biome.json").write_text('{"plugins": ["./x.grit"]}', encoding="utf-8")
+    assert "biome.json" in _guard("biome", tmp_path, "")
+    (tmp_path / "biome.json").write_text("{}", encoding="utf-8")
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "biome").write_text("x", encoding="utf-8")
+    assert "ships its own biome" in _guard("biome", tmp_path, "")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junction creation is Windows-specific here")
+def test_prettier_guard_refuses_a_linked_folder(tmp_path):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (tmp_path / "root").mkdir()
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(tmp_path / "root" / "hop"), str(target)],
+                   check=True, capture_output=True)
+    assert "linked folder" in _guard("prettier", tmp_path / "root", "")
+
+
+def test_format_check_runs_the_formatter_when_nothing_executable_is_present(tmp_path, captured, not_live):
+    (tmp_path / "a.js").write_text("x\n", encoding="utf-8")
+    result = harness_tools.format_code(root=str(tmp_path), tool="prettier", check_only=True)
+    assert captured == [["npx", "--no-install", "prettier", "--check", "."]], result
+
+
+# ---- review round 2: requirements ${VAR} and scheme-only includes ---------------------------
+
+@pytest.mark.parametrize("line", [
+    "-r ${TEMP}/x.txt",
+    "-r${TEMP}/x.txt",
+    "--requirement=${HOME}/x.txt",
+    "requests ${EXTRA}",
+    "-r file:/etc/passwd",
+    "-r FILE:x.txt",
+    "--constraint=file:c.txt",
+    "-r https:x.txt",
+])
+def test_requirements_guard_refuses_variable_expansion_and_url_schemes(tmp_path, line):
+    from sonder_runtime.adapters import requirements_guard
+
+    (tmp_path / "requirements.txt").write_text(line + "\n", encoding="utf-8")
+    (tmp_path / "x.txt").write_text("requests\n", encoding="utf-8")
+    assert requirements_guard.requirements_content_error(tmp_path) is not None, line
+
+
+def test_requirements_guard_still_allows_plain_relative_includes(tmp_path):
+    from sonder_runtime.adapters import requirements_guard
+
+    (tmp_path / "requirements.txt").write_text("-r base.txt\nrequests==2.0\n", encoding="utf-8")
+    (tmp_path / "base.txt").write_text("idna\n", encoding="utf-8")
+    assert requirements_guard.requirements_content_error(tmp_path) is None

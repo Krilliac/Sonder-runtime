@@ -7,6 +7,9 @@ named inside the file, so checking only the top-level file leaves a nested inclu
 :func:`requirements_content_error` parses the file and every include recursively
 and refuses:
 
+- ``${VAR}`` environment expansion anywhere in a line (pip expands it before it
+  resolves includes) and an include value that starts with a URL scheme
+  (``file:/x``, ``https:...``);
 - an include that is a URL, escapes the root, is a link, or is missing/too large;
 - an include cycle or a tree deeper/larger than the caps below;
 - editables (``-e``/``--editable``), direct references (``name @ url``, bare URLs,
@@ -40,6 +43,11 @@ _NAME = re.compile(
     r"(?:\[[A-Za-z0-9._,\s-]*\])?"
     r"\s*(?:(?:===|==|!=|<=|>=|~=|<|>)\s*[A-Za-z0-9.*+!_-]+\s*,?\s*)*"
 )
+
+
+# pip treats ``scheme:`` (two or more letters) as a URL; ``file:/x`` has no ``//`` yet is not joined
+# to the parent folder. A single letter is a Windows drive and is left to the confined read.
+_URL_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]+:")
 
 
 def _logical_lines(text: str) -> list[str]:
@@ -94,12 +102,16 @@ class _Walk:
         return None
 
     def include(self, value: str, parent: Path, depth: int) -> str | None:
-        if not value or "://" in value or "\0" in value or value.startswith(("\\\\", "//")):
+        if (not value or "://" in value or "\0" in value or "${" in value
+                or _URL_SCHEME.match(value) or value.startswith(("\\\\", "//"))):
             return "requirements include %r is a URL or network path" % value[:80]
         target = Path(os.path.normpath(str(parent.parent / value)))
         return self.file(target, depth + 1)
 
     def line(self, line: str, parent: Path, depth: int) -> str | None:
+        if "${" in line:
+            # pip expands ${VAR} from the environment before it resolves includes.
+            return "requirements line uses ${VAR} expansion: %r" % line[:80]
         try:
             # Non-POSIX splitting keeps Windows backslashes; quotes are stripped by hand.
             tokens = [

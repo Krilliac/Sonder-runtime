@@ -686,6 +686,10 @@ def test_fw_rpc_server_program_rule_variants_refuse(tmp_path: Path, program: str
     ("alias-any", {"interfaceAlias": ["Any"]}),
     ("alias-missing", {"interfaceAlias": []}),
     ("alias-wildcard", {"interfaceAlias": ["Private*"]}),
+    ("alias-wrong-adapter", {"interfaceAlias": ["Wi-Fi"]}),
+    ("alias-several", {"interfaceAlias": ["Private Link", "Wi-Fi"]}),
+    ("alias-several-wrong", {"interfaceAlias": ["Ethernet", "Wi-Fi"]}),
+    ("alias-case-differs", {"interfaceAlias": ["private link"]}),
     ("filter-omitted", {"omitInterface": True}),
     ("per-rule-unreadable", {"failInterface": True, "hiddenFromAll": True}),
     ("type-empty", {"interfaceType": ""}),
@@ -694,7 +698,17 @@ def test_fw_peer_rule_without_a_pinned_interface_is_wide(tmp_path: Path, name: s
     unpinned = _fw_rule(**overrides)
     outcome = _run_fw(tmp_path / name, [unpinned])
     _assert_fw_refused(outcome, "'Sonder llama-rpc worker (main peer only)'", "Disable-NetFirewallRule -Name 'peer'",
-                       "a peer rule must be pinned to one interface alias")
+                       "a peer rule must be pinned to the single interface alias that owns")
+
+
+@pytest.mark.parametrize("name, aliases", [
+    ("unresolved", []),
+    ("two-owners", ["Private Link", "Wi-Fi"]),
+])
+def test_fw_peer_rule_is_wide_when_the_bind_adapter_is_not_exactly_one(tmp_path: Path, name: str, aliases: list) -> None:
+    outcome = _run_fw(tmp_path / name, [_FW_PEER], extra={"ipAliases": aliases})
+    _assert_fw_refused(outcome, "'Sonder llama-rpc worker (main peer only)'",
+                       "the adapter owning the bind address could not be resolved")
 
 
 def test_fw_failing_bulk_interface_listing_falls_back_to_the_per_rule_read(tmp_path: Path) -> None:
