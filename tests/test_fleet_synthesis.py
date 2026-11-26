@@ -49,7 +49,12 @@ def test_master_offload_applies_budget_and_marks_raw_provider_truncation(provide
         requests.append(payload)
         return raw, "## Verified Findings (what"
     from sonder_runtime.application.tasks.account_scope import active_task_account_scope
+    from sonder_runtime.bootstrap import thinking_ensemble
+    fake_server_mod = SimpleNamespace(TIERS={"code": "test"})
     scope = _host_functions({"_offload_tier_impl"}, dict(
+        __name__="server",
+        sys=SimpleNamespace(modules={"server": fake_server_mod}),
+        _thinking_ensemble=thinking_ensemble,
         TIMEOUT=180, TIERS={"code": "test"}, os=os, contextlib=contextlib,
         active_task_account_scope=active_task_account_scope,
         _provider_bridge=provider_bridge,

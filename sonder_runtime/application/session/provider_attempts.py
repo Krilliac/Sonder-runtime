@@ -131,6 +131,24 @@ def report_ensemble_event(
         pass
 
 
+def report_thinking_delegation_event(
+    fields: Mapping[str, object] | None = None,
+    *,
+    run_id: str | None = None,
+) -> None:
+    """Tell the observer one content-free ``thinking.delegated`` record.
+
+    Observers without ``thinking_delegation_event`` ignore it; it never raises.
+    """
+    hook = getattr(_attempt_observer, "thinking_delegation_event", None)
+    if not callable(hook):
+        return
+    try:
+        hook(dict(fields or {}), run_id=run_id)
+    except Exception:
+        pass
+
+
 def _count(value) -> int | None:
     return value if type(value) is int and 0 <= value <= _MAX_TOKEN_COUNT else None
 
