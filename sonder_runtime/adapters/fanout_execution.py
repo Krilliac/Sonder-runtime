@@ -10,9 +10,14 @@ from __future__ import annotations
 import contextlib
 import json
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any, cast
 
+from sonder_runtime.application.session.provider_attempts import (
+    report_fanout_event,
+    telemetry_error_code,
+)
 from sonder_runtime.domain.model_usage import usage_count
 from sonder_runtime.domain.fanout_receipts import safe_answer as _default_redact
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
@@ -106,6 +111,37 @@ def result_fields(metadata: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def emit_fanout_result(
+    run_id: str,
+    metadata: Mapping[str, Any],
+    *,
+    status: str = "ok",
+    error_code: str | None = None,
+) -> None:
+    """Emit a content-free ``fanout.result`` event from a worker's metadata.
+
+    Only bounded labels and counts cross the boundary; sealed answers and
+    prompt/reply text are never inspected or exported.
+    """
+    usage = cast("Callable[[object], int | None]", usage_count)
+    fields: dict[str, object] = {"status": status}
+    served_model = metadata.get("served_model")
+    if isinstance(served_model, str) and served_model:
+        fields["served_model"] = served_model
+    done_reason = metadata.get("done_reason")
+    if isinstance(done_reason, str) and done_reason:
+        fields["done_reason"] = done_reason
+    tokens_in = usage(metadata.get("tokens_in"))
+    if tokens_in is not None:
+        fields["tokens_in"] = tokens_in
+    tokens_out = usage(metadata.get("tokens_out"))
+    if tokens_out is not None:
+        fields["tokens_out"] = tokens_out
+    if error_code:
+        fields["error_code"] = error_code
+    report_fanout_event("result", fields, run_id=run_id)
+
+
 @contextlib.contextmanager
 def fanout_lease_heartbeat(
     fanout_store: Any,
@@ -116,6 +152,7 @@ def fanout_lease_heartbeat(
     """Keep a claimed fanout run's lease renewed while the worker is active."""
     stop = threading.Event()
     interval = max(5.0, float(lease_seconds) / 3.0)
+    started = time.monotonic()
 
     def _loop() -> None:
         while not stop.wait(interval):
@@ -127,8 +164,28 @@ def fanout_lease_heartbeat(
         target=_loop, daemon=True, name="sonder-fanout-heartbeat",
     )
     thread.start()
+    report_fanout_event("started", {"status": "running"}, run_id=run_id)
     try:
         yield
+    except BaseException as exc:
+        elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+        report_fanout_event(
+            "failed",
+            {
+                "elapsed_ms": elapsed_ms,
+                "status": "error",
+                "error_code": telemetry_error_code(exc),
+            },
+            run_id=run_id,
+        )
+        raise
+    else:
+        elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+        report_fanout_event(
+            "completed",
+            {"elapsed_ms": elapsed_ms, "status": "ok"},
+            run_id=run_id,
+        )
     finally:
         stop.set()
         thread.join(timeout=1.0)
