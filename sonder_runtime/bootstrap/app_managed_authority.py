@@ -87,7 +87,7 @@ def _context_within(context, ceiling, *, check_cancel=True):
         and not ceiling.cloud_allowed
         or context.remote_ollama_allowed
         and not ceiling.remote_ollama_allowed
-        or context.private_node_allowed is True
+        or context.private_node_allowed is not False
         and ceiling.private_node_allowed is False
         or check_cancel
         and (context.cancellation.cancelled or ceiling.cancellation.cancelled)
@@ -702,8 +702,8 @@ class AppManagedAuthority:
             and not selection.context.cloud_allowed
             or lane["remote_ollama_allowed"]
             and not selection.context.remote_ollama_allowed
-            or lane.get("private_node_allowed") is False
-            and selection.context.private_node_allowed is True
+            or lane.get("private_node_allowed") is not False
+            and selection.context.private_node_allowed is False
         ):
             raise PermissionError("lane exceeds registered app authority")
         if context.source == "worker":

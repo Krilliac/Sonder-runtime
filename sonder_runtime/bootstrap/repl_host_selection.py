@@ -226,7 +226,7 @@ class ReplHostSelectionAdapter:
                     context.remote_ollama_allowed and not original.remote_ollama_allowed
                 )
                 or (
-                    context.private_node_allowed is True
+                    context.private_node_allowed is not False
                     and original.private_node_allowed is False
                 )
                 or (
