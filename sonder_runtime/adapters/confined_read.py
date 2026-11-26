@@ -201,7 +201,10 @@ class PinnedDirectory:
                         os.fstat(self._fd), os.stat(self._requested, follow_symlinks=False)):
                     raise ConfinedReadRefused("the opened directory path could not be confirmed")
                 actual = self._requested
-            if not _reader._inside(actual, self._root) or _reader._handle_relative(actual, self._root) is None:
+            if not _reader._inside(actual, self._root) or (
+                _reader._norm(actual) != _reader._norm(self._root)
+                and _reader._handle_relative(actual, self._root) is None
+            ):
                 raise ConfinedReadRefused("the opened directory resolves outside the root")
             self._path = actual
         except BaseException:
