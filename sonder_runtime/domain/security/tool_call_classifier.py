@@ -382,8 +382,11 @@ def _strip_components(path: str) -> str:
 def _resolve(drive: str, target: str) -> tuple[str, str]:
     """``(drive, path)`` with stream suffixes, trailing dots, ``/*``, ``.`` and ``..`` resolved."""
     target = _strip_components(target)
-    while target.endswith("/*"):
-        target = target[:-2] or "/"
+    end = len(target)
+    while end >= 2 and target[end - 2:end] == "/*":
+        end -= 2
+    if end != len(target):
+        target = target[:end] or "/"
     if target.startswith("/"):
         target = posixpath.normpath("/" + target.lstrip("/"))
     elif target:
@@ -600,7 +603,7 @@ def _is_root_target(token: str, cwd: tuple[_Place, ...] = ()) -> bool:
 
 
 def _is_delete_verb(name: str) -> bool:
-    return name in _DELETE_VERBS or name == "rmtree" or name.endswith(".rmtree")
+    return name in _DELETE_VERBS or name == "rmtree" or ("." in name and name.endswith(".rmtree"))
 
 
 def _is_flag(token: str) -> bool:
@@ -656,10 +659,11 @@ def _brace_words(word: str) -> tuple[list[str], bool]:
             if current:
                 done.append(current)
             continue
-        head, tail = current[:group.start()], current[group.end():]
-        pending.extend(head + choice + tail for choice in reversed(group.group(1).split(",")))
-        if len(done) + len(pending) > _MAX_BRACE_WORDS:
+        choices = group.group(1).split(",")
+        if len(done) + len(pending) + len(choices) > _MAX_BRACE_WORDS:
             return [piece for piece in _BRACE_MARKS.split(word) if piece], False
+        head, tail = current[:group.start()], current[group.end():]
+        pending.extend(head + choice + tail for choice in reversed(choices))
     return done, True
 
 
@@ -832,9 +836,11 @@ class _Scan:
         return False
 
     def _word(self, context: _Context, word: str, glued: bool) -> bool:
-        name = _program_name(word) if ("/" in word or "\\" in word or word.endswith(".exe")) else word
-        if (word in _BLOCK_TOKENS or name in _BLOCK_TOKENS or word.startswith("mkfs")
-                or (name.startswith("mkfs") and _MKFS.fullmatch(name))):
+        has_path = "/" in word or "\\" in word or ("." in word and word.endswith(".exe"))
+        name = _program_name(word) if has_path else word
+        if word in _BLOCK_TOKENS or (word and word[0] == "m" and word.startswith("mkfs")):
+            return True
+        if has_path and (name in _BLOCK_TOKENS or (name and name[0] == "m" and name.startswith("mkfs") and _MKFS.fullmatch(name))):
             return True
         if self.previous == "format" and _is_drive_root(word):
             return True
@@ -947,7 +953,7 @@ class _Scan:
             self._record_outputs(command)
         if self.shell and command.program_at >= 0:
             prog = words[command.program_at]
-            if prog in _CD_VERBS or (("/" in prog or "\\" in prog or prog.endswith(".exe"))
+            if prog in _CD_VERBS or (("/" in prog or "\\" in prog or ("." in prog and prog.endswith(".exe")))
                                      and _program_name(prog) in _CD_VERBS):
                 self._change_directory(words[command.program_at + 1:])
         return False

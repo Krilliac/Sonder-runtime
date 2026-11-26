@@ -3729,8 +3729,11 @@ def main(
         startup_prewarm.start_default_model_prewarm(
             setting=PREWARM_ON_START, prewarm=lambda tier: server.prewarm_model(tier, announce=True),
             enabled=lambda: server.sonder_speculation.prewarm_enabled(), thread_factory=owned_runtime_thread)
-        cloud_model_refresh_schedule.start_scheduled_refresh(
-            origin=server.BASE, thread_factory=owned_runtime_thread, stop=cloud_refresh_stop)
+        try:
+            cloud_model_refresh_schedule.start_scheduled_refresh(
+                origin=server.BASE, thread_factory=owned_runtime_thread, stop=cloud_refresh_stop)
+        except DependencyUnavailable:
+            _serve_logger.debug("cloud model refresh schedule skipped: legacy runtime unavailable")
         url = "http://%s:%d" % (HOST, port)
         _serve_logger.info(f"Server listening on {url}, auth_mode={_effective_auth_mode()!r}")
         rpc_cluster.start_sharded_backend_probe(thread_factory=owned_runtime_thread)

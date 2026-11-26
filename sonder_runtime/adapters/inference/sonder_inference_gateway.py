@@ -64,6 +64,7 @@ from typing import Sequence
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from ...application.chat import stream_sink
+from ...application.chat.provider_bridge import UnsupportedProviderFeature
 from ...application.context import OperationContext, current_operation_context
 from ...application.ports.model_gateway import (
     Embedding,
@@ -173,11 +174,24 @@ ENV_HEALTH_STALE = "SONDER_INFERENCE_HEALTH_STALE_SECONDS"
 ENV_FALLBACK = "SONDER_INFERENCE_FALLBACK"
 ENV_PRIVATE_WORKERS = "SONDER_INFERENCE_PRIVATE_WORKERS"
 ENV_MAX_INFLIGHT = "SONDER_INFERENCE_MAX_INFLIGHT"
+ENV_NATIVE_TOOLS = "SONDER_INFERENCE_NATIVE_TOOLS"
 LATENCY_EWMA_ALPHA = 0.3
 MAX_PRIVATE_WORKERS = 8
 MAX_WORKER_INFLIGHT = 16
+MAX_TOOLS_PER_REQUEST = 128
+MAX_RESPONSE_TOOL_CALLS = 64
 MIN_WORKER_TOKEN_LENGTH = 16
 PRIVATE_WORKERS_LIMIT = 16_384
+NATIVE_TOOL_MARKERS = frozenset({"tool_calling", "tools", "native_tools"})
+NATIVE_TOOLS_REFUSAL = (
+    "native tool calls are not supported by this sonder-inference endpoint: "
+    "the worker does not advertise 'tool_calling' or 'tools' "
+    "(upgrade sonder-inference or set %s=on if it honours OpenAI tools)"
+    % ENV_NATIVE_TOOLS
+)
+_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
+_TOOL_FLAG_ON = frozenset({"1", "on", "true", "yes"})
+_TOOL_FLAG_OFF = frozenset({"0", "off", "false", "no"})
 _TOKEN_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,127}\Z")
 _WORKER_KEYS = frozenset({"url", "ca_bundle", "token_env", "max_inflight"})
 
@@ -223,9 +237,11 @@ _FORWARDED_OPTIONS = {
     "num_predict": "max_tokens",
 }
 _INTEGER_OPTIONS = frozenset({"top_k", "seed", "repeat_last_n", "num_ctx", "num_predict"})
-# Requests Inference v1 rejects with 400 unsupported_parameter.  Refusing them
-# here keeps the failure local, loud and free of a wasted network round trip.
-_UNSUPPORTED_OPTIONS = ("format", "tools", "tool_choice", "functions", "response_format")
+# Requests this gateway refuses locally (legacy functions, Ollama schema
+# format, and unimplemented response_format).  OpenAI ``tools`` and
+# ``tool_choice`` are validated locally and gated on advertised worker
+# capability (see :func:`native_tools_supported`).
+_UNSUPPORTED_OPTIONS = ("format", "functions", "response_format")
 
 
 class SonderInferenceUnreachable(DependencyUnavailable):
@@ -278,6 +294,324 @@ class SonderInferenceResponse(ModelResponse):
     # Scheme and host of the endpoint that served it, when private workers
     # are configured (never a path, query or credential).
     endpoint: str | None = None
+    # Normalized OpenAI tool calls returned by a tool-capable worker, or None.
+    tool_calls: tuple[Mapping[str, object], ...] | None = None
+
+
+def _native_tools_flag(env: Mapping[str, str] | None) -> str:
+    source = os.environ if env is None else env
+    raw = str(source.get(ENV_NATIVE_TOOLS, "") or "").strip().lower() or "auto"
+    if raw in _TOOL_FLAG_ON:
+        return "on"
+    if raw in _TOOL_FLAG_OFF:
+        return "off"
+    if raw == "auto":
+        return "auto"
+    raise InvalidInput("%s must be auto, on or off, got %r" % (ENV_NATIVE_TOOLS, raw))
+
+
+def _capability_names(value: object) -> set[str]:
+    if isinstance(value, Mapping):
+        return {str(item).strip().lower() for item, enabled in value.items() if enabled}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return {item.strip().lower() for item in value if isinstance(item, str)}
+    return set()
+
+
+def native_tools_supported(
+    document: Mapping[str, object] | None,
+    *,
+    model: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    """Whether a ``sonder-inference`` health document advertises native tool calling.
+
+    Honours ``SONDER_INFERENCE_NATIVE_TOOLS`` (``auto`` | ``on`` | ``off``).
+    Under ``auto`` (the default), fails closed unless the server advertises one
+    of :data:`NATIVE_TOOL_MARKERS` (e.g. ``tool_calling`` in
+    ``backends[].capabilities`` from Sonder-Inference PR #96, or in top-level /
+    ``sonder`` ``features``/``capabilities`` or ``models[].capabilities``).
+    """
+    mode = _native_tools_flag(env)
+    if mode != "auto":
+        return mode == "on"
+    if not isinstance(document, Mapping):
+        return False
+    containers: list[Mapping[str, object]] = [document]
+    extension = document.get("sonder")
+    if isinstance(extension, Mapping):
+        containers.append(extension)
+    for container in containers:
+        if (_capability_names(container.get("features")) & NATIVE_TOOL_MARKERS
+                or _capability_names(container.get("capabilities")) & NATIVE_TOOL_MARKERS):
+            return True
+    backends_raw = document.get("backends")
+    backends = [entry for entry in backends_raw if isinstance(entry, Mapping)] if isinstance(backends_raw, list) else []
+    models_raw = document.get("models")
+    models = [entry for entry in models_raw if isinstance(entry, Mapping)] if isinstance(models_raw, list) else []
+    if model is not None:
+        matched_model: Mapping[str, object] | None = None
+        if model == DEFAULT_MODEL:
+            matched_model = next((entry for entry in models if entry.get("default") is True), None)
+        else:
+            matched_model = next((entry for entry in models if entry.get("id") == model), None)
+        if matched_model is not None:
+            if _capability_names(matched_model.get("capabilities")) & NATIVE_TOOL_MARKERS:
+                return True
+            backend_name = matched_model.get("backend")
+            if isinstance(backend_name, str) and backend_name:
+                matching_backends = [b for b in backends if b.get("name") == backend_name]
+                if matching_backends:
+                    return any(
+                        b.get("available") is not False
+                        and bool(_capability_names(b.get("capabilities")) & NATIVE_TOOL_MARKERS)
+                        for b in matching_backends
+                    )
+    for backend in backends:
+        if (backend.get("available") is not False
+                and _capability_names(backend.get("capabilities")) & NATIVE_TOOL_MARKERS):
+            return True
+    if model is None:
+        for entry in models:
+            if _capability_names(entry.get("capabilities")) & NATIVE_TOOL_MARKERS:
+                return True
+    return False
+
+
+def _normalize_tools(raw: object) -> list[dict[str, object]] | None:
+    """Validate and clone OpenAI ``tools`` definitions before any network I/O."""
+    if raw in (None, False, "", [], {}):
+        return None
+    if not isinstance(raw, (list, tuple)):
+        raise InvalidInput("option 'tools' must be a list of OpenAI function tool definitions")
+    if len(raw) > MAX_TOOLS_PER_REQUEST:
+        raise InvalidInput(
+            "option 'tools' exceeds maximum of %d definitions" % MAX_TOOLS_PER_REQUEST
+        )
+    normalized: list[dict[str, object]] = []
+    seen_names: set[str] = set()
+    for idx, entry in enumerate(raw):
+        where = "option 'tools[%d]'" % idx
+        if not isinstance(entry, Mapping):
+            raise InvalidInput("%s must be an object" % where)
+        if entry.get("type") != "function":
+            raise InvalidInput("%s.type must be 'function'" % where)
+        fn = entry.get("function")
+        if not isinstance(fn, Mapping):
+            raise InvalidInput("%s.function must be an object" % where)
+        name = fn.get("name")
+        if not isinstance(name, str) or not _TOOL_NAME_RE.fullmatch(name):
+            raise InvalidInput(
+                "%s.function.name must be 1-128 characters of [A-Za-z0-9_.-]" % where
+            )
+        if name in seen_names:
+            raise InvalidInput("%s duplicates tool name %r" % (where, name))
+        seen_names.add(name)
+        clean_fn: dict[str, object] = {"name": name}
+        desc = fn.get("description")
+        if desc is not None:
+            if not isinstance(desc, str):
+                raise InvalidInput("%s.function.description must be a string" % where)
+            clean_fn["description"] = desc
+        params = fn.get("parameters")
+        if params is not None:
+            if not isinstance(params, Mapping):
+                raise InvalidInput("%s.function.parameters must be a JSON Schema object" % where)
+            try:
+                clean_fn["parameters"] = json.loads(json.dumps(dict(params), allow_nan=False))
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise InvalidInput("%s.function.parameters must be JSON-serializable" % where) from exc
+        strict = fn.get("strict")
+        if strict is not None:
+            if not isinstance(strict, bool):
+                raise InvalidInput("%s.function.strict must be a boolean" % where)
+            clean_fn["strict"] = strict
+        normalized.append({"type": "function", "function": clean_fn})
+    return normalized
+
+
+def _normalize_tool_choice(
+    raw: object, tools: list[dict[str, object]] | None,
+) -> str | dict[str, object] | None:
+    """Validate and clone OpenAI ``tool_choice`` against ``tools``."""
+    if raw in (None, False, "", {}):
+        return None
+    tool_names = {
+        str(fn["name"])
+        for item in (tools or ())
+        if isinstance(fn := item.get("function"), Mapping) and isinstance(fn.get("name"), str)
+    }
+    if isinstance(raw, str):
+        if raw not in ("auto", "none", "required"):
+            raise InvalidInput(
+                "option 'tool_choice' must be 'auto', 'none', 'required', or a function object"
+            )
+        if raw == "required" and not tool_names:
+            raise InvalidInput("option 'tool_choice' value 'required' requires at least one tool")
+        return raw
+    if isinstance(raw, Mapping):
+        if raw.get("type") != "function":
+            raise InvalidInput("option 'tool_choice'.type must be 'function'")
+        fn = raw.get("function")
+        if not isinstance(fn, Mapping):
+            raise InvalidInput("option 'tool_choice'.function must be an object")
+        name = fn.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise InvalidInput("option 'tool_choice'.function.name must be a non-empty string")
+        if name not in tool_names:
+            raise InvalidInput(
+                "option 'tool_choice' function %r is not defined in tools" % name
+            )
+        return {"type": "function", "function": {"name": name}}
+    raise InvalidInput(
+        "option 'tool_choice' must be 'auto', 'none', 'required', or a function object"
+    )
+
+
+def _normalize_message_tool_calls(raw: object, *, msg_index: int) -> list[dict[str, object]]:
+    """Normalize assistant history ``tool_calls`` to strict OpenAI wire shape."""
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise InvalidInput("history message %d tool_calls must be a non-empty list" % msg_index)
+    normalized: list[dict[str, object]] = []
+    for tc_idx, item in enumerate(raw):
+        where = "history message %d tool_calls[%d]" % (msg_index, tc_idx)
+        if not isinstance(item, Mapping):
+            raise InvalidInput("%s must be an object" % where)
+        tc_type = item.get("type", "function")
+        if tc_type is not None and tc_type != "function":
+            raise InvalidInput("%s.type must be 'function'" % where)
+        raw_id = item.get("id")
+        if raw_id is not None and not isinstance(raw_id, str):
+            raise InvalidInput("%s.id must be a string" % where)
+        tc_id = (
+            raw_id.strip()
+            if isinstance(raw_id, str) and raw_id.strip()
+            else "call_hist_%d_%d" % (msg_index, tc_idx)
+        )
+        fn = item.get("function")
+        if not isinstance(fn, Mapping):
+            raise InvalidInput("%s.function must be an object" % where)
+        name = fn.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise InvalidInput("%s.function.name must be a non-empty string" % where)
+        raw_args = fn.get("arguments")
+        if raw_args is None:
+            args_str = "{}"
+        elif isinstance(raw_args, str):
+            args_str = raw_args
+        elif isinstance(raw_args, Mapping):
+            try:
+                args_str = json.dumps(
+                    dict(raw_args), ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+                )
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise InvalidInput("%s.function.arguments must be JSON-serializable" % where) from exc
+        else:
+            raise InvalidInput("%s.function.arguments must be a JSON string or object" % where)
+        normalized.append({
+            "id": tc_id,
+            "type": "function",
+            "function": {"name": name.strip(), "arguments": args_str},
+        })
+    return normalized
+
+
+def _extract_response_tool_calls(
+    data: dict,
+    *,
+    tools: list[dict[str, object]] | None = None,
+    tool_choice: str | dict[str, object] | None = None,
+) -> tuple[dict[str, object], ...] | None:
+    """Validate and extract OpenAI ``choices[0].message.tool_calls``.
+
+    Fails closed with :class:`DependencyUnavailable` if the server returns
+    unsolicited tool calls (``tools`` absent or ``tool_choice == "none"``),
+    exceeds :data:`MAX_RESPONSE_TOOL_CALLS`, names an undeclared tool,
+    violates a forced function ``tool_choice``, or emits malformed/NaN
+    arguments.
+    """
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return None
+    message = choices[0].get("message")
+    if not isinstance(message, dict) or "tool_calls" not in message or message["tool_calls"] is None:
+        return None
+    raw = message["tool_calls"]
+    if not isinstance(raw, list):
+        raise DependencyUnavailable("sonder-inference returned invalid tool_calls")
+    if not raw:
+        return None
+    if not tools or tool_choice == "none":
+        raise DependencyUnavailable(
+            "sonder-inference returned unsolicited tool_calls when tools were not permitted"
+        )
+    if len(raw) > MAX_RESPONSE_TOOL_CALLS:
+        raise DependencyUnavailable(
+            "sonder-inference returned more than %d tool_calls" % MAX_RESPONSE_TOOL_CALLS
+        )
+    allowed_names = {
+        str(fn["name"])
+        for item in tools
+        if isinstance(fn := item.get("function"), Mapping) and isinstance(fn.get("name"), str)
+    }
+    forced_name: str | None = None
+    if isinstance(tool_choice, Mapping):
+        tc_fn = tool_choice.get("function")
+        if isinstance(tc_fn, Mapping) and isinstance(tc_fn.get("name"), str):
+            forced_name = tc_fn["name"]
+    calls: list[dict[str, object]] = []
+    for idx, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise DependencyUnavailable("sonder-inference returned an invalid tool call entry")
+        tc_type = item.get("type", "function")
+        if tc_type is not None and tc_type != "function":
+            raise DependencyUnavailable("sonder-inference returned an unsupported tool call type")
+        raw_id = item.get("id")
+        if raw_id is not None and not isinstance(raw_id, str):
+            raise DependencyUnavailable("sonder-inference returned an invalid tool call id")
+        tc_id = (
+            raw_id.strip()
+            if isinstance(raw_id, str) and raw_id.strip()
+            else "call_%d" % idx
+        )
+        fn = item.get("function")
+        if not isinstance(fn, dict):
+            raise DependencyUnavailable("sonder-inference returned a tool call without a function")
+        name = fn.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise DependencyUnavailable("sonder-inference returned a tool call without a name")
+        clean_name = name.strip()
+        if clean_name not in allowed_names:
+            raise DependencyUnavailable(
+                "sonder-inference returned tool call for undeclared tool %r" % clean_name
+            )
+        if forced_name is not None and clean_name != forced_name:
+            raise DependencyUnavailable(
+                "sonder-inference returned tool call %r instead of forced tool %r"
+                % (clean_name, forced_name)
+            )
+        raw_args = fn.get("arguments")
+        if raw_args is None:
+            args_str = "{}"
+        elif isinstance(raw_args, str):
+            args_str = raw_args
+        elif isinstance(raw_args, Mapping):
+            try:
+                args_str = json.dumps(
+                    dict(raw_args), ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+                )
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise DependencyUnavailable(
+                    "sonder-inference returned non-serializable tool call arguments"
+                ) from exc
+        else:
+            raise DependencyUnavailable("sonder-inference returned invalid tool call arguments")
+        calls.append({
+            "id": tc_id,
+            "type": "function",
+            "function": {"name": clean_name, "arguments": args_str},
+        })
+    return tuple(calls)
 
 
 # -- transport ---------------------------------------------------------------
@@ -1310,6 +1644,61 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             detail=snap.detail,
         )
 
+    def supports_native_tools(
+        self,
+        *,
+        tier: str | None = None,
+        model: str | None = None,
+        refresh: bool = False,
+    ) -> bool:
+        """Return True only when a ready endpoint advertises native tool calling.
+
+        Uses the bounded, cached health probe (no generation, never raises) and
+        fails closed whenever the endpoint is unreachable, misconfigured, or
+        does not advertise tool capability.
+        """
+        try:
+            mode = _native_tools_flag(self._env)
+            if mode != "auto":
+                return mode == "on"
+            settings = self.settings()
+        except Exception:  # noqa: BLE001 - capability probe fails closed
+            return False
+        resolved_model: str | None = model
+        if resolved_model is None and tier:
+            resolved_model = settings.tier_models.get(tier, settings.model)
+        try:
+            check_endpoint_policy(settings)
+            snap = self.health(settings=settings, refresh=refresh)
+            if (snap.state == "ready"
+                    and (resolved_model is None or self._serves(snap, resolved_model))
+                    and native_tools_supported(snap.document, model=resolved_model, env=self._env)):
+                return True
+        except Exception:  # noqa: BLE001 - primary unavailable; private workers may still serve
+            pass
+        if not settings.private_worker and settings.workers:
+            for spec in settings.workers:
+                try:
+                    worker_gw = self._worker_gateway(settings, spec)
+                    worker_settings = worker_gw.settings()
+                    worker_snap = worker_gw.health(settings=worker_settings, refresh=refresh)
+                    if worker_snap.document is None or (
+                        worker_snap.state != "ready" and not worker_snap.busy
+                    ):
+                        continue
+                    if resolved_model is not None:
+                        if resolved_model == DEFAULT_MODEL:
+                            continue
+                        if not self._worker_serves(worker_gw, worker_settings, worker_snap, resolved_model):
+                            continue
+                    if native_tools_supported(
+                        worker_snap.document, model=resolved_model, env=self._env,
+                    ):
+                        return True
+                except Exception:  # noqa: BLE001 - unusable worker fails closed
+                    continue
+        return False
+
     # -- identity ----------------------------------------------------------
 
     def observe_identity(self, model: str | None = None) -> IdentityObservation:
@@ -1838,6 +2227,77 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         ids = {item.get("id") for item in models if isinstance(item, dict)}
         return model in ids
 
+    @staticmethod
+    def _history_ends_with_tool(request: ModelRequest) -> bool:
+        history = request.history or ()
+        if not history:
+            return False
+        last = history[-1]
+        return isinstance(last, Mapping) and last.get("role") == "tool"
+
+    @staticmethod
+    def _request_uses_native_tools(request: ModelRequest) -> bool:
+        options = request.options or {}
+        if options.get("tools") not in (None, False, "", [], {}):
+            return True
+        if options.get("tool_choice") not in (None, False, "", {}):
+            return True
+        for entry in request.history or ():
+            if isinstance(entry, Mapping) and (
+                entry.get("tool_calls") or entry.get("role") == "tool"
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _build_messages(request: ModelRequest) -> list[dict[str, object]]:
+        messages: list[dict[str, object]] = []
+        if request.system:
+            messages.append({"role": "system", "content": request.system})
+        for idx, entry in enumerate(request.history or ()):
+            if isinstance(entry, Mapping) and entry.get("role"):
+                role = str(entry["role"])
+                raw_tool_calls = entry.get("tool_calls") if role == "assistant" else None
+                if raw_tool_calls:
+                    raw_content = entry.get("content", "")
+                    content = "" if raw_content is None else raw_content
+                    if not isinstance(content, str):
+                        raise InvalidInput("history message %d content must be text" % idx)
+                    messages.append({
+                        "role": "assistant",
+                        "content": content,
+                        "tool_calls": _normalize_message_tool_calls(raw_tool_calls, msg_index=idx),
+                    })
+                elif role == "tool":
+                    if "content" not in entry or not isinstance(entry["content"], str):
+                        raise InvalidInput("history tool message %d content must be text" % idx)
+                    tool_msg: dict[str, object] = {
+                        "role": "tool",
+                        "content": entry["content"],
+                    }
+                    raw_tc_id = entry.get("tool_call_id")
+                    if raw_tc_id is not None:
+                        if not isinstance(raw_tc_id, str):
+                            raise InvalidInput("history tool message %d tool_call_id must be a string" % idx)
+                        if raw_tc_id.strip():
+                            tool_msg["tool_call_id"] = raw_tc_id.strip()
+                    raw_name = entry.get("name")
+                    if raw_name is None:
+                        raw_name = entry.get("tool_name")
+                    if raw_name is not None:
+                        if not isinstance(raw_name, str):
+                            raise InvalidInput("history tool message %d name must be a string" % idx)
+                        if raw_name.strip():
+                            tool_msg["name"] = raw_name.strip()
+                    messages.append(tool_msg)
+                elif "content" in entry:
+                    messages.append({"role": role, "content": entry["content"]})
+            elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+                messages.append({"role": entry[0], "content": entry[1]})
+        if (request.prompt or "") or not (messages and messages[-1].get("role") == "tool"):
+            messages.append({"role": "user", "content": request.prompt})
+        return messages
+
     def _placement_candidates(self, request: ModelRequest, settings: SonderInferenceConfig,
                               context: OperationContext):
         """``[(key, gateway, settings)]`` for the primary and each usable worker."""
@@ -1858,6 +2318,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 continue
             candidates.append((spec.url, gateway, gateway.settings()))
         model = self.select_model(request, settings)
+        needs_tools = self._request_uses_native_tools(request)
         usable = []
         for key, gateway, endpoint in candidates:
             snapshot = gateway._peek_health(endpoint)
@@ -1865,7 +2326,12 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 # A worker is chosen only on positive evidence that it serves
                 # this exact model: a missing model would be a 404, which is
                 # final and never moves to another endpoint.
-                if not self._worker_serves(gateway, endpoint, snapshot, model):
+                worker_snap = self._worker_snapshot(gateway, endpoint, snapshot, model)
+                if worker_snap is None:
+                    continue
+                if needs_tools and not native_tools_supported(
+                    worker_snap.document, model=model, env=self._env,
+                ):
                     continue
                 usable.append((key, gateway, endpoint))
                 continue
@@ -1882,8 +2348,42 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 continue
             if not self._serves(snapshot, model):
                 continue
+            if needs_tools and not native_tools_supported(
+                snapshot.document if snapshot is not None else None,
+                model=model, env=self._env,
+            ):
+                continue
             usable.append((key, gateway, endpoint))
         return usable
+
+    @staticmethod
+    def _worker_snapshot(
+        gateway: "SonderInferenceGateway",
+        endpoint: SonderInferenceConfig,
+        snapshot: HealthSnapshot | None,
+        model: str,
+    ) -> HealthSnapshot | None:
+        """The worker's ready health snapshot when it serves ``model``, else None."""
+        if model == DEFAULT_MODEL:
+            return None
+        if snapshot is None:
+            try:
+                snapshot = gateway.health(settings=endpoint)
+            except Cancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 - an unusable worker is skipped
+                logger.info("private sonder-inference worker %s skipped: %s",
+                            endpoint.display_base_url,
+                            _bounded(exc if isinstance(exc, SonderError) else type(exc).__name__))
+                return None
+        if snapshot.document is None or (snapshot.state != "ready" and not snapshot.busy):
+            return None
+        models = snapshot.document.get("models")
+        if not isinstance(models, list):
+            return None
+        if model not in {item.get("id") for item in models if isinstance(item, dict)}:
+            return None
+        return snapshot
 
     @staticmethod
     def _worker_serves(gateway: "SonderInferenceGateway", endpoint: SonderInferenceConfig,
@@ -1894,24 +2394,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         it never selects a worker.  The probe is the cached, single-flight,
         bounded health check (at most one per worker per health TTL).
         """
-        if model == DEFAULT_MODEL:
-            return False
-        if snapshot is None:
-            try:
-                snapshot = gateway.health(settings=endpoint)
-            except Cancelled:
-                raise
-            except Exception as exc:  # noqa: BLE001 - an unusable worker is skipped
-                logger.info("private sonder-inference worker %s skipped: %s",
-                            endpoint.display_base_url,
-                            _bounded(exc if isinstance(exc, SonderError) else type(exc).__name__))
-                return False
-        if snapshot.document is None or (snapshot.state != "ready" and not snapshot.busy):
-            return False
-        models = snapshot.document.get("models")
-        if not isinstance(models, list):
-            return False
-        return model in {item.get("id") for item in models if isinstance(item, dict)}
+        return SonderInferenceGateway._worker_snapshot(gateway, endpoint, snapshot, model) is not None
 
     @staticmethod
     def _with_request_cancel_token(
@@ -2115,7 +2598,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
     def _generate_here(self, request: ModelRequest, context: OperationContext) -> ModelResponse:
         context = self._with_request_cancel_token(request, context)
         self._call.response_meta = {}
-        if not (request.prompt or "").strip():
+        if not (request.prompt or "").strip() and not self._history_ends_with_tool(request):
             raise InvalidInput("model request prompt is empty")
         settings = self.settings()
         cfg = OpenAICompatibleConfig(
@@ -2125,19 +2608,37 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         timeout = self._call_timeout(settings, context)
         options = dict(request.options or {})
         think = options.pop("think", None)  # decided after readiness (request_tuning)
+        raw_tools = options.pop("tools", None)
+        raw_tool_choice = options.pop("tool_choice", None)
         raw_effort = options.pop("reasoning_effort", None)
         from ...domain.reasoning_effort import check_effort as _check_effort
         reasoning_effort = _check_effort(raw_effort) if raw_effort is not None else None
         options.pop("cancel_token", None)  # folded into ``context`` above, never sent
         options.pop("cancel_event", None)
+        tools = _normalize_tools(raw_tools)
+        tool_choice = _normalize_tool_choice(raw_tool_choice, tools)
         model = self.select_model(request, settings)
+        messages = self._build_messages(request)
+        uses_native_tools = bool(
+            tools is not None
+            or tool_choice is not None
+            or any(
+                isinstance(msg, Mapping)
+                and (msg.get("tool_calls") or msg.get("role") == "tool")
+                for msg in messages
+            )
+        )
         live = stream_sink.call_stream()
-        payload = {
+        payload: dict[str, object] = {
             "model": model,
-            "messages": self._build_messages(request),
+            "messages": messages,
             "stream": live is not None,
             **self._payload_options(options),
         }
+        if tools is not None:
+            payload["tools"] = tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
         if live is not None:
             payload["stream_options"] = {"include_usage": True}
         cache_key = _conversation_key(context)
@@ -2147,6 +2648,10 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         with _cancellation_scope(context.cancellation):
             snap = self._require_ready(settings, timeout)
         self._check_liveness(context, phase="before model call")
+        if uses_native_tools and not native_tools_supported(
+            snap.document, model=model, env=self._env,
+        ):
+            raise UnsupportedProviderFeature(NATIVE_TOOLS_REFUSAL)
         if reasoning_effort is not None and think is None:
             from .request_tuning import thinking_supported as _thinking_supported
             if reasoning_effort == "off":
@@ -2181,11 +2686,15 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             return served
 
         served = served_model(data)
+        tool_calls = _extract_response_tool_calls(
+            data, tools=tools, tool_choice=tool_choice,
+        )
         choices = data.get("choices")
         choice = choices[0] if isinstance(choices, list) and choices else None
         message = choice.get("message") if isinstance(choice, dict) else None
         empty_length = (
-            isinstance(choice, dict) and choice.get("finish_reason") == "length"
+            not tool_calls
+            and isinstance(choice, dict) and choice.get("finish_reason") == "length"
             and isinstance(message, dict)
             and (message.get("content") is None
                  or isinstance(message.get("content"), str)
@@ -2217,8 +2726,23 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                                       context=context)
                 self._check_liveness(context, phase="during model call")
                 served = served_model(data)
+                tool_calls = _extract_response_tool_calls(
+                    data, tools=tools, tool_choice=tool_choice,
+                )
                 repaired = True
-        text = self._extract_text(data)
+        if tool_calls:
+            choices = data.get("choices")
+            choice = choices[0] if isinstance(choices, list) and choices else None
+            message = choice.get("message") if isinstance(choice, dict) else None
+            raw_content = message.get("content") if isinstance(message, dict) else None
+            if raw_content is None:
+                text = ""
+            elif isinstance(raw_content, str):
+                text = raw_content
+            else:
+                raise DependencyUnavailable("sonder-inference returned invalid message content")
+        else:
+            text = require_model_text(self._extract_text(data))
         usage = data.get("usage")
         if usage is None:
             usage = {}
@@ -2244,6 +2768,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         finish = finish if finish in ("stop", "length", "content_filter", "tool_calls", "function_call") else None
         self._call.response_meta = {key: value for key, value in (
             ("finish_reason", finish), ("done_reason", finish), ("timings", measured),
+            ("tool_call_count", len(tool_calls) if tool_calls else None),
             ("empty_length_recovered", True if repaired else None),
         ) if value is not None}
         # The public activity projection retains summary, while the owning
@@ -2254,7 +2779,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             **self._call.response_meta,
         )
         response = SonderInferenceResponse(
-            text=require_model_text(text),
+            text=text,
             model=served,
             tier=request.tier or PROVIDER_ID,
             duration_ms=int((time.monotonic() - started) * 1000),
@@ -2263,6 +2788,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             telemetry=telemetry,
             timings=measured,
             finish_reason=finish,
+            tool_calls=tool_calls,
         )
         default_registry().observe_inference(PROVIDER_ID, telemetry)
         return response
@@ -2281,9 +2807,13 @@ __all__ = [
     "API_VERSION",
     "CORRELATION_VALUE",
     "DEFAULT_BASE_URL",
+    "ENV_NATIVE_TOOLS",
     "ENV_PRIVATE_WORKERS",
     "HealthSnapshot",
     "IdentityObservation",
+    "MAX_RESPONSE_TOOL_CALLS",
+    "NATIVE_TOOLS_REFUSAL",
+    "NATIVE_TOOL_MARKERS",
     "PROVIDER_ID",
     "PROVIDER_LABEL",
     "PrivateWorkerSpec",
@@ -2292,6 +2822,7 @@ __all__ = [
     "SonderInferenceConfig",
     "SonderInferenceGateway",
     "SonderInferenceOverloaded",
+    "SonderInferenceResponse",
     "SonderInferenceUnreachable",
     "WORKLOAD_BY_SOURCE",
     "check_endpoint_policy",
@@ -2300,6 +2831,7 @@ __all__ = [
     "direct_get_transport",
     "direct_post_transport",
     "is_loopback_url",
+    "native_tools_supported",
     "normalize_base_url",
     "parse_private_workers",
     "read_ready_file",
