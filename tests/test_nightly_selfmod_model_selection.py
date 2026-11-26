@@ -1200,3 +1200,56 @@ def test_selfmod_forever_imports_without_pythonpath_and_defaults_to_code_tier():
     )
     assert help_run.returncode == 0, help_run.stdout + help_run.stderr
     assert "qwen2.5-coder:14b" not in help_run.stdout
+
+
+def test_grounding_prefers_uniquely_named_function_even_when_why_shares_domain_words():
+    source = (
+        "def create_goal(goal):\n"
+        "    return {'goal': goal, 'status': 'open'}\n\n"
+        "def update_goal(goal, status):\n"
+        "    return {'goal': goal, 'status': status}\n"
+    )
+    assert nightly_selfmod._objective_target_function(
+        "In `update_goal`, guard against empty status updates.",
+        "`update_goal` writes `status` onto the `goal` record even when blank.",
+        source,
+    ) == "update_goal"
+    # Naming two functions stays ambiguous and is rejected.
+    assert nightly_selfmod._objective_target_function(
+        "Update both `create_goal` and `update_goal` to check status.",
+        "Both write `status`.",
+        source,
+    ) is None
+
+
+def test_propose_objective_uses_prose_ensemble_mode_and_parses_before_footer(tmp_path, monkeypatch):
+    seen_kwargs = []
+    monkeypatch.setattr(nightly_selfmod, "REPO", tmp_path)
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "runtime" / "sample.py").write_text(
+        "def alpha(x):\n    return x\n\ndef beta(y):\n    return y\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(nightly_selfmod, "_recent_objectives", lambda: [])
+    monkeypatch.setattr(nightly_selfmod, "_eligible_candidate_files", lambda: ("runtime/sample.py",))
+
+    def fake_ask(_server, _prompt, **kwargs):
+        seen_kwargs.append(kwargs)
+        return (
+            "**OBJECTIVE:** Guard empty input in `alpha`.\n"
+            "**WHY:** `alpha` forwards blank values unchanged.\n"
+            "\n=== ENSEMBLE (2 models answered) ===\n"
+            "  code (bonsai-27b-pq2) in 4000ms\n"
+            "  reasoning (qwen3-coder-next-80b:latest) in 20000ms\n"
+        )
+
+    monkeypatch.setattr(nightly_selfmod, "_ask", fake_ask)
+    proposed = nightly_selfmod.propose_objective(
+        object(), lambda _msg: None, return_function=True,
+    )
+    assert seen_kwargs and seen_kwargs[0]["mode"] == "prose"
+    assert proposed == (
+        "runtime/sample.py",
+        "Guard empty input in `alpha`. (`alpha` forwards blank values unchanged.)",
+        "alpha",
+    )

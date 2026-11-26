@@ -1013,6 +1013,14 @@ def _objective_target_function(objective: str, rationale: str, source: str) -> s
             return None
     if len(functions) == 1:
         return functions[0].name
+    named = [
+        node for node in functions
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(node.name)}(?![A-Za-z0-9_])", claim)
+    ]
+    if len(named) == 1:
+        return named[0].name
+    if len(named) > 1:
+        return None
     distinctive = _distinctive(claim)
     matches = []
     for node in functions:
@@ -1100,7 +1108,7 @@ def _model_refusal(server, model="") -> str:
     return tool_lane_guard.selector_refusal("code", getattr(server, "TIERS", {}), policy)
 
 
-def _ask(server, prompt, num_predict=1200, model="", num_ctx=0, timeout=60):
+def _ask(server, prompt, num_predict=1200, model="", num_ctx=0, timeout=60, mode="code"):
     # A blocked model is refused before the catalog probe or any model call.
     refusal = _model_refusal(server, model)
     if refusal:
@@ -1132,7 +1140,7 @@ def _ask(server, prompt, num_predict=1200, model="", num_ctx=0, timeout=60):
         kwargs = {
             "tiers": "code",
             "num_predict": num_predict,
-            "mode": "code",
+            "mode": mode,
         }
         if int(num_ctx or 0) > 0:
             kwargs["num_ctx"] = int(num_ctx)
@@ -1597,16 +1605,24 @@ def propose_objective(
             "If the module has no such defect, reply exactly: NONE\n\n"
             "=== %s ===\n%s" % (_proposal_function_inventory(visible_source), name, visible_source)
         ), num_predict=300, model=model, num_ctx=num_ctx,
-            timeout=min(60, max(1, int(remaining))) if remaining is not None else 60)
+            timeout=min(60, max(1, int(remaining))) if remaining is not None else 60,
+            mode="prose")
         if answer.strip().upper().startswith("NONE"):
             log("  %s: model reports no defect" % name)
             continue
         objective = why = ""
-        for line in answer.splitlines():
-            if line.upper().startswith("OBJECTIVE:"):
-                objective = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("WHY:"):
-                why = line.split(":", 1)[1].strip()
+        for raw_line in answer.splitlines():
+            if raw_line.strip().startswith("=== ENSEMBLE"):
+                break
+            line = re.sub(r"^\s*(?:[-*]\s+|\*\*|__)+", "", raw_line).strip()
+            upper = line.upper()
+            if upper.startswith("OBJECTIVE:") and not objective:
+                objective = line.split(":", 1)[1].strip().strip("*").strip()
+            elif upper.startswith("WHY:") and not why:
+                why = line.split(":", 1)[1].strip().strip("*").strip()
+        if not objective:
+            log("  %s: reply had no OBJECTIVE line, skipping" % name)
+            continue
         if objective:
             if not _objective_is_actionable(objective):
                 log("  %s: non-executable objective, skipping" % name)
