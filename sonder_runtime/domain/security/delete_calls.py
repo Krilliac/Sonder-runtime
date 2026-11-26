@@ -99,9 +99,10 @@ def _leaves(value: Any, depth: int = 0) -> list[str]:
 
 def _program_name(word: str) -> str:
     """``word`` without its program suffixes (``rimraf.cmd.exe`` is ``rimraf``)."""
-    while word.endswith(_PROGRAM_SUFFIXES):
-        word = word[:word.rfind(".")]
-    return word
+    end = len(word)
+    while word.endswith(_PROGRAM_SUFFIXES, 0, end):
+        end = word.rfind(".", 0, end)
+    return word if end == len(word) else word[:end]
 
 
 def _is_delete_verb(word: str) -> bool:
@@ -126,7 +127,7 @@ def _scan(tool_name: str, arguments: Mapping[str, Any]) -> bool:
     # backtick-escaped PowerShell command, or any ``^`` reaching cmd.exe.
     is_powershell = (
         any(name in word for word in words for name in _POWERSHELL_NAMES)
-        or str(arguments.get("language") or "").strip().lower() in _POWERSHELL_LANGUAGES
+        or str(arguments.get("language") or "").strip().strip("\ufeff").lower() in _POWERSHELL_LANGUAGES
     )
     if is_powershell and (
         any(word.lstrip("-") in _ENCODED_COMMAND_FLAGS for word in words)

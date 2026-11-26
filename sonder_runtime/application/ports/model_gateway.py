@@ -139,6 +139,31 @@ class Embedding:
     model: str
 
 
+@dataclass(frozen=True)
+class RerankScore:
+    """One ranked document result preserving its original input index."""
+
+    index: int
+    relevance_score: float
+    model: str
+    document: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.index) is not int or self.index < 0:
+            raise ValueError("rerank result index must be a non-negative integer")
+        if (
+            isinstance(self.relevance_score, bool)
+            or not isinstance(self.relevance_score, numbers.Real)
+            or not math.isfinite(float(self.relevance_score))
+        ):
+            raise ValueError("rerank relevance_score must be a finite real number")
+        object.__setattr__(self, "relevance_score", float(self.relevance_score))
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ValueError("rerank result model must be a non-empty string")
+        if self.document is not None and not isinstance(self.document, str):
+            raise ValueError("rerank result document must be a string or None")
+
+
 def require_model_text(value: object) -> str:
     """Validate provider output before it crosses the gateway boundary."""
     if not isinstance(value, str) or not value.strip():
@@ -205,3 +230,17 @@ class BatchModelGateway(ModelGateway, Protocol):
         self, requests: Sequence[ModelRequest], context: OperationContext,
         *, max_workers: int = 2,
     ) -> tuple[ModelBatchOutcome, ...]: ...
+
+
+class RerankGateway(Protocol):
+    """Optional additive capability for cross-encoder document reranking."""
+
+    def rerank(
+        self,
+        query: str,
+        documents: Sequence[str],
+        context: OperationContext | None = None,
+        *,
+        model: str | None = None,
+        top_n: int | None = None,
+    ) -> Sequence[RerankScore]: ...
