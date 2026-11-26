@@ -6,6 +6,7 @@ from hashlib import sha256
 import json
 from enum import StrEnum
 import re
+from typing import Any
 
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_.-]{1,127}$")
@@ -178,7 +179,7 @@ class ExtensionManifest:
             permissions=tuple(plugin.permissions),  # type: ignore[attr-defined]
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Return the canonical, versioned wire/persistence representation.
 
         This is the one public serialization of ``ExtensionManifest``; adapters
@@ -209,7 +210,7 @@ class ExtensionManifest:
         }
 
     @classmethod
-    def from_dict(cls, value: dict) -> "ExtensionManifest":
+    def from_dict(cls, value: dict[str, Any]) -> "ExtensionManifest":
         """Rehydrate a manifest from :meth:`to_dict`'s shape.
 
         Unknown extra keys (a newer schema_version's additions) are ignored

@@ -119,6 +119,7 @@ class TurnProgress {
     _activityAt = ++_clock;
     switch (event.state) {
       case 'awaiting_approval':
+      case 'awaiting_client_approval':
         _awaitingApproval = true;
         _activityPhase = 'awaiting approval';
       case 'approved':
@@ -129,13 +130,17 @@ class TurnProgress {
       case 'denied':
       case 'expired':
       case 'refused':
+      case 'error':
+      case 'interrupted':
         _awaitingApproval = false;
         _activityPhase = 'thinking';
       default:
         _awaitingApproval = false;
         _activityPhase = event.tool.isNotEmpty ? event.tool : 'tool';
     }
-    return phase != before || event.state == 'awaiting_approval';
+    return phase != before ||
+        event.state == 'awaiting_approval' ||
+        event.state == 'awaiting_client_approval';
   }
 
   /// A status reading arrived; [activity] is its activity section, if any.

@@ -70,12 +70,24 @@ class SQLiteOutboxCASRepository(OutboxCASRepository):
         if row is None:
             return None
         aggregate_id, revision, schema_version, payload = row
-        return TransactionNeutralRecord(aggregate_id, revision, json.loads(payload), schema_version=schema_version)
+        try:
+            decoded = json.loads(payload)
+        except (TypeError, ValueError) as exc:
+            raise PersistenceError("corrupt CAS record payload JSON") from exc
+        if not isinstance(decoded, Mapping):
+            raise PersistenceError("CAS record payload must be a JSON object")
+        return TransactionNeutralRecord(aggregate_id, revision, decoded, schema_version=schema_version)
 
     @staticmethod
     def _event(row: tuple[Any, ...]) -> OutboxEvent:
         event_id, aggregate_id, event_type, revision, schema_version, payload, occurred_at = row
-        return OutboxEvent(event_id, aggregate_id, event_type, revision, json.loads(payload), occurred_at, schema_version=schema_version)
+        try:
+            decoded = json.loads(payload)
+        except (TypeError, ValueError) as exc:
+            raise PersistenceError("corrupt CAS outbox event payload JSON") from exc
+        if not isinstance(decoded, Mapping):
+            raise PersistenceError("CAS outbox event payload must be a JSON object")
+        return OutboxEvent(event_id, aggregate_id, event_type, revision, decoded, occurred_at, schema_version=schema_version)
 
     def get(self, aggregate_id: str) -> TransactionNeutralRecord | None:
         with self._connect() as connection:
@@ -105,11 +117,11 @@ class SQLiteOutboxCASRepository(OutboxCASRepository):
                         (record.aggregate_id, record.revision, record.schema_version, payload),
                     )
                 else:
-                    connection.execute(
+                    cursor = connection.execute(
                         f"UPDATE {self._records} SET revision=?,schema_version=?,payload_json=? WHERE aggregate_id=? AND revision=?",
                         (record.revision, record.schema_version, payload, record.aggregate_id, expected_revision),
                     )
-                    if connection.total_changes != 1:
+                    if cursor.rowcount != 1:
                         connection.rollback()
                         return None
                 connection.execute(

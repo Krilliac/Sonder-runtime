@@ -20,6 +20,8 @@ const quickCommands = <String, String>{
   '/effort': "Show or set this session's reasoning effort (off|minimal|low|medium|high|xhigh|auto)",
   '/persona':
       "Show or set this session's persona (auto|off|architect|coder|concise|creative|explainer|mathematician|reviewer|security|teacher)",
+  '/exec_mode':
+      'Show or set execution mode override (auto|single|ensemble|fanout)',
   '/compact': 'Preview context compaction',
   '/commands': 'List command registry',
   '/activity': 'Show live tool/file activity',

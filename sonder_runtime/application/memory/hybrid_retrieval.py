@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import math
 import re
 from typing import Iterable
 
@@ -18,10 +19,31 @@ from .memory_policy import MemoryClass, PrivacyClass, TemporalTruth, evaluate_re
 MAX_CANDIDATES = 10_000
 MAX_LIMIT = 100
 MAX_QUERY_CHARS = 64_000
+_UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _tokens(value: str) -> frozenset[str]:
     return frozenset(re.findall(r"\w+", value.casefold(), re.UNICODE))
+
+
+def _safe_epoch_seconds(value: datetime) -> float:
+    """Return UTC seconds since 1970 without failing on pre-1970 Windows timestamps."""
+    normalized = (
+        value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(timezone.utc)
+    )
+    return (normalized - _UTC_EPOCH).total_seconds()
+
+
+def _bounded_semantic_score(value: object) -> float:
+    """Clamp finite semantic scores to [0.0, 1.0]; treat NaN/Inf/invalid as 0.0."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        return 0.0
+    return max(0.0, min(1.0, numeric))
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,17 +121,14 @@ class HybridMemoryRetriever:
             exact = len(query_tokens & _tokens(candidate.text)) / max(1, len(query_tokens))
             if query.mode == "exact" and exact <= 0.0:
                 continue
-            if query.mode == "decision" and query.decision_tag not in candidate.decision_tags:
-                continue
-            if query.mode == "failure" and query.failure_tag not in candidate.failure_tags:
-                continue
             temporal_score = candidate.temporal.decay(now) if candidate.temporal else 1.0
             if query.mode == "temporal" and candidate.temporal is None:
                 continue
+            bounded_semantic = _bounded_semantic_score(candidate.semantic_score)
             decision = evaluate_retrieval(
                 candidate.memory_id,
                 candidate.memory_class,
-                score_components={"exact": exact, "semantic": candidate.semantic_score},
+                score_components={"exact": exact, "semantic": bounded_semantic},
                 provenance=candidate.provenance,
                 confidence=candidate.confidence,
                 freshness=candidate.freshness,
@@ -121,9 +140,17 @@ class HybridMemoryRetriever:
             )
             if not decision.included:
                 continue
-            score = (0.55 * exact) + (0.25 * max(0.0, min(1.0, candidate.semantic_score))) + (0.10 * temporal_score) + (0.10 * candidate.confidence)
+            score = (0.55 * exact) + (0.25 * bounded_semantic) + (0.10 * temporal_score) + (0.10 * candidate.confidence)
             selected.append(RetrievedMemory(candidate, score, exact, temporal_score))
-        selected.sort(key=lambda item: (-item.score, -item.exact_score, -item.temporal_score, -item.candidate.created_at.timestamp(), item.candidate.memory_id))
+        selected.sort(
+            key=lambda item: (
+                -item.score,
+                -item.exact_score,
+                -item.temporal_score,
+                -_safe_epoch_seconds(item.candidate.created_at),
+                item.candidate.memory_id,
+            )
+        )
         return tuple(selected[: query.limit])
 
 

@@ -36,7 +36,7 @@ def _has_compact_credential(fragment: str) -> bool:
     return False
 
 
-def redact_prompt_echo(value, prompt) -> str:
+def redact_prompt_echo(value: object, prompt: object) -> str:
     """Remove verbatim request material before a durable receipt is written.
 
     Models frequently preface an answer by quoting only part of their input,
@@ -60,15 +60,16 @@ def redact_prompt_echo(value, prompt) -> str:
     # Sampling every seed_size characters is sufficient: a shared span of at
     # least two seeds necessarily contains one complete sampled seed. Index
     # response windows once, then expand only matching candidates.
-    source_seeds = {}
+    source_seeds: dict[str, list[int]] = {}
     for source_start in range(0, len(question) - seed_size + 1, seed_size):
         source_seeds.setdefault(question[source_start:source_start + seed_size], []).append(source_start)
-    response_seeds = {}
+    response_seeds: dict[str, list[int]] = {}
     for response_start in range(0, len(rendered) - seed_size + 1):
         seed = rendered[response_start:response_start + seed_size]
         if seed in source_seeds:
             response_seeds.setdefault(seed, []).append(response_start)
-    spans, comparisons = [], 0
+    spans: list[tuple[int, int]] = []
+    comparisons = 0
     for seed, source_positions in source_seeds.items():
         for source_start in source_positions:
             for response_start in response_seeds.get(seed, ()):
@@ -99,13 +100,14 @@ def redact_prompt_echo(value, prompt) -> str:
         return rendered
     # SequenceMatcher reports non-overlapping blocks, but merge defensively so
     # this stays correct if its implementation or our thresholds change.
-    merged = []
+    merged: list[tuple[int, int]] = []
     for start, end in sorted(spans):
         if merged and start <= merged[-1][1]:
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
         else:
             merged.append((start, end))
-    parts, cursor = [], 0
+    parts: list[str] = []
+    cursor = 0
     for start, end in merged:
         parts.append(rendered[cursor:start])
         parts.append("<redacted prompt>")
