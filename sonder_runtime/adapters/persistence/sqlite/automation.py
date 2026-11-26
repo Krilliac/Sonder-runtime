@@ -88,11 +88,15 @@ def init_automation_db(db_path: Path) -> sqlite3.Connection:
     conn = cast("Callable[[str], sqlite3.Connection]", owned_sqlite_connect)(
         str(db_path)
     )
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(AUTOMATION_DDL)
-    conn.executescript(OUTBOX_DDL)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.executescript(AUTOMATION_DDL)
+        conn.executescript(OUTBOX_DDL)
+    except BaseException:
+        conn.close()
+        raise
     logger.debug("automation.db schema applied successfully")
     logger.info(f"automation.db initialized at {db_path}")
     return conn

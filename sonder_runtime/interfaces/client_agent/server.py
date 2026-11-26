@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import socketserver
 import threading
@@ -29,9 +30,82 @@ from .executor import (
 DEFAULT_CLIENT_AGENT_HOST = "127.0.0.1"
 DEFAULT_CLIENT_AGENT_PORT = 11439
 _MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
+_BODY_READ_CHUNK_BYTES = 65_536
+_MAX_JSON_DEPTH = 64
+_MAX_REQUEST_LINE_BYTES = 4_096
+_MAX_HEADER_COUNT = 64
+_MAX_HEADER_BYTES = 16_384
+_REQUEST_READ_TIMEOUT_SECONDS = 30.0
+_MAX_ORIGIN_CHARS = 512
+_MAX_TOKEN_CHARS = 4_096
+_MAX_CALL_ID_CHARS = 256
+_MAX_APPROVAL_TOKEN_CHARS = 256
+_MAX_TOOL_NAME_CHARS = 128
+_MAX_MODE_CHARS = 64
+_MAX_ERROR_CHARS = 4_096
+_MAX_REFLECTED_PATH_CHARS = 128
 _LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 _DEFAULT_APPROVAL_TTL_SECONDS = 300.0
 _MAX_APPROVAL_CHALLENGES = 256
+_BEARER_SECRET_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{6,}")
+_TOKEN_HEADER_SECRET_RE = re.compile(
+    r"(?i)(X-Sonder-Client-Agent-Token\s*[:=]\s*)[^\s,;\"']+"
+)
+
+
+def _has_control_chars(text: str, *, allow_newlines: bool = False) -> bool:
+    for ch in text:
+        code = ord(ch)
+        if allow_newlines and ch in ("\n", "\t"):
+            continue
+        if code < 32 or code == 127:
+            return True
+    return False
+
+
+def _sanitize_error_message(
+    text: str,
+    *,
+    secrets_to_redact: Iterable[str] = (),
+    limit: int = _MAX_ERROR_CHARS,
+) -> str:
+    """Strip control characters, redact tokens/secrets, and bound error text."""
+    cleaned = "".join(
+        ch if (ord(ch) >= 32 and ord(ch) != 127) or ch in ("\n", "\t") else " "
+        for ch in str(text or "")
+    )
+    cleaned = _BEARER_SECRET_RE.sub("Bearer [redacted]", cleaned)
+    cleaned = _TOKEN_HEADER_SECRET_RE.sub(r"\1[redacted]", cleaned)
+    for secret in secrets_to_redact:
+        if secret and len(secret) >= 6:
+            cleaned = cleaned.replace(secret, "[redacted]")
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(0, limit - 16)] + "\n...[truncated]"
+
+
+def _reject_json_constant(constant: str) -> Any:
+    raise ValueError(f"non-standard JSON constant {constant!r} is not allowed")
+
+
+def _json_depth_within_limit(value: Any, max_depth: int) -> bool:
+    """Iterative container nesting depth check (avoids Python recursion exhaustion)."""
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if depth > max_depth:
+            return False
+        if isinstance(current, dict):
+            next_depth = depth + 1
+            for item in current.values():
+                if isinstance(item, (dict, list)):
+                    stack.append((item, next_depth))
+        elif isinstance(current, list):
+            next_depth = depth + 1
+            for item in current:
+                if isinstance(item, (dict, list)):
+                    stack.append((item, next_depth))
+    return True
 
 
 def canonical_args_digest(args: Mapping[str, Any] | None) -> str:
@@ -42,6 +116,7 @@ def canonical_args_digest(args: Mapping[str, Any] | None) -> str:
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
+        allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
@@ -76,9 +151,9 @@ def _format_origin(scheme: str, host: str, port: int | None) -> str:
 def normalize_origin(raw: str) -> str | None:
     """Validate and normalize an ``http(s)://host[:port]`` origin without ``urllib``."""
     text = raw.strip()
-    if not text or text.lower() == "null":
+    if not text or len(text) > _MAX_ORIGIN_CHARS or text.lower() == "null":
         return None
-    if any(ch in text for ch in ("?", "#", "@", " ", "\t", "\r", "\n")):
+    if _has_control_chars(text) or any(ch in text for ch in ("?", "#", "@", " ", "\\", "%")):
         return None
     lower = text.lower()
     if lower.startswith("https://"):
@@ -120,6 +195,42 @@ def normalize_origin(raw: str) -> str | None:
     return _format_origin(scheme, rest.lower(), None)
 
 
+def is_allowed_host_header(raw_host: str) -> bool:
+    """Return True iff an HTTP ``Host`` header names a valid loopback host[:port].
+
+    Defends against DNS-rebinding attacks where a remote domain resolves to
+    127.0.0.1 and issues same-origin browser requests without an ``Origin``
+    mismatch.
+    """
+    text = raw_host.strip()
+    if not text or len(text) > _MAX_ORIGIN_CHARS:
+        return False
+    if _has_control_chars(text) or any(ch in text for ch in (" ", "/", "\\", "@", "?", "#", "%", ",")):
+        return False
+    if text.startswith("["):
+        end_bracket = text.find("]")
+        if end_bracket <= 1:
+            return False
+        host = text[: end_bracket + 1].lower()
+        after = text[end_bracket + 1 :]
+        if after:
+            if not after.startswith(":") or not (after[1:].isascii() and after[1:].isdigit()):
+                return False
+            port = int(after[1:])
+            if not 1 <= port <= 65535:
+                return False
+        return is_loopback_host(host)
+    if ":" in text:
+        host_part, port_part = text.rsplit(":", 1)
+        if not host_part or ":" in host_part or not (port_part.isascii() and port_part.isdigit()):
+            return False
+        port = int(port_part)
+        if not 1 <= port <= 65535:
+            return False
+        return is_loopback_host(host_part)
+    return is_loopback_host(text)
+
+
 def _origin_host(normalized_origin: str) -> str:
     after_scheme = normalized_origin.split("://", 1)[1]
     if after_scheme.startswith("["):
@@ -139,8 +250,94 @@ def is_origin_allowed(origin: str, allowed_origins: frozenset[str]) -> bool:
 
 
 class _QuietWSGIHandler(WSGIRequestHandler):
+    timeout = _REQUEST_READ_TIMEOUT_SECONDS
+    server_version = "sonder-client-agent"
+    sys_version = ""
+
     def log_message(self, format: str, *args: object) -> None:
         return
+
+    def _send_json_error(self, code: int, error_code: str, message: str) -> None:
+        body = json.dumps(
+            {"ok": False, "error": {"code": error_code, "message": message}},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        if not hasattr(self, "requestline"):
+            self.requestline = ""
+        if getattr(self, "request_version", "") in ("", "HTTP/0.9"):
+            self.request_version = self.protocol_version
+        self.send_response(code)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            self.wfile.write(body)
+        except OSError:
+            pass
+
+    def send_error(
+        self,
+        code: int,
+        message: str | None = None,
+        explain: str | None = None,
+    ) -> None:
+        _ = explain
+        safe_msg = _sanitize_error_message(message or f"HTTP {code}", limit=256)
+        error_code = {
+            400: "INVALID_REQUEST",
+            414: "URI_TOO_LONG",
+            431: "REQUEST_HEADER_FIELDS_TOO_LARGE",
+        }.get(int(code), "HTTP_ERROR")
+        self._send_json_error(int(code), error_code, safe_msg)
+
+    def parse_request(self) -> bool:
+        raw_line = getattr(self, "raw_requestline", b"")
+        if isinstance(raw_line, (bytes, bytearray)) and len(raw_line) > _MAX_REQUEST_LINE_BYTES:
+            self.command = ""
+            self.requestline = ""
+            self.request_version = self.protocol_version
+            self.close_connection = True
+            self._send_json_error(
+                414,
+                "URI_TOO_LONG",
+                f"Request line exceeds {_MAX_REQUEST_LINE_BYTES} bytes",
+            )
+            return False
+        if not super().parse_request():
+            return False
+        raw_headers = self.headers.items()
+        if len(raw_headers) > _MAX_HEADER_COUNT:
+            self._send_json_error(
+                431,
+                "REQUEST_HEADER_FIELDS_TOO_LARGE",
+                f"Request exceeds {_MAX_HEADER_COUNT} headers",
+            )
+            return False
+        total_header_bytes = sum(len(k) + len(v) + 4 for k, v in raw_headers)
+        if total_header_bytes > _MAX_HEADER_BYTES:
+            self._send_json_error(
+                431,
+                "REQUEST_HEADER_FIELDS_TOO_LARGE",
+                f"Request headers exceed {_MAX_HEADER_BYTES} bytes",
+            )
+            return False
+        hosts = self.headers.get_all("host") or []
+        if len(hosts) > 1:
+            self._send_json_error(400, "INVALID_REQUEST", "Duplicate Host header is not allowed")
+            return False
+        content_lengths = self.headers.get_all("content-length") or []
+        if len(content_lengths) > 1:
+            self._send_json_error(
+                400,
+                "INVALID_REQUEST",
+                "Duplicate Content-Length header is not allowed",
+            )
+            return False
+        return True
 
 
 class ClientAgentServer(socketserver.ThreadingMixIn, WSGIServer):
@@ -158,10 +355,15 @@ class _ClientAgentIPv6Server(ClientAgentServer):
 def _extract_token(environ: Mapping[str, Any]) -> str:
     direct = str(environ.get("HTTP_X_SONDER_CLIENT_AGENT_TOKEN") or "").strip()
     if direct:
+        if len(direct) > _MAX_TOKEN_CHARS or _has_control_chars(direct):
+            return ""
         return direct
     auth = str(environ.get("HTTP_AUTHORIZATION") or "").strip()
     if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
+        bearer = auth[7:].strip()
+        if len(bearer) > _MAX_TOKEN_CHARS or _has_control_chars(bearer):
+            return ""
+        return bearer
     return ""
 
 
@@ -186,14 +388,26 @@ def _read_json_body(environ: Mapping[str, Any]) -> tuple[dict[str, Any] | None, 
     stream = environ.get("wsgi.input")
     if stream is None or not hasattr(stream, "read"):
         return None, 400
-    data = stream.read(length)
-    if not isinstance(data, (bytes, bytearray)):
+    chunks: list[bytes] = []
+    remaining = length
+    while remaining > 0:
+        piece = stream.read(min(_BODY_READ_CHUNK_BYTES, remaining))
+        if not isinstance(piece, (bytes, bytearray)):
+            return None, 400
+        if not piece:
+            break
+        chunks.append(bytes(piece))
+        remaining -= len(piece)
+    if remaining > 0:
         return None, 400
+    data = b"".join(chunks)
     try:
-        decoded = json.loads(bytes(data).decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+        decoded = json.loads(data.decode("utf-8"), parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return None, 400
     if not isinstance(decoded, dict):
+        return None, 400
+    if not _json_depth_within_limit(decoded, _MAX_JSON_DEPTH):
         return None, 400
     return decoded, 200
 
@@ -323,6 +537,9 @@ def build_wsgi_app(
             405: "405 Method Not Allowed",
             411: "411 Length Required",
             413: "413 Payload Too Large",
+            414: "414 URI Too Long",
+            431: "431 Request Header Fields Too Large",
+            500: "500 Internal Server Error",
         }.get(status, f"{status} Error")
         headers: list[tuple[str, str]] = [
             ("Cache-Control", "no-store"),
@@ -340,10 +557,26 @@ def build_wsgi_app(
         start_response(status_text, headers)
         return [body]
 
-    def app(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
+    def _handle_request(environ: WSGIEnvironment, start_response: StartResponse) -> list[bytes]:
         method = str(environ.get("REQUEST_METHOD") or "GET").upper()
         path = str(environ.get("PATH_INFO") or "/")
         origin_header = str(environ.get("HTTP_ORIGIN") or "").strip()
+        host_header = str(environ.get("HTTP_HOST") or "").strip()
+        protocol = str(environ.get("SERVER_PROTOCOL") or "").strip().upper()
+
+        if host_header:
+            if not is_allowed_host_header(host_header):
+                return _respond(
+                    start_response,
+                    403,
+                    {"ok": False, "error": {"code": "HOST_FORBIDDEN", "message": "Host header not allowed"}},
+                )
+        elif protocol == "HTTP/1.1":
+            return _respond(
+                start_response,
+                403,
+                {"ok": False, "error": {"code": "HOST_FORBIDDEN", "message": "Host header is required"}},
+            )
 
         if origin_header and not is_origin_allowed(origin_header, normalized_origins):
             return _respond(
@@ -417,8 +650,27 @@ def build_wsgi_app(
                     _body_error_payload(body_status),
                     origin_header,
                 )
-            wanted = str(body.get("mode") or "").strip()
-            confirm_bypass = body.get("confirm_bypass") is True
+            raw_wanted = body.get("mode")
+            if not isinstance(raw_wanted, str) or len(raw_wanted) > _MAX_MODE_CHARS or _has_control_chars(raw_wanted):
+                return _respond(
+                    start_response,
+                    400,
+                    {"ok": False, "error": {"code": "INVALID_MODE", "message": "mode must be a valid string"}},
+                    origin_header,
+                )
+            wanted = raw_wanted.strip()
+            raw_confirm = body.get("confirm_bypass")
+            if raw_confirm is not None and not isinstance(raw_confirm, bool):
+                return _respond(
+                    start_response,
+                    400,
+                    {
+                        "ok": False,
+                        "error": {"code": "INVALID_REQUEST", "message": "confirm_bypass must be a boolean"},
+                    },
+                    origin_header,
+                )
+            confirm_bypass = raw_confirm is True
             try:
                 with lock:
                     updated = policy.set_mode(wanted, confirm_bypass=confirm_bypass)
@@ -431,7 +683,10 @@ def build_wsgi_app(
                     403,
                     {
                         "ok": False,
-                        "error": {"code": "MODE_FORBIDDEN", "message": str(exc)},
+                        "error": {
+                            "code": "MODE_FORBIDDEN",
+                            "message": _sanitize_error_message(str(exc), secrets_to_redact=(token,)),
+                        },
                     },
                     origin_header,
                 )
@@ -441,7 +696,10 @@ def build_wsgi_app(
                     400,
                     {
                         "ok": False,
-                        "error": {"code": "BYPASS_CONFIRMATION_REQUIRED", "message": str(exc)},
+                        "error": {
+                            "code": "BYPASS_CONFIRMATION_REQUIRED",
+                            "message": _sanitize_error_message(str(exc), secrets_to_redact=(token,)),
+                        },
                     },
                     origin_header,
                 )
@@ -449,7 +707,13 @@ def build_wsgi_app(
                 return _respond(
                     start_response,
                     400,
-                    {"ok": False, "error": {"code": "INVALID_MODE", "message": str(exc)}},
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "INVALID_MODE",
+                            "message": _sanitize_error_message(str(exc), secrets_to_redact=(token,)),
+                        },
+                    },
                     origin_header,
                 )
             return _respond(
@@ -474,7 +738,15 @@ def build_wsgi_app(
                     _body_error_payload(body_status),
                     origin_header,
                 )
-            tool = str(body.get("tool") or "").strip()
+            raw_tool = body.get("tool")
+            if not isinstance(raw_tool, str) or len(raw_tool) > _MAX_TOOL_NAME_CHARS or _has_control_chars(raw_tool):
+                return _respond(
+                    start_response,
+                    400,
+                    {"ok": False, "error": {"code": "INVALID_REQUEST", "message": "tool must be a non-empty string"}},
+                    origin_header,
+                )
+            tool = raw_tool.strip()
             if not tool:
                 return _respond(
                     start_response,
@@ -490,20 +762,105 @@ def build_wsgi_app(
                     {"ok": False, "error": {"code": "INVALID_REQUEST", "message": "args must be an object"}},
                     origin_header,
                 )
-            approved = body.get("approved") is True
-            call_id = str(body.get("call_id") or "").strip()
+            raw_approved = body.get("approved")
+            if raw_approved is not None and not isinstance(raw_approved, bool):
+                return _respond(
+                    start_response,
+                    400,
+                    {"ok": False, "error": {"code": "INVALID_REQUEST", "message": "approved must be a boolean"}},
+                    origin_header,
+                )
+            approved = raw_approved is True
+            raw_call_id = body.get("call_id")
+            if raw_call_id is not None:
+                if (
+                    not isinstance(raw_call_id, str)
+                    or len(raw_call_id) > _MAX_CALL_ID_CHARS
+                    or _has_control_chars(raw_call_id)
+                ):
+                    return _respond(
+                        start_response,
+                        400,
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "INVALID_REQUEST",
+                                "message": f"call_id must be a string of at most {_MAX_CALL_ID_CHARS} characters",
+                            },
+                        },
+                        origin_header,
+                    )
+                call_id = raw_call_id.strip()
+            else:
+                call_id = ""
             raw_approval_token = body.get("approval_token")
-            approval_token = raw_approval_token.strip() if isinstance(raw_approval_token, str) else ""
+            if raw_approval_token is not None:
+                if (
+                    not isinstance(raw_approval_token, str)
+                    or len(raw_approval_token) > _MAX_APPROVAL_TOKEN_CHARS
+                    or _has_control_chars(raw_approval_token)
+                ):
+                    return _respond(
+                        start_response,
+                        400,
+                        {
+                            "ok": False,
+                            "error": {"code": "INVALID_REQUEST", "message": "approval_token is invalid"},
+                        },
+                        origin_header,
+                    )
+                approval_token = raw_approval_token.strip()
+            else:
+                approval_token = ""
             has_supplied_digest = "args_digest" in body and body.get("args_digest") is not None
             raw_supplied_digest = body.get("args_digest")
-            supplied_args_digest = (
-                raw_supplied_digest.strip().lower()
-                if isinstance(raw_supplied_digest, str)
-                else ""
-            )
-            requested_mode = str(body.get("mode") or "").strip()
+            if has_supplied_digest:
+                if (
+                    not isinstance(raw_supplied_digest, str)
+                    or len(raw_supplied_digest) > 128
+                    or _has_control_chars(raw_supplied_digest)
+                ):
+                    return _respond(
+                        start_response,
+                        400,
+                        {
+                            "ok": False,
+                            "error": {"code": "INVALID_REQUEST", "message": "args_digest must be a string"},
+                        },
+                        origin_header,
+                    )
+                supplied_args_digest = raw_supplied_digest.strip().lower()
+            else:
+                supplied_args_digest = ""
+            raw_mode = body.get("mode")
+            if raw_mode is not None:
+                if not isinstance(raw_mode, str) or len(raw_mode) > _MAX_MODE_CHARS or _has_control_chars(raw_mode):
+                    return _respond(
+                        start_response,
+                        400,
+                        {"ok": False, "error": {"code": "INVALID_MODE", "message": "mode must be a valid string"}},
+                        origin_header,
+                    )
+                requested_mode = raw_mode.strip()
+                if requested_mode and requested_mode not in _MODE_RANK:
+                    return _respond(
+                        start_response,
+                        400,
+                        {"ok": False, "error": {"code": "INVALID_MODE", "message": "Unknown permission mode"}},
+                        origin_header,
+                    )
+            else:
+                requested_mode = ""
             clean_tool = tool.lstrip("/")
-            args_digest = canonical_args_digest(raw_args)
+            try:
+                args_digest = canonical_args_digest(raw_args)
+            except (TypeError, ValueError, RecursionError):
+                return _respond(
+                    start_response,
+                    400,
+                    {"ok": False, "error": {"code": "INVALID_REQUEST", "message": "args cannot be serialized"}},
+                    origin_header,
+                )
             with lock:
                 effective_policy = ClientAgentPolicy(
                     workspace_root=policy.workspace_root,
@@ -589,6 +946,14 @@ def build_wsgi_app(
                 approved=verified_approval,
             )
             payload = result.to_dict()
+            secrets_bag = (token, approval_token) if approval_token else (token,)
+            if isinstance(payload.get("error"), str) and payload["error"]:
+                payload["error"] = _sanitize_error_message(
+                    payload["error"],
+                    secrets_to_redact=secrets_bag,
+                )
+            if isinstance(payload.get("output"), str) and payload["output"] and len(token) >= 6:
+                payload["output"] = payload["output"].replace(token, "[redacted]")
             if call_id:
                 payload["call_id"] = call_id
             return _respond(start_response, 200, payload, origin_header)
@@ -600,12 +965,23 @@ def build_wsgi_app(
                 {"ok": False, "error": {"code": "METHOD_NOT_ALLOWED", "message": "Method not allowed"}},
                 origin_header,
             )
+        safe_path = _sanitize_error_message(path, secrets_to_redact=(token,), limit=_MAX_REFLECTED_PATH_CHARS)
         return _respond(
             start_response,
             404,
-            {"ok": False, "error": {"code": "NOT_FOUND", "message": f"Unknown path: {path}"}},
+            {"ok": False, "error": {"code": "NOT_FOUND", "message": f"Unknown path: {safe_path}"}},
             origin_header,
         )
+
+    def app(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
+        try:
+            return _handle_request(environ, start_response)
+        except Exception:  # noqa: BLE001 - fail closed with zero traceback/secret leak
+            return _respond(
+                start_response,
+                500,
+                {"ok": False, "error": {"code": "INTERNAL_ERROR", "message": "Internal server error"}},
+            )
 
     return app
 
@@ -634,6 +1010,8 @@ def create_client_agent_server(
     )
     server_cls = _ClientAgentIPv6Server if ":" in bind_host else ClientAgentServer
     effective_token = (token or "").strip() or secrets.token_urlsafe(32)
+    if len(effective_token) > _MAX_TOKEN_CHARS or _has_control_chars(effective_token):
+        raise ValueError("client_agent token must be a single-line string without control characters")
     policy = ClientAgentPolicy(
         workspace_root=workspace_root,
         mode=mode,
