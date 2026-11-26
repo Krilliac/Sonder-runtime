@@ -1007,10 +1007,19 @@ def _post_mode(handler, body, *, context=None):
     return handler.sent[-1]
 
 
+def _console_mode(mode):
+    """The console's /mode: the only route that raises the global mode."""
+    with pm.attended_mode_change():
+        reply = server.permission_mode(mode=mode)
+    assert not reply.startswith("refused"), reply
+
+
 def test_two_sessions_keep_their_own_modes_under_the_global_ceiling(mode_state):
-    status, payload = _post_mode(_PermissionModeHandler(), {"mode": "auto", "scope": "global"})
-    assert status == 200 and payload["scope"] == "global" and payload["mode"] == pm.AUTO
+    _console_mode("auto")  # HTTP cannot raise the global mode; the console does
+    status, payload = _post_mode(_PermissionModeHandler(), {"mode": "plan", "scope": "global"})
+    assert status == 200 and payload["scope"] == "global" and payload["mode"] == pm.PLAN
     assert payload.get("session_id", "") == ""
+    _console_mode("auto")
     status_a, payload_a = _post_mode(_PermissionModeHandler("sess-A"), {"mode": "manual", "scope": "session"})
     status_b, payload_b = _post_mode(_PermissionModeHandler("sess-B"), {"mode": "acceptEdits", "scope": "session"})
     assert (status_a, status_b) == (200, 200)
@@ -1036,7 +1045,7 @@ def test_a_session_can_never_be_raised_above_the_global_mode(mode_state):
 
 
 def test_body_session_id_and_scope_session_also_scope_the_change(mode_state):
-    _post_mode(_PermissionModeHandler(), {"mode": "auto", "scope": "global"})
+    _console_mode("auto")
     status, payload = _post_mode(_PermissionModeHandler(), {"mode": "plan", "session_id": "sess-X", "scope": "session"})
     assert status == 200 and payload["scope"] == "session" and payload["session_id"] == "sess-X"
     assert pm.global_mode() == pm.AUTO
@@ -1048,8 +1057,10 @@ def test_body_session_id_and_scope_session_also_scope_the_change(mode_state):
 
 
 def test_omitted_scope_keeps_global_safety_stop_even_with_session_header(mode_state):
-    _post_mode(_PermissionModeHandler(), {"mode": "auto", "scope": "global"})
-    _post_mode(_PermissionModeHandler("sess-B"), {"mode": "bypass", "confirm_bypass": True})
+    _console_mode("auto")
+    with pm.mode_scope("owner", "sess-B"), pm.attended_mode_change(), pm.attended_bypass_confirm():
+        pm.set_mode(pm.BYPASS)  # the console route; HTTP cannot enter bypass
+        assert pm.current_mode() == pm.BYPASS
     status, payload = _post_mode(_PermissionModeHandler("sess-A"), {"mode": "manual"})
     assert status == 200 and "scope" not in payload
     assert pm.global_mode() == pm.MANUAL
@@ -1086,7 +1097,7 @@ def test_local_open_session_scope_cannot_escalate_above_manual(mode_state):
 
 
 def test_a_concurrent_global_lowering_cannot_leave_a_session_above_the_ceiling(mode_state):
-    _post_mode(_PermissionModeHandler(), {"mode": "auto", "scope": "global"})
+    _console_mode("auto")
     entered, release, results = threading.Event(), threading.Event(), {}
     original = pm.set_mode
 

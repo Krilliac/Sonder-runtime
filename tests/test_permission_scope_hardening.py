@@ -6,6 +6,7 @@ import json
 import pytest
 
 import permission_modes as pm
+import server
 from sonder_runtime.adapters.security.permission_policy import permission_policy
 from sonder_runtime.interfaces.http import chat_tool_stream
 
@@ -30,11 +31,11 @@ def mode_state(monkeypatch, tmp_path):
 
 def test_console_global_lowering_clamps_a_granted_session_mode(mode_state):
     with pm.attended_mode_change():
-        pm.set_mode(pm.AUTO)  # console: global auto
+        server.permission_mode(mode="auto")  # console /mode: global auto
         with pm.mode_scope("owner", "s1"):
             assert pm.set_session_mode(pm.AUTO) == pm.AUTO
             assert pm.current_mode() == pm.AUTO
-        pm.set_mode(pm.MANUAL)  # console: lower the global mode (no scope)
+        server.permission_mode(mode="manual")  # console /mode: lower the global mode
     with pm.mode_scope("owner", "s1"):
         assert pm.current_mode() == pm.MANUAL
     with pm.mode_scope("owner", "s1"):
@@ -150,6 +151,13 @@ class _Handler:
         self.sent.append((status, payload))
 
 
+def _console(mode):
+    """The console's /mode: server.permission_mode under attended_mode_change."""
+    with pm.attended_mode_change():
+        reply = server.permission_mode(mode=mode)
+    assert not reply.startswith("refused"), reply
+
+
 def _post(session, body):
     handler = _Handler(session)
     chat_tool_stream.handle_permission_mode_post(
@@ -166,8 +174,7 @@ def _post(session, body):
 
 
 def test_http_session_setter_lowers_but_refuses_to_raise(mode_state):
-    with pm.attended_mode_change():
-        pm.set_mode(pm.AUTO)
+    _console("auto")
     status, _ = _post("s1", {"mode": "plan", "scope": "session"})
     assert status == 200
     with pm.mode_scope("owner", "s1"):
@@ -181,13 +188,70 @@ def test_http_session_setter_lowers_but_refuses_to_raise(mode_state):
 
 
 def test_http_session_raise_takes_effect_only_after_console_approval(mode_state):
-    with pm.attended_mode_change():
-        pm.set_mode(pm.AUTO)
+    _console("auto")
     _post("s1", {"mode": "manual", "scope": "session"})
     status, _ = _post("s1", {"mode": "auto", "scope": "session"})
     assert status == 403
     with pm.mode_scope("owner", "s1"):
         assert pm.current_mode() == pm.MANUAL
-        with pm.attended_mode_change():
-            assert pm.set_session_mode(pm.AUTO) == pm.AUTO  # console approval
+        # The console route, unattended: refused, nothing changes.
+        assert server.permission_mode(mode="auto").startswith("refused")
+        assert pm.current_mode() == pm.MANUAL
+        with pm.attended_mode_change():  # console approval: /mode auto
+            server.permission_mode(mode="auto")
         assert pm.current_mode() == pm.AUTO
+
+
+# --- authenticated HTTP is unattended too -------------------------------------
+
+
+def test_http_bypass_is_refused_and_cannot_exceed_the_global_ceiling(mode_state):
+    _console("plan")
+    status, payload = _post("s1", {"mode": "bypass", "scope": "session", "confirm_bypass": True})
+    assert status == 403
+    assert payload["code"] == "BYPASS_REQUIRES_CONSOLE"
+    with pm.mode_scope("owner", "s1"):
+        assert pm.current_mode() == pm.PLAN
+    assert pm.global_mode() == pm.PLAN
+    # A bypass scope written some other way is still capped by the global mode.
+    with pm._LOCK:
+        pm._SCOPED_MODES[pm._scope_key("owner", "s1")] = pm.BYPASS
+    with pm.mode_scope("owner", "s1"):
+        assert pm.current_mode() == pm.PLAN
+
+
+def test_http_global_raise_is_refused_for_an_authenticated_admin(mode_state):
+    _console("manual")
+    for body in ({"mode": "auto"}, {"mode": "auto", "scope": "global"}):
+        status, payload = _post("s1", body)
+        assert status == 403, body
+        assert "authenticated administrator" in payload["error"]["message"]
+        assert "local-open" not in payload["error"]["message"]
+        assert "SONDER_API_KEY" not in payload["error"]["message"]
+        assert "/mode auto" in payload["error"]["message"]
+    assert pm.global_mode() == pm.MANUAL
+
+
+def test_http_global_clamp_then_raise_cannot_launder_a_session_raise(mode_state):
+    _console("manual")
+    with pm.mode_scope("owner", "s1"):
+        pass
+    status, _ = _post("s1", {"mode": "auto", "scope": "session"})
+    assert status == 403
+    status, _ = _post("s1", {"mode": "manual", "scope": "global"})
+    assert status == 200
+    status, _ = _post("s1", {"mode": "auto", "scope": "global"})
+    assert status == 403
+    with pm.mode_scope("owner", "s1"):
+        assert pm.current_mode() == pm.MANUAL
+
+
+def test_http_global_lowering_still_works_and_clamps_scopes(mode_state):
+    _console("auto")
+    with pm.mode_scope("owner", "s1"):
+        with pm.attended_mode_change():
+            server.permission_mode(mode="auto")
+    status, _ = _post("s1", {"mode": "plan"})
+    assert status == 200
+    with pm.mode_scope("owner", "s1"):
+        assert pm.current_mode() == pm.PLAN

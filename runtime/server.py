@@ -10416,8 +10416,8 @@ def permission_mode(mode: str = "", explain: bool = False) -> str:
 
     Elevation is a separate axis no mode grants; see permission_policy.
     Raising the mode above manual needs an attended caller (the console's
-    /mode, or an administrator's POST /v1/permission-mode); from here an
-    unattended client may only lower it or return from plan to manual.
+    /mode); neither this tool nor POST /v1/permission-mode (with or without
+    credentials) can raise it, only lower it or return from plan to manual.
     """
     _maybe_live_reload()
     started = time.time()

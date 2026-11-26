@@ -118,7 +118,8 @@ def test_bypass_file_ops_containment_keeps_user_role_blocked(monkeypatch, tmp_pa
         assert file_ops.bypass_enabled() is False
 
     with pm.mode_scope("api-key", "sess-a"):
-        pm.set_mode(pm.BYPASS)
+        with pm.attended_mode_change(), pm.attended_bypass_confirm():
+            pm.set_mode(pm.BYPASS)
         assert file_ops.bypass_enabled() is True
         assert file_ops.resolve_path(str(target)) == target.resolve()
 
@@ -230,14 +231,14 @@ def test_admin_account_http_bypass_gated_scoped_and_audited(monkeypatch, tmp_pat
     with _http_server(monkeypatch) as port:
         status_get, _, body_get = _request(port, "GET", "/v1/permission-mode", headers=auth("admin-token"))
         assert status_get == 200
-        assert json.loads(body_get)["can_bypass"] is True
+        assert json.loads(body_get)["can_bypass"] is False
 
         status_unconfirmed, _, body_unconfirmed = _request(
             port, "POST", "/v1/permission-mode",
             body=json.dumps({"mode": "bypass"}), headers={**JSON, **auth("admin-token")},
         )
-        assert status_unconfirmed == 400
-        assert json.loads(body_unconfirmed)["code"] == "BYPASS_CONFIRMATION_REQUIRED"
+        assert status_unconfirmed == 403
+        assert json.loads(body_unconfirmed)["code"] == "BYPASS_REQUIRES_CONSOLE"
 
         headers_sess = {**JSON, **auth("admin-token"), "X-Sonder-Session": "chat-1"}
         status_ok, _, body_ok = _request(
@@ -245,9 +246,15 @@ def test_admin_account_http_bypass_gated_scoped_and_audited(monkeypatch, tmp_pat
             body=json.dumps({"mode": "bypass", "confirm_bypass": True}),
             headers=headers_sess,
         )
-        assert status_ok == 200, body_ok
-        assert json.loads(body_ok)["mode"] == "bypass"
-        assert json.loads(body_ok)["can_bypass"] is True
+        assert status_ok == 403, body_ok
+        assert json.loads(body_ok)["code"] == "BYPASS_REQUIRES_CONSOLE"
+
+        status_same, _, body_same = _request(
+            port, "GET", "/v1/permission-mode",
+            headers={**auth("admin-token"), "X-Sonder-Session": "chat-1"},
+        )
+        assert status_same == 200
+        assert json.loads(body_same)["mode"] == pm.DEFAULT_MODE
 
         status_other, _, body_other = _request(
             port, "GET", "/v1/permission-mode",
@@ -263,8 +270,7 @@ def test_admin_account_http_bypass_gated_scoped_and_audited(monkeypatch, tmp_pat
         )
         assert status_user == 403
 
-    assert audits and audits[-1][:2] == (pm.DEFAULT_MODE, pm.BYPASS)
-    assert audits[-1][2]["confirmed"] is True
+    assert not audits
 
 
 def test_unattended_mcp_permission_mode_bypass_refused(monkeypatch, tmp_path):
@@ -298,7 +304,8 @@ def test_scoped_mode_persistence_keeps_default_shape_when_empty(monkeypatch, tmp
     assert json.loads(state_file.read_text(encoding="utf-8")) == {"mode": pm.AUTO}
 
     with pm.mode_scope("dev-1", "s-1"):
-        pm.set_mode(pm.BYPASS)
+        with pm.attended_mode_change(), pm.attended_bypass_confirm():
+            pm.set_mode(pm.BYPASS)
         assert pm.current_mode() == pm.BYPASS
     # A scoped bypass lives for this process only; it is never written down.
     assert json.loads(state_file.read_text(encoding="utf-8")) == {"mode": pm.AUTO}
@@ -440,7 +447,8 @@ def test_scoped_bypass_cannot_turn_on_cloud_over_http_chat(
             pm.set_mode(pm.BYPASS)
         assert pm.current_mode() == pm.MANUAL
     with pm.mode_scope("api-key", session):
-        pm.set_mode(pm.BYPASS)
+        with pm.attended_mode_change(), pm.attended_bypass_confirm():
+            pm.set_mode(pm.BYPASS)
         assert pm.current_mode() == pm.BYPASS
     _serve_with_accounts(monkeypatch, mode="api-key")
     key = {"Authorization": "Bearer " + API_KEY}
@@ -538,8 +546,8 @@ def test_local_open_http_cannot_raise_mode_above_manual_to_run_host_code(
 
 
 @pytest.mark.parametrize("auth_mode", ["account", "both", "api-key"])
-def test_authenticated_http_callers_can_still_raise_mode(monkeypatch, tmp_path, auth_mode):
-    """Authenticated admins and the owner API key keep today's behaviour."""
+def test_authenticated_http_callers_cannot_raise_mode(monkeypatch, tmp_path, auth_mode):
+    """Authenticated admins and the owner API key may lower, never raise, over HTTP."""
     monkeypatch.setattr(pm, "_state_path", lambda: str(tmp_path / "permission_mode.json"))
     pm._reset_for_tests()
     _serve_with_accounts(monkeypatch, mode=auth_mode)
@@ -550,14 +558,17 @@ def test_authenticated_http_callers_can_still_raise_mode(monkeypatch, tmp_path, 
     else:
         auth = {"Authorization": "Bearer " + API_KEY}
     with _http_server(monkeypatch) as port:
-        for wanted in (pm.ACCEPT_EDITS, pm.AUTO, pm.MANUAL):
+        for wanted, expected in ((pm.ACCEPT_EDITS, 403), (pm.AUTO, 403), (pm.PLAN, 200), (pm.MANUAL, 200)):
             status, _, raw = _request(
                 port, "POST", "/v1/permission-mode",
                 body=json.dumps({"mode": wanted}),
                 headers={**JSON, **auth, "X-Sonder-Session": "s-1"},
             )
-            assert status == 200, (wanted, raw)
-            assert json.loads(raw)["mode"] == wanted
+            assert status == expected, (wanted, raw)
+            if expected == 200:
+                assert json.loads(raw)["mode"] == wanted
+            else:
+                assert json.loads(raw)["mode"] == pm.MANUAL
 
 
 def test_unattended_escalation_refusal_does_not_send_local_open_callers_to_the_post(
@@ -569,8 +580,8 @@ def test_unattended_escalation_refusal_does_not_send_local_open_callers_to_the_p
         text = pm.unattended_escalation_refusal(target)
         assert text.startswith("refused"), text
         assert "/mode %s" % target in text
-        assert "authenticated administrator" in text
-        assert "local-open" in text
+        assert "cannot raise the mode either" in text
+        assert "SONDER_API_KEY" not in text
 
 
 # --- cycle 2: reading and revoking cloud consent is never blocked ------------

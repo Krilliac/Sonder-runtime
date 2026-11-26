@@ -218,17 +218,20 @@ persists in ``SONDER_HOME`` and governs every surface sharing that home, could
 be switched to ``auto`` by any MCP client and then used to run host programs.
 Lowering the mode, and returning from ``plan`` to ``manual``, stay allowed
 everywhere. The attended surfaces are the console's ``/mode`` and Shift+Tab
-(which run inside ``attended_mode_change()``) and the administrator-authorized
-``POST /v1/permission-mode`` endpoint, which sets the mode directly. A new
-surface is unattended until it says otherwise: that is the fail-closed
-default.
+(which run inside ``attended_mode_change()``) and nothing else. The
+``POST /v1/permission-mode`` endpoint is held to lowering for every caller,
+authenticated administrators included: a raise (global or per session) is
+refused with 403 and made at the console, and ``bypass`` is never entered over
+HTTP. A new surface is unattended until it says otherwise: that is the
+fail-closed default.
 
 Under ``local-open`` that endpoint has no administrator to authorize: every
-local process passes its authority check, with no secret at all. There it
-calls ``set_mode_without_escalation`` and answers 403
-``PERMISSION_MODE_ESCALATION_REFUSED`` for a raise, so a raise is never made
-or saved by a credential-less caller; lowering stays allowed. An API key or an
-admin account restores the attended raise. ``POST /v1/approvals/<call_id>``
+local process passes its authority check, with no secret at all. An API key
+or an admin account proves who is calling, not that a person is present, so
+the endpoint calls ``set_mode_without_escalation`` (global) or
+``set_session_mode_lowering_only`` (session) for every caller and answers 403
+``PERMISSION_MODE_ESCALATION_REFUSED`` for a raise; lowering stays allowed.
+``POST /v1/approvals/<call_id>``
 follows the same line: under ``local-open`` it refuses to approve a call
 (403 ``APPROVAL_REQUIRES_AUTHENTICATED_ADMIN``) and still revokes one; the
 console's ``/approve`` is unchanged.
@@ -364,6 +367,9 @@ _PREAPPROVED_CAPTURE: contextvars.ContextVar[dict[str, object] | None] = context
     "sonder_preapproved_capture", default=None,
 )
 _SCOPED_MODES: dict[str, str] = {}
+# Scope keys whose bypass was entered at the console (attended and confirmed).
+# Only these are exempt from the stricter-of-global rule; never persisted.
+_CONSOLE_BYPASS_SCOPES: set[str] = set()
 
 LOCAL_OPEN_PRINCIPAL = "local-open"
 _MODE_SCOPE_CAPPED: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -1141,6 +1147,7 @@ def _load() -> None:
             return
         _LOADED = True
         _SCOPED_MODES.clear()
+        _CONSOLE_BYPASS_SCOPES.clear()
         try:
             with open(_state_path(), encoding="utf-8") as handle:
                 saved = json.load(handle)
@@ -1349,6 +1356,7 @@ def _clamp_scopes_unlocked(ceiling: str) -> dict[str, str]:
     }
     for key in dropped:
         del _SCOPED_MODES[key]
+        _CONSOLE_BYPASS_SCOPES.discard(key)
     return dropped
 
 
@@ -1420,34 +1428,45 @@ def _reset_for_tests() -> None:
         _STATE.clear()
         _STATE.update(mode=DEFAULT_MODE, elevated=False, elevation_reason="")
         _SCOPED_MODES.clear()
+        _CONSOLE_BYPASS_SCOPES.clear()
     _MODE_SCOPE_CAPPED.set(False)
 
 
-def _scoped_mode_unlocked(pair: tuple[str, str] | None) -> str | None:
+def _scoped_entry_unlocked(pair: tuple[str, str] | None) -> tuple[str, str] | None:
+    """``(key, mode)`` of the scope that applies to *pair*, or None."""
     if pair is None:
         return None
     principal, session = pair
     if session:
         key = _scope_key(principal, session)
         if key and key in _SCOPED_MODES:
-            return _SCOPED_MODES[key]
+            return key, _SCOPED_MODES[key]
     if principal:
         pkey = _scope_key(principal, "")
         if pkey and pkey in _SCOPED_MODES:
-            return _SCOPED_MODES[pkey]
+            return pkey, _SCOPED_MODES[pkey]
     return None
+
+
+def _scoped_mode_unlocked(pair: tuple[str, str] | None) -> str | None:
+    entry = _scoped_entry_unlocked(pair)
+    return entry[1] if entry is not None else None
 
 
 def _current_mode_uncapped() -> str:
     pair = _MODE_SCOPE.get()
     with _LOCK:
-        scoped = _scoped_mode_unlocked(pair)
+        entry = _scoped_entry_unlocked(pair)
+        scoped = entry[1] if entry is not None else None
         mode = _STATE["mode"]
         if scoped is not None:
-            # The stricter of scope and global. A scope an administrator
-            # entered in bypass (attended confirmation, never persisted) is the
-            # one deliberate exception; every global write clears it.
-            if scoped != BYPASS and mode in MODES and MODES.index(scoped) > MODES.index(mode):
+            # The stricter of scope and global. The one exception is a bypass
+            # scope entered at the console (attended and confirmed, never
+            # persisted); a bypass scope from any other route is capped, and
+            # every global write clears even the console one.
+            if scoped == BYPASS and entry[0] in _CONSOLE_BYPASS_SCOPES:
+                return scoped
+            if mode in MODES and MODES.index(scoped) > MODES.index(mode):
                 return mode
             return scoped
         if pair is not None and mode == BYPASS:
@@ -1505,20 +1524,17 @@ def unattended_escalation_refusal(target_name: str) -> str:
     if target == BYPASS and not (mode_change_attended() and _BYPASS_CONFIRMED.get()):
         return (
             "refused: bypass mode requires explicit attended confirmation "
-            "(run /mode bypass and confirm 'yes' at the console, or POST /v1/permission-mode "
-            "with confirm_bypass: true as an authenticated administrator; never under local-open auth); "
-            "unattended callers cannot enter bypass."
+            "(run /mode bypass and confirm 'yes' at the console; it is never entered over "
+            "HTTP); unattended callers cannot enter bypass."
         )
     if mode_change_attended() or not is_unattended_escalation(current, target):
         return ""
     return (
         "refused: raising the permission mode from %s to %s needs a person to "
         "confirm it, and this caller is unattended (an MCP client, the HTTP "
-        "chat, or a control command). Run /mode %s at the Sonder console, or "
-        "have an authenticated administrator send POST /v1/permission-mode with "
-        "the server's API key (SONDER_API_KEY) or an admin account token "
-        "(SONDER_REQUIRE_ACCOUNT=1); under local-open auth, with neither "
-        "configured, that control cannot raise the mode above manual either. "
+        "chat, or a control command). Run /mode %s at the Sonder console; "
+        "POST /v1/permission-mode cannot raise the mode either, with or without "
+        "credentials. "
         "Lowering the mode, or returning from plan to manual, is allowed here." % (current, target, target)
     )
 
@@ -1562,6 +1578,10 @@ def set_mode(name: str) -> str:
             previous = _scoped_mode_unlocked(pair) or _STATE["mode"]
             prior = _SCOPED_MODES.get(scope)
             _SCOPED_MODES[scope] = match
+            if match == BYPASS and mode_change_attended() and _BYPASS_CONFIRMED.get():
+                _CONSOLE_BYPASS_SCOPES.add(scope)
+            else:
+                _CONSOLE_BYPASS_SCOPES.discard(scope)
             _save(previous, scope=scope, scope_prior=prior)
         else:
             _write_global_unlocked(match)
@@ -1750,6 +1770,7 @@ def cycle_mode(step: int = 1) -> str:
         if scope:
             prior = _SCOPED_MODES.get(scope)
             _SCOPED_MODES[scope] = new
+            _CONSOLE_BYPASS_SCOPES.discard(scope)
             _save(previous, scope=scope, scope_prior=prior)
         else:
             _write_global_unlocked(new)

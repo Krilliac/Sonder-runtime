@@ -45,6 +45,13 @@ ESCALATION_HTTP_LOCAL_OPEN_REFUSAL = (
     "mode to manual or plan is allowed here."
 )
 
+ESCALATION_HTTP_REFUSAL = (
+    "raising the permission mode above manual (to %s) over HTTP is refused "
+    "even for an authenticated administrator: HTTP proves who is calling, "
+    "not that a person is present. Raise it at the attended Sonder console "
+    "(/mode %s). Lowering the mode to manual or plan is allowed here."
+)
+
 
 def is_local_open_context(context: Any) -> bool:
     """True when this request is unauthenticated local-open.
@@ -97,10 +104,7 @@ def handle_permission_mode_get(
         handler._send_auth_error()
         return
     session_id = str(handler.headers.get("X-Sonder-Session", "") or "").strip()
-    can_bypass = not (
-        authority_error("permission_mode_change", context)
-        or bypass_http_refusal(context)
-    )
+    can_bypass = False  # bypass is entered at the console only
     with permission_policy.mode_scope(
         principal_of(context), session_id, local_open=is_local_open_context(context),
     ):
@@ -131,26 +135,24 @@ def handle_permission_mode_post(
     error_envelope: Callable[..., dict[str, Any]] | None = None,
     send_escalation_refusal: Callable[..., bool] | None = None,
 ) -> None:
-    """Serve ``POST /v1/permission-mode`` with gated ``bypass`` entry and audit.
+    """Serve ``POST /v1/permission-mode``: lowering only, for every caller.
 
-    Under local-open auth raising the mode above both current and manual is
-    refused with 403 (``PERMISSION_MODE_ESCALATION_REFUSED``, or
-    ``BYPASS_REQUIRES_AUTHENTICATED_ADMIN`` for bypass) while lowering remains
-    allowed; authenticated admins keep every mode, with non-bypass modes global
-    by default (clearing looser per-session scopes as a safety stop). Passing
-    explicit ``scope: "session"`` limits non-bypass changes to that principal/
-    session under the global ceiling (``set_session_mode``), while ``scope:
-    "global"`` applies globally; when ``scope`` is provided the response echoes
-    ``scope`` and ``session_id``. Bypass is always scoped to principal/session
-    behind ``confirm_bypass: true``.
+    Raising the mode above both current and manual is refused with 403
+    (``PERMISSION_MODE_ESCALATION_REFUSED``), authenticated administrators
+    included, while lowering remains allowed. Modes are global by default
+    (``set_mode_without_escalation``, clearing looser per-session scopes as a
+    safety stop). Explicit ``scope: "session"`` limits the change to that
+    principal/session under the global ceiling
+    (``set_session_mode_lowering_only``), while ``scope: "global"`` applies
+    globally; when ``scope`` is provided the response echoes
+    ``scope`` and ``session_id``. Bypass is never entered over HTTP (403
+    ``BYPASS_REQUIRES_CONSOLE``).
     """
     wanted = ""
-    confirm_bypass = False
     scope = ""
     session_id = str(handler.headers.get("X-Sonder-Session", "") or "").strip()
     if isinstance(req, dict):
         wanted = str(req.get("mode") or "").strip()
-        confirm_bypass = req.get("confirm_bypass") is True
         scope = str(req.get("scope") or "").strip().lower()
         if not session_id:
             session_id = str(req.get("session_id") or "").strip()
@@ -185,50 +187,29 @@ def handle_permission_mode_post(
             status=403,
         )
         return
-    if resolved == getattr(permission_policy, "BYPASS", "bypass") and not confirm_bypass:
+    if resolved == getattr(permission_policy, "BYPASS", "bypass"):
         handler._send_json_payload(
             {
-                "error": "bypass mode requires explicit confirmation (confirm_bypass: true)",
-                "code": "BYPASS_CONFIRMATION_REQUIRED",
+                "error": "bypass is entered at the Sonder console (/mode bypass, then confirm), never over HTTP",
+                "code": "BYPASS_REQUIRES_CONSOLE",
                 "modes": _policy_modes(permission_policy),
             },
-            status=400,
+            status=403,
         )
         return
     principal = principal_of(context)
-    is_bypass = resolved == getattr(permission_policy, "BYPASS", "bypass")
-    scoped = is_bypass or scope == "session"
+    scoped = scope == "session"
     local_open = is_local_open_context(context)
     refused_type = getattr(permission_policy, "ModeEscalationRefused", None) or permission_policy.mode_escalation_refused()
-    if is_bypass and scope == "global":
-        handler._send_json_payload(
-            {
-                "error": "bypass is entered per session, never as the global mode over HTTP",
-                "modes": _policy_modes(permission_policy),
-            },
-            status=400,
-        )
-        return
-    if local_open:
-        def apply_mode() -> Any:
-            try:
-                if scoped and not is_bypass:
-                    return _session_setter(permission_policy)(resolved)
-                return permission_policy.set_mode_without_escalation(resolved)
-            except refused_type as refused:
-                return refused
-    else:
-        change = (
-            permission_policy.set_mode
-            if is_bypass
-            else (_session_setter(permission_policy) if scoped else permission_policy.set_global_mode)
-        )
-
-        def apply_mode() -> Any:
-            try:
-                return change(resolved)
-            except refused_type as refused:
-                return refused
+    # Authenticated or not, HTTP is an unattended surface: it proves who is
+    # calling, not that a person is present. Both scopes may only lower.
+    def apply_mode() -> Any:
+        try:
+            if scoped:
+                return _session_setter(permission_policy)(resolved)
+            return permission_policy.set_mode_without_escalation(resolved)
+        except refused_type as refused:
+            return refused
 
     scope_tag = f"\0{scope}" if scope in ("session", "global") else ""
     try:
@@ -252,24 +233,26 @@ def handle_permission_mode_post(
         def error_envelope(code: str, message: str, correlation_id: str, *, retryable: bool = False) -> dict[str, Any]:
             return {"error": {"code": code, "message": message, "correlation_id": correlation_id, "retryable": retryable}}
     if send_escalation_refusal is not None:
-        if send_escalation_refusal(handler, permission_policy, result, error_envelope):
+        if send_escalation_refusal(
+            handler, permission_policy, result, error_envelope, credential_less=local_open,
+        ):
             return
     elif isinstance(result, refused_type):
         current = str(getattr(result, "current", ""))
         target = str(getattr(result, "target", resolved))
         payload = error_envelope(
             "PERMISSION_MODE_ESCALATION_REFUSED",
-            ESCALATION_HTTP_LOCAL_OPEN_REFUSAL % (target, target),
+            (ESCALATION_HTTP_LOCAL_OPEN_REFUSAL if local_open else ESCALATION_HTTP_REFUSAL) % (target, target),
             handler._correlation(),
             retryable=False,
         )
         payload["mode"] = current
         handler._send_json_payload(payload, status=403)
         return
-    if audit_transition is not None and previous != resolved and (previous == "bypass" or resolved == "bypass"):
+    if audit_transition is not None and previous != resolved and previous == "bypass":
         audit_transition(
             previous, resolved, surface="http", actor=approver_of(context),
-            confirmed=confirm_bypass,
+            confirmed=False,
         )
     if scoped:
         with permission_policy.mode_scope(principal, session_id, local_open=local_open):
@@ -280,7 +263,7 @@ def handle_permission_mode_post(
         payload = dict(mode_data())
         if isinstance(result, str) and result:
             payload["mode"] = result
-    payload["can_bypass"] = not bypass_http_refusal(context)
+    payload["can_bypass"] = False
     if scope in ("session", "global"):
         payload["scope"] = "session" if scoped else "global"
         payload["session_id"] = session_id if scoped else ""
