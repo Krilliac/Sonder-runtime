@@ -125,8 +125,13 @@ def eligible(*, scope, cloud, temperature, learning, augmented,
 
 
 def identity_key(*, scope, model, model_revision="", tier, system, prompt, history, options,
-                 cloud_allowed) -> str:
-    """Opaque SHA-256 identity binding every generation-relevant input."""
+                 cloud_allowed, extra="") -> str:
+    """Opaque SHA-256 identity binding every generation-relevant input.
+
+    ``extra`` is an opaque serving-state fragment (for example the thinking
+    ensemble's enabled/bound-tier state); when empty it is omitted so the
+    identity of a turn without that state is unchanged.
+    """
     normalized_history = [
         {
             "role": str((message or {}).get("role", "")),
@@ -134,22 +139,25 @@ def identity_key(*, scope, model, model_revision="", tier, system, prompt, histo
         }
         for message in (history or [])
     ]
+    fields = {
+        "v": _KEY_DOMAIN,
+        "scope": str(scope),
+        "model": str(model),
+        # A mutable Ollama tag is not an identity.  The serving layer
+        # supplies the catalog digest and refuses cache admission when it
+        # cannot establish one.
+        "model_revision": str(model_revision),
+        "tier": str(tier),
+        "system": str(system),
+        "prompt": str(prompt),
+        "history": normalized_history,
+        "options": options or {},
+        "cloud_allowed": bool(cloud_allowed),
+    }
+    if extra:
+        fields["extra"] = str(extra)
     material = json.dumps(
-        {
-            "v": _KEY_DOMAIN,
-            "scope": str(scope),
-            "model": str(model),
-            # A mutable Ollama tag is not an identity.  The serving layer
-            # supplies the catalog digest and refuses cache admission when it
-            # cannot establish one.
-            "model_revision": str(model_revision),
-            "tier": str(tier),
-            "system": str(system),
-            "prompt": str(prompt),
-            "history": normalized_history,
-            "options": options or {},
-            "cloud_allowed": bool(cloud_allowed),
-        },
+        fields,
         sort_keys=True,
         ensure_ascii=False,
         separators=(",", ":"),

@@ -57,7 +57,7 @@ def test_resolve_thinking_tier_prefers_thinking_then_reasoning_and_skips_cloud_o
     assert te_domain.resolve_thinking_tier({"code": "sonder:latest", "reasoning": ""}, primary_tier="code") is None
 
 
-def test_expand_lane_ensemble_tiers_pairs_code_and_security_only():
+def test_requested_tiers_are_never_expanded():
     tiers = {
         "fast": "qwen3.5:4b",
         "code": "qwen3.8-fable-27b:latest",
@@ -65,16 +65,21 @@ def test_expand_lane_ensemble_tiers_pairs_code_and_security_only():
         "security": "astra-cyber-35b-a3b:latest",
         "reasoning": "qwen3-coder-next-80b:latest",
     }
-    assert te_domain.expand_lane_ensemble_tiers(["code"], tiers) == ["code", "reasoning"]
-    assert te_domain.expand_lane_ensemble_tiers(["security"], tiers) == ["security", "reasoning"]
-    # Non-code/security single tiers and explicit multi-tier lists stay unchanged.
-    assert te_domain.expand_lane_ensemble_tiers(["fast"], tiers) == ["fast"]
-    assert te_domain.expand_lane_ensemble_tiers(["general"], tiers) == ["general"]
-    assert te_domain.expand_lane_ensemble_tiers(["code", "fast"], tiers) == ["code", "fast"]
-    # Respects opt-out.
-    assert te_domain.expand_lane_ensemble_tiers(["code"], tiers, enabled=False) == ["code"]
+    for named in (["code"], ["security"], ["fast"], ["general"], ["code", "fast"]):
+        assert te_domain.normalize_requested_tiers(named, tiers) == named
     # Alias normalization: "thinking" resolves to "reasoning" when not separately bound.
-    assert te_domain.expand_lane_ensemble_tiers(["thinking"], tiers) == ["reasoning"]
+    assert te_domain.normalize_requested_tiers(["thinking"], tiers) == ["reasoning"]
+    # A separately bound thinking tier keeps its own name.
+    assert te_domain.normalize_requested_tiers(["thinking"], {**tiers, "thinking": "t:latest"}) == ["thinking"]
+
+
+def test_thinking_ensemble_is_opt_in_with_alias():
+    assert te_domain.thinking_ensemble_enabled({}) is False
+    assert te_domain.thinking_ensemble_enabled(None) is False
+    assert te_domain.thinking_ensemble_enabled({"SONDER_THINKING_ENSEMBLE": "1"}) is True
+    assert te_domain.thinking_ensemble_enabled({"SONDER_THINKING_DELEGATION": "true"}) is True
+    assert te_domain.thinking_ensemble_enabled({"SONDER_THINKING_ENSEMBLE": "0", "SONDER_THINKING_DELEGATION": "1"}) is False
+    assert te_domain.thinking_ensemble_enabled({"SONDER_THINKING_ENSEMBLE": "banana"}) is False
 
 
 def test_should_delegate_thinking_and_brief_framing_boundaries():
@@ -89,15 +94,21 @@ def test_should_delegate_thinking_and_brief_framing_boundaries():
         "general",
         "Design a lock-free ring buffer for our audio mixer thread",
         tiers,
+        enabled=True,
     ) == ("reasoning", "qwen3-coder-next-80b:latest")
+    # Default is off: no delegation unless explicitly enabled.
+    assert te_domain.should_delegate_thinking(
+        "general", "Design a lock-free ring buffer for our audio mixer thread", tiers,
+    ) is None
     # Trivial greeting and slash commands skip thinking delegation.
-    assert te_domain.should_delegate_thinking("general", "hi", tiers) is None
-    assert te_domain.should_delegate_thinking("code", "/status", tiers) is None
+    assert te_domain.should_delegate_thinking("general", "hi", tiers, enabled=True) is None
+    assert te_domain.should_delegate_thinking("code", "/status", tiers, enabled=True) is None
     # Cloud turns never delegate to local thinking tier.
     assert te_domain.should_delegate_thinking(
         "code",
         "Refactor this parser safely with full bounds checks",
         tiers,
+        enabled=True,
         cloud=True,
     ) is None
 
@@ -137,8 +148,50 @@ def test_seed_model_accepts_sonder_thinking_env_alias():
 # --- 2. Server & Bootstrap Wiring -------------------------------------------
 
 
-def test_server_ensemble_targets_auto_pairs_code_and_security_and_thinking_alias(monkeypatch):
-    monkeypatch.delenv("SONDER_THINKING_ENSEMBLE", raising=False)
+def test_server_ensemble_targets_return_exactly_the_named_tiers_and_thinking_alias(monkeypatch):
+    for key in ("SONDER_THINKING_ENSEMBLE", "SONDER_THINKING_DELEGATION"):
+        monkeypatch.delenv(key, raising=False)
+    tiers = {
+        "fast": "qwen3.5:4b",
+        "code": "qwen3.8-fable-27b:latest",
+        "general": "qwen3.8-fable-27b:latest",
+        "security": "astra-cyber-35b-a3b:latest",
+        "reasoning": "qwen3-coder-next-80b:latest",
+    }
+    monkeypatch.setattr(server, "TIERS", tiers)
+    for env in ({}, {"SONDER_THINKING_ENSEMBLE": "1"}):
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        code_targets, code_unk = server._ensemble_targets("code")
+        assert not code_unk
+        assert code_targets == [("code", "qwen3.8-fable-27b:latest")]
+        sec_targets, sec_unk = server._ensemble_targets("security")
+        assert not sec_unk
+        assert sec_targets == [("security", "astra-cyber-35b-a3b:latest")]
+        both, _ = server._ensemble_targets("code,reasoning")
+        assert both == [
+            ("code", "qwen3.8-fable-27b:latest"),
+            ("reasoning", "qwen3-coder-next-80b:latest"),
+        ]
+        # The thinking alias resolves to the bound reasoning tier.
+        alias, _ = server._ensemble_targets("thinking")
+        assert alias == [("reasoning", "qwen3-coder-next-80b:latest")]
+
+    # "thinking" resolves to bound "reasoning" tier on _serve_target.
+    model, cloud, _aug, label = server._serve_target("thinking", False)
+    assert model == "qwen3-coder-next-80b:latest"
+    assert cloud is False
+    assert label == "reasoning"
+
+
+@pytest.mark.parametrize("env", [{}, {"SONDER_THINKING_ENSEMBLE": "1"}])
+def test_agent_mode_consult_asks_exactly_one_tier_per_ensemble_call(monkeypatch, env):
+    from sonder_runtime.bootstrap import agent_mode_wiring
+
+    for key in ("SONDER_THINKING_ENSEMBLE", "SONDER_THINKING_DELEGATION"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
     monkeypatch.setattr(
         server,
         "TIERS",
@@ -150,39 +203,29 @@ def test_server_ensemble_targets_auto_pairs_code_and_security_and_thinking_alias
             "reasoning": "qwen3-coder-next-80b:latest",
         },
     )
-    code_targets, code_unk = server._ensemble_targets("code")
-    assert not code_unk
-    assert code_targets == [
-        ("code", "qwen3.8-fable-27b:latest"),
-        ("reasoning", "qwen3-coder-next-80b:latest"),
-    ]
+    resolved: list[list[tuple[str, str]]] = []
 
-    sec_targets, sec_unk = server._ensemble_targets("security")
-    assert not sec_unk
-    assert sec_targets == [
-        ("security", "astra-cyber-35b-a3b:latest"),
-        ("reasoning", "qwen3-coder-next-80b:latest"),
-    ]
+    def ensemble_fn(question, tiers="", mode="general", **_kw):
+        targets, _unknown = server._ensemble_targets(tiers)
+        resolved.append(targets)
+        return f"answer from {tiers}"
 
-    # Inside thinking_delegation_scope (used by consult per-tier legs), no auto-expansion.
-    with te_bootstrap.thinking_delegation_scope():
-        single_targets, _ = server._ensemble_targets("code")
-        assert single_targets == [("code", "qwen3.8-fable-27b:latest")]
-
-    # "thinking" resolves to bound "reasoning" tier on _serve_target.
-    model, cloud, _aug, label = server._serve_target("thinking", False)
-    assert model == "qwen3-coder-next-80b:latest"
-    assert cloud is False
-    assert label == "reasoning"
-
-    # Opt-out via env var disables auto-pairing cleanly.
-    monkeypatch.setenv("SONDER_THINKING_ENSEMBLE", "0")
-    opt_out_targets, _ = server._ensemble_targets("code")
-    assert opt_out_targets == [("code", "qwen3.8-fable-27b:latest")]
+    agent_mode_wiring.dispatch_agent_consult(
+        {"prompt": "Is this lock ordering safe?", "tiers": "code,security,reasoning"},
+        is_cloud_tier=lambda _t: False,
+        consult_flow=server.consult_flow,
+        ensemble_fn=ensemble_fn,
+        lookup_scope_fn=lambda: None,
+    )
+    assert resolved, "consult made no ensemble calls"
+    assert all(len(targets) == 1 for targets in resolved)
+    member_calls = [targets[0][0] for targets in resolved][:3]
+    assert member_calls == ["code", "security", "reasoning"]
 
 
 def test_main_workstation_thinking_delegation_records_reasoning_and_keeps_manifest_last(monkeypatch):
-    monkeypatch.delenv("SONDER_THINKING_ENSEMBLE", raising=False)
+    monkeypatch.delenv("SONDER_THINKING_DELEGATION", raising=False)
+    monkeypatch.setenv("SONDER_THINKING_ENSEMBLE", "1")
     recorded_reasoning: list[tuple[str, str]] = []
     recorded_events: list[tuple[str, str]] = []
     chat_calls: list[dict[str, Any]] = []
@@ -268,6 +311,7 @@ def test_main_workstation_thinking_delegation_records_reasoning_and_keeps_manife
 
 def test_auto_ensemble_offload_and_delegated_security_lane(monkeypatch):
     monkeypatch.delenv("SONDER_THINKING_ENSEMBLE", raising=False)
+    monkeypatch.delenv("SONDER_THINKING_DELEGATION", raising=False)
     monkeypatch.setenv("SONDER_AUTO_ENSEMBLE_OFFLOAD", "1")
     ensemble_calls: list[dict[str, Any]] = []
     fake_server = SimpleNamespace(
@@ -355,6 +399,8 @@ def test_auto_ensemble_offload_and_delegated_security_lane(monkeypatch):
 
 def test_runtime_policy_data_exposes_thinking_ensemble_status(monkeypatch):
     monkeypatch.delenv("SONDER_THINKING_ENSEMBLE", raising=False)
+    monkeypatch.delenv("SONDER_THINKING_DELEGATION", raising=False)
+    monkeypatch.delenv("SONDER_AUTO_ENSEMBLE_OFFLOAD", raising=False)
     policy_stub = {
         "local_models": {
             "fast": "qwen3.5:4b",
@@ -370,18 +416,24 @@ def test_runtime_policy_data_exposes_thinking_ensemble_status(monkeypatch):
     data = server.runtime_policy_data()
     te = data.get("thinking_ensemble")
     assert isinstance(te, dict)
-    assert te["active"] is True
+    # Effective default is off: bound, but not active.
+    assert te["default_enabled"] is False
+    assert te["enabled"] is False
+    assert te["active"] is False
+    assert te["auto_offload_enabled"] is False
     assert te["bound_tier"] == "reasoning"
     assert te["bound_model"] == "qwen3-coder-next-80b:latest"
-    assert te["code_ensembles_with"] == "reasoning"
-    assert te["security_ensembles_with"] == "reasoning"
+    monkeypatch.setenv("SONDER_THINKING_ENSEMBLE", "1")
+    on = server.runtime_policy_data()["thinking_ensemble"]
+    assert on["enabled"] is True and on["active"] is True and on["default_enabled"] is False
 
 
 _PRIVATE_MARKER = "ZXQ-PRIVATE-REASONING-7731"
 
 
 def _run_marker_deliberation(monkeypatch, *, expose: bool):
-    monkeypatch.delenv("SONDER_THINKING_ENSEMBLE", raising=False)
+    monkeypatch.delenv("SONDER_THINKING_DELEGATION", raising=False)
+    monkeypatch.setenv("SONDER_THINKING_ENSEMBLE", "1")
     board_events: list[dict[str, Any]] = []
     recorded_events: list[tuple[str, str]] = []
     recorded_reasoning: list[tuple[str, str]] = []
@@ -469,7 +521,8 @@ def test_auto_ensemble_offload_is_opt_in_prose_and_footer_free(monkeypatch):
 def test_deliberation_clears_inherited_primary_rung(monkeypatch):
     from sonder_runtime.application.chat import provider_bridge as pb
 
-    monkeypatch.delenv("SONDER_THINKING_ENSEMBLE", raising=False)
+    monkeypatch.delenv("SONDER_THINKING_DELEGATION", raising=False)
+    monkeypatch.setenv("SONDER_THINKING_ENSEMBLE", "1")
     seen: list[Any] = []
 
     def chat(payload, **kw):
@@ -509,7 +562,8 @@ def _fake_thinking_server(chat_calls):
 
 
 def test_deliberation_passes_caller_cancel_check_and_bounded_timeout(monkeypatch):
-    monkeypatch.delenv("SONDER_THINKING_ENSEMBLE", raising=False)
+    monkeypatch.delenv("SONDER_THINKING_DELEGATION", raising=False)
+    monkeypatch.setenv("SONDER_THINKING_ENSEMBLE", "1")
     calls: list[dict[str, Any]] = []
     cancel = lambda: False  # noqa: E731
     _sys, res = te_bootstrap.augment_system_with_thinking(
@@ -597,3 +651,225 @@ def test_escalation_deliberates_once_per_turn(monkeypatch, tmp_path):
     assert len(systems) == 2
     assert len(deliberations) == 1
     assert all("brief number 1" in s for s in systems)
+
+
+# --- opt-in default, cache identity, explicit selection, children, telemetry ------
+
+
+def _clear_thinking_env(monkeypatch):
+    for key in ("SONDER_THINKING_ENSEMBLE", "SONDER_THINKING_DELEGATION"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_empty_environment_makes_no_thinking_tier_call(monkeypatch):
+    """RED on the previous head: delegation ran by default with an empty environment."""
+    _clear_thinking_env(monkeypatch)
+    calls: list[dict[str, Any]] = []
+    prompt = "Refactor the task scheduler lock hierarchy to prevent deadlock"
+    res = te_bootstrap.deliberate_for_turn(
+        _fake_thinking_server(calls), prompt, tier="general", model="sonder:latest",
+        check_reachable=lambda *_a: True,
+    )
+    assert res is None
+    system, res2 = te_bootstrap.augment_system_with_thinking(
+        _fake_thinking_server(calls), "BASE", prompt, tier="code", model="sonder:latest",
+        check_reachable=lambda *_a: True,
+    )
+    assert res2 is None and system == "BASE"
+    assert calls == []
+    turn = te_bootstrap.TurnDeliberation(_fake_thinking_server(calls), prompt, [])
+    assert turn.system("BASE", "general", "sonder:latest", False, False, False, lambda x: x)
+    assert calls == []
+    # Opting in turns it on (same server, same prompt).
+    monkeypatch.setenv("SONDER_THINKING_DELEGATION", "1")
+    assert te_bootstrap.deliberate_for_turn(
+        _fake_thinking_server(calls), prompt, tier="general", model="sonder:latest",
+        check_reachable=lambda *_a: True,
+    ) is not None
+    assert len(calls) == 1
+
+
+def test_delegated_child_makes_no_thinking_call_by_default(monkeypatch):
+    _clear_thinking_env(monkeypatch)
+    calls: list[dict[str, Any]] = []
+    prompts: list[str] = []
+    child_server = _fake_thinking_server(calls)
+    child_server._agent_impl = lambda prompt, **_kw: prompts.append(prompt) or "done"
+    child_server.OLLAMA_POOL = SimpleNamespace(enabled=False)
+    child_server.BASE = "http://127.0.0.1:11434"
+    child_server._is_cloud_model_name = lambda *_a: False
+    monkeypatch.setattr(te_bootstrap, "thinking_tier_reachable", lambda *_a: True)
+    spec = DelegationTaskSpec(agent_id="code-1", task="Refactor scheduler locking", role="coder", tier="code", max_steps=4)
+    result = delegation_wiring._run_one_child(
+        child_server, spec, parent_agent_id="coordinator", parent_project="",
+        parent_read_only=True, peer_handles=("code-1",), board=_delegation_rt.AgentProgressBoard(),
+    )
+    assert result.ok is True
+    assert calls == []
+    assert "INTERNAL THINKING BRIEF" not in prompts[0]
+
+
+def test_cache_identity_binds_thinking_ensemble_state(monkeypatch):
+    import request_cache
+
+    _clear_thinking_env(monkeypatch)
+    fake = SimpleNamespace(
+        TIERS={"code": "sonder:latest", "reasoning": "think:latest"},
+        _is_cloud_tier=lambda _t, m="": ":cloud" in str(m),
+    )
+
+    def key(extra):
+        return request_cache.identity_key(
+            scope="o", model="m", model_revision="r", tier="general", system="s", prompt="p",
+            history=[], options={}, cloud_allowed=False, extra=extra,
+        )
+
+    off = te_bootstrap.thinking_identity_token(fake, "general", "sonder:latest")
+    assert off == ""
+    assert key(off) == key("")
+    monkeypatch.setenv("SONDER_THINKING_ENSEMBLE", "1")
+    on = te_bootstrap.thinking_identity_token(fake, "general", "sonder:latest")
+    assert on and "reasoning" in on and "think:latest" in on
+    fake.TIERS["reasoning"] = "other-think:latest"
+    rebound = te_bootstrap.thinking_identity_token(fake, "general", "sonder:latest")
+    assert rebound != on
+    assert len({key(off), key(on), key(rebound)}) == 3
+
+
+def test_toggling_thinking_ensemble_does_not_serve_answers_cached_under_other_setting(monkeypatch, tmp_path):
+    systems, deliberations = _chat_turn_fakes(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "TIERS", {**server.TIERS, "reasoning": "think:latest"})
+    statuses: list[str] = []
+    run = lambda: server._answer_with_history_impl(  # noqa: E731
+        "explain what a mutex is", [], cache_scope="owner", cache_observer=statuses.append,
+    )
+    _clear_thinking_env(monkeypatch)
+    run()
+    run()
+    monkeypatch.setenv("SONDER_THINKING_ENSEMBLE", "1")
+    run()
+    run()
+    assert statuses == ["miss", "hit", "miss", "hit"]
+
+
+def test_explicit_serve_selection_skips_deliberation(monkeypatch, tmp_path):
+    systems, deliberations = _chat_turn_fakes(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_THINKING_ENSEMBLE", "1")
+    monkeypatch.setattr(server, "TIERS", {**server.TIERS, "reasoning": "think:latest"})
+    out = server._answer_with_history_impl("explain what a mutex is", [], tier="code")
+    assert "answer" in out
+    assert deliberations == []
+    assert systems and all("INTERNAL THINKING BRIEF" not in s for s in systems)
+
+
+def _delegated_child_board(monkeypatch, *, expose: bool):
+    monkeypatch.delenv("SONDER_THINKING_DELEGATION", raising=False)
+    monkeypatch.setenv("SONDER_THINKING_ENSEMBLE", "1")
+    board = _delegation_rt.AgentProgressBoard()
+    prompts: list[str] = []
+    server_stub = _fake_thinking_server([])
+    server_stub._chat_request = lambda payload, **kw: (
+        {},
+        {"role": "assistant", "thinking": f"{_PRIVATE_MARKER} deep", "content": f"- {_PRIVATE_MARKER} brief line"},
+    )
+    server_stub.reasoning_exposure_enabled = lambda: expose
+    server_stub._agent_impl = lambda prompt, **_kw: prompts.append(prompt) or "done"
+    server_stub.OLLAMA_POOL = SimpleNamespace(enabled=False)
+    server_stub.BASE = "http://127.0.0.1:11434"
+    server_stub._is_cloud_model_name = lambda *_a: False
+    monkeypatch.setattr(te_bootstrap, "thinking_tier_reachable", lambda *_a: True)
+    spec = DelegationTaskSpec(agent_id="code-1", task="Refactor the scheduler lock hierarchy", role="coder", tier="code", max_steps=4)
+    result = delegation_wiring._run_one_child(
+        server_stub, spec, parent_agent_id="coordinator", parent_project="",
+        parent_read_only=True, peer_handles=("code-1",), board=board,
+    )
+    assert result.ok is True
+    assert "INTERNAL THINKING BRIEF" in prompts[0]
+    return [ev for ev in board.events() if ev.phase == "thinking"]
+
+
+def test_delegated_child_emits_exactly_one_thinking_event_without_text_when_exposure_off(monkeypatch):
+    events = _delegated_child_board(monkeypatch, expose=False)
+    assert len(events) == 1
+    assert _PRIVATE_MARKER not in repr(events)
+    assert "brief line" not in repr(events)
+    assert all(not ev.thinking for ev in events)
+
+
+def test_delegated_child_event_carries_text_only_when_exposure_on(monkeypatch):
+    events = _delegated_child_board(monkeypatch, expose=True)
+    assert len(events) == 1
+    assert _PRIVATE_MARKER in events[0].thinking
+
+
+def test_offload_tier_impl_passes_bounded_timeout_and_caller_cancel(monkeypatch):
+    monkeypatch.setenv("SONDER_THINKING_ENSEMBLE", "1")
+    monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
+    monkeypatch.setattr(server, "_should_learn", lambda *_a: True)
+    monkeypatch.setattr(server, "_bound_request_timeout", lambda timeout, default: 300)
+    seen: dict[str, Any] = {}
+
+    class _Stop(Exception):
+        pass
+
+    def fake_augment(_server, system, prompt, **kw):
+        seen.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(server._thinking_ensemble, "augment_system_with_thinking", fake_augment)
+    cancel = lambda: False  # noqa: E731
+    with pytest.raises(_Stop):
+        server._offload_tier_impl("Audit this parser for bounds errors", tier="code", learn=True, cancel_check=cancel)
+    assert seen["timeout"] == 45
+    assert seen["cancel_check"] is cancel
+
+
+@pytest.mark.parametrize(
+    ("scenario", "outcome"),
+    [("ok", "ok"), ("timeout", "timeout"), ("unreachable", "unreachable"), ("empty", "skipped")],
+)
+def test_one_content_free_telemetry_record_per_delegated_turn(monkeypatch, scenario, outcome):
+    from sonder_runtime.application.session import provider_attempts as pa
+
+    monkeypatch.delenv("SONDER_THINKING_DELEGATION", raising=False)
+    monkeypatch.setenv("SONDER_THINKING_ENSEMBLE", "1")
+    records: list[dict[str, Any]] = []
+    observer = SimpleNamespace(thinking_delegation_event=lambda fields, run_id=None: records.append(dict(fields)))
+    monkeypatch.setattr(pa, "_attempt_observer", observer)
+    stub = _fake_thinking_server([])
+
+    def chat(payload, **kw):
+        if scenario == "timeout":
+            raise TimeoutError("slow")
+        if scenario == "empty":
+            return {}, {"role": "assistant", "content": ""}
+        return {}, {"role": "assistant", "content": f"- {_PRIVATE_MARKER}"}
+
+    stub._chat_request = chat
+    te_bootstrap.deliberate_for_turn(
+        stub, "Refactor the task scheduler lock hierarchy to prevent deadlock",
+        tier="general", model="sonder:latest", check_reachable=lambda *_a: scenario != "unreachable",
+    )
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["outcome"] == outcome
+    assert rec["tier"] == "reasoning" and rec["model"] == "think:latest"
+    assert isinstance(rec["wall_ms"], int) and rec["wall_ms"] >= 0
+    assert rec["brief_chars"] == (len(f"- {_PRIVATE_MARKER}") if outcome == "ok" else 0)
+    assert _PRIVATE_MARKER not in repr(rec)
+
+
+def test_runtime_telemetry_emits_thinking_delegated_event():
+    from sonder_runtime.application.observability.runtime_telemetry import RuntimeTelemetry
+
+    events: list[Any] = []
+    tele = RuntimeTelemetry(SimpleNamespace(emit=events.append), session_id="s1", version="t")
+    assert tele.thinking_delegation_event(
+        {"tier": "reasoning", "model": "think:latest", "lane": "code", "wall_ms": 12,
+         "brief_chars": 40, "outcome": "ok"}, run_id="run-1") is True
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.event_code == "thinking.delegated"
+    assert ev.fields["outcome"] == "ok" and ev.fields["brief_chars"] == 40
+    assert ev.fields["tier"] == "reasoning" and ev.fields["wall_ms"] == 12.0
+    assert tele.thinking_delegation_event({"outcome": "bogus"}, run_id="run-1") is False

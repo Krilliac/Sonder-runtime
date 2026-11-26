@@ -479,6 +479,7 @@ def _run_one_child(
                 model=resolved_model,
                 cloud=False,
                 lane=child_lane,
+                emit_board=False,  # the one board event for this child is emitted below
             )
             if delib is not None and delib.brief:
                 thinking_section = "\n\n" + format_thinking_brief(

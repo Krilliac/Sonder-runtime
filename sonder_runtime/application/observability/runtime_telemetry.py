@@ -56,6 +56,7 @@ DIFFICULTY_BANDS = frozenset({"quick", "standard", "hard", "multi_scope"})
 ENSEMBLE_MODES = frozenset({"prose", "code"})
 FANOUT_PHASES = frozenset({"started", "result", "completed", "failed"})
 ENSEMBLE_PHASES = frozenset({"started", "completed", "failed"})
+THINKING_DELEGATION_OUTCOMES = frozenset({"ok", "timeout", "unreachable", "skipped"})
 
 _CORRELATION_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 _LABEL = re.compile(r"[A-Za-z0-9._:/@+-]{1,96}")
@@ -1122,6 +1123,51 @@ class RuntimeTelemetry:
             run_id=ev_run_id,
             session_id=sid,
             level="WARNING" if norm_phase == "failed" else "INFO",
+        )
+        return True
+
+    def thinking_delegation_event(
+        self,
+        fields: Mapping[str, object] | None = None,
+        *,
+        run_id: str | None = None,
+    ) -> bool:
+        """Emit one content-free ``thinking.delegated`` record (tier, model, wall_ms, brief_chars, outcome)."""
+        turn = _CURRENT_TURN.get()
+        clean_run_id = sanitize_correlation_id(run_id)
+        if turn is not None and not turn.finished:
+            target = turn.owner if isinstance(turn.owner, RuntimeTelemetry) else self
+            req_id = turn.turn_id
+            ev_run_id = clean_run_id or turn.turn_id
+            sid = turn.session_id
+        elif clean_run_id is not None:
+            target = self
+            req_id = clean_run_id
+            ev_run_id = clean_run_id
+            sid = None
+        else:
+            return False
+        src = fields if isinstance(fields, Mapping) else {}
+        outcome = str(src.get("outcome") or "").strip().lower()
+        if outcome not in THINKING_DELEGATION_OUTCOMES:
+            return False
+        lane = bounded_label(src.get("lane"))
+        attrs: dict[str, object] = {
+            "operation": "thinking_delegation",
+            "tier": bounded_label(src.get("tier")),
+            "model": bounded_label(src.get("model")),
+            "lane": None if lane == _UNSAFE_LABEL else lane,
+            "wall_ms": _bounded_float(src.get("wall_ms"), maximum=_MAX_DURATION_MS),
+            "brief_chars": _non_negative_int(src.get("brief_chars")),
+            "outcome": outcome,
+        }
+        target._emit(
+            "thinking.delegated",
+            attrs,
+            request_id=req_id,
+            run_id=ev_run_id,
+            session_id=sid,
+            level="INFO" if outcome in {"ok", "skipped"} else "WARNING",
         )
         return True
 
