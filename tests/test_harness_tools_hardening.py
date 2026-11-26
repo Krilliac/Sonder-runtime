@@ -94,8 +94,8 @@ def test_format_check_only_never_runs_a_writing_formatter(tmp_path, captured, to
 @pytest.mark.parametrize("tool, check", [
     ("ruff", ["ruff", "format", "--check", "."]),
     ("black", ["black", "--check", "."]),
-    ("prettier", ["npx", "prettier", "--check", "."]),
-    ("biome", ["npx", "@biomejs/biome", "format", "."]),
+    ("prettier", ["npx", "--no-install", "prettier", "--check", "."]),
+    ("biome", ["npx", "--no-install", "@biomejs/biome", "format", "."]),
     ("dart", ["dart", "format", "--output=none", "--set-exit-if-changed", "."]),
     ("dotnet", ["dotnet", "format", "--verify-no-changes"]),
     ("rustfmt", ["cargo", "fmt", "--check"]),
@@ -143,12 +143,28 @@ def test_clang_format_check_without_path_is_refused(tmp_path, no_child):
 
 # ---- pip dependency tools --------------------------------------------------
 
-def _fake_venv(root, name=".venv"):
+def _fake_home(root, payload=b"BASE-PYTHON"):
+    """A base interpreter directory OUTSIDE ``root`` laid out as ``python -m venv`` expects."""
+    home = root.parent / (root.name + "_base")
+    launcher = home / "Lib" / "venv" / "scripts" / "nt" / "python.exe" if os.name == "nt" else home / "python"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_bytes(payload)
+    return home, launcher
+
+
+def _fake_venv(root, name=".venv", *, payload=b"BASE-PYTHON", home=None):
     venv = root / name
     python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     python.parent.mkdir(parents=True)
-    python.write_bytes(b"")
-    (venv / "pyvenv.cfg").write_text("home = elsewhere\n", encoding="utf-8")
+    base, launcher = _fake_home(root, b"BASE-PYTHON")
+    if os.name == "nt":
+        python.write_bytes(payload)
+    else:
+        try:
+            python.symlink_to(launcher) if payload == b"BASE-PYTHON" else python.write_bytes(payload)
+        except OSError:
+            python.write_bytes(payload)
+    (venv / "pyvenv.cfg").write_text("home = %s\n" % (home or base), encoding="utf-8")
     return python
 
 
@@ -177,6 +193,32 @@ def test_pip_runs_in_the_project_venv_isolated(tmp_path, captured, not_live, too
     if tool in ("dependency_add", "dependency_remove"):
         assert "--" in captured[0]
     assert sys.executable not in captured[0]
+
+
+def test_pip_refuses_a_repo_supplied_interpreter_that_is_not_a_venv_launcher(tmp_path, no_child, not_live):
+    # A hostile repo ships its own .venv/Scripts/python.exe next to a plausible pyvenv.cfg.
+    (tmp_path / "requirements.txt").write_text("requests\n", encoding="utf-8")
+    _fake_venv(tmp_path, payload=b"EVIL-BINARY")
+    for tool, kwargs in _PIP_CALLS:
+        result = getattr(harness_tools, tool)(root=str(tmp_path), **kwargs)
+        assert result["ok"] is False, tool
+        assert "virtual environment" in result["error"]
+
+
+def test_pip_refuses_a_venv_whose_home_is_inside_the_repo(tmp_path, no_child, not_live):
+    (tmp_path / "requirements.txt").write_text("requests\n", encoding="utf-8")
+    inside = tmp_path / "fake_home"
+    inside.mkdir()
+    _fake_venv(tmp_path, home=inside)
+    result = harness_tools.dependency_add(root=str(tmp_path), packages_json='["requests"]')
+    assert result["ok"] is False
+    assert "virtual environment" in result["error"]
+
+
+def test_pip_refuses_a_venv_with_a_missing_or_unreadable_home(tmp_path, no_child, not_live):
+    (tmp_path / "requirements.txt").write_text("requests\n", encoding="utf-8")
+    _fake_venv(tmp_path, home=tmp_path.parent / "no_such_home_dir")
+    assert harness_tools.dependency_add(root=str(tmp_path), packages_json='["requests"]')["ok"] is False
 
 
 def test_pip_refuses_a_venv_that_is_the_runtime_environment(tmp_path, no_child, not_live, monkeypatch):
@@ -426,12 +468,12 @@ def test_diff_files_refuses_network_or_control_paths_before_resolving(workspace,
     assert result["ok"] is False
 
 
-def test_diff_files_bounds_negative_context(workspace, captured):
+def test_diff_files_bounds_negative_context(workspace):
     other = os.path.join("src", "ok.txt")
     (workspace / "src" / "other.txt").write_text("key two\n", encoding="utf-8")
     result = harness_tools.diff_files(root=str(workspace), left=other, right="src/other.txt", context=-5)
     assert result["ok"] is True
-    assert "-U0" in captured[0]
+    assert "-key ordinary" in result["stdout"] and "+key two" in result["stdout"]
 
 
 # ---- PATHEXT resolution on Windows -----------------------------------------
@@ -531,3 +573,228 @@ def test_harness_secret_scan_counts_nested_env_files(tmp_path):
     result = harness_tools.secret_scan(root=str(tmp_path))
     assert result["credential_files_skipped"] == 3
     assert MARK not in str(result)
+
+
+# ---- requirements includes -------------------------------------------------
+
+def _pip_audit(monkeypatch, tmp_path):
+    fake = str(tmp_path / "bin" / "pip-audit")
+    monkeypatch.setattr(harness_tools.shutil, "which", lambda name, *a, **k: fake if name == "pip-audit" else None)
+    return fake
+
+
+@pytest.mark.parametrize("name, text, needle", [
+    ("nested-escape", "-r ../outside.txt\n", "outside the root"),
+    ("nested-absolute", "-r {outside}\n", "outside the root"),
+    ("constraint-escape", "-c ../outside.txt\n", "outside the root"),
+    ("url-include", "-r https://example.invalid/r.txt\n", "URL"),
+    ("editable", "-e .\n", "editable"),
+    ("editable-long", "--editable=./pkg\n", "editable"),
+    ("index", "--index-url https://example.invalid/simple\nrequests\n", "not allowed"),
+    ("extra-index", "--extra-index-url=https://example.invalid/simple\n", "not allowed"),
+    ("find-links", "-f https://example.invalid/wheels\n", "not allowed"),
+    ("direct-url", "requests @ https://example.invalid/r.whl\n", "link, path or unsupported"),
+    ("vcs", "git+https://example.invalid/r.git#egg=r\n", "link, path or unsupported"),
+    ("local-path", "./vendored/pkg\n", "link, path or unsupported"),
+    ("missing-include", "-r absent.txt\n", "does not exist"),
+])
+def test_requirements_includes_and_links_are_refused(tmp_path, no_child, monkeypatch, name, text, needle):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (tmp_path / "outside.txt").write_text("requests==2.32.0\n", encoding="utf-8")
+    (proj / "requirements.txt").write_text(text.format(outside=str(tmp_path / "outside.txt")), encoding="utf-8")
+    _pip_audit(monkeypatch, tmp_path)
+    result = harness_tools.dependency_audit(root=str(proj))
+    assert result["ok"] is False, result
+    assert needle in result["error"], result["error"]
+
+
+def test_a_nested_include_is_checked_recursively(tmp_path, no_child, monkeypatch):
+    proj = tmp_path / "proj"
+    (proj / "reqs").mkdir(parents=True)
+    (proj / "requirements.txt").write_text("-r reqs/base.txt\n", encoding="utf-8")
+    (proj / "reqs" / "base.txt").write_text("requests==2.32.0\n-r deeper.txt\n", encoding="utf-8")
+    (proj / "reqs" / "deeper.txt").write_text("-e ./evil\n", encoding="utf-8")
+    _pip_audit(monkeypatch, tmp_path)
+    result = harness_tools.dependency_audit(root=str(proj))
+    assert result["ok"] is False
+    assert "editable" in result["error"]
+
+
+def test_a_symlinked_include_is_refused(tmp_path, no_child, monkeypatch):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("requests==2.32.0\n", encoding="utf-8")
+    try:
+        (proj / "linked.txt").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need privilege on this host")
+    (proj / "requirements.txt").write_text("-r linked.txt\n", encoding="utf-8")
+    _pip_audit(monkeypatch, tmp_path)
+    assert harness_tools.dependency_audit(root=str(proj))["ok"] is False
+
+
+def test_ordinary_nested_requirements_with_hashes_and_markers_pass(tmp_path, captured, monkeypatch):
+    proj = tmp_path / "proj"
+    (proj / "reqs").mkdir(parents=True)
+    (proj / "requirements.txt").write_text(
+        "# top\n-r reqs/base.txt  # include\n-c reqs/constraints.txt\nrequests[socks]>=2.31,<3 ; python_version >= '3.9'\n",
+        encoding="utf-8")
+    (proj / "reqs" / "base.txt").write_text(
+        "urllib3==2.2.1 \\\n    --hash=sha256:abc123\n--require-hashes\n", encoding="utf-8")
+    (proj / "reqs" / "constraints.txt").write_text("idna<4\n", encoding="utf-8")
+    fake = _pip_audit(monkeypatch, tmp_path)
+    harness_tools.dependency_audit(root=str(proj))
+    assert captured == [[fake, "-r", "requirements.txt", "--no-deps", "--disable-pip"]]
+
+
+def test_an_include_cycle_terminates(tmp_path, captured, monkeypatch):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "requirements.txt").write_text("-r other.txt\n", encoding="utf-8")
+    (proj / "other.txt").write_text("-r requirements.txt\nrequests\n", encoding="utf-8")
+    _pip_audit(monkeypatch, tmp_path)
+    harness_tools.dependency_audit(root=str(proj))
+    assert len(captured) == 1
+
+
+def test_dependency_update_refuses_an_escaping_include_before_running_pip(tmp_path, no_child, not_live):
+    (tmp_path / "requirements.txt").write_text("-r ../x.txt\n", encoding="utf-8")
+    _fake_venv(tmp_path)
+    result = harness_tools.dependency_update(root=str(tmp_path), packages_json="[]")
+    assert result["ok"] is False
+    assert "outside the root" in result["error"]
+
+
+# ---- format_code check mode runs under the same guards --------------------
+
+def test_format_check_only_gets_no_guard_exemption(tmp_path, no_child, monkeypatch):
+    monkeypatch.setattr(harness_tools, "_live_refusal", lambda op, root: {"ok": False, "error": "live checkout"})
+    result = harness_tools.format_code(root=str(tmp_path), tool="ruff", check_only=True)
+    assert result["ok"] is False
+    assert result["error"] == "live checkout"
+    assert result["mode"] == "check"
+
+
+def test_format_check_only_honors_the_protected_write_scope(tmp_path, no_child, not_live, monkeypatch):
+    monkeypatch.setattr(harness_tools.protected_write_scope, "scope_refusal",
+                        lambda op, _root, _target: f"refusing {op}: protected")
+    result = harness_tools.format_code(root=str(tmp_path), tool="ruff", check_only=True)
+    assert result["ok"] is False
+    assert "protected" in result["error"]
+
+
+@pytest.mark.parametrize("config", [
+    "prettier.config.js", "prettier.config.cjs", "prettier.config.mjs", ".prettierrc.js", ".prettierrc.mjs",
+])
+def test_prettier_check_refuses_executable_project_config(tmp_path, no_child, not_live, config):
+    (tmp_path / config).write_text("require('fs').writeFileSync('PWNED', 'x')\n", encoding="utf-8")
+    result = harness_tools.format_code(root=str(tmp_path), tool="prettier", check_only=True)
+    assert result["ok"] is False
+    assert config in result["error"]
+    assert not (tmp_path / "PWNED").exists()
+
+
+@pytest.mark.parametrize("name, text", [
+    (".prettierrc", '{"plugins": ["./evil.js"]}'),
+    (".prettierrc.json", '{"plugins": ["./evil.js"]}'),
+    (".prettierrc.yaml", "plugins:\n  - ./evil.js\n"),
+    ("package.json", '{"prettier": {"plugins": ["./evil.js"]}}'),
+    ("package.json", '{"prettier": "some-shared-config"}'),
+])
+def test_prettier_check_refuses_plugin_configs(tmp_path, no_child, not_live, name, text):
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    result = harness_tools.format_code(root=str(tmp_path), tool="prettier", check_only=True)
+    assert result["ok"] is False
+    assert "check mode" in result["error"]
+
+
+def test_prettier_check_refuses_a_config_in_a_parent_of_the_checked_path(tmp_path, no_child, not_live):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "prettier.config.js").write_text("module.exports = {}\n", encoding="utf-8")
+    result = harness_tools.format_code(root=str(tmp_path), tool="prettier", path="pkg", check_only=True)
+    assert result["ok"] is False
+
+
+def test_prettier_check_runs_with_a_data_only_config(tmp_path, captured, not_live):
+    (tmp_path / ".prettierrc.json").write_text('{"semi": false}', encoding="utf-8")
+    (tmp_path / "package.json").write_text('{"name": "x", "prettier": {"semi": false}}', encoding="utf-8")
+    result = harness_tools.format_code(root=str(tmp_path), tool="prettier", check_only=True)
+    assert result["ok"] is True
+    assert captured == [["npx", "--no-install", "prettier", "--check", "."]]
+
+
+def test_formatter_npx_never_installs(tmp_path, captured, not_live):
+    harness_tools.format_code(root=str(tmp_path), tool="prettier", check_only=False)
+    harness_tools.format_code(root=str(tmp_path), tool="biome", check_only=False)
+    assert all(argv[:2] == ["npx", "--no-install"] for argv in captured)
+
+
+# ---- diff_files / rename / references: short names and handle checks -------
+
+@pytest.mark.parametrize("name", ["CREDEN~1.JSO", "ENV~1", "sub/ID_RSA~1", "PROGRA~1/x.txt"])
+def test_diff_files_refuses_short_name_shaped_components(workspace, name):
+    (workspace / "src" / "b.txt").write_text("other\n", encoding="utf-8")
+    result = harness_tools.diff_files(root=str(workspace), left=name, right="src/b.txt")
+    assert result["ok"] is False
+    assert "short name" in result["error"]
+    assert MARK not in str(result)
+
+
+def test_diff_files_diffs_the_bytes_it_read(workspace):
+    (workspace / "src" / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (workspace / "src" / "b.txt").write_text("one\n2\n", encoding="utf-8")
+    result = harness_tools.diff_files(root=str(workspace), left="src/a.txt", right="src/b.txt")
+    assert result["ok"] is True and result["returncode"] == 1
+    assert "-two" in result["stdout"] and "+2" in result["stdout"]
+    assert harness_tools.diff_files(root=str(workspace), left="src/a.txt", right="src/a.txt")["returncode"] == 0
+
+
+def test_diff_files_never_hands_git_a_pathname(workspace, monkeypatch):
+    (workspace / "src" / "a.txt").write_text("one\n", encoding="utf-8")
+    (workspace / "src" / "b.txt").write_text("two\n", encoding="utf-8")
+    monkeypatch.setattr(harness_tools, "_run", lambda *a, **k: pytest.fail("git was handed the paths again"))
+    assert harness_tools.diff_files(root=str(workspace), left="src/a.txt", right="src/b.txt")["ok"] is True
+
+
+def test_diff_files_refuses_when_the_opened_handle_is_protected(workspace, monkeypatch):
+    # A swap between the check and the open is modelled by making the post-open
+    # classification (on the handle's final path) say protected.
+    (workspace / "src" / "a.txt").write_text("one\n", encoding="utf-8")
+    (workspace / "src" / "b.txt").write_text("two\n", encoding="utf-8")
+    seen = []
+
+    def protected(path):
+        seen.append(path.name)
+        return path.name == "b.txt"
+
+    monkeypatch.setattr(harness_tools, "_is_protected_read_target", protected)
+    result = harness_tools.diff_files(root=str(workspace), left="src/a.txt", right="src/b.txt")
+    assert result["ok"] is False
+    assert "refusing to diff right" in result["error"]
+    assert "b.txt" in seen
+
+
+def test_extract_references_and_rename_use_the_handle_checked_reader(workspace, monkeypatch):
+    calls = []
+    real = harness_tools.confined_read.read_confined_bytes
+
+    def spy(root, path, **kwargs):
+        calls.append(path)
+        return real(root, path, **kwargs)
+
+    monkeypatch.setattr(harness_tools.confined_read, "read_confined_bytes", spy)
+    harness_tools.extract_references(root=str(workspace), symbol="key", glob="src/**/*")
+    harness_tools.rename_symbol(root=str(workspace), old_name="key", new_name="k2", glob="src/**/*", dry_run=True)
+    assert len(calls) >= 2
+
+
+def test_rename_refuses_and_references_skip_a_short_name_shaped_file(workspace):
+    (workspace / "src" / "ab~1.txt").write_text("key" + chr(10), encoding="utf-8")
+    result = harness_tools.rename_symbol(
+        root=str(workspace), old_name="key", new_name="k2", glob="src/**/*", dry_run=True)
+    assert result["ok"] is False
+    assert "short name" in result["error"]
+    refs = harness_tools.extract_references(root=str(workspace), symbol="key", glob="src/**/*")
+    assert {ref["file"] for ref in refs["references"]} == {os.path.join("src", "ok.txt")}

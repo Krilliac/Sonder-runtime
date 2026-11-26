@@ -25,7 +25,11 @@ from sonder_runtime.adapters import git_change_targets
 from sonder_runtime.adapters import live_checkout
 from sonder_runtime.adapters import git_program_guard
 from sonder_runtime.adapters import process_tree
+from sonder_runtime.adapters import confined_read
+from sonder_runtime.adapters import formatter_config_guard
+from sonder_runtime.adapters import project_venv
 from sonder_runtime.adapters import protected_write_scope
+from sonder_runtime.adapters import requirements_guard
 from sonder_runtime.adapters import secret_scan as _secret_scan_adapter
 from sonder_runtime.adapters.git_mutation_guard import (
     ConcurrentGitMutation,
@@ -813,8 +817,8 @@ _LINT_TOOLS = {
 _FORMATTERS = {
     "ruff": ["ruff", "format"],
     "black": ["black"],
-    "prettier": ["npx", "prettier", "--write"],
-    "biome": ["npx", "@biomejs/biome", "format", "--write"],
+    "prettier": ["npx", "--no-install", "prettier", "--write"],
+    "biome": ["npx", "--no-install", "@biomejs/biome", "format", "--write"],
     "rustfmt": ["cargo", "fmt"],
     "gofmt": ["gofmt", "-w"],
     "clang-format": ["clang-format", "-i"],
@@ -834,8 +838,8 @@ _FORMATTERS = {
 _FORMATTER_CHECKS = {
     "ruff": ["ruff", "format", "--check"],
     "black": ["black", "--check"],
-    "prettier": ["npx", "prettier", "--check"],
-    "biome": ["npx", "@biomejs/biome", "format"],
+    "prettier": ["npx", "--no-install", "prettier", "--check"],
+    "biome": ["npx", "--no-install", "@biomejs/biome", "format"],
     "rustfmt": ["cargo", "fmt", "--check"],
     "gofmt": ["gofmt", "-l"],
     "clang-format": ["clang-format", "--dry-run", "--Werror"],
@@ -997,16 +1001,20 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
     cmd_template = _FORMATTERS.get(tool)
     if not cmd_template:
         return {"ok": False, "error": "unknown formatter: %s" % tool, "tool": tool}
-    if not check_only:
-        live = _live_refusal("format_code", root / path if path else root)
-        if live:
-            return {**live, "tool": tool, "mode": "format"}
-        refused = protected_write_scope.scope_refusal("format_code", root, root / path if path else root)
-        if refused:
-            return {"ok": False, "error": refused, "tool": tool, "mode": "format"}
+    mode = "check" if check_only else "format"
+    # Check mode gets no exemption: a formatter run loads project configuration
+    # and writes caches whether or not it rewrites sources.
+    live = _live_refusal("format_code", root / path if path else root)
+    if live:
+        return {**live, "tool": tool, "mode": mode}
+    refused = protected_write_scope.scope_refusal("format_code", root, root / path if path else root)
+    if refused:
+        return {"ok": False, "error": refused, "tool": tool, "mode": mode}
     if check_only:
-        # The live-checkout and protected-scope guards above run only for writes,
-        # so check mode must never fall back to a writing formatter command.
+        config_refused = formatter_config_guard.executable_config_error(tool, root, path)
+        if config_refused:
+            return {"ok": False, "error": config_refused, "tool": tool, "mode": "check"}
+        # Check mode must never fall back to a writing formatter command.
         check_template = _FORMATTER_CHECKS.get(tool)
         if not check_template:
             return {
@@ -1178,7 +1186,8 @@ def _project_python(root):
         if file_ops.is_reparse_point(bin_dir) or not bin_dir.is_dir():
             continue
         python = bin_dir / exe_name
-        if python.is_file():
+        # Never hand back a repo-supplied binary: it must be what ``venv`` installs from ``home``.
+        if python.is_file() and project_venv.venv_interpreter_is_genuine(root, venv, python):
             return str(python)
     return None
 
@@ -1197,12 +1206,20 @@ def _project_pip(root):
 
 
 def _requirements_link_error(root):
-    """Return an error message if ``root/requirements.txt`` is a link escaping root, else None."""
+    """Return an error message if ``root/requirements.txt`` may not be handed to pip, else None.
+
+    The top-level file must not be a link escaping root, and the file plus every
+    ``-r``/``-c`` include must pass ``requirements_guard`` (no escaping or linked
+    includes, URLs, editables, index overrides or direct references).
+    """
     req_path = Path(root) / "requirements.txt"
     if file_ops.is_reparse_point(req_path) or (
         req_path.exists() and _secret_scan_adapter.confined_path(req_path, Path(root)) is None
     ):
         return "refusing to read requirements.txt: it is a link or resolves outside the root"
+    content = requirements_guard.requirements_content_error(root)
+    if content:
+        return "refusing requirements.txt: %s" % content
     return None
 
 
@@ -1859,10 +1876,29 @@ def _protected_source(path, root):
     return real
 
 
-def _read_source(path):
-    # newline="" keeps each file's own line endings through a rewrite.
-    with open(path, encoding="utf-8", newline="") as handle:
-        return handle.read()
+def _is_protected_read_target(path):
+    """True when ``path`` (the path of an opened handle) is a credential store or secret/control state."""
+    return bool(
+        file_ops.credential_read_component(path)
+        or file_ops.is_credential_store(path)
+        or file_ops._is_protected_read_path(path)
+    )
+
+
+_MAX_SOURCE_BYTES = 2_000_000
+_MAX_DIFF_BYTES = 8_000_000
+
+
+def _read_source(path, root):
+    """Decode ``path`` through a validated open handle (see ``confined_read``).
+
+    newline="" semantics: bytes are decoded as-is so each file's own line
+    endings survive a rewrite. Raises ``PermissionError`` on a confinement
+    refusal, ``UnicodeDecodeError``/``OSError`` otherwise.
+    """
+    data = confined_read.read_confined_bytes(
+        root, path, max_bytes=_MAX_SOURCE_BYTES, is_protected=_is_protected_read_target)
+    return data.decode("utf-8")
 
 
 def _apply_staged_rewrites(staged):
@@ -1944,7 +1980,12 @@ def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=Tr
                 dry_run, old_name, new_name,
             )
         try:
-            content = _read_source(real)
+            content = _read_source(path, root)
+        except confined_read.ConfinedReadRefused as exc:
+            return _rename_refusal(
+                "refusing to rename: %s is not safely readable (%s); narrow the glob to exclude it" % (rel, exc),
+                dry_run, old_name, new_name,
+            )
         except (UnicodeDecodeError, OSError):
             continue
         matches = list(pattern.finditer(content))
@@ -1992,7 +2033,7 @@ def extract_references(root=".", symbol="", glob="**/*.py", timeout=30, extra_ro
         if real is None:
             continue
         try:
-            content = real.read_text(encoding="utf-8")
+            content = _read_source(path, root)
         except (UnicodeDecodeError, OSError):
             continue
         lines = content.splitlines()
@@ -2029,6 +2070,13 @@ def _prepare_diff_side(root, requested, label):
         return None, None, {"ok": False, "error": "left and right must resolve inside the root directory"}
     if _has_reparse_component(joined, root):
         return None, None, {"ok": False, "error": "left and right must resolve inside the root directory"}
+    # Judged on the caller's spelling: resolve() below expands a short name to the long one.
+    if confined_read.short_name_component(root, joined) is not None:
+        return None, None, {
+            "ok": False,
+            "error": "refusing to diff %s file %s: a component is shaped like a Windows 8.3 "
+                     "short name (NAME~N.EXT); give the long name" % (label, requested),
+        }
     try:
         resolved = joined.resolve()
         rel = resolved.relative_to(root)
@@ -2059,18 +2107,51 @@ def diff_files(root=".", left="", right="", context=3, timeout=10, extra_roots="
     right_path, right_rel, err = _prepare_diff_side(root, right, "right")
     if err:
         return err
-    if not left_path.is_file():
-        return {"ok": False, "error": "left file not found: %s" % left}
-    if not right_path.is_file():
-        return {"ok": False, "error": "right file not found: %s" % right}
+    sides = []
+    for label, requested, path in (("left", left, left_path), ("right", right, right_path)):
+        try:
+            sides.append(confined_read.read_confined_bytes(
+                root, path, max_bytes=_MAX_DIFF_BYTES, is_protected=_is_protected_read_target))
+        except confined_read.ConfinedReadRefused:
+            return {
+                "ok": False,
+                "error": "refusing to diff %s file %s: it is a link, an alias, outside the root, "
+                         "or secret or control state" % (label, requested),
+            }
+        except confined_read.ConfinedReadTooLarge:
+            return {"ok": False, "error": "%s file is over the %d byte diff cap: %s" % (label, _MAX_DIFF_BYTES, requested)}
+        except OSError:
+            return {"ok": False, "error": "%s file not found: %s" % (label, requested)}
+    # The diff is built from the bytes already read through the validated handles;
+    # git is never handed the pathnames again.
+    return _diff_bytes(sides[0], sides[1], left_rel.as_posix(), right_rel.as_posix(), context)
 
-    result = _run(
-        [_git(), "diff", "--no-index", "-U%d" % context, "--", str(left_rel), str(right_rel)],
-        cwd=root, timeout=timeout,
-    )
-    if not result.get("timed_out") and result.get("returncode") in (0, 1):
-        result["ok"] = True
-    return result
+
+def _diff_bytes(left_bytes, right_bytes, left_name, right_name, context):
+    import difflib
+
+    started = time.time()
+    if left_bytes == right_bytes:
+        stdout = ""
+    elif b"\0" in left_bytes[:8192] or b"\0" in right_bytes[:8192]:
+        stdout = "Binary files a/%s and b/%s differ\n" % (left_name, right_name)
+    else:
+        left_lines = left_bytes.decode("utf-8", errors="replace").splitlines()
+        right_lines = right_bytes.decode("utf-8", errors="replace").splitlines()
+        body = difflib.unified_diff(
+            left_lines, right_lines, fromfile="a/" + left_name, tofile="b/" + right_name,
+            n=context, lineterm="",
+        )
+        stdout = "diff --git a/%s b/%s\n%s\n" % (left_name, right_name, "\n".join(body))
+    return {
+        "ok": True,
+        "returncode": 1 if stdout else 0,
+        "timed_out": False,
+        "elapsed_ms": int((time.time() - started) * 1000),
+        "stdout": _trim(stdout),
+        "stderr": "",
+        "command": ["diff_files", left_name, right_name],
+    }
 
 
 def apply_patch(root=".", patch_text="", check_only=False, timeout=10, extra_roots=""):

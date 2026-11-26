@@ -250,6 +250,7 @@ $global:MockPortproxyExit = [int]$scenario.portproxyExit
 $global:MockPortproxyThrows = [bool]$scenario.portproxyThrows
 $global:MockServiceStatus = if ($null -ne $scenario.serviceStatus) { [string]$scenario.serviceStatus } else { 'Running' }
 $global:MockServiceFails = [bool]$scenario.serviceFails
+$global:MockInterfaceFilterFails = [bool]$scenario.interfaceFilterFails
 
 function Write-MockLog([string]$Name, $Value) {
     Add-Content -LiteralPath (Join-Path $global:MockOut $Name) -Value ($Value | ConvertTo-Json -Compress -Depth 6)
@@ -274,17 +275,31 @@ function New-MockFilter($r, [string]$Kind) {
         'Port' { [pscustomobject]@{ InstanceID = [string]$r.name; Protocol = $r.protocol; LocalPort = @($r.localPort) } }
         'Address' { [pscustomobject]@{ InstanceID = [string]$r.name; LocalAddress = @($r.localAddress); RemoteAddress = @($r.remoteAddress) } }
         'Application' { [pscustomobject]@{ InstanceID = [string]$r.name; Program = [string]$r.program; Package = [string]$r.package } }
+        'Interface' {
+            if ($r.omitInterface) { return }
+            [pscustomobject]@{ InstanceID = [string]$r.name; InterfaceAlias = @($r.interfaceAlias) }
+        }
+        'InterfaceType' {
+            if ($r.omitInterface) { return }
+            [pscustomobject]@{ InstanceID = [string]$r.name; InterfaceType = @($r.interfaceType) }
+        }
     }
 }
 
 function Get-MockFilter($InputRule, [bool]$All, [string]$Kind) {
     if ($All) {
+        if (($Kind -eq 'Interface' -or $Kind -eq 'InterfaceType') -and $global:MockInterfaceFilterFails) {
+            Write-Error -Message 'mock: Access is denied.' -Category PermissionDenied; return
+        }
         foreach ($r in $global:MockRules) { if (-not $r.hiddenFromAll) { New-MockFilter $r $Kind } }
         return
     }
     $r = $global:MockRules | Where-Object { $_.name -eq $InputRule.InstanceID } | Select-Object -First 1
     if ($null -eq $r) { Write-Error -Message "mock: no rule $($InputRule.InstanceID)" -Category ObjectNotFound; return }
     if ($r.failPerRule) { Write-Error -Message 'mock: Access is denied.' -Category PermissionDenied; return }
+    if (($Kind -eq 'Interface' -or $Kind -eq 'InterfaceType') -and $r.failInterface) {
+        Write-Error -Message 'mock: Access is denied.' -Category PermissionDenied; return
+    }
     New-MockFilter $r $Kind
 }
 
@@ -320,6 +335,16 @@ function Get-NetFirewallApplicationFilter {
     param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule, [switch]$All, [string]$PolicyStore)
     process { Get-MockFilter $AssociatedNetFirewallRule ([bool]$All) 'Application' }
 }
+function Get-NetFirewallInterfaceFilter {
+    [CmdletBinding()]
+    param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule, [switch]$All, [string]$PolicyStore)
+    process { Get-MockFilter $AssociatedNetFirewallRule ([bool]$All) 'Interface' }
+}
+function Get-NetFirewallInterfaceTypeFilter {
+    [CmdletBinding()]
+    param([Parameter(ValueFromPipeline = $true)]$AssociatedNetFirewallRule, [switch]$All, [string]$PolicyStore)
+    process { Get-MockFilter $AssociatedNetFirewallRule ([bool]$All) 'InterfaceType' }
+}
 function Get-NetFirewallProfile {
     [CmdletBinding()]
     param([string]$PolicyStore, [switch]$All)
@@ -350,6 +375,7 @@ function New-NetFirewallRule {
         name = "mock-$DisplayName"; displayName = $DisplayName; enabled = 'True'; direction = $Direction; action = $Action
         protocol = $Protocol; localPort = $LocalPort; localAddress = $LocalAddress; remoteAddress = $RemoteAddress
         program = $(if ($Program) { $Program } else { 'Any' }); package = ''; packageFamilyName = ''
+        interfaceAlias = $(if ($InterfaceAlias) { $InterfaceAlias } else { @('Any') }); interfaceType = 'Any'
         policyStoreSource = 'PersistentStore'; policyStoreSourceType = 'Local'
         remoteDynamicKeywordAddresses = @()
     })
@@ -437,7 +463,8 @@ function New-Object {
 }
 
 foreach ($cmd in 'Get-NetFirewallRule', 'Get-NetFirewallPortFilter', 'Get-NetFirewallAddressFilter',
-                 'Get-NetFirewallApplicationFilter', 'Get-NetFirewallProfile', 'Remove-NetFirewallRule',
+                 'Get-NetFirewallApplicationFilter', 'Get-NetFirewallInterfaceFilter',
+                 'Get-NetFirewallInterfaceTypeFilter', 'Get-NetFirewallProfile', 'Remove-NetFirewallRule',
                  'New-NetFirewallRule', 'Get-NetTCPConnection', 'Invoke-CimMethod', 'New-Object',
                  'Get-NetIPAddress', 'Get-Process', 'Stop-Process', 'Wait-Process',
                  'netsh', 'Get-Service') {
@@ -469,6 +496,8 @@ _FW_PEER = {
     "program": "Any",
     "package": "",
     "packageFamilyName": "",
+    "interfaceAlias": ["Private Link"],
+    "interfaceType": "Any",
     "policyStoreSource": "PersistentStore",
     "policyStoreSourceType": "Local",
 }
@@ -651,6 +680,32 @@ def test_fw_rpc_server_program_rule_variants_refuse(tmp_path: Path, program: str
     prog = _fw_rule(name="prog", displayName="rpc program rule", protocol="Any", localPort=["Any"],
                     localAddress=["Any"], remoteAddress=["Any"], program=program)
     _assert_fw_refused(_run_fw(tmp_path, [_FW_PEER, prog]), "'rpc program rule'", "Disable-NetFirewallRule -Name 'prog'")
+
+
+@pytest.mark.parametrize("name, overrides", [
+    ("alias-any", {"interfaceAlias": ["Any"]}),
+    ("alias-missing", {"interfaceAlias": []}),
+    ("alias-wildcard", {"interfaceAlias": ["Private*"]}),
+    ("filter-omitted", {"omitInterface": True}),
+    ("per-rule-unreadable", {"failInterface": True, "hiddenFromAll": True}),
+    ("type-empty", {"interfaceType": ""}),
+])
+def test_fw_peer_rule_without_a_pinned_interface_is_wide(tmp_path: Path, name: str, overrides: dict) -> None:
+    unpinned = _fw_rule(**overrides)
+    outcome = _run_fw(tmp_path / name, [unpinned])
+    _assert_fw_refused(outcome, "'Sonder llama-rpc worker (main peer only)'", "Disable-NetFirewallRule -Name 'peer'",
+                       "a peer rule must be pinned to one interface alias")
+
+
+def test_fw_failing_bulk_interface_listing_falls_back_to_the_per_rule_read(tmp_path: Path) -> None:
+    outcome = _run_fw(tmp_path, [_FW_PEER], extra={"interfaceFilterFails": True})
+    # The bulk listing failing falls back to a per-rule read, which succeeds, so the pinned rule still passes.
+    assert outcome.launched, outcome.error or outcome.text
+
+
+def test_fw_pinned_peer_rule_with_any_interface_type_is_peer_only(tmp_path: Path) -> None:
+    assert _run_fw(tmp_path, [_fw_rule(interfaceType="Any")]).launched
+    assert _run_fw(tmp_path / "wired", [_fw_rule(interfaceType="Wired")]).launched
 
 
 def test_fw_unrelated_rules_allow_start(tmp_path: Path) -> None:
