@@ -1,98 +1,63 @@
-"""Validate that a project's virtual-environment interpreter is a real venv launcher.
+"""Locate a project's virtual-environment site-packages without running anything in it.
 
-A repository controls ``.venv/Scripts/python.exe`` (or ``.venv/bin/python``), and
-``pip --python <venv>`` re-executes that very binary, so neither a trusted pip
-nor the flag avoids running repo-supplied code. The interpreter is therefore
-accepted only when it demonstrably is what ``python -m venv`` would have
-installed from the base interpreter named by ``pyvenv.cfg``:
+A repository controls everything inside its own ``.venv``: ``python.exe`` can be
+a planted binary, ``Lib/site-packages`` can carry ``.pth`` files that execute on
+interpreter start (``-I`` does not turn that off) and a committed ``pip`` package
+that ``python -m pip`` would import. Nothing under the root is therefore ever
+executed. Sonder installs with its OWN pip and ``--target <site-packages>``, so
+this module only validates that the venv is a plain directory tree inside the
+root and returns the folder packages should land in.
 
-- ``home`` in ``pyvenv.cfg`` is an existing directory outside the project root;
-- POSIX: the interpreter resolves to a file inside ``home``, or is byte-identical
-  to a ``python*`` binary there (``venv --copies``);
-- Windows: the interpreter is byte-identical to the base installation's
-  ``python.exe`` or to the venv launcher in ``Lib/venv/scripts/nt``.
-
-Anything else (including an unreadable or missing ``home``) is refused. Residual
-trust: ``home`` itself, which sits outside the repository the agent controls.
-Stateless; any thread.
+Stateless; any thread. Never follows a link.
 """
 from __future__ import annotations
 
-import hashlib
 import os
-import re
 from pathlib import Path
 
 from .filesystem import file_ops
 
 _MAX_CFG_BYTES = 64 * 1024
-_MAX_CANDIDATES = 24
-_PYTHON_NAME = re.compile(r"python[0-9.]*")
 
 
-def _digest(path: Path) -> tuple[int, str] | None:
+def _plain_dir(path: Path, root: Path) -> Path | None:
     try:
-        hasher = hashlib.sha256()
-        size = 0
-        with open(path, "rb") as handle:
-            for block in iter(lambda: handle.read(1 << 20), b""):
-                size += len(block)
-                hasher.update(block)
-        return size, hasher.hexdigest()
-    except OSError:
-        return None
-
-
-def _home(cfg: Path) -> Path | None:
-    try:
-        if cfg.stat().st_size > _MAX_CFG_BYTES:
+        if file_ops.is_reparse_point(path) or not path.is_dir():
             return None
-        text = cfg.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        real = path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
         return None
-    for line in text.splitlines():
-        key, separator, value = line.partition("=")
-        if separator and key.strip().lower() == "home" and value.strip():
-            return Path(value.strip())
-    return None
+    return real if file_ops._is_inside(real, root) else None
 
 
-def _candidates(home: Path) -> list[Path]:
-    if os.name == "nt":
-        launchers = home / "Lib" / "venv" / "scripts" / "nt"
-        return [home / "python.exe", launchers / "python.exe", launchers / "venvlauncher.exe"]
+def venv_site_packages(root: Path | str, venv: Path) -> Path | None:
+    """The ``site-packages`` directory of ``venv`` (under ``root``), or None.
+
+    Requires a regular ``pyvenv.cfg`` and a site-packages directory that is not a
+    link and resolves inside ``root``. Executes and imports nothing.
+    """
     try:
-        names = sorted(entry for entry in os.listdir(home) if _PYTHON_NAME.fullmatch(entry))
-    except OSError:
-        return []
-    return [home / name for name in names[:_MAX_CANDIDATES]]
-
-
-def venv_interpreter_is_genuine(root: Path | str, venv: Path, python: Path) -> bool:
-    """True when ``python`` (inside ``venv`` under ``root``) is a genuine venv interpreter."""
-    home = _home(venv / "pyvenv.cfg")
-    if home is None:
-        return False
-    try:
-        real_home = home.resolve(strict=True)
         real_root = Path(root).resolve(strict=True)
     except (OSError, RuntimeError, ValueError):
-        return False
-    if not real_home.is_dir() or real_home == real_root or file_ops._is_inside(real_home, real_root):
-        return False
-    if not python.is_file():
-        return False
+        return None
+    real_venv = _plain_dir(venv, real_root)
+    if real_venv is None:
+        return None
+    cfg = venv / "pyvenv.cfg"
+    try:
+        if file_ops.is_reparse_point(cfg) or not cfg.is_file() or cfg.stat().st_size > _MAX_CFG_BYTES:
+            return None
+    except OSError:
+        return None
     if os.name == "nt":
-        if file_ops.is_reparse_point(python):
-            return False
+        candidates = [venv / "Lib" / "site-packages"]
     else:
+        lib = venv / "lib"
+        if _plain_dir(lib, real_root) is None:
+            return None
         try:
-            real_python = python.resolve(strict=True)
-        except (OSError, RuntimeError, ValueError):
-            return False
-        if file_ops._is_inside(real_python, real_home) and not file_ops._is_inside(real_python, real_root):
-            return True
-    actual = _digest(python)
-    if actual is None:
-        return False
-    return any(candidate.is_file() and _digest(candidate) == actual for candidate in _candidates(real_home))
+            candidates = [lib / name / "site-packages" for name in sorted(os.listdir(lib)) if name.startswith("python")]
+        except OSError:
+            return None
+    found = [path for path in candidates if _plain_dir(path, real_root) is not None]
+    return found[0] if len(found) == 1 else None

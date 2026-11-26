@@ -1153,56 +1153,55 @@ def _parse_and_validate_packages(packages_json, *, allow_empty=False):
 _PROJECT_VENV_DIRECTORIES = (".venv", "venv")
 
 
-def _project_python(root):
-    """The interpreter of the project's own virtual environment under ``root``, or None.
+def _project_site_packages(root):
+    """The ``site-packages`` folder of the project's own venv under ``root``, or None.
 
-    Project ``pip`` commands must never target ``sys.executable`` (Sonder's own
-    interpreter). Only a real directory venv inside ``root`` with a real
-    ``pyvenv.cfg`` and real bin/Scripts dir that is not the runtime prefix
-    qualifies. The python binary itself may be a symlink on POSIX.
+    Nothing inside the repository is ever executed: the venv is only a target
+    directory for Sonder's own pip (see ``project_venv``). The runtime's own
+    environment never qualifies.
     """
     root = Path(root)
     try:
-        runtime_prefix = Path(sys.prefix).resolve()
+        runtime_key = os.path.normcase(str(Path(sys.prefix).resolve()))
     except OSError:
-        runtime_prefix = Path(sys.prefix)
-    runtime_key = os.path.normcase(str(runtime_prefix))
-    bin_dir_name = "Scripts" if os.name == "nt" else "bin"
-    exe_name = "python.exe" if os.name == "nt" else "python"
+        runtime_key = os.path.normcase(str(Path(sys.prefix)))
     for name in _PROJECT_VENV_DIRECTORIES:
         venv = root / name
         try:
-            if file_ops.is_reparse_point(venv) or not venv.is_dir():
+            if os.path.normcase(str(venv.resolve())) == runtime_key:
                 continue
-            real = venv.resolve(strict=True)
         except (OSError, RuntimeError, ValueError):
             continue
-        if not file_ops._is_inside(real, root) or os.path.normcase(str(real)) == runtime_key:
-            continue
-        cfg = venv / "pyvenv.cfg"
-        bin_dir = venv / bin_dir_name
-        if file_ops.is_reparse_point(cfg) or not cfg.is_file():
-            continue
-        if file_ops.is_reparse_point(bin_dir) or not bin_dir.is_dir():
-            continue
-        python = bin_dir / exe_name
-        # Never hand back a repo-supplied binary: it must be what ``venv`` installs from ``home``.
-        if python.is_file() and project_venv.venv_interpreter_is_genuine(root, venv, python):
-            return str(python)
+        target = project_venv.venv_site_packages(root, venv)
+        if target is not None:
+            return target
     return None
 
 
-def _project_pip(root):
-    """``([python, "-I", "-m", "pip"], None)`` for the project's venv, or ``(None, error)``."""
-    python = _project_python(root)
-    if python is None:
+def _project_pip(root, action):
+    """``([sys.executable, "-I", "-m", "pip", action, "--target", site-packages], None)`` or ``(None, error)``.
+
+    Sonder's own interpreter runs pip and writes into the project venv's
+    site-packages; the repository's interpreter, ``.pth`` files and committed pip
+    are never executed. ``pip uninstall`` cannot target another folder, so
+    removal is refused rather than run against the runtime environment.
+    """
+    if action == "uninstall":
         return None, {
             "ok": False,
-            "error": "no project virtual environment (.venv or venv with pyvenv.cfg) under the root; "
-                     "refusing to run pip in the Sonder runtime's own interpreter",
+            "error": "pip uninstall cannot target a project virtual environment without running its "
+                     "interpreter, which is repo-controlled code; remove the package by hand",
             "manager": "pip",
         }
-    return [python, "-I", "-m", "pip"], None
+    target = _project_site_packages(root)
+    if target is None:
+        return None, {
+            "ok": False,
+            "error": "no project virtual environment (.venv or venv with pyvenv.cfg and a real "
+                     "site-packages) under the root; refusing to run pip in the Sonder runtime's own interpreter",
+            "manager": "pip",
+        }
+    return [sys.executable, "-I", "-m", "pip", action, "--target", str(target)], None
 
 
 def _requirements_link_error(root):
@@ -1238,10 +1237,10 @@ def dependency_add(root=".", packages_json="[]", dev=False, timeout=60, extra_ro
 
     mgr = _detect_package_manager(root)
     if mgr == "pip":
-        pip, pip_err = _project_pip(root)
+        pip, pip_err = _project_pip(root, "install")
         if pip_err:
             return pip_err
-        cmd = pip + ["install", "--"] + packages
+        cmd = pip + ["--"] + packages
     elif mgr == "uv":
         cmd = ["uv", "add"] + (["--dev"] if dev else []) + ["--"] + packages
     elif mgr == "npm":
@@ -1288,10 +1287,10 @@ def dependency_remove(root=".", packages_json="[]", timeout=60, extra_roots=""):
 
     mgr = _detect_package_manager(root)
     if mgr == "pip":
-        pip, pip_err = _project_pip(root)
+        pip, pip_err = _project_pip(root, "uninstall")
         if pip_err:
             return pip_err
-        cmd = pip + ["uninstall", "-y", "--"] + packages
+        cmd = pip + ["-y", "--"] + packages
     elif mgr == "uv":
         cmd = ["uv", "remove", "--"] + packages
     elif mgr == "npm":
@@ -1336,16 +1335,16 @@ def dependency_update(root=".", packages_json="[]", timeout=120, extra_roots="")
 
     mgr = _detect_package_manager(root)
     if mgr == "pip":
-        pip, pip_err = _project_pip(root)
+        pip, pip_err = _project_pip(root, "install")
         if pip_err:
             return pip_err
         if packages:
-            cmd = pip + ["install", "--upgrade", "--"] + packages
+            cmd = pip + ["--upgrade", "--"] + packages
         else:
             req_err = _requirements_link_error(root)
             if req_err:
                 return {"ok": False, "error": req_err, "manager": "pip"}
-            cmd = pip + ["install", "--upgrade", "-r", "requirements.txt"]
+            cmd = pip + ["--upgrade", "-r", "requirements.txt"]
     elif mgr == "uv":
         cmd = ["uv", "lock", "--upgrade"]
     elif mgr == "npm":
@@ -1901,45 +1900,48 @@ def _read_source(path, root):
     return data.decode("utf-8")
 
 
-def _apply_staged_rewrites(staged):
+def _apply_staged_rewrites(staged, root):
     """Write every staged rewrite, or none of them.
 
-    Each new content is first written to a temporary file beside its target;
-    only when all are staged are they swapped in with ``os.replace``.  If any
-    step fails, staged files are removed and already-swapped targets are
-    restored to their original content, so a failure never leaves a
-    half-renamed tree.
+    Each target's parent folder is opened first and held (``confined_read.PinnedDirectory``),
+    so a parent swapped for a junction after validation cannot redirect the temp file or the
+    replace outside ``root``. Each new content is first written to a temporary file beside
+    its target; only when all are staged are they swapped in. If any step fails, staged
+    files are removed and already-swapped targets are restored to their original content,
+    so a failure never leaves a half-renamed tree.
     """
-    import tempfile
-
     temps = []
     applied = []
-    try:
-        for path, _original, new_content in staged:
-            fd, temp = tempfile.mkstemp(dir=path.parent, prefix="." + path.name + ".", suffix=".rename")
-            temps.append(temp)
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-                handle.write(new_content)
-            shutil.copymode(path, temp)
-        for (path, original, _new), temp in zip(staged, temps, strict=True):
-            os.replace(temp, path)
-            applied.append((path, original))
-    except BaseException as error:
-        for temp in temps:
-            with contextlib.suppress(OSError):
-                os.unlink(temp)
-        unrestored = []
-        for path, original in reversed(applied):
-            try:
-                with open(path, "w", encoding="utf-8", newline="") as handle:
-                    handle.write(original)
-            except OSError:
-                unrestored.append(path)
-        if unrestored:
-            raise OSError(
-                "rename rollback could not restore %d file(s)" % len(unrestored)
-            ) from error
-        raise
+    with contextlib.ExitStack() as stack:
+        pins = {}
+
+        def pinned(path):
+            key = os.path.normcase(os.path.abspath(str(path.parent)))
+            if key not in pins:
+                pins[key] = stack.enter_context(confined_read.PinnedDirectory(root, path.parent))
+            return pins[key]
+
+        try:
+            for path, _original, new_content in staged:
+                pin = pinned(path)
+                temps.append((pin, pin.stage(path.name, new_content)))
+            for (path, original, _new), (pin, temp) in zip(staged, temps, strict=True):
+                pin.commit(temp, path.name)
+                applied.append((path, original))
+        except BaseException as error:
+            for pin, temp in temps:
+                pin.discard(temp)
+            unrestored = []
+            for path, original in reversed(applied):
+                try:
+                    pinned(path).rewrite(path.name, original)
+                except OSError:
+                    unrestored.append(path)
+            if unrestored:
+                raise OSError(
+                    "rename rollback could not restore %d file(s)" % len(unrestored)
+                ) from error
+            raise
 
 
 def _rename_refusal(error, dry_run, old_name, new_name):
@@ -2005,7 +2007,7 @@ def rename_symbol(root=".", old_name="", new_name="", glob="**/*.py", dry_run=Tr
         if refused:
             return _rename_refusal(refused, dry_run, old_name, new_name)
         try:
-            _apply_staged_rewrites(staged)
+            _apply_staged_rewrites(staged, root)
         except OSError as exc:
             return _rename_refusal("rename failed and was rolled back: %s" % exc, dry_run, old_name, new_name)
 
@@ -2124,25 +2126,56 @@ def diff_files(root=".", left="", right="", context=3, timeout=10, extra_roots="
             return {"ok": False, "error": "%s file not found: %s" % (label, requested)}
     # The diff is built from the bytes already read through the validated handles;
     # git is never handed the pathnames again.
-    return _diff_bytes(sides[0], sides[1], left_rel.as_posix(), right_rel.as_posix(), context)
+    return _diff_bytes(sides[0], sides[1], left_rel.as_posix(), right_rel.as_posix(), context, timeout, root)
 
 
-def _diff_bytes(left_bytes, right_bytes, left_name, right_name, context):
-    import difflib
+# Runs in a child interpreter (``-I``) that the parent kills at the timeout: difflib is
+# quadratic on hostile inputs and cannot be interrupted in-process. stdin carries one JSON
+# header line (byte lengths, context, names) followed by the left and right bytes.
+_DIFF_CHILD = "\n".join((
+    "import sys, json, difflib",
+    "raw = sys.stdin.buffer",
+    "head = json.loads(raw.readline())",
+    "left = raw.read(head['l']).decode('utf-8', errors='replace').splitlines()",
+    "right = raw.read(head['r']).decode('utf-8', errors='replace').splitlines()",
+    "body = difflib.unified_diff(left, right, fromfile='a/' + head['a'], tofile='b/' + head['b'],"
+    " n=head['n'], lineterm='')",
+    "text = 'diff --git a/%s b/%s' % (head['a'], head['b']) + chr(10) + chr(10).join(body) + chr(10)",
+    "sys.stdout.buffer.write(text.encode('utf-8', errors='replace'))",
+    "",
+))
 
+
+def _diff_bytes(left_bytes, right_bytes, left_name, right_name, context, timeout=10, root="."):
     started = time.time()
+    command = ["diff_files", left_name, right_name]
     if left_bytes == right_bytes:
         stdout = ""
     elif b"\0" in left_bytes[:8192] or b"\0" in right_bytes[:8192]:
         stdout = "Binary files a/%s and b/%s differ\n" % (left_name, right_name)
     else:
-        left_lines = left_bytes.decode("utf-8", errors="replace").splitlines()
-        right_lines = right_bytes.decode("utf-8", errors="replace").splitlines()
-        body = difflib.unified_diff(
-            left_lines, right_lines, fromfile="a/" + left_name, tofile="b/" + right_name,
-            n=context, lineterm="",
+        header = json.dumps({
+            "l": len(left_bytes), "r": len(right_bytes), "n": context, "a": left_name, "b": right_name,
+        }).encode("utf-8") + b"\n"
+        child = _run(
+            [sys.executable, "-I", "-c", _DIFF_CHILD], cwd=root, timeout=timeout,
+            stdin_bytes=header + left_bytes + right_bytes,
         )
-        stdout = "diff --git a/%s b/%s\n%s\n" % (left_name, right_name, "\n".join(body))
+        if child.get("timed_out"):
+            return {
+                "ok": False, "returncode": -1, "timed_out": True,
+                "elapsed_ms": int((time.time() - started) * 1000), "stdout": "",
+                "stderr": "diff_files exceeded the %d second timeout" % timeout,
+                "error": "diff exceeded the %d second timeout; compare smaller files" % timeout,
+                "command": command,
+            }
+        if child.get("returncode") != 0:
+            return {
+                "ok": False, "returncode": child.get("returncode", -1), "timed_out": False,
+                "elapsed_ms": int((time.time() - started) * 1000), "stdout": "",
+                "stderr": child.get("stderr", ""), "error": "diff failed", "command": command,
+            }
+        stdout = child.get("stdout", "")
     return {
         "ok": True,
         "returncode": 1 if stdout else 0,
@@ -2150,7 +2183,7 @@ def _diff_bytes(left_bytes, right_bytes, left_name, right_name, context):
         "elapsed_ms": int((time.time() - started) * 1000),
         "stdout": _trim(stdout),
         "stderr": "",
-        "command": ["diff_files", left_name, right_name],
+        "command": command,
     }
 
 

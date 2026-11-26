@@ -137,3 +137,197 @@ def _validate_handle(
         raise ConfinedReadRefused("the opened file is a secret or control-state path and is never read")
     if os.name != "nt" and not os.path.samestat(opened, os.stat(current, follow_symlinks=False)):
         raise ConfinedReadRefused("the file changed while it was validated")
+
+
+class PinnedDirectory:
+    """A directory below a root held open while files in it are replaced.
+
+    ``rename_symbol`` used to validate a path and then ``mkstemp``/``os.replace`` through
+    the same spelling, so a parent folder swapped for a junction after validation sent the
+    write outside the root. Here the directory is opened first (no link followed) and its
+    final handle path must lie inside the root:
+
+    - Windows: the handle is opened without ``FILE_SHARE_DELETE``, so the folder (and every
+      ancestor) cannot be renamed, deleted or replaced by a junction while it is held;
+      temp files and the replace use the handle's final path, never the caller's spelling.
+    - POSIX: temp creation, the target check and ``os.replace`` go through the directory
+      descriptor (``dir_fd``), so a swapped parent path is never consulted.
+
+    Every temp file's own handle path and the target's must also sit directly in that
+    directory. Thread affinity: one instance per thread; ``close`` releases the handle.
+    """
+
+    def __init__(self, root: Path | str, directory: Path | str) -> None:
+        self._root = os.path.abspath(str(root))
+        self._requested = os.path.abspath(str(directory))
+        self._fd = -1
+        self._path = ""
+
+    def __enter__(self) -> "PinnedDirectory":
+        self._open()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._fd >= 0:
+            try:
+                os.close(self._fd)
+            finally:
+                self._fd = -1
+
+    def _open(self) -> None:
+        if not _reader._inside(self._requested, self._root):
+            raise ConfinedReadRefused("the directory resolves outside the root")
+        if os.name == "nt":
+            self._fd = _open_directory_windows(self._requested)
+        else:
+            flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_CLOEXEC", 0))
+            try:
+                self._fd = os.open(self._requested, flags)
+            except OSError as exc:
+                raise ConfinedReadRefused(
+                    "the directory could not be opened without following a link: %s" % exc) from None
+        try:
+            try:
+                actual = _reader._opened_handle_path(self._fd)
+            except (PathEscapeRefused, OSError) as exc:
+                raise ConfinedReadRefused("the opened directory path could not be confirmed: %s" % exc) from None
+            if actual is None:
+                if os.name == "nt" or not os.path.samestat(
+                        os.fstat(self._fd), os.stat(self._requested, follow_symlinks=False)):
+                    raise ConfinedReadRefused("the opened directory path could not be confirmed")
+                actual = self._requested
+            if not _reader._inside(actual, self._root) or _reader._handle_relative(actual, self._root) is None:
+                raise ConfinedReadRefused("the opened directory resolves outside the root")
+            self._path = actual
+        except BaseException:
+            self.close()
+            raise
+
+    def _same_directory(self, actual: str, name: str) -> bool:
+        return _reader._norm(actual) == _reader._norm(os.path.join(self._path, name))
+
+    def stage(self, name: str, text: str) -> str:
+        """Write ``text`` to a new temp file in the directory; returns the temp name.
+
+        The mode of the existing ``name`` (if any) is copied. Raises ``ConfinedReadRefused``
+        when the temp file's own handle path is not directly in the pinned directory.
+        """
+        import secrets
+
+        if os.sep in name or (os.altsep and os.altsep in name) or name in ("", ".", ".."):
+            raise ConfinedReadRefused("not a plain file name")
+        temp = "." + name + "." + secrets.token_hex(6) + ".rename"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+        if os.name == "nt":
+            descriptor = os.open(os.path.join(self._path, temp), flags, 0o600)
+        else:
+            descriptor = os.open(temp, flags | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=self._fd)
+        try:
+            try:
+                actual = _reader._opened_handle_path(descriptor)
+            except (PathEscapeRefused, OSError):
+                actual = None
+            if actual is not None and not self._same_directory(actual, temp):
+                raise ConfinedReadRefused("the temporary file is not in the validated directory")
+            if actual is None and os.name == "nt":
+                raise ConfinedReadRefused("the temporary file path could not be confirmed")
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(text.encode("utf-8"))
+            try:
+                if os.name == "nt":
+                    mode = os.stat(os.path.join(self._path, name)).st_mode
+                    os.chmod(os.path.join(self._path, temp), stat.S_IMODE(mode))
+                else:
+                    os.fchmod(descriptor, stat.S_IMODE(os.stat(name, dir_fd=self._fd, follow_symlinks=False).st_mode))
+            except OSError:
+                pass
+        except BaseException:
+            os.close(descriptor)
+            self.discard(temp)
+            raise
+        os.close(descriptor)
+        return temp
+
+    def commit(self, temp: str, name: str) -> None:
+        """Atomically replace ``name`` with the staged ``temp`` after confirming the target."""
+        target = os.path.join(self._path, name)
+        if os.name == "nt":
+            try:
+                descriptor = _reader._open_no_follow(target)
+            except (PathEscapeRefused, SourceRefused) as exc:
+                raise ConfinedReadRefused(str(exc)) from None
+            except FileNotFoundError:
+                descriptor = -1
+            try:
+                if descriptor >= 0:
+                    actual = _reader._opened_handle_path(descriptor)
+                    if actual is None or not self._same_directory(actual, name):
+                        raise ConfinedReadRefused("the target is not directly in the validated directory")
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+            os.replace(os.path.join(self._path, temp), target)
+            return
+        try:
+            info = os.stat(name, dir_fd=self._fd, follow_symlinks=False)
+        except FileNotFoundError:
+            info = None
+        if info is not None and not stat.S_ISREG(info.st_mode):
+            raise ConfinedReadRefused("the target is a link or not a regular file")
+        os.replace(temp, name, src_dir_fd=self._fd, dst_dir_fd=self._fd)
+
+    def discard(self, temp: str) -> None:
+        try:
+            if os.name == "nt":
+                os.unlink(os.path.join(self._path, temp))
+            else:
+                os.unlink(temp, dir_fd=self._fd)
+        except OSError:
+            pass
+
+    def rewrite(self, name: str, text: str) -> None:
+        """Stage and commit ``text`` as the new content of ``name``."""
+        temp = self.stage(name, text)
+        try:
+            self.commit(temp, name)
+        except BaseException:
+            self.discard(temp)
+            raise
+
+
+def _open_directory_windows(path: str) -> int:
+    """Open a directory without following a link and without ``FILE_SHARE_DELETE``."""
+    import ctypes
+    import msvcrt
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [("attributes", ctypes.c_uint32), ("reparse_tag", ctypes.c_uint32)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    close = kernel32.CloseHandle
+    close.argtypes = [ctypes.c_void_p]
+    close.restype = ctypes.c_int
+    create = kernel32.CreateFileW
+    create.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                       ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    create.restype = ctypes.c_void_p
+    # GENERIC_READ, share read|write (not delete), OPEN_EXISTING, BACKUP_SEMANTICS | OPEN_REPARSE_POINT.
+    raw = create(path, 0x80000000, 0x3, None, 3, 0x02000000 | 0x00200000, None)
+    if raw == ctypes.c_void_p(-1).value or raw is None:
+        raise ConfinedReadRefused("the directory could not be opened (error %d)" % ctypes.get_last_error())
+    info = FileAttributeTagInfo()
+    inspect = kernel32.GetFileInformationByHandleEx
+    inspect.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    inspect.restype = ctypes.c_int
+    if not inspect(raw, 9, ctypes.byref(info), ctypes.sizeof(info)) or info.attributes & 0x400:
+        close(raw)
+        raise ConfinedReadRefused("the directory is a symlink or junction, or could not be inspected")
+    try:
+        return msvcrt.open_osfhandle(raw, os.O_RDONLY)
+    except Exception:
+        close(raw)
+        raise

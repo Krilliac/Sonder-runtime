@@ -220,12 +220,26 @@ function Get-RpcFwRuleFilter($Rule, [hashtable]$Map, [string]$Kind) {
     return $filter
 }
 
-# A peer rule is only peer-only when it is also pinned to one interface: an
-# InterfaceAlias of Any (or a wildcard, an empty or unreadable value) admits the
-# peer address on every adapter, where overlapping addressing or a spoofed or
-# routed packet can match it. The interface-type filter must be readable too
+# The comm listener binds 0.0.0.0, so a peer rule is only peer-only when it is
+# pinned to the ONE adapter that owns $BindHost. An alias of Any, a wildcard, an
+# empty or unreadable value, a list of several aliases, or a different adapter
+# admits the peer address on other interfaces, where overlapping addressing or a
+# spoofed or routed packet can match it. The match is case-sensitive, as the
+# installer pins the exact name. The interface-type filter must be readable too
 # (Any is fine once the alias is pinned). Anything missing or unreadable is wide.
-function Get-RpcFwInterfaceState($Rule, [hashtable]$InterfaceMap, [hashtable]$TypeMap) {
+function Get-RpcFwBindAdapterAlias([string]$BindHost) {
+    try {
+        $aliases = @(Get-NetIPAddress -IPAddress $BindHost -ErrorAction Stop |
+            ForEach-Object { ([string]$_.InterfaceAlias).Trim() } |
+            Where-Object { $_ -ne '' } |
+            Select-Object -Unique)
+    }
+    catch { return $null }
+    if ($aliases.Count -ne 1) { return $null }
+    return [string]$aliases[0]
+}
+
+function Get-RpcFwInterfaceState($Rule, [hashtable]$InterfaceMap, [hashtable]$TypeMap, $OwnerAlias) {
     $state = [pscustomobject]@{ Pinned = $false; Alias = '<unreadable>'; Type = '<unreadable>' }
     try {
         $ifaceFilter = Get-RpcFwRuleFilter $Rule $InterfaceMap 'Interface'
@@ -238,9 +252,14 @@ function Get-RpcFwInterfaceState($Rule, [hashtable]$InterfaceMap, [hashtable]$Ty
         $state.Alias = $aliases -join ','
         $state.Type = $types -join ','
         if ($aliases.Count -eq 0 -or $types.Count -eq 0) { return $state }
-        foreach ($alias in $aliases) {
-            if ($alias -ieq 'Any' -or [System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($alias)) { return $state }
+        if ($null -eq $OwnerAlias) {
+            $state.Alias = "$($state.Alias) (the adapter owning the bind address could not be resolved to exactly one alias)"
+            return $state
         }
+        if ($aliases.Count -ne 1) { return $state }
+        $alias = [string]$aliases[0]
+        if ($alias -ieq 'Any' -or [System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($alias)) { return $state }
+        if ($alias -cne [string]$OwnerAlias) { return $state }
         $state.Pinned = $true
     }
     catch {
@@ -427,6 +446,7 @@ function Assert-RpcFirewallLockdown {
     $portMap = Get-RpcFwFilterMap 'Port'
     $addrMap = Get-RpcFwFilterMap 'Address'
     $interfaceMap = Get-RpcFwFilterMap 'Interface'
+    $ownerAlias = Get-RpcFwBindAdapterAlias $BindHost
     $typeMap = Get-RpcFwFilterMap 'InterfaceType'
 
     $peerRules = @()
@@ -465,7 +485,7 @@ function Assert-RpcFirewallLockdown {
         $remotePeerOnly = ($null -ne $matchedSinglePeer)
         $ifaceState = $null
         if ($remotePeerOnly -and ($programIsRpc -or $coversTcpPort)) {
-            $ifaceState = Get-RpcFwInterfaceState $rule $interfaceMap $typeMap
+            $ifaceState = Get-RpcFwInterfaceState $rule $interfaceMap $typeMap $ownerAlias
             if (-not $ifaceState.Pinned) { $remotePeerOnly = $false }
         }
 
@@ -477,7 +497,7 @@ function Assert-RpcFirewallLockdown {
                 LocalPort     = (ConvertTo-RpcFwTokens $portFilter.LocalPort) -join ','
                 RemoteAddress = (ConvertTo-RpcFwTokens $addrFilter.RemoteAddress) -join ','
                 Keywords      = $keywords -join ','
-                InterfaceNote = $(if ($null -ne $ifaceState) { "; InterfaceAlias=$($ifaceState.Alias); InterfaceType=$($ifaceState.Type) (a peer rule must be pinned to one interface alias)" } else { '' })
+                InterfaceNote = $(if ($null -ne $ifaceState) { "; InterfaceAlias=$($ifaceState.Alias); InterfaceType=$($ifaceState.Type) (a peer rule must be pinned to the single interface alias that owns $BindHost)" } else { '' })
                 Program       = $program
                 Source        = ([string]$rule.PolicyStoreSource).Trim()
                 SourceType    = ([string]$rule.PolicyStoreSourceType).Trim()
