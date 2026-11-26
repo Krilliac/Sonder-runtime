@@ -722,3 +722,66 @@ def test_slotted_gateway_without_weakref_hits_warm_cache():
     assert gw.calls == 1
 
 
+@pytest.mark.parametrize(
+    ("raw", "include_path", "expected"),
+    [
+        ("https://user:secret@api.example:9443/private?key=leak#frag", False, "https://api.example:9443"),
+        ("https://user:secret@router.example:8443/v1?api_key=leak#frag", True, "https://router.example:8443/v1"),
+        ("  HTTP://[::1]:11437/custom  ", True, "http://[::1]:11437/custom"),
+        ("  HTTP://[::1]:11437/custom  ", False, "http://[::1]:11437"),
+        ("ftp://example.com/v1", True, ""),
+        ("   ", True, ""),
+        (123, True, ""),
+    ],
+)
+def test_safe_url_origin_handles_paths_credentials_and_invalid_inputs(
+    raw: object, include_path: bool, expected: str,
+):
+    assert legacy_chat_bridge._safe_url_origin(raw, include_path=include_path) == expected
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (
+            SimpleNamespace(display_base_url="https://router.example/v1", base_url="https://router.example/v1"),
+            "https://router.example/v1",
+        ),
+        (
+            SimpleNamespace(
+                display_base_url="https://user:secret@router.example:8443/v1?api_key=leak#frag",
+                base_url="https://ignored.example",
+            ),
+            "https://router.example:8443/v1",
+        ),
+        (
+            SimpleNamespace(display_base_url=None, base_url="https://user:secret@api.example:9443/private?k=v#f"),
+            "https://api.example:9443",
+        ),
+        (
+            SimpleNamespace(display_base_url="", base_url="http://[::1]:32123/v1"),
+            "http://[::1]:32123",
+        ),
+        (
+            SimpleNamespace(display_base_url=None, base_url="http://127.0.0.1:99999"),
+            "(endpoint unavailable)",
+        ),
+        (
+            SimpleNamespace(display_base_url="http://127.0.0.1:abc", base_url="http://127.0.0.1:11437"),
+            "(endpoint unavailable)",
+        ),
+        (
+            SimpleNamespace(display_base_url=123, base_url="http://127.0.0.1:11437"),
+            "(endpoint unavailable)",
+        ),
+        (
+            SimpleNamespace(display_base_url="   ", base_url="http://127.0.0.1:11437"),
+            "(endpoint unavailable)",
+        ),
+    ],
+)
+def test_provider_display_url_preserves_display_policy_and_degrades_safely(
+    config: SimpleNamespace, expected: str,
+):
+    gw = SimpleNamespace(_resolved_config=lambda: config)
+    assert legacy_chat_bridge._provider_display_url(gw, "sonder_inference") == expected
