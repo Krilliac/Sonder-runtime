@@ -158,10 +158,16 @@ def bind(
     return _row_dict(row)
 
 
+def _bounded_limit(limit: int, *, maximum: int) -> int:
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ValueError("limit must be an integer")
+    return max(1, min(limit, maximum))
+
+
 def lookup_targets(
     source_type: str, source_id: str, target_type: str = "", *, limit: int = 200,
 ) -> list[dict]:
-    bounded = max(1, min(int(limit), 500))
+    bounded = _bounded_limit(limit, maximum=500)
     try:
         conn = _connection()
         if target_type:
@@ -184,7 +190,7 @@ def lookup_targets(
 def lookup_sources(
     target_type: str, target_id: str, source_type: str = "", *, limit: int = 200,
 ) -> list[dict]:
-    bounded = max(1, min(int(limit), 500))
+    bounded = _bounded_limit(limit, maximum=500)
     try:
         conn = _connection()
         if source_type:
@@ -228,7 +234,7 @@ def _close(binding_id: str, status: str, reason: str) -> dict:
 
 
 def active_bindings(limit: int = 50) -> list[dict]:
-    bounded = max(1, min(int(limit), 200))
+    bounded = _bounded_limit(limit, maximum=200)
     try:
         conn = _connection()
         rows = conn.execute(

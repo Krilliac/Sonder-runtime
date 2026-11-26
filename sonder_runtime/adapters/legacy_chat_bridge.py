@@ -52,8 +52,12 @@ _MODEL_PROBE_MAX_NAME_LENGTH = 256
 _ScopeKey = tuple[int, str, str, tuple[str, ...]]
 
 
-def _safe_url_origin(raw: object) -> str:
-    """Extract a credential-free ``scheme://host[:port]`` origin for keying/logs."""
+def _safe_url_origin(raw: object, *, include_path: bool = False) -> str:
+    """Extract a credential-free ``scheme://host[:port]`` origin for keying/logs.
+
+    When ``include_path`` is True, preserve the URL path (for provider configs
+    whose ``display_base_url`` property already enforces a safe path policy).
+    """
     if not isinstance(raw, str):
         return ""
     text = raw.strip()
@@ -68,10 +72,11 @@ def _safe_url_origin(raw: object) -> str:
         return ""
     host = parts.hostname.lower()
     if ":" in host:
-        host = "[%s]" % host
+        host = f"[{host}]"
     if port is not None:
-        host = "%s:%d" % (host, port)
-    return urlunsplit((parts.scheme.lower(), host, "", "", ""))
+        host = f"{host}:{port}"
+    path = parts.path if include_path else ""
+    return urlunsplit((parts.scheme.lower(), host, path, "", ""))
 
 
 def _extract_model_name(raw: object) -> str:
@@ -908,17 +913,12 @@ def _provider_display_url(gateway: object, provider: str) -> str:
             config = settings()
             display = getattr(config, "display_base_url", None)
             raw = display or getattr(config, "base_url", "")
-            parts = urlsplit(raw)
-            if parts.scheme not in ("http", "https") or not parts.hostname:
-                break
-            host = parts.hostname
-            if ":" in host:
-                host = "[%s]" % host
-            if parts.port is not None:
-                host += ":%d" % parts.port
             # Provider display properties already apply their path policy.
             # Generic configs have no such guarantee: show only their origin.
-            return urlunsplit((parts.scheme, host, parts.path if display else "", "", ""))
+            resolved = _safe_url_origin(raw, include_path=bool(display))
+            if not resolved:
+                break
+            return resolved
     except Exception:  # noqa: BLE001 - display metadata must not mask the provider failure
         pass
     return "(endpoint unavailable)"
