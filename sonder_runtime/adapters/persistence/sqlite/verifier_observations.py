@@ -45,10 +45,26 @@ def _json(value: object) -> str:
 
 def _observation(value: dict) -> LearningObservation:
     from datetime import datetime
-    value = dict(value)
-    value["observed_at"] = datetime.fromisoformat(value["observed_at"])
-    value["provenance"] = tuple(value["provenance"])
-    return LearningObservation(**value)
+    if not isinstance(value, dict):
+        raise ValueError("corrupt verifier observation payload")
+    try:
+        copied = dict(value)
+        copied["observed_at"] = datetime.fromisoformat(copied["observed_at"])
+        copied["provenance"] = tuple(copied["provenance"])
+        return LearningObservation(**copied)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("corrupt verifier observation payload") from exc
+
+
+def _decode_pair(receipt_raw: str, observation_raw: str) -> tuple[VerifierReceipt, LearningObservation]:
+    try:
+        receipt_data = json.loads(receipt_raw)
+        observation_data = json.loads(observation_raw)
+        if not isinstance(receipt_data, dict) or not isinstance(observation_data, dict):
+            raise ValueError("corrupt verifier observation JSON")
+        return VerifierReceipt(**receipt_data), _observation(observation_data)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("corrupt verifier observation JSON") from exc
 
 
 class SQLiteVerifierObservationRepository:
@@ -88,10 +104,7 @@ class SQLiteVerifierObservationRepository:
         rows = self._connection.execute(
             self._NEGATIVE_QUERY, (project_scope, project_scope, content, limit)
         ).fetchall()
-        return tuple(
-            (VerifierReceipt(**json.loads(row[0])), _observation(json.loads(row[1])))
-            for row in rows
-        )
+        return tuple(_decode_pair(row[0], row[1]) for row in rows)
 
     def list_subject_pairs(
         self, project_scope: str, content: str, *, limit: int = 10_001,
@@ -102,10 +115,7 @@ class SQLiteVerifierObservationRepository:
         rows = self._connection.execute(
             self._SUBJECT_QUERY, (project_scope, project_scope, content, limit)
         ).fetchall()
-        return tuple(
-            (VerifierReceipt(**json.loads(row[0])), _observation(json.loads(row[1])))
-            for row in rows
-        )
+        return tuple(_decode_pair(row[0], row[1]) for row in rows)
 
     @contextmanager
     def _transaction(self):
@@ -116,7 +126,7 @@ class SQLiteVerifierObservationRepository:
             self._connection.execute("BEGIN IMMEDIATE")
         try:
             yield
-        except Exception:
+        except BaseException:
             if nested:
                 self._connection.execute("ROLLBACK TO SAVEPOINT sonder_verifier_observation_write")
                 self._connection.execute("RELEASE SAVEPOINT sonder_verifier_observation_write")
@@ -173,7 +183,26 @@ class SQLiteVerifierObservationRepository:
         ).fetchone()
         if row is None:
             return None
-        return VerifierReceipt(**json.loads(row[0])), _observation(json.loads(row[1]))
+        return _decode_pair(row[0], row[1])
+
+    def get_many(
+        self, observation_ids: tuple[str, ...] | list[str],
+    ) -> dict[str, tuple[VerifierReceipt, LearningObservation]]:
+        """Batch-load verifier observations in bounded SQL chunks."""
+        unique = tuple(dict.fromkeys(oid for oid in observation_ids if oid))
+        result: dict[str, tuple[VerifierReceipt, LearningObservation]] = {}
+        chunk_size = 500
+        for start in range(0, len(unique), chunk_size):
+            chunk = unique[start:start + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self._connection.execute(
+                "SELECT observation_id, receipt_json, observation_json "
+                f"FROM verifier_learning_observations WHERE observation_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for obs_id, receipt_raw, obs_raw in rows:
+                result[obs_id] = _decode_pair(receipt_raw, obs_raw)
+        return result
 
     def list_pairs(self, *, limit: int = 10_001) -> tuple[tuple[VerifierReceipt, LearningObservation], ...]:
         """Read a bounded complete snapshot, or let callers fail closed."""
@@ -184,10 +213,7 @@ class SQLiteVerifierObservationRepository:
             "FROM verifier_learning_observations ORDER BY rowid LIMIT ?",
             (limit,),
         ).fetchall()
-        return tuple(
-            (VerifierReceipt(**json.loads(row[0])), _observation(json.loads(row[1])))
-            for row in rows
-        )
+        return tuple(_decode_pair(row[0], row[1]) for row in rows)
 
     def list(self, *, limit: int = 256) -> tuple[LearningObservation, ...]:
         if type(limit) is not int or not 1 <= limit <= 10_000:
@@ -196,7 +222,14 @@ class SQLiteVerifierObservationRepository:
             "SELECT observation_json FROM verifier_learning_observations ORDER BY rowid LIMIT ?",
             (limit,),
         ).fetchall()
-        return tuple(_observation(json.loads(row[0])) for row in rows)
+        decoded = []
+        for row in rows:
+            try:
+                obs_data = json.loads(row[0])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("corrupt verifier observation JSON") from exc
+            decoded.append(_observation(obs_data))
+        return tuple(decoded)
 
 
 __all__ = ["SQLiteVerifierObservationRepository"]

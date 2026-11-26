@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 _STRONG_SYNTH_TIERS = frozenset({"code", "general", "creative"})
@@ -24,7 +24,7 @@ _CODE_LEAD_RE = re.compile(
 )
 
 
-def candidate_references(answers):
+def candidate_references(answers: Iterable[Mapping[str, Any]]) -> str:
     """Serialize model answers as data, never as executable prompt sections."""
     return json.dumps([
         {
@@ -37,7 +37,7 @@ def candidate_references(answers):
     ], ensure_ascii=True, separators=(",", ":"))
 
 
-def candidate_boundary(candidate_data):
+def candidate_boundary(candidate_data: str) -> str:
     """Frame synthesized candidates as quoted, untrusted reference data.
 
     Candidate text is model output, so it can contain convincing imperative
@@ -57,7 +57,7 @@ def candidate_boundary(candidate_data):
     ) % candidate_data
 
 
-def code_synthesis_prompt(question, answers):
+def code_synthesis_prompt(question: str, answers: Iterable[Mapping[str, Any]]) -> str:
     """Synthesis contract for code, where prose merging is actively harmful.
 
     Blending two source files line by line produces something that resembles
@@ -90,7 +90,12 @@ KEEP_CITATIONS_RULE = (
 )
 
 
-def synthesis_prompt(question, answers, *, keep_citations=False):
+def synthesis_prompt(
+    question: str,
+    answers: Iterable[Mapping[str, Any]],
+    *,
+    keep_citations: bool = False,
+) -> str:
     candidate_data = candidate_references(answers)
     return (
         "Several local models were asked the same question independently. "

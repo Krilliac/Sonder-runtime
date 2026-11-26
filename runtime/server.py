@@ -4960,7 +4960,6 @@ def _preserve_reasoning_failure_usage(
 # HTTP chat through the ModelGateway for non-Ollama rungs: the bridge lives in
 # sonder_runtime/adapters/legacy_chat_bridge.py; these wrappers inject policy.
 
-
 def _bridge_provider_for_tier(tier_label, cloud=False):
     """The non-Ollama provider serving a local rung, or None for Ollama."""
     graph = _APP_GRAPH if (_APP_GRAPH is not None or cloud or not str(tier_label or "").strip().lower().startswith("model:")) else _application()
@@ -4973,6 +4972,7 @@ def _bridge_endpoint_is_loopback(provider):
 
 
 _provider_bridge.set_endpoint_locality_probe(_bridge_endpoint_is_loopback)
+_provider_bridge.set_native_tools_probe(lambda provider: _legacy_chat_bridge.native_tools_supported(provider, _APP_GRAPH))
 
 
 def _bridge_operation_context(timeout, cancel_check):
@@ -5024,6 +5024,10 @@ def _chat_request(
         think_supported=_think_option_supported,
         model=model,
     )
+    if tools and not text_only:
+        payload = {**payload, "tools": list(tools)}
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
     _tool_lane_guard.require_generation(model, rung=bridged_rung, text_only=text_only, payload=payload)  # deny list unless text-only
     base_loopback = ollama_endpoint.is_loopback(BASE)
     rerouted = None if bridged_rung is None else _legacy_chat_bridge.ollama_only_reroute(  # a step Inference cannot carry
@@ -5087,10 +5091,6 @@ def _chat_request(
             and _think_option_supported(model)
         ):
             payload["think"] = True
-    if tools and not text_only:
-        payload = {**payload, "tools": list(tools)}
-        if tool_choice is not None:
-            payload["tool_choice"] = tool_choice
     out, attempts = _post_model(
         "/api/chat",
         payload,

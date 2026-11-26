@@ -177,22 +177,28 @@ class _RawDisclosureState extends State<RawDisclosure> {
         HoverSurface(
           onTap: () => setState(() => _open = !_open),
           semanticLabel: '${widget.title}, ${_open ? 'expanded' : 'collapsed'}',
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-                horizontal: SonderSpace.lg, vertical: SonderSpace.md),
-            child: Row(children: [
-              AnimatedRotation(
-                turns: _open ? 0.25 : 0,
-                duration: SonderMotion.of(context, SonderMotion.fast),
-                child: Icon(Icons.chevron_right, size: 18, color: tokens.text2),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: ExcludeSemantics(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: SonderSpace.lg, vertical: SonderSpace.md),
+                child: Row(children: [
+                  AnimatedRotation(
+                    turns: _open ? 0.25 : 0,
+                    duration: SonderMotion.of(context, SonderMotion.fast),
+                    child:
+                        Icon(Icons.chevron_right, size: 18, color: tokens.text2),
+                  ),
+                  const SizedBox(width: SonderSpace.sm),
+                  Expanded(
+                    child: Text(widget.title,
+                        style: text.bodyMedium
+                            ?.copyWith(fontWeight: FontWeight.w500)),
+                  ),
+                ]),
               ),
-              const SizedBox(width: SonderSpace.sm),
-              Expanded(
-                child: Text(widget.title,
-                    style: text.bodyMedium
-                        ?.copyWith(fontWeight: FontWeight.w500)),
-              ),
-            ]),
+            ),
           ),
         ),
         SonderReveal(
