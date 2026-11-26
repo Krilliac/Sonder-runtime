@@ -50,6 +50,25 @@ class SettingsSection extends StatelessWidget {
       body.add(children[i]);
     }
     final hasHeader = title != null || trailing != null;
+    final scale = MediaQuery.textScalerOf(context).scale(1.0).clamp(1.0, 2.5);
+    final headerText = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (title != null)
+          Semantics(
+            header: true,
+            child: Text(title!,
+                style: text.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
+          ),
+        if (description != null)
+          Padding(
+            padding: const EdgeInsets.only(top: SonderSpace.xxs),
+            child: Text(description!, style: text.bodySmall),
+          ),
+      ],
+    );
+    final stackHeader =
+        trailing != null && scale > 1.25 && MediaQuery.sizeOf(context).width < 480 * scale;
     return Padding(
       padding: const EdgeInsets.only(bottom: SonderSpace.lg),
       child: Column(
@@ -59,31 +78,22 @@ class SettingsSection extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.fromLTRB(
                   SonderSpace.xs, 0, 0, SonderSpace.sm),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Expanded(
-                    child: Column(
+              child: stackHeader
+                  ? Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        if (title != null)
-                          Semantics(
-                            header: true,
-                            child: Text(title!,
-                                style: text.titleSmall
-                                    ?.copyWith(fontWeight: FontWeight.w600)),
-                          ),
-                        if (description != null)
-                          Padding(
-                            padding: const EdgeInsets.only(top: SonderSpace.xxs),
-                            child: Text(description!, style: text.bodySmall),
-                          ),
+                        headerText,
+                        const SizedBox(height: SonderSpace.xs),
+                        trailing!,
+                      ],
+                    )
+                  : Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Expanded(child: headerText),
+                        if (trailing != null) trailing!,
                       ],
                     ),
-                  ),
-                  if (trailing != null) trailing!,
-                ],
-              ),
             ),
           if (body.isNotEmpty)
             Container(
@@ -315,7 +325,9 @@ class ValueRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(
           horizontal: SonderSpace.lg, vertical: SonderSpace.xs),
       child: LayoutBuilder(builder: (context, constraints) {
-        final narrow = constraints.maxWidth < 480;
+        final scale =
+            MediaQuery.textScalerOf(context).scale(1.0).clamp(1.0, 2.5);
+        final narrow = constraints.maxWidth < 480 * scale;
         final labelBlock = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
@@ -329,20 +341,8 @@ class ValueRow extends StatelessWidget {
               ),
           ],
         );
-        final valueBlock = Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (kind != null) ...[
-              StatusMark(kind!, word: word, size: 12),
-              const SizedBox(width: SonderSpace.sm),
-            ],
-            Flexible(
-              child: SelectableText(value,
-                  style: valueStyle,
-                  textAlign: narrow ? TextAlign.start : TextAlign.end),
-            ),
-            if (copyable)
-              IconButton(
+        final copyButton = copyable
+            ? IconButton(
                 tooltip: 'Copy $label',
                 iconSize: 16,
                 icon: const Icon(Icons.copy_outlined),
@@ -352,13 +352,45 @@ class ValueRow extends StatelessWidget {
                     showSonderToast(context, '$label copied');
                   }
                 },
-              ),
-            if (trailing != null) ...[
-              const SizedBox(width: SonderSpace.xs),
-              trailing!,
-            ],
-          ],
+              )
+            : null;
+        final selectableValue = Semantics(
+          label: value,
+          excludeSemantics: true,
+          child: SelectableText(value,
+              style: valueStyle,
+              textAlign: narrow ? TextAlign.start : TextAlign.end),
         );
+        final Widget valueBlock;
+        if (narrow && scale > 1.25) {
+          valueBlock = Wrap(
+            spacing: SonderSpace.sm,
+            runSpacing: SonderSpace.xs,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (kind != null) StatusMark(kind!, word: word, size: 12),
+              selectableValue,
+              if (copyButton != null) copyButton,
+              if (trailing != null) trailing!,
+            ],
+          );
+        } else {
+          valueBlock = Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (kind != null) ...[
+                StatusMark(kind!, word: word, size: 12),
+                const SizedBox(width: SonderSpace.sm),
+              ],
+              Flexible(child: selectableValue),
+              if (copyButton != null) copyButton,
+              if (trailing != null) ...[
+                const SizedBox(width: SonderSpace.xs),
+                trailing!,
+              ],
+            ],
+          );
+        }
         if (narrow) {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
