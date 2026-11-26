@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sqlite3
 from typing import Any, Callable, Sequence
+
+MAX_BACKFILL_LIMIT = 500
 
 
 @dataclass(frozen=True)
@@ -110,12 +113,14 @@ def run_embedding_backfill(
     count_remaining: Callable[..., int],
 ) -> BackfillResult:
     """Validate local-only constraints, optionally refresh embeddings, and format report."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("backfill limit must be a positive integer")
+    bounded_limit = min(limit, MAX_BACKFILL_LIMIT)
     if is_cloud_model(approved_model):
         return BackfillResult(error_detail=spec.cloud_error_template % approved_model)
     if not endpoint_is_loopback(approved_base):
         return BackfillResult(error_detail=spec.loopback_error)
 
-    conn = open_db()
     updated = 0
     failed: list[str] = []
     conflicted: list[str] = []
@@ -123,6 +128,7 @@ def run_embedding_backfill(
     target_model = canonical_model_name(approved_model)
     target_revision = current_revision(model=approved_model, base=approved_base)
     revision_changed = False
+    conn = open_db()
     try:
         if apply:
             probe = embed_fn(
@@ -148,7 +154,7 @@ def run_embedding_backfill(
                 target_model,
                 revision=target_revision,
                 dimension=target_dimension,
-                limit=limit,
+                limit=bounded_limit,
             )
         )
         if apply:
@@ -184,7 +190,12 @@ def run_embedding_backfill(
                         updated += 1
                     else:
                         conflicted.append(row_id)
-                except (OSError, TypeError, ValueError, OverflowError):
+                except (OSError, TypeError, ValueError, OverflowError, sqlite3.Error):
+                    if getattr(conn, "in_transaction", False):
+                        try:
+                            conn.rollback()
+                        except sqlite3.Error:
+                            pass
                     failed.append(row_id)
         remaining = count_remaining(
             conn,

@@ -18,6 +18,7 @@ import 'api/work_runs.dart';
 import 'models.dart';
 import 'runtime/ecosystem.dart';
 import 'runtime/model_catalog.dart';
+import 'settings/execution_mode_choice.dart' show normalizeExecutionMode;
 
 // The API layer is split by domain under lib/api/; this file stays the
 // barrel so every `import 'api.dart'` keeps working.
@@ -1740,6 +1741,7 @@ class SonderApi implements SonderApiPort {
     Object? sessionTemperature,
     Object? sessionReasoningEffort,
     String? persona,
+    String? executionMode,
     String? history,
   }) async {
     if (history != null && history != 'client' && history != 'auto') {
@@ -1750,6 +1752,7 @@ class SonderApi implements SonderApiPort {
             ? await _discoverApproximateLocation()
             : null;
     final trimmedPersona = persona?.trim();
+    final normalizedExecutionMode = normalizeExecutionMode(executionMode);
     return jsonEncode({
       'model': model,
       'context_size': contextSize,
@@ -1762,6 +1765,8 @@ class SonderApi implements SonderApiPort {
         'session_reasoning_effort': sessionReasoningEffort,
       if (trimmedPersona != null && trimmedPersona.isNotEmpty)
         'persona': trimmedPersona,
+      if (normalizedExecutionMode != null)
+        'execution_mode': normalizedExecutionMode,
       'location_consent': allowApproximateLocation,
       if (locationHint != null) 'location_hint': locationHint,
       // Server S5: "client" means use only the messages sent, never inject
@@ -1808,6 +1813,7 @@ class SonderApi implements SonderApiPort {
     Object? sessionTemperature,
     Object? sessionReasoningEffort,
     String? persona,
+    String? executionMode,
     String? history,
     bool clientExec = true,
     CancelToken? cancel,
@@ -1825,6 +1831,7 @@ class SonderApi implements SonderApiPort {
         sessionTemperature: sessionTemperature,
         sessionReasoningEffort: sessionReasoningEffort,
         persona: persona,
+        executionMode: executionMode,
         history: history,
         clientExec: clientExec,
         cancel: token,
@@ -1847,6 +1854,7 @@ class SonderApi implements SonderApiPort {
     Object? sessionTemperature,
     Object? sessionReasoningEffort,
     String? persona,
+    String? executionMode,
     String? history,
     bool clientExec = true,
     Duration? timeout,
@@ -1861,6 +1869,7 @@ class SonderApi implements SonderApiPort {
       sessionTemperature: sessionTemperature,
       sessionReasoningEffort: sessionReasoningEffort,
       persona: persona,
+      executionMode: executionMode,
       history: history,
       stream: false,
     );
@@ -1955,6 +1964,7 @@ class SonderApi implements SonderApiPort {
     Object? sessionTemperature,
     Object? sessionReasoningEffort,
     String? persona,
+    String? executionMode,
     String? history,
     bool clientExec = true,
     CancelToken? cancel,
@@ -1972,6 +1982,7 @@ class SonderApi implements SonderApiPort {
         sessionTemperature: sessionTemperature,
         sessionReasoningEffort: sessionReasoningEffort,
         persona: persona,
+        executionMode: executionMode,
         history: history,
         stream: true,
       );

@@ -259,6 +259,7 @@ class _Aggregate:
         self.parts: list[str] = []
         self.reasoning_parts: list[str] = []
         self._tool_calls: dict[int, dict[str, object]] = {}
+        self.logprobs_content: list[object] = []
         self.model: object = None
         self.ident: object = None
         self.finish_reason: object = None
@@ -295,6 +296,11 @@ class _Aggregate:
             raise _malformed("a choice is not an object", self._label)
         if choice.get("finish_reason") is not None:
             self.finish_reason = choice["finish_reason"]
+        raw_logprobs = choice.get("logprobs")
+        if isinstance(raw_logprobs, dict):
+            raw_content = raw_logprobs.get("content")
+            if isinstance(raw_content, list) and raw_content:
+                self.logprobs_content.extend(raw_content)
         delta = choice.get("delta")
         piece = delta.get("content") if isinstance(delta, dict) else None
         reasoning_piece = None
@@ -360,13 +366,16 @@ class _Aggregate:
             message["reasoning_content"] = "".join(self.reasoning_parts)
         if self._tool_calls:
             message["tool_calls"] = [self._tool_calls[idx] for idx in sorted(self._tool_calls)]
+        choice_doc: dict[str, object] = {
+            "index": 0,
+            "message": message,
+            "finish_reason": self.finish_reason,
+        }
+        if self.logprobs_content:
+            choice_doc["logprobs"] = {"content": self.logprobs_content}
         document: dict[str, object] = {
             "object": "chat.completion",
-            "choices": [{
-                "index": 0,
-                "message": message,
-                "finish_reason": self.finish_reason,
-            }],
+            "choices": [choice_doc],
         }
         if self.ident is not None:
             document["id"] = self.ident

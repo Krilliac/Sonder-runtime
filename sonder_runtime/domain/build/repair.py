@@ -222,8 +222,12 @@ def _translation_phases(text: str, *, trigraphs: bool = True, digraphs: bool = T
 
 # Characters the masking loop only copies: ASCII that cannot start a comment,
 # a literal, a raw-string prefix, a pp-number or a digraph. Runs of them are
-# copied in one step.
-_PLAIN_RUN_RE = re.compile(r"(?:[^/\"'<:%0-9.uULR\x80-\U0010ffff]|u(?!8?R\")|[UL](?!R\")|R(?!\"))+")
+# copied in one step. The four branches are disjoint on their first character
+# and nothing follows the repeat, so possessive quantifiers prevent CPython's
+# sre from pushing one heap backtracking frame per plain character.
+_PLAIN_RUN_RE = re.compile(
+    r"(?:[^/\"'<:%0-9.uULR\x80-\U0010ffff]++|u(?!8?R\")|[UL](?!R\")|R(?!\"))++"
+)
 _LETTERS_RE = re.compile(r"[A-Za-z_]+")
 _MASK_STARTERS = "/\"'<:%0123456789."  # never plain: skip the run match for these
 _ASCII_DIGITS = frozenset("0123456789")

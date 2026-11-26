@@ -264,10 +264,20 @@ def discover_migrations(store: str) -> tuple[Migration, ...]:
 
 
 def open_connection(db_path: str, *, busy_timeout_ms: int = 5000) -> sqlite3.Connection:
+    if (
+        isinstance(busy_timeout_ms, bool)
+        or not isinstance(busy_timeout_ms, int)
+        or busy_timeout_ms < 0
+    ):
+        raise ValueError("busy_timeout_ms must be a non-negative integer")
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = owned_sqlite_connect(db_path, isolation_level=None)
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+    try:
+        conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+        conn.execute("PRAGMA foreign_keys=ON")
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 

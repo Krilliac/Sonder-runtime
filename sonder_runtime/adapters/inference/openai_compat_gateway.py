@@ -54,6 +54,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import http.client
+import inspect
 import ipaddress
 import json
 import logging
@@ -110,7 +111,7 @@ from ...domain.common.errors import (
     InvalidInput,
     SonderError,
 )
-from ...domain.gpu_admission import RefusalReason
+from ...domain.gpu_admission import AdmissionLane, RefusalReason
 from ...domain.openai_spend_policy import (
     MAX_PRICE_USD_PER_MTOK,
     ChatPrice,
@@ -984,6 +985,7 @@ ExtraHeaders = Callable[[OperationContext], Mapping[str, str]]
 HttpErrorClassifier = Callable[[int, bytes], "SonderError | None"]
 ConnectErrorClassifier = Callable[[BaseException], "SonderError | None"]
 GetTransport = Callable[[str, dict, float], "tuple[int, bytes]"]
+ResidencyProbe = Callable[..., bool | None]
 
 # Static, provider-shape facts — never a live probe result.  One configured
 # endpoint and model serve every request; there is no per-request local/cloud
@@ -1320,6 +1322,10 @@ class OpenAICompatibleGateway:
     * ``get_transport(url, headers, timeout) -> (status, body)`` -- the GET
       seam behind :meth:`get_json`; it returns non-2xx statuses instead of
       raising so callers can read error bodies such as a 503 health document.
+    * ``residency_probe(model, base_url) -> bool | None`` (alias
+      ``is_model_resident``) -- optional callback used by local GPU admission
+      to distinguish warm resident models (``True``) from cold loads (``False``)
+      or unknown state (``None``).
     """
 
     def __init__(
@@ -1330,6 +1336,8 @@ class OpenAICompatibleGateway:
         http_error_classifier: HttpErrorClassifier | None = None,
         connect_error_classifier: ConnectErrorClassifier | None = None,
         get_transport: GetTransport | None = None,
+        residency_probe: ResidencyProbe | None = None,
+        is_model_resident: ResidencyProbe | None = None,
         spend_ledger: SpendLedger | None | _DefaultLedger = _DEFAULT_LEDGER,
     ):
         # Sentinel: metered with the OpenAI ledger in the state home.  None:
@@ -1342,6 +1350,12 @@ class OpenAICompatibleGateway:
             )
         elif spend_ledger is not None and not isinstance(spend_ledger, SpendLedger):
             raise TypeError("spend_ledger must be a SpendLedger or None")
+        if residency_probe is not None and is_model_resident is not None:
+            raise TypeError("pass at most one of residency_probe or is_model_resident")
+        selected_residency = residency_probe if residency_probe is not None else is_model_resident
+        if selected_residency is not None and not callable(selected_residency):
+            raise TypeError("residency_probe must be callable")
+        self._residency_probe: ResidencyProbe | None = selected_residency
         self._spend_ledger: SpendLedger | None = spend_ledger
         self._provider_label = str(provider_label)
         # Fail at construction on a label that would not map to a provider id.
@@ -1368,6 +1382,10 @@ class OpenAICompatibleGateway:
             )
         else:
             logger.info("OpenAI-compatible gateway created with deferred env config")
+
+    @property
+    def residency_probe(self) -> ResidencyProbe | None:
+        return self._residency_probe
 
     @property
     def capabilities(self) -> frozenset[str]:
@@ -2095,7 +2113,7 @@ class OpenAICompatibleGateway:
         spend.charge(prompt, 0)
 
     def _embedding_results(self, data: dict, items: list, model: str) -> Sequence[Embedding]:
-        rows = data.get("data") or []
+        rows = data.get("data")
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise DependencyUnavailable("endpoint returned invalid embedding data")
         if len(rows) != len(items):
@@ -2103,8 +2121,10 @@ class OpenAICompatibleGateway:
                 "endpoint returned %d embeddings for %d inputs"
                 % (len(rows), len(items))
             )
-        indexes = [row.get("index") for row in rows]
-        if all(isinstance(index, int) for index in indexes):
+        if any("index" in row for row in rows):
+            indexes = [row.get("index") for row in rows]
+            if any(type(index) is not int for index in indexes):
+                raise DependencyUnavailable("endpoint returned invalid embedding indexes")
             if set(indexes) != set(range(len(items))):
                 raise DependencyUnavailable("endpoint returned invalid embedding indexes")
             # OpenAI-compatible servers identify input alignment by index; using
@@ -2112,8 +2132,16 @@ class OpenAICompatibleGateway:
             # out of order.
             rows = sorted(rows, key=lambda row: row["index"])
         results = []
+        expected_dim: int | None = None
         for row in rows:
             vector = require_embedding_vector(row.get("embedding"))
+            if expected_dim is None:
+                expected_dim = len(vector)
+            elif len(vector) != expected_dim:
+                raise DependencyUnavailable(
+                    "endpoint returned inconsistent embedding dimensions (%d vs %d)"
+                    % (len(vector), expected_dim)
+                )
             results.append(Embedding(vector=vector, model=model))
         return results
 
@@ -2292,22 +2320,73 @@ class OpenAICompatibleGateway:
             return None
         return self._connect_error_classifier(reason)
 
-    @staticmethod
+    def _probe_model_residency(
+        self, model: str, cfg: OpenAICompatibleConfig,
+    ) -> bool | None:
+        """Query the configured residency callback for *(model, cfg.base_url)*."""
+        probe = self._residency_probe
+        if probe is None:
+            return None
+        try:
+            sig = inspect.signature(probe)
+            positional = [
+                param
+                for param in sig.parameters.values()
+                if param.kind in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+            has_varargs = any(
+                param.kind == inspect.Parameter.VAR_POSITIONAL
+                for param in sig.parameters.values()
+            )
+        except (TypeError, ValueError):
+            positional = []
+            has_varargs = True
+        if has_varargs or len(positional) >= 2:
+            verdict = probe(model, cfg.base_url)
+        elif len(positional) == 1:
+            verdict = probe(model)
+        else:
+            verdict = probe()
+        if verdict is not None and type(verdict) is not bool:
+            raise TypeError("residency probe must return bool or None")
+        return verdict
+
+    def _residency_callback(
+        self, model: str, cfg: OpenAICompatibleConfig,
+    ) -> Callable[[], bool | None] | None:
+        if (
+            self._residency_probe is None
+            and type(self)._probe_model_residency is OpenAICompatibleGateway._probe_model_residency
+        ):
+            return None
+        return lambda: self._probe_model_residency(model, cfg)
+
     def _backend_admission(
-        path: str, payload: dict, cfg: OpenAICompatibleConfig,
+        self,
+        path: str,
+        payload: dict,
+        cfg: OpenAICompatibleConfig,
         context: OperationContext | None,
     ):
-        """GPU-slot admission for a chat request to a declared streamed model.
+        """GPU-slot admission for requests targeting a declared streamed model.
 
-        It takes the shared GPU slot (queueing for it), and checks host memory
-        only when a residency callback answers False; production passes none,
-        so the gateway path queues but does not refuse on memory. Only a loopback endpoint whose model has a declaration in
-        ``SONDER_GPU_STREAMED_MODELS`` is gated; everything else passes through.
-        A remote endpoint never touches admission. A refusal raises
-        ``GpuAdmissionRefused``, which ``_post`` maps to a domain error; an
-        invalid declaration on a loopback endpoint raises ``InternalFailure``."""
+        It takes the shared GPU slot (queueing for it), and enforces host-memory
+        cold-load checks whenever the wired residency callback answers ``False``
+        (``True`` skips cold-load charging; ``None`` or absent stays unknown and
+        queues without refusing on host memory). Only a loopback endpoint whose
+        model has a declaration in ``SONDER_GPU_STREAMED_MODELS`` is gated;
+        everything else passes through. A remote endpoint never touches
+        admission. A refusal raises ``GpuAdmissionRefused``, which ``_post``
+        maps to a domain error; an invalid declaration on a loopback endpoint
+        raises ``InternalFailure``.
+        """
         model = payload.get("model")
-        if path != "/v1/chat/completions" or not isinstance(model, str) or not model:
+        if path not in (
+            "/v1/chat/completions", "/v1/responses", "/v1/embeddings", "/v1/rerank",
+        ) or not isinstance(model, str) or not model:
             return contextlib.nullcontext()
         try:
             service = gpu_admission.backend_service_for(cfg.base_url)
@@ -2319,8 +2398,16 @@ class OpenAICompatibleGateway:
         if footprint is None:
             return contextlib.nullcontext()
         deadline = context.deadline_monotonic if context is not None else None
+        lane = AdmissionLane.EMBED if path == "/v1/embeddings" else AdmissionLane.INFERENCE
+        resident_cb = self._residency_callback(model, cfg)
         return service.admit_backend(
-            model, origin=cfg.base_url, footprint=footprint, deadline=deadline)
+            model,
+            origin=cfg.base_url,
+            footprint=footprint,
+            lane=lane,
+            deadline=deadline,
+            resident=resident_cb,
+        )
 
     def _post(
         self, path: str, payload: dict, cfg: OpenAICompatibleConfig, timeout,

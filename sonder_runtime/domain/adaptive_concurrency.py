@@ -32,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import PurePosixPath
-from typing import Collection, Mapping, Sequence
+from typing import Any, Collection, Mapping, Sequence
 
 
 # Pressure bands mirror ``sonder_runtime.domain.fleet_pressure``.  They are
@@ -281,7 +281,7 @@ class ConcurrencyDecision:
     action: str  # "shrink" | "grow" | "hold"
     reasons: tuple[str, ...] = field(default_factory=tuple)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "previous_cap": self.previous_cap,
             "cap": self.cap,
@@ -339,7 +339,7 @@ def _resource_pressure(
     return not (memory_released and band_released), False, 0
 
 
-def _retry_storm_weight(recent) -> int:
+def _retry_storm_weight(recent: Sequence[tuple[Outcome, str | None]]) -> int:
     """Transient failures in the window, at most one per source lane.
 
     One flaky lane retrying several times is that lane's problem, not a
