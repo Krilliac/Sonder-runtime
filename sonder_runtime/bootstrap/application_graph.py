@@ -157,6 +157,9 @@ class Application:
     telemetry: RuntimeTelemetry | None = None
     telemetry_feed: TelemetryFeed | None = None
     close_telemetry: Callable[[], None] | None = field(default=None, repr=False)
+    # Lazy SonderResponsesClient factory backed by SONDER_INFERENCE_* env config
+    # when first invoked; None only when explicitly omitted on synthetic graphs.
+    responses_client: Callable[[], Any] | None = None
 
     def operational_capabilities(self):
         from ..domain.operational_capabilities import build_operational_capabilities
