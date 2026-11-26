@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 import logging
 
 from sonder_runtime.domain.model_capabilities import fanout_capabilities
@@ -15,6 +16,7 @@ _GENERATIVE_CAPABILITIES = frozenset(
 
 
 def _normalized_values(raw: object) -> set[str]:
+    values: Iterable[object]
     if isinstance(raw, str):
         values = (raw,)
     elif isinstance(raw, (list, tuple, set)):
@@ -24,7 +26,7 @@ def _normalized_values(raw: object) -> set[str]:
     return {str(value).strip().lower() for value in values if str(value).strip()}
 
 
-def nonchat_reason(record: object, *, vision_only_model_families) -> str:
+def nonchat_reason(record: object, *, vision_only_model_families: Iterable[str]) -> str:
     """Return why a catalog record must not be used as a chat target.
 
     The policy is deliberately explicit-input and side-effect free. Catalog
@@ -35,7 +37,8 @@ def nonchat_reason(record: object, *, vision_only_model_families) -> str:
     record = record if isinstance(record, dict) else {}
     vision_only = {str(family).casefold() for family in vision_only_model_families}
     model_name = record.get("name") or record.get("model") or "?"
-    details = record.get("details") if isinstance(record.get("details"), dict) else {}
+    raw_details = record.get("details")
+    details = raw_details if isinstance(raw_details, dict) else {}
     capabilities = fanout_capabilities(record)
     logger.debug(f"nonchat_reason: model={model_name!r}, capabilities={capabilities}")
     if capabilities & _GENERATIVE_CAPABILITIES:

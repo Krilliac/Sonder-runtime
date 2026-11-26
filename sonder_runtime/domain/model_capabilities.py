@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 
 # Canonical ModelGateway capability vocabulary.  Adapters publish a subset of
 # these as typed, static facts about their own transport shape — never a
@@ -25,7 +27,7 @@ KNOWN_GATEWAY_CAPABILITIES = frozenset({
 })
 
 
-def fanout_capabilities(record) -> set[str]:
+def fanout_capabilities(record: object) -> set[str]:
     """Return normalized capabilities from a catalog record.
 
     Ollama-compatible catalogs may expose a scalar or collection at the top
@@ -35,9 +37,11 @@ def fanout_capabilities(record) -> set[str]:
     routing callers can share one deterministic normalization rule.
     """
     record = record if isinstance(record, dict) else {}
-    details = record.get("details") if isinstance(record.get("details"), dict) else {}
+    raw_details = record.get("details")
+    details = raw_details if isinstance(raw_details, dict) else {}
 
-    def normalized(raw):
+    def normalized(raw: object) -> set[str]:
+        values: Iterable[object]
         if isinstance(raw, str):
             values = (raw,)
         elif isinstance(raw, (list, tuple, set)):
