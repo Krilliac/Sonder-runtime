@@ -1,6 +1,6 @@
 """Pure permission-policy rules (SPEC-3 Phase 5 extraction).
 
-The tool-visibility policy is a small, auditable rule list evaluated by
+The tool-permission policy is a small, auditable rule list evaluated by
 first-match glob. This module owns the pure parts — the default rules,
 valid actions, rule normalization, and evaluation — with no filesystem
 I/O. ``permission_rules.py`` keeps load/save/path handling and delegates
