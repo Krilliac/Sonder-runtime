@@ -58,8 +58,135 @@ from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.platform.logging import Redactor
 from sonder_runtime.platform.metrics import MetricsRegistry, default_registry
 from sonder_runtime.application.routing.identity_cache import IdentityObservationCache
+from sonder_runtime.domain.routing.prefix_locality import (
+    CandidateCompletionEstimate,
+    DEFAULT_MAX_LOCALITY_ENTRIES,
+    LocalityMatch,
+    PrefixLocalityTable,
+    digest_key_parts,
+    score_endpoint_completion,
+)
+from .telemetry import from_ollama
 
 logger = logging.getLogger(__name__)
+
+
+_EMPTY_OLLAMA_LOCALITY_MATCH = LocalityMatch(0.0, 0.0, 0.0, 0.0, False, 0.0, 0.0)
+_DEFAULT_OLLAMA_EXPECTED_DECODE_TOKENS = 256
+_MAX_OLLAMA_ESTIMATED_PROMPT_TOKENS = 1_000_000
+
+
+@dataclass(frozen=True)
+class _OllamaRoutingHints:
+    model: str
+    adapter_key: str
+    prefix_key: str
+    estimated_prompt_tokens: int
+    expected_decode_tokens: int
+
+
+def _ollama_positive_int(value: object) -> int | None:
+    return value if type(value) is int and value > 0 else None
+
+
+def _estimate_ollama_prompt_tokens(payload: object) -> int:
+    if not isinstance(payload, Mapping):
+        return 0
+    total_chars = 0
+    system_prompt = payload.get("system")
+    if isinstance(system_prompt, str):
+        total_chars += len(system_prompt)
+    prompt = payload.get("prompt")
+    if isinstance(prompt, str):
+        total_chars += len(prompt)
+    messages = payload.get("messages")
+    if isinstance(messages, (list, tuple)):
+        for msg in messages:
+            if not isinstance(msg, Mapping):
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                total_chars += len(content)
+            elif isinstance(content, (list, tuple)):
+                total_chars += sum(len(str(part)) for part in content)
+    if total_chars <= 0:
+        return 0
+    return min(_MAX_OLLAMA_ESTIMATED_PROMPT_TOKENS, max(1, (total_chars + 3) // 4))
+
+
+def _extract_ollama_routing_hints(
+    payload: object,
+    *,
+    model: str | None,
+    prefix_key: str | None = None,
+    adapter_key: str | None = None,
+    approx_tokens: int = 0,
+    required_num_ctx: int | None = None,
+    expected_decode_tokens: int | None = None,
+) -> _OllamaRoutingHints:
+    payload_map = payload if isinstance(payload, Mapping) else {}
+    opts = payload_map.get("options")
+    opts_map = opts if isinstance(opts, Mapping) else {}
+
+    resolved_model = str(model or "").strip()
+    if not resolved_model and isinstance(payload_map.get("model"), str):
+        resolved_model = payload_map["model"].strip()
+
+    eff_ctx = (
+        _ollama_positive_int(required_num_ctx)
+        or _ollama_positive_int(opts_map.get("num_ctx"))
+        or _ollama_positive_int(payload_map.get("num_ctx"))
+    )
+    if isinstance(adapter_key, str) and adapter_key.strip():
+        eff_adapter = adapter_key.strip()
+    else:
+        eff_adapter = digest_key_parts(
+            "ollama-adapter",
+            {
+                "num_ctx": eff_ctx,
+                "think": payload_map.get("think"),
+                "format": payload_map.get("format"),
+                "tools": bool(payload_map.get("tools")),
+                "keep_alive": payload_map.get("keep_alive"),
+            },
+        )
+
+    eff_prefix = ""
+    if isinstance(prefix_key, str) and prefix_key.strip():
+        eff_prefix = prefix_key.strip()
+    elif isinstance(payload_map.get("prompt_cache_key"), str) and payload_map["prompt_cache_key"].strip():
+        eff_prefix = digest_key_parts("ollama-cache-key", payload_map["prompt_cache_key"].strip())
+    elif isinstance(opts_map.get("prompt_cache_key"), str) and opts_map["prompt_cache_key"].strip():
+        eff_prefix = digest_key_parts("ollama-cache-key", opts_map["prompt_cache_key"].strip())
+    else:
+        system_prompt = payload_map.get("system")
+        has_system = isinstance(system_prompt, str) and bool(system_prompt.strip())
+        messages = payload_map.get("messages")
+        if isinstance(messages, (list, tuple)) and messages:
+            if len(messages) > 1 or has_system:
+                eff_prefix = digest_key_parts(
+                    "ollama-prefix",
+                    {
+                        "system": system_prompt if has_system else "",
+                        "prefix": list(messages[:-1]),
+                    },
+                )
+        elif has_system:
+            eff_prefix = digest_key_parts("ollama-system", system_prompt)
+
+    est_prompt = _ollama_positive_int(approx_tokens) or _estimate_ollama_prompt_tokens(payload_map)
+    est_decode = (
+        _ollama_positive_int(expected_decode_tokens)
+        or _ollama_positive_int(opts_map.get("num_predict"))
+        or _DEFAULT_OLLAMA_EXPECTED_DECODE_TOKENS
+    )
+    return _OllamaRoutingHints(
+        model=resolved_model,
+        adapter_key=eff_adapter,
+        prefix_key=eff_prefix,
+        estimated_prompt_tokens=est_prompt,
+        expected_decode_tokens=est_decode,
+    )
 
 
 _FAILOVER_HTTP_CODES = frozenset({502, 503, 504})
@@ -997,6 +1124,7 @@ _SHOW_CACHE_LIMIT = 512
 _SHOW_FETCHES_PER_PROBE = 8
 _SHOW_BACKOFF_BASE_SECONDS = 30.0
 _SHOW_BACKOFF_MAX_SECONDS = 600.0
+_TOOL_PROBE_TIMEOUT_COOLDOWN_SECONDS = 15.0
 _KV_CACHE_TYPES = frozenset({"f32", "f16", "bf16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"})
 
 
@@ -1230,6 +1358,12 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
                 show_cache.move_to_end(cache_key)
                 while len(show_cache) > _SHOW_CACHE_LIMIT:
                     show_cache.popitem(last=False)
+            callback = on_show_cached_ref[0]
+            if callback is not None:
+                try:
+                    callback(origin, model_name, dict(meta))
+                except Exception:
+                    pass
         return meta
 
     def show_is_backed_off(origin: str, model_name: str, digest: str) -> bool:
@@ -1237,7 +1371,17 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
             entry = show_failures.get((origin, model_name, digest))
         return entry is not None and time.monotonic() < entry[0]
 
+    def cached_show(origin: str, model_name: str, *, digest: str = "") -> dict[str, Any] | None:
+        cache_key = (origin, model_name, digest)
+        with show_lock:
+            cached = show_cache.get(cache_key)
+            if cached is not None:
+                show_cache.move_to_end(cache_key)
+                return dict(cached)
+        return None
+
     probe_gate_ref: list[Callable[[str], Callable[[], None]] | None] = [None]
+    on_show_cached_ref: list[Callable[[str, str, dict[str, Any]], None] | None] = [None]
 
     def fill_show_cache(origin: str, pending: list[tuple[str, str]]) -> None:
         try:
@@ -1393,9 +1537,12 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
             show_failures.clear()
 
     probe.show = show  # type: ignore[attr-defined]
+    probe.cached_show = cached_show  # type: ignore[attr-defined]
+    probe.is_show_backed_off = show_is_backed_off  # type: ignore[attr-defined]
     probe.clear_show_cache = clear_show_cache  # type: ignore[attr-defined]
     probe.wait_show_fill = wait_show_fill  # type: ignore[attr-defined]
     probe.bind_probe_gate = lambda fn: probe_gate_ref.__setitem__(0, fn)  # type: ignore[attr-defined]
+    probe.bind_on_show_cached = lambda fn: on_show_cached_ref.__setitem__(0, fn)  # type: ignore[attr-defined]
     probe._sonder_default_allow_remote = allow_remote  # type: ignore[attr-defined]
     return probe
 
@@ -1452,7 +1599,10 @@ class OllamaWorkerPool:
         time_fn: Callable[[], float] | None = None,
         metrics: MetricsRegistry | None = None,
         redactor: Redactor | None = None,
+        locality_max_entries: int = DEFAULT_MAX_LOCALITY_ENTRIES,
     ) -> None:
+        if type(locality_max_entries) is not int or locality_max_entries < 1:
+            raise ValueError("locality_max_entries must be a positive integer")
         if not 1 <= failure_threshold <= _MAX_FAILURE_THRESHOLD:
             raise ValueError("failure threshold must be within 1..100")
         if not 1 <= cooldown_seconds <= _MAX_COOLDOWN_SECONDS:
@@ -1562,9 +1712,7 @@ class OllamaWorkerPool:
         self.gpu_admission = (
             gpu_admission if gpu_admission is not None else gpu_admission_module.process_service()
         )
-        bind_gate = getattr(self._capability_prober, "bind_probe_gate", None)
-        if callable(bind_gate):
-            bind_gate(self._show_probe_permit)
+        self._bind_capability_prober()
         self._recent_evidence = recent_evidence
         self._identity_for = identity_for
         self._capability_routing = capability_routing
@@ -1615,6 +1763,12 @@ class OllamaWorkerPool:
         self._external_source = None
         self._request_wave_inflight = False
         self._last_model_miss_refresh = None
+        self._locality_table = PrefixLocalityTable(max_entries=locality_max_entries)
+        self._worker_prompt_ms_per_tok: dict[str, float] = {}
+        self._worker_decode_ms_per_tok: dict[str, float] = {}
+        self._last_locality_decision: dict[str, object] | None = None
+        self._tool_show_inflight: set[tuple[str, str]] = set()
+        self._tool_probe_cooldown: dict[tuple[str, str], float] = {}
 
     @staticmethod
     def _identity_cache_key(origin, model, payload):
@@ -1672,6 +1826,7 @@ class OllamaWorkerPool:
         self._configured_remote_origins = allowed
         self._capability_prober = _default_capability_prober(
             allow_remote=True, timeout=probe_timeout_seconds, open_url=self.open_url)
+        self._bind_capability_prober()
 
     def open_url(self, request, *, timeout, allow_remote=None):
         import sonder_runtime.adapters.inference.ollama_endpoint as ollama_endpoint
@@ -2135,6 +2290,7 @@ class OllamaWorkerPool:
                     self._capability_prober = _default_capability_prober(
                         allow_remote=True, timeout=self._probe_timeout,
                     )
+                    self._bind_capability_prober()
                 self._condition.notify_all()
             target_id = id(existing)
         if refresh and self._capability_prober is not None:
@@ -2389,6 +2545,7 @@ class OllamaWorkerPool:
                     self._condition.notify_all()
                 raise
 
+            hydrated_candidates: list[tuple[str, str, str]] = []
             with self._condition:
                 for state, (payload, measured_ms, error) in zip(candidates, outcomes):
                     state.capability_probe_generation += 1
@@ -2457,7 +2614,25 @@ class OllamaWorkerPool:
                     state.compatibility_error = ""
                     state.capability_probe_failed = False
                     self._record_success(state, latency_ms)
+                    for model_name in capabilities.models:
+                        if capabilities.model_supports_tools(model_name) is None:
+                            meta_entry = capabilities.model_metadata.get(model_name)
+                            digest = (
+                                str(meta_entry.get("digest") or "").strip()
+                                if isinstance(meta_entry, Mapping)
+                                else ""
+                            )
+                            hydrated_candidates.append((state.endpoint.origin, model_name, digest))
                 self._condition.notify_all()
+            cached_show_fn = getattr(self._capability_prober, "cached_show", None)
+            if callable(cached_show_fn) and hydrated_candidates:
+                for origin, model_name, digest in hydrated_candidates:
+                    try:
+                        cached_meta = cached_show_fn(origin, model_name, digest=digest)
+                    except Exception:
+                        cached_meta = None
+                    if isinstance(cached_meta, Mapping):
+                        self._merge_show_metadata(origin, model_name, cached_meta)
         finally:
             with self._condition:
                 self._condition.notify_all()
@@ -2745,6 +2920,7 @@ class OllamaWorkerPool:
         self, *, model: str | None, excluded: set[str], now: float,
         evidence_allowed: set[str] | None = None,
         required_num_ctx: int | None = None,
+        routing_hints: _OllamaRoutingHints | None = None,
     ) -> _WorkerState | None:
         candidates = [
             state for state in self._states
@@ -2785,6 +2961,47 @@ class OllamaWorkerPool:
             else None
         )
 
+        use_locality = bool(routing_hints is not None and routing_hints.prefix_key)
+        matches: dict[str, LocalityMatch] = {}
+        estimates: dict[str, CandidateCompletionEstimate] = {}
+        if use_locality:
+            assert routing_hints is not None
+            for state in rotated:
+                wid = state.endpoint.worker_id
+                matches[wid] = self._locality_table.lookup(
+                    endpoint=wid,
+                    model_identity=routing_hints.model,
+                    adapter_key=routing_hints.adapter_key,
+                    prefix_key=routing_hints.prefix_key,
+                    now=now,
+                    estimated_prompt_tokens=routing_hints.estimated_prompt_tokens,
+                )
+            for state in rotated:
+                wid = state.endpoint.worker_id
+                observed_req = (
+                    state.inference_ewma_ms
+                    if state.inference_ewma_ms is not None
+                    else state.latency_ewma_ms
+                )
+                decode_rate = self._worker_decode_ms_per_tok.get(wid)
+                if decode_rate is None:
+                    base_req = observed_req if observed_req is not None else 256.0
+                    decode_rate = max(0.05, base_req / 128.0)
+                prompt_rate = self._worker_prompt_ms_per_tok.get(
+                    wid, max(0.02, decode_rate * 0.25),
+                )
+                estimates[wid] = score_endpoint_completion(
+                    endpoint=wid,
+                    inflight=state.inflight,
+                    max_inflight=self._capacity(state),
+                    decode_ms_per_token=decode_rate,
+                    prompt_ms_per_token=prompt_rate,
+                    estimated_prompt_tokens=routing_hints.estimated_prompt_tokens,
+                    expected_decode_tokens=routing_hints.expected_decode_tokens,
+                    match=matches.get(wid, _EMPTY_OLLAMA_LOCALITY_MATCH),
+                    observed_request_ms=observed_req,
+                )
+
         def score(state: _WorkerState):
             latency = state.inference_ewma_ms if by_inference else state.latency_ewma_ms
             if latency is None:
@@ -2804,6 +3021,15 @@ class OllamaWorkerPool:
             else:
                 not_resident = 0
                 ctx_headroom_miss = 0
+            if use_locality:
+                est = estimates[state.endpoint.worker_id]
+                return (
+                    lacks_model,
+                    not_resident,
+                    ctx_headroom_miss,
+                    est.total_cost_ms,
+                    state.inflight,
+                )
             return (
                 lacks_model,
                 not_resident,
@@ -2813,6 +3039,19 @@ class OllamaWorkerPool:
             )
 
         chosen = min(rotated, key=score)
+        if use_locality:
+            chosen_est = estimates[chosen.endpoint.worker_id]
+            self._last_locality_decision = {
+                "selected_worker_id": chosen.endpoint.worker_id,
+                "candidate_count": len(candidates),
+                "warm_hit": chosen_est.warm_hit,
+                "effective_cached_tokens": chosen_est.effective_cached_tokens,
+                "projected_queue_delay_ms": chosen_est.projected_queue_delay_ms,
+                "uncached_prompt_work_ms": chosen_est.uncached_prompt_work_ms,
+                "expected_decode_work_ms": chosen_est.expected_decode_work_ms,
+                "locality_bonus_ms": chosen_est.locality_bonus_ms,
+                "total_cost_ms": chosen_est.total_cost_ms,
+            }
         logger.debug(
             f"_choose: selected {chosen.endpoint.worker_id} for model={model!r}, "
             f"inflight={chosen.inflight}/{self._capacity(chosen)}, "
@@ -2829,6 +3068,7 @@ class OllamaWorkerPool:
         evidence_allowed: set[str] | None = None,
         evidence_reason: str = "",
         required_num_ctx: int | None = None,
+        routing_hints: _OllamaRoutingHints | None = None,
         _lease_box: list | None = None,
         _lease_caller: str = "",
         _wait: QueueWaitState | None = None,
@@ -2853,7 +3093,8 @@ class OllamaWorkerPool:
                 now = self._clock()
                 state = self._choose(model=model, excluded=excluded, now=now,
                                      evidence_allowed=evidence_allowed,
-                                     required_num_ctx=required_num_ctx)
+                                     required_num_ctx=required_num_ctx,
+                                     routing_hints=routing_hints)
                 if state is not None:
                     if self._metrics_observer is not None:
                         self._worker_metric_label(state)
@@ -3328,6 +3569,101 @@ class OllamaWorkerPool:
                 raise WorkerCapabilityUnavailable("backend identity changed during model dispatch")
         return result
 
+    def _observe_locality_outcome(
+        self,
+        worker_id: str,
+        hints: _OllamaRoutingHints,
+        result: object,
+    ) -> None:
+        prompt_tokens: int | None = None
+        cached_tokens: int | None = None
+        prompt_ms: float | None = None
+        decode_ms: float | None = None
+        uncached_tokens: int | None = None
+        predicted_tokens: int | None = None
+
+        telemetry = None
+        if isinstance(result, Mapping):
+            telemetry = from_ollama(dict(result))
+            if telemetry is None:
+                usage = result.get("usage")
+                if isinstance(usage, Mapping):
+                    raw_pt = usage.get("prompt_tokens")
+                    if type(raw_pt) is int and raw_pt >= 0:
+                        prompt_tokens = raw_pt
+                    details = usage.get("prompt_tokens_details")
+                    if isinstance(details, Mapping):
+                        raw_ct = details.get("cached_tokens")
+                        if type(raw_ct) is int and raw_ct >= 0:
+                            cached_tokens = raw_ct
+        else:
+            telemetry = getattr(result, "telemetry", None)
+
+        if telemetry is not None:
+            prompt_tokens = getattr(telemetry, "prompt_tokens", prompt_tokens)
+            cached_tokens = getattr(telemetry, "prompt_cached_tokens", cached_tokens)
+            uncached_tokens = getattr(telemetry, "prompt_uncached_tokens", None)
+            prompt_ms = getattr(telemetry, "prompt_eval_ms", None)
+            decode_ms = getattr(telemetry, "eval_ms", None)
+            predicted_tokens = getattr(telemetry, "completion_tokens", None)
+        if prompt_tokens is None and not isinstance(result, Mapping):
+            raw_ti = getattr(result, "tokens_in", None)
+            if type(raw_ti) is int and raw_ti >= 0:
+                prompt_tokens = raw_ti
+        if predicted_tokens is None and not isinstance(result, Mapping):
+            raw_to = getattr(result, "tokens_out", None)
+            if type(raw_to) is int and raw_to > 0:
+                predicted_tokens = raw_to
+
+        prompt_work_tokens = uncached_tokens if uncached_tokens is not None else prompt_tokens
+        with self._condition:
+            if (
+                isinstance(prompt_ms, (int, float))
+                and not isinstance(prompt_ms, bool)
+                and prompt_ms > 0
+                and type(prompt_work_tokens) is int
+                and prompt_work_tokens > 0
+            ):
+                sample_p = max(0.01, float(prompt_ms) / float(prompt_work_tokens))
+                prev_p = self._worker_prompt_ms_per_tok.get(worker_id)
+                self._worker_prompt_ms_per_tok[worker_id] = (
+                    sample_p if prev_p is None else 0.25 * sample_p + 0.75 * prev_p
+                )
+            if (
+                isinstance(decode_ms, (int, float))
+                and not isinstance(decode_ms, bool)
+                and decode_ms > 0
+                and type(predicted_tokens) is int
+                and predicted_tokens > 0
+            ):
+                sample_d = max(0.05, float(decode_ms) / float(predicted_tokens))
+                prev_d = self._worker_decode_ms_per_tok.get(worker_id)
+                self._worker_decode_ms_per_tok[worker_id] = (
+                    sample_d if prev_d is None else 0.25 * sample_d + 0.75 * prev_d
+                )
+            now = self._clock()
+
+        if hints.prefix_key and hints.model:
+            self._locality_table.observe(
+                endpoint=worker_id,
+                model_identity=hints.model,
+                adapter_key=hints.adapter_key,
+                prefix_key=hints.prefix_key,
+                now=now,
+                prompt_tokens=prompt_tokens,
+                cached_tokens=cached_tokens,
+                estimated_prompt_tokens=hints.estimated_prompt_tokens,
+            )
+
+    def locality_summary(self) -> dict[str, object]:
+        """Return bounded, content-free prefix locality metrics and last decision."""
+        with self._condition:
+            last = dict(self._last_locality_decision) if self._last_locality_decision else None
+        return {
+            "summary": self._locality_table.summary(),
+            "last_decision": last,
+        }
+
     def request(
         self,
         sender: Callable[[str], object],
@@ -3344,6 +3680,9 @@ class OllamaWorkerPool:
         approx_tokens=0,
         long_context=False,
         required_num_ctx: int | None = None,
+        prefix_key: str | None = None,
+        adapter_key: str | None = None,
+        expected_decode_tokens: int | None = None,
     ):
         """Admit and send one logical request with pre-response failover only."""
         model = str(model or "").strip() or None
@@ -3352,6 +3691,15 @@ class OllamaWorkerPool:
             opts = payload.get("options")
             if isinstance(opts, Mapping):
                 effective_num_ctx = _positive_int_value(opts.get("num_ctx"))
+        routing_hints = _extract_ollama_routing_hints(
+            payload,
+            model=model,
+            prefix_key=prefix_key,
+            adapter_key=adapter_key,
+            approx_tokens=approx_tokens if type(approx_tokens) is int else 0,
+            required_num_ctx=effective_num_ctx,
+            expected_decode_tokens=expected_decode_tokens,
+        )
         logger.debug(f"pool.request: model={model!r}, idempotent={idempotent}")
         with self._condition:
             self._metrics["logical_requests"] += 1
@@ -3501,6 +3849,7 @@ class OllamaWorkerPool:
                         evidence_allowed=evidence_allowed,
                         evidence_reason=evidence_reason,
                         required_num_ctx=effective_num_ctx,
+                        routing_hints=routing_hints,
                         _lease_box=leases,
                         _lease_caller=caller,
                     )
@@ -3671,6 +4020,7 @@ class OllamaWorkerPool:
                             f"worker capability evidence changed after response: {why}"
                         )
                 self._close_lease(lease, error=None, latency_ms=latency_ms)
+                self._observe_locality_outcome(state.endpoint.worker_id, routing_hints, result)
                 return result
             except BaseException as error:
                 abandoned_by = error
@@ -3798,6 +4148,354 @@ class OllamaWorkerPool:
                         if size is not None:
                             return size
         return 0
+
+    @property
+    def has_capability_prober(self) -> bool:
+        return self._capability_prober is not None
+
+    def _bind_capability_prober(self) -> None:
+        bind_gate = getattr(self._capability_prober, "bind_probe_gate", None)
+        if callable(bind_gate):
+            bind_gate(self._show_probe_permit)
+        bind_cached = getattr(self._capability_prober, "bind_on_show_cached", None)
+        if callable(bind_cached):
+            bind_cached(self._merge_show_metadata)
+
+    def _merge_show_metadata(
+        self, origin: str, model_name: str, meta: Mapping[str, Any],
+    ) -> None:
+        """Fold freshly cached ``/api/show`` metadata into the matching worker snapshot."""
+        if not origin or not model_name or not isinstance(meta, Mapping) or not meta:
+            return
+        wanted = _model_key(model_name)
+        if not wanted:
+            return
+        with self._condition:
+            for state in self._states:
+                if state.endpoint.origin != origin or state.membership_state == "draining":
+                    continue
+                caps = state.capabilities
+                if caps is None:
+                    continue
+                matched = next(
+                    (name for name in caps.models if name == model_name or _model_key(name) == wanted),
+                    None,
+                )
+                if matched is None:
+                    continue
+                supports_tools = dict(caps.supports_tools)
+                if isinstance(meta.get("supports_tools"), bool):
+                    supports_tools[matched] = meta["supports_tools"]
+                model_contexts = dict(caps.model_contexts)
+                loaded_keys = {_model_key(item) for item in caps.loaded_models}
+                ctx_val = _positive_int_value(meta.get("context_length"))
+                if ctx_val is not None and _model_key(matched) not in loaded_keys:
+                    model_contexts[matched] = ctx_val
+                model_active_billions = dict(caps.model_active_billions)
+                active_val = _parse_billions(meta.get("active_billions"))
+                if active_val is not None:
+                    model_active_billions[matched] = active_val
+                model_metadata = {k: dict(v) for k, v in caps.model_metadata.items()}
+                merged_entry = dict(model_metadata.get(matched, {}))
+                merged_entry.update(meta)
+                model_metadata[matched] = merged_entry
+                state.capabilities = WorkerCapabilities(
+                    protocol=caps.protocol,
+                    version=caps.version,
+                    models=caps.models,
+                    observed_at=caps.observed_at,
+                    effective_max_inflight=caps.effective_max_inflight,
+                    model_contexts=MappingProxyType(model_contexts),
+                    loaded_models=caps.loaded_models,
+                    vram_bytes=caps.vram_bytes,
+                    ram_bytes=caps.ram_bytes,
+                    kv_cache_type=caps.kv_cache_type,
+                    supports_tools=MappingProxyType(supports_tools),
+                    model_active_billions=MappingProxyType(model_active_billions),
+                    model_metadata=MappingProxyType({
+                        k: MappingProxyType(v) for k, v in model_metadata.items()
+                    }),
+                )
+                self._condition.notify_all()
+                break
+
+    def _cached_model_supports_tools_locked(self, target: str, now: float) -> bool | None:
+        """Tri-state tool support across healthy workers: True, explicit False, or None (unprobed)."""
+        saw_false = False
+        for state in self._states:
+            if not (
+                self._membership_admissible(state, now)
+                and not state.compatibility_error
+                and not (state.capabilities is None and state.capability_probe_failed)
+                and state.cooldown_until <= now
+                and state.membership_state != "draining"
+            ):
+                continue
+            caps = state.capabilities
+            if caps is None:
+                continue
+            verdict = caps.model_supports_tools(target)
+            if verdict is True:
+                return True
+            if verdict is False:
+                saw_false = True
+        return False if saw_false else None
+
+    def _run_tool_support_probe(self, target: str, *, timeout: float) -> bool | None:
+        deadline = time.monotonic() + max(0.05, float(timeout))
+        with self._condition:
+            now = self._clock()
+            cached = self._cached_model_supports_tools_locked(target, now)
+            if cached is not None:
+                return cached
+            if self._draining or self._capability_prober is None:
+                return None
+            prober = self._capability_prober
+            stale_ids = frozenset(
+                id(state)
+                for state in self._states
+                if self._stale_static_candidate_locked(state, now)
+                and not state.capability_probe_inflight
+            )
+
+        if stale_ids:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                run_bounded(
+                    lambda: self._refresh_capabilities(_targets=stale_ids),
+                    max(0.001, remaining),
+                    name="sonder-ollama-tool-probe-refresh",
+                )
+
+        with self._condition:
+            while (
+                not self._draining
+                and self._cached_model_supports_tools_locked(target, self._clock()) is None
+                and any(
+                    state.membership_state is None
+                    and self._membership_admissible(state, self._clock())
+                    and state.capabilities is None
+                    and state.capability_probe_inflight
+                    for state in self._states
+                )
+            ):
+                wait_left = deadline - time.monotonic()
+                if wait_left <= 0:
+                    break
+                self._condition.wait(timeout=wait_left)
+            cached = self._cached_model_supports_tools_locked(target, self._clock())
+            if cached is not None:
+                return cached
+
+        show_fn = getattr(prober, "show", None)
+        if not callable(show_fn):
+            return None
+
+        wanted = _model_key(target)
+        cached_show_fn = getattr(prober, "cached_show", None)
+        is_backed_off_fn = getattr(prober, "is_show_backed_off", None)
+
+        with self._condition:
+            now = self._clock()
+            show_targets: list[tuple[str, str, str]] = []
+            for state in self._states:
+                if not (
+                    self._membership_admissible(state, now)
+                    and not state.compatibility_error
+                    and not (state.capabilities is None and state.capability_probe_failed)
+                    and state.cooldown_until <= now
+                    and state.membership_state != "draining"
+                ):
+                    continue
+                caps = state.capabilities
+                if caps is None or caps.model_supports_tools(target) is not None:
+                    continue
+                matched = next(
+                    (name for name in caps.models if _model_key(name) == wanted),
+                    None,
+                )
+                if matched is None:
+                    continue
+                meta_entry = caps.model_metadata.get(matched)
+                digest = (
+                    str(meta_entry.get("digest") or "").strip()
+                    if isinstance(meta_entry, Mapping)
+                    else ""
+                )
+                show_targets.append((state.endpoint.origin, matched, digest))
+
+        for origin, matched_name, digest in show_targets:
+            if callable(cached_show_fn):
+                try:
+                    cached_meta = cached_show_fn(origin, matched_name, digest=digest)
+                except Exception:
+                    cached_meta = None
+                if isinstance(cached_meta, Mapping):
+                    self._merge_show_metadata(origin, matched_name, cached_meta)
+                    if cached_meta.get("supports_tools") is True:
+                        return True
+                    if cached_meta.get("supports_tools") is False:
+                        continue
+
+            if callable(is_backed_off_fn):
+                try:
+                    if is_backed_off_fn(origin, matched_name, digest):
+                        continue
+                except Exception:
+                    pass
+
+            probe_key = (origin, wanted)
+            now_mono = time.monotonic()
+            with self._condition:
+                cooldown_until = self._tool_probe_cooldown.get(probe_key)
+                if cooldown_until is not None and now_mono < cooldown_until:
+                    continue
+                while probe_key in self._tool_show_inflight:
+                    wait_left = deadline - time.monotonic()
+                    if wait_left <= 0:
+                        break
+                    self._condition.wait(timeout=wait_left)
+                cached = self._cached_model_supports_tools_locked(target, self._clock())
+                if cached is True:
+                    return True
+                if probe_key in self._tool_show_inflight:
+                    continue
+                # Re-check whether this worker was populated while waiting.
+                already_known = any(
+                    state.endpoint.origin == origin
+                    and state.capabilities is not None
+                    and state.capabilities.model_supports_tools(target) is not None
+                    for state in self._states
+                )
+                if already_known:
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._tool_show_inflight.add(probe_key)
+
+            try:
+                release = self._show_probe_permit(origin)
+            except (gpu_admission_module.GpuAdmissionRefused, CapabilityProbeDeferred):
+                with self._condition:
+                    self._tool_show_inflight.discard(probe_key)
+                    self._condition.notify_all()
+                continue
+            except BaseException:
+                with self._condition:
+                    self._tool_show_inflight.discard(probe_key)
+                    self._condition.notify_all()
+                raise
+
+            def _complete(
+                _key: tuple[str, str] = probe_key,
+                _rel: Callable[[], None] = release,
+            ) -> None:
+                try:
+                    _rel()
+                finally:
+                    with self._condition:
+                        self._tool_show_inflight.discard(_key)
+                        self._condition.notify_all()
+
+            def _call_show(
+                _fn: Any = show_fn,
+                _origin: str = origin,
+                _model: str = matched_name,
+                _digest: str = digest,
+            ) -> Any:
+                try:
+                    return _fn(_origin, _model, digest=_digest)
+                except TypeError:
+                    return _fn(_origin, _model)
+
+            meta, error, completed = run_bounded(
+                _call_show,
+                max(0.001, deadline - time.monotonic()),
+                on_complete=_complete,
+                name="sonder-ollama-tool-show-probe",
+            )
+            if not completed or error is not None:
+                with self._condition:
+                    self._tool_probe_cooldown[probe_key] = (
+                        time.monotonic() + _TOOL_PROBE_TIMEOUT_COOLDOWN_SECONDS
+                    )
+                    while len(self._tool_probe_cooldown) > _SHOW_CACHE_LIMIT:
+                        self._tool_probe_cooldown.pop(next(iter(self._tool_probe_cooldown)))
+                continue
+            with self._condition:
+                self._tool_probe_cooldown.pop(probe_key, None)
+            if isinstance(meta, Mapping):
+                self._merge_show_metadata(origin, matched_name, meta)
+                if meta.get("supports_tools") is True:
+                    return True
+
+        with self._condition:
+            return self._cached_model_supports_tools_locked(target, self._clock())
+
+    def model_supports_tools(
+        self,
+        model: str | None,
+        *,
+        probe: bool = False,
+        probe_timeout: float | None = None,
+        blocking: bool = True,
+    ) -> bool | None:
+        """Return whether healthy pool workers report tool calling for ``model``.
+
+        Returns ``True`` when any healthy worker reports ``supports_tools=True``,
+        ``False`` when no healthy worker reports ``True`` and at least one
+        explicitly reports ``supports_tools=False``, or ``None`` when no worker
+        has probed tool support for ``model`` yet.
+
+        With ``probe=True``, unprobed/empty snapshots trigger a bounded cached
+        capability probe (or a coalesced non-blocking background warm-up when
+        ``blocking=False``) without ever bypassing remote-consent, HTTPS, or
+        GPU probe-admission policy.
+        """
+        target = str(model or "").strip()
+        if not target:
+            return None
+        with self._condition:
+            cached = self._cached_model_supports_tools_locked(target, self._clock())
+            if cached is not None:
+                return cached
+            if not probe or self._draining or self._capability_prober is None:
+                return None
+        effective_timeout = (
+            self._probe_timeout
+            if probe_timeout is None
+            else max(0.05, min(float(probe_timeout), self._probe_timeout))
+        )
+        if not blocking:
+            bg_key = ("__async__", _model_key(target))
+            with self._condition:
+                if bg_key in self._tool_show_inflight:
+                    return None
+                self._tool_show_inflight.add(bg_key)
+
+            def _bg() -> None:
+                try:
+                    self._run_tool_support_probe(target, timeout=effective_timeout)
+                except Exception:
+                    pass
+                finally:
+                    with self._condition:
+                        self._tool_show_inflight.discard(bg_key)
+                        self._condition.notify_all()
+
+            try:
+                owned_runtime_thread(
+                    target=_bg,
+                    name="sonder-ollama-tool-probe-bg",
+                    daemon=True,
+                ).start()
+            except Exception:
+                with self._condition:
+                    self._tool_show_inflight.discard(bg_key)
+                    self._condition.notify_all()
+            return None
+        return self._run_tool_support_probe(target, timeout=effective_timeout)
 
     def snapshots(self) -> tuple[WorkerSnapshot, ...]:
         now = self._clock()
@@ -4274,6 +4972,7 @@ class OllamaWorkerPool:
                 "worker_capability_probe_parallelism": self._probe_parallelism,
                 "worker_capability_probe_batch_size": self._probe_batch_size,
                 "worker_status_page_size": self._status_page_size,
+                "prefix_locality": self.locality_summary(),
             })
             cursors = {end: self._encode_status_cursor(end, principal)
                        for end in range(start, min(total_count, start + selected_page_size) + 1)}

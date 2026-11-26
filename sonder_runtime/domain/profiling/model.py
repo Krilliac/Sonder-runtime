@@ -15,7 +15,7 @@ import math
 import time
 from dataclasses import dataclass, field, fields, replace
 from enum import Enum
-from typing import Any, Callable, Iterator, Literal
+from typing import Any, Callable, Iterable, Iterator, Literal, TypeVar, cast
 
 from sonder_runtime.domain.diagnostics.model import clean_text
 
@@ -118,7 +118,7 @@ def _opt_text(value: object, limit: int = WIRE_TEXT_CHARS) -> str | None:
 
 def _int(value: object, *, minimum: int = 0) -> int:
     try:
-        number = int(value)  # type: ignore[arg-type]
+        number = int(cast(Any, value))
     except (TypeError, ValueError, OverflowError):
         return minimum
     return max(minimum, number)
@@ -132,7 +132,7 @@ def _opt_int(value: object, *, minimum: int = 0) -> int | None:
 
 def _float(value: object, *, minimum: float = 0.0, ndigits: int = 3) -> float:
     try:
-        number = float(value)  # type: ignore[arg-type]
+        number = float(cast(Any, value))
     except (TypeError, ValueError, OverflowError):
         return minimum
     if not math.isfinite(number):
@@ -371,9 +371,12 @@ class ProfileDigest:
         _set(self, "digest", content_digest(self))
 
 
-def _typed(items: object, kind: type, limit: int) -> tuple:
+_T = TypeVar("_T")
+
+
+def _typed(items: object, kind: type[_T], limit: int) -> tuple[_T, ...]:
     try:
-        values = tuple(items)[: limit]  # type: ignore[arg-type]
+        values: tuple[object, ...] = tuple(cast(Iterable[object], items))[: limit]
     except TypeError:
         return ()
     return tuple(item for item in values if isinstance(item, kind))

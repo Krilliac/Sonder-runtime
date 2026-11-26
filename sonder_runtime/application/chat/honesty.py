@@ -238,6 +238,52 @@ def _normalise_path(value: str) -> str:
     return value.replace("\\", "/").casefold()
 
 
+class _WrittenTrieNode:
+    """One path-segment node in :class:`_WrittenPathIndex`."""
+
+    __slots__ = ("children",)
+
+    def __init__(self) -> None:
+        self.children: dict[str, _WrittenTrieNode] = {}
+
+
+class _WrittenPathIndex:
+    """Reversed-segment suffix trie for O(len(path)) written-path lookups.
+
+    Matches :func:`_written` exactly: ``candidate == actual`` or
+    ``actual.endswith("/" + candidate)`` holds iff ``candidate.split("/")``
+    is a suffix of ``actual.split("/")``.
+    """
+
+    __slots__ = ("_root",)
+
+    def __init__(self, written_paths: Iterable[str]) -> None:
+        self._root: dict[str, _WrittenTrieNode] = {}
+        for raw in written_paths:
+            actual = _normalise_path(raw)
+            if not actual:
+                continue
+            children = self._root
+            for segment in reversed(actual.split("/")):
+                node = children.get(segment)
+                if node is None:
+                    node = _WrittenTrieNode()
+                    children[segment] = node
+                children = node.children
+
+    def contains(self, path: str) -> bool:
+        candidate = _normalise_path(path)
+        if not candidate or not self._root:
+            return False
+        children = self._root
+        for segment in reversed(candidate.split("/")):
+            node = children.get(segment)
+            if node is None:
+                return False
+            children = node.children
+        return True
+
+
 def _written(path: str, written_paths: tuple[str, ...]) -> bool:
     candidate = _normalise_path(path)
     if not candidate:
@@ -398,11 +444,16 @@ def guard_unsaved_file_claim(
         return text
     visible = _without_code_fences(text).replace("`", "")
     written = tuple(str(path) for path in written_paths)
+    written_index = _WrittenPathIndex(written)
 
     scan = _ClaimScan(visible)
     claim = _has_file_claim(visible, scan)
     claim_paths = _claim_paths(visible, scan)
-    unwritten_runs = [path for path in _run_paths(visible) if not _written(path, written)]
+    unwritten_runs = list(
+        dict.fromkeys(
+            path for path in _run_paths(visible) if not written_index.contains(path)
+        )
+    )
     markers = _first_occurrences(visible, unwritten_runs)
     run_path = next(
         (path for path in unwritten_runs if not _is_future_run(visible, markers[path])),
@@ -410,7 +461,7 @@ def guard_unsaved_file_claim(
     )
     if not claim and run_path is None:
         return text
-    unverified_claim = any(not _written(path, written) for path in claim_paths)
+    unverified_claim = any(not written_index.contains(path) for path in claim_paths)
     if run_path is not None or unverified_claim or (claim and not written):
         return text + "\n\n" + _UNSAVED_NOTE.format(folder=folder)
     return text
@@ -465,12 +516,12 @@ _READ_TOOLS = frozenset({
 _RUN_CLAIM_RE = re.compile(
     r"(?:\b(?:i\s+(?:just\s+)?(?:ran|executed|tested|compiled|verified)|"
     r"tests?\s+passed|all\s+\d+\s+tests?\s+pass|execution\s+output|"
-    r"output\s+was|exit\s+code\s*(?:is|=|:)?\s*0)\b|[\u2705\u2713])",
+    r"output\s+was|exit\s+code\s*(?:(?:is|=|:)\s*)?0)\b|[\u2705\u2713])",
     re.IGNORECASE,
 )
 _PASS_ONLY_CLAIM_RE = re.compile(
-    r"(?:\b(?:tests?\s+passed|all\s+\d*\s*tests?\s+pass(?:ed)?|"
-    r"ran\s+cleanly|verified\s+cleanly|exit\s+code\s*(?:is|=|:)?\s*0)\b|[\u2705\u2713])",
+    r"(?:\b(?:tests?\s+passed|all\s+(?:\d+\s*)?tests?\s+pass(?:ed)?|"
+    r"ran\s+cleanly|verified\s+cleanly|exit\s+code\s*(?:(?:is|=|:)\s*)?0)\b|[\u2705\u2713])",
     re.IGNORECASE,
 )
 _WEB_CLAIM_RE = re.compile(
@@ -502,15 +553,15 @@ def _tool_succeeded(item: object) -> bool:
     exit_code = getattr(item, "exit_code", None)
     if status not in {"ok", "completed", "ran"}:
         return False
-    if isinstance(exit_code, int) and exit_code != 0:
-        return False
-    return True
+    return not (isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0)
 
 
 def _tool_failed(item: object) -> bool:
     status = str(getattr(item, "status", "") or "").strip().lower()
     exit_code = getattr(item, "exit_code", None)
-    return status in {"error", "failed", "timeout", "timed_out"} or (isinstance(exit_code, int) and exit_code != 0)
+    return status in {"error", "failed", "timeout", "timed_out"} or (
+        isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0
+    )
 
 
 def guard_unverified_run_claim(
@@ -533,10 +584,10 @@ def guard_unverified_run_claim(
     if had_pass:
         return reply
     if had_fail:
-        if _PASS_ONLY_CLAIM_RE.search(reply) and _CONTRADICTED_RUN_NOTE.strip() not in reply:
+        if _CONTRADICTED_RUN_NOTE.strip() not in reply and _PASS_ONLY_CLAIM_RE.search(reply):
             return reply.rstrip() + _CONTRADICTED_RUN_NOTE
         return reply
-    if _RUN_CLAIM_RE.search(reply) and _UNVERIFIED_RUN_NOTE.strip() not in reply:
+    if _UNVERIFIED_RUN_NOTE.strip() not in reply and _RUN_CLAIM_RE.search(reply):
         return reply.rstrip() + _UNVERIFIED_RUN_NOTE
     return reply
 
@@ -553,13 +604,14 @@ def guard_unverified_web_claim(
     """Append a factual note if a reply claims a live web lookup when no web tool succeeded."""
     if not isinstance(reply, str) or not reply.strip():
         return reply
+    if _UNVERIFIED_WEB_NOTE.strip() in reply:
+        return reply
     for item in executed_tools:
         name = str(getattr(item, "tool", item) or "").strip()
         if name in _WEB_TOOLS and _tool_succeeded(item):
             return reply
     visible = _without_code_fences(reply)
-    m = _WEB_CLAIM_RE.search(visible)
-    if m and not _is_negated_at(visible, m.start()) and _UNVERIFIED_WEB_NOTE.strip() not in reply:
+    if any(not _is_negated_at(visible, m.start()) for m in _WEB_CLAIM_RE.finditer(visible)):
         return reply.rstrip() + _UNVERIFIED_WEB_NOTE
     return reply
 
@@ -571,13 +623,14 @@ def guard_unverified_read_claim(
     """Append a factual note if a reply claims to have read local files when no read tool succeeded."""
     if not isinstance(reply, str) or not reply.strip():
         return reply
+    if _UNVERIFIED_READ_NOTE.strip() in reply:
+        return reply
     for item in executed_tools:
         name = str(getattr(item, "tool", item) or "").strip()
         if name in _READ_TOOLS and _tool_succeeded(item):
             return reply
     visible = _without_code_fences(reply).replace("`", "")
-    m = _READ_CLAIM_RE.search(visible)
-    if m and not _is_negated_at(visible, m.start()) and _UNVERIFIED_READ_NOTE.strip() not in reply:
+    if any(not _is_negated_at(visible, m.start()) for m in _READ_CLAIM_RE.finditer(visible)):
         return reply.rstrip() + _UNVERIFIED_READ_NOTE
     return reply
 

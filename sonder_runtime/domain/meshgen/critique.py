@@ -4,6 +4,12 @@ from __future__ import annotations
 import json
 import re
 
+from ..common.bounded_json import (
+    DEFAULT_MAX_DEPTH,
+    JsonBoundsExceeded,
+    container_extents,
+    container_walk,
+)
 from .connectivity import boxes_near, tolerance
 
 MAX_ISSUES = 8
@@ -224,12 +230,15 @@ def cap_score(score, floating_issues):
 
 
 def _first_object(text: str):
+    last_close = text.rfind("}")
+    if last_close < 0:
+        return None
     decoder = json.JSONDecoder()
     index = text.find("{")
     failures = 0
-    extents = {}
-    scans = 0
-    while index != -1:
+    table = None
+    walking = True
+    while index != -1 and index < last_close:
         following = index + 1
         while following < len(text) and text[following] in " \t\n\r":
             following += 1
@@ -237,55 +246,45 @@ def _first_object(text: str):
             # Not the start of a JSON object (code braces, prose): skip without decoding or counting.
             index = text.find("{", index + 1)
             continue
+        looked_up = not walking
+        if walking:
+            try:
+                deepest, extent_end, closed = container_walk(text, index, DEFAULT_MAX_DEPTH)
+            except JsonBoundsExceeded:
+                looked_up = True
+            # Past an unclosed opener (which walked to EOF) or one deeper than
+            # DEFAULT_MAX_DEPTH, switch to a single O(N) extents table.
+            walking = not looked_up and closed
+        if looked_up:
+            if table is None:
+                table = container_extents(text)
+            deepest, extent_end = table.lookup(index)
+            closed = extent_end >= 0
+        if not closed:
+            # An unclosed '{' can never decode as JSON; keep its inner objects findable.
+            index = text.find("{", index + 1)
+            continue
+        if deepest > DEFAULT_MAX_DEPTH:
+            # Closed container nested deeper than the bound: skip its whole extent
+            # without decoding or descending into a nested object.
+            index = text.find("{", extent_end)
+            continue
         try:
-            value, _end = decoder.raw_decode(text, index)
+            value, _end = decoder.raw_decode(text[index:extent_end], 0)
         except (ValueError, RecursionError):
             # A legitimate reply has a handful of brace groups; 64 failed
-            # decodes bound the scan so a long run of '{' stays linear.
+            # decodes bound the scan so repeated broken objects stay linear.
             failures += 1
             if failures >= 64:
                 return None
             # Skip the failed object's whole balanced extent so a nested object
-            # is never returned; a truncated outer object (never closes) keeps
-            # its inner objects findable.
-            if index not in extents:
-                # A legitimate reply needs one scan; quoting crafted to defeat
-                # the cache fails closed, like the 64-failure bound.
-                scans += 1
-                if scans > 2:
-                    return None
-                _record_extents(text, index, extents)
-            end = extents[index]
-            index = text.find("{", index + 1 if end is None else end)
+            # is never returned.
+            index = text.find("{", extent_end)
             continue
         if isinstance(value, dict):
             return value
-        index = text.find("{", index + 1)
+        index = text.find("{", extent_end)
     return None
-
-
-def _record_extents(text, start, extents):
-    """Map each '{' a string-aware scan from ``start`` sees to its extent end (None: never closes)."""
-    stack = []
-    in_string = escaped = False
-    for i in range(start, len(text)):
-        char = text[i]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-        elif char == '"':
-            in_string = True
-        elif char in "{[":
-            stack.append(i)
-        elif char in "}]" and stack:
-            opener = stack.pop()
-            extents.setdefault(opener, i + 1)
-    for opener in stack:
-        extents.setdefault(opener, None)
 
 
 def parse_critique(text: str) -> dict:

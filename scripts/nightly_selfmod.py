@@ -113,8 +113,9 @@ from collections import deque
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-if str(REPO) not in sys.path:
-    sys.path.insert(0, str(REPO))
+for _candidate in (str(REPO / "runtime"), str(REPO)):
+    if _candidate not in sys.path:
+        sys.path.insert(0, _candidate)
 
 import code_improve
 import selfmod
@@ -219,6 +220,10 @@ _FENCE = re.compile(r"^\s*```[a-zA-Z0-9_+-]*\s*$", re.M)
 
 def _test_python() -> str:
     """Return the candidate-worktree interpreter, with a portable fallback."""
+    # Preserve an active virtualenv interpreter (for example the managed
+    # runtime venv) instead of silently downgrading to a stale in-repo venv.
+    if sys.prefix != sys.base_prefix and Path(sys.executable).is_file():
+        return sys.executable
     venv_python = REPO / "venv" / "Scripts" / "python.exe"
     if venv_python.is_file():
         return str(venv_python)
@@ -257,6 +262,27 @@ def _ruff_command(py: str) -> list[str] | None:
         timeout=10,
     )
     return [py, "-m", "ruff"] if probe.returncode == 0 else None
+
+
+def _lint_command(py: str, target: str, workspace: Path) -> list[str] | None:
+    """Return a low-integrity-safe lint command, or None when Ruff is absent.
+
+    Runs ``scripts/check_lint_ratchet.py`` when present so pre-existing legacy
+    baseline findings do not reject unrelated candidate edits while any new
+    blocking or ratchet finding still fails closed.  Otherwise falls back to
+    cacheless, isolated Ruff blocking checks on ``target``.
+    """
+    ruff = _ruff_command(py)
+    if not ruff:
+        return None
+    if (workspace / "scripts" / "check_lint_ratchet.py").is_file():
+        return [py, "scripts/check_lint_ratchet.py"]
+    return [
+        *ruff, "check", "--no-cache", "--isolated",
+        "--target-version", "py312",
+        "--select", "F821,F822,F811,PLE,B023",
+        target,
+    ]
 
 
 # The regression suite is partitioned by marker. Both gated partitions run
@@ -987,6 +1013,14 @@ def _objective_target_function(objective: str, rationale: str, source: str) -> s
             return None
     if len(functions) == 1:
         return functions[0].name
+    named = [
+        node for node in functions
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(node.name)}(?![A-Za-z0-9_])", claim)
+    ]
+    if len(named) == 1:
+        return named[0].name
+    if len(named) > 1:
+        return None
     distinctive = _distinctive(claim)
     matches = []
     for node in functions:
@@ -1074,7 +1108,7 @@ def _model_refusal(server, model="") -> str:
     return tool_lane_guard.selector_refusal("code", getattr(server, "TIERS", {}), policy)
 
 
-def _ask(server, prompt, num_predict=1200, model="", num_ctx=0, timeout=60):
+def _ask(server, prompt, num_predict=1200, model="", num_ctx=0, timeout=60, mode="code"):
     # A blocked model is refused before the catalog probe or any model call.
     refusal = _model_refusal(server, model)
     if refusal:
@@ -1106,7 +1140,7 @@ def _ask(server, prompt, num_predict=1200, model="", num_ctx=0, timeout=60):
         kwargs = {
             "tiers": "code",
             "num_predict": num_predict,
-            "mode": "code",
+            "mode": mode,
         }
         if int(num_ctx or 0) > 0:
             kwargs["num_ctx"] = int(num_ctx)
@@ -1569,18 +1603,26 @@ def propose_objective(
             "OBJECTIVE: <one sentence, imperative>\n"
             "WHY: <one sentence naming the concrete wrong behaviour>\n\n"
             "If the module has no such defect, reply exactly: NONE\n\n"
-            "=== %s ===\n%s" % (name, _proposal_function_inventory(visible_source), visible_source)
+            "=== %s ===\n%s" % (_proposal_function_inventory(visible_source), name, visible_source)
         ), num_predict=300, model=model, num_ctx=num_ctx,
-            timeout=min(60, max(1, int(remaining))) if remaining is not None else 60)
+            timeout=min(60, max(1, int(remaining))) if remaining is not None else 60,
+            mode="prose")
         if answer.strip().upper().startswith("NONE"):
             log("  %s: model reports no defect" % name)
             continue
         objective = why = ""
-        for line in answer.splitlines():
-            if line.upper().startswith("OBJECTIVE:"):
-                objective = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("WHY:"):
-                why = line.split(":", 1)[1].strip()
+        for raw_line in answer.splitlines():
+            if raw_line.strip().startswith("=== ENSEMBLE"):
+                break
+            line = re.sub(r"^\s*(?:[-*]\s+|\*\*|__)+", "", raw_line).strip()
+            upper = line.upper()
+            if upper.startswith("OBJECTIVE:") and not objective:
+                objective = line.split(":", 1)[1].strip().strip("*").strip()
+            elif upper.startswith("WHY:") and not why:
+                why = line.split(":", 1)[1].strip().strip("*").strip()
+        if not objective:
+            log("  %s: reply had no OBJECTIVE line, skipping" % name)
+            continue
         if objective:
             if not _objective_is_actionable(objective):
                 log("  %s: non-executable objective, skipping" % name)
@@ -1941,9 +1983,9 @@ def run(server, log, *, test_timeout=1800, branch=True, model="", num_ctx=0,
     # lane. An optional lint result is recorded separately, so a missing Ruff
     # install cannot masquerade as a syntax failure.
     checks = [("syntax", [py, "-m", "py_compile", target])]
-    ruff = _ruff_command(py)
-    if ruff:
-        checks.append(("lint", [*ruff, "check", target]))
+    lint_cmd = _lint_command(py, target, workspace)
+    if lint_cmd:
+        checks.append(("lint", lint_cmd))
         log("  lint: Ruff available")
     else:
         log("  lint: Ruff unavailable; Python compilation is the syntax gate")
