@@ -9,6 +9,7 @@ import server
 
 from sonder_runtime.adapters import chat_tool_manifest
 from sonder_runtime.adapters import runtime_policy as _runtime_policy
+from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.agents import delegation_runtime as _delegation_rt
 from sonder_runtime.application.chat import tool_manifest as tm
 from sonder_runtime.bootstrap import delegation_wiring
@@ -826,7 +827,14 @@ def test_offload_tier_impl_passes_bounded_timeout_and_caller_cancel(monkeypatch)
 
 @pytest.mark.parametrize(
     ("scenario", "outcome"),
-    [("ok", "ok"), ("timeout", "timeout"), ("unreachable", "unreachable"), ("empty", "skipped")],
+    [
+        ("ok", "ok"),
+        ("timeout", "timeout"),
+        ("model_call_timeout", "timeout"),
+        ("model_call_cancelled", "skipped"),
+        ("unreachable", "unreachable"),
+        ("empty", "skipped"),
+    ],
 )
 def test_one_content_free_telemetry_record_per_delegated_turn(monkeypatch, scenario, outcome):
     from sonder_runtime.application.session import provider_attempts as pa
@@ -841,6 +849,11 @@ def test_one_content_free_telemetry_record_per_delegated_turn(monkeypatch, scena
     def chat(payload, **kw):
         if scenario == "timeout":
             raise TimeoutError("slow")
+        if scenario == "model_call_timeout":
+            # What server._chat_request actually raises on its main path.
+            raise ModelCallError("timeout", "slow")
+        if scenario == "model_call_cancelled":
+            raise ModelCallError("cancelled", "stopped")
         if scenario == "empty":
             return {}, {"role": "assistant", "content": ""}
         return {}, {"role": "assistant", "content": f"- {_PRIVATE_MARKER}"}
