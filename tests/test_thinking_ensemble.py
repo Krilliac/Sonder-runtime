@@ -268,6 +268,7 @@ def test_main_workstation_thinking_delegation_records_reasoning_and_keeps_manife
 
 def test_auto_ensemble_offload_and_delegated_security_lane(monkeypatch):
     monkeypatch.delenv("SONDER_THINKING_ENSEMBLE", raising=False)
+    monkeypatch.setenv("SONDER_AUTO_ENSEMBLE_OFFLOAD", "1")
     ensemble_calls: list[dict[str, Any]] = []
     fake_server = SimpleNamespace(
         TIERS={
@@ -444,3 +445,48 @@ def test_thinking_exposure_on_carries_text_in_thinking_field(monkeypatch):
     board_events, _events, recorded_reasoning = _run_marker_deliberation(monkeypatch, expose=True)
     assert any(_PRIVATE_MARKER in ev["thinking"] for ev in board_events)
     assert recorded_reasoning and _PRIVATE_MARKER in recorded_reasoning[0][0]
+
+
+def test_auto_ensemble_offload_is_opt_in_prose_and_footer_free(monkeypatch):
+    calls: list[dict[str, Any]] = []
+    fake_server = SimpleNamespace(
+        TIERS={"code": "c:latest", "reasoning": "r:latest"},
+        OLLAMA_POOL=SimpleNamespace(enabled=False),
+        _is_cloud_tier=lambda _t, m="": ":cloud" in str(m),
+        ensemble_answer=lambda prompt, **kw: (
+            calls.append(kw) or "Bug list.\n=== ENSEMBLE (2 models answered) ===\n  synthesized by x"
+        ),
+    )
+    kw = {"tier": "code", "check_reachable": lambda *_a: True}
+    monkeypatch.delenv("SONDER_AUTO_ENSEMBLE_OFFLOAD", raising=False)
+    assert te_bootstrap.maybe_auto_ensemble_offload(fake_server, "list the bugs", **kw) is None
+    assert calls == []
+    monkeypatch.setenv("SONDER_AUTO_ENSEMBLE_OFFLOAD", "1")
+    assert te_bootstrap.maybe_auto_ensemble_offload(fake_server, "list the bugs", **kw) == "Bug list."
+    assert calls[0]["mode"] == "prose"
+
+
+def test_deliberation_clears_inherited_primary_rung(monkeypatch):
+    from sonder_runtime.application.chat import provider_bridge as pb
+
+    monkeypatch.delenv("SONDER_THINKING_ENSEMBLE", raising=False)
+    seen: list[Any] = []
+
+    def chat(payload, **kw):
+        seen.append(pb.active_rung())
+        return {}, {"content": "<think>t</think>- brief"}
+
+    fake_server = SimpleNamespace(
+        TIERS={"code": "c:latest", "reasoning": "r:latest"},
+        OLLAMA_POOL=SimpleNamespace(enabled=False),
+        _is_cloud_tier=lambda _t, m="": ":cloud" in str(m),
+        _bridge_provider_for_tier=lambda t: None,
+        _chat_request=chat,
+    )
+    with pb.bind_rung("llamacpp", "code"):
+        assert pb.active_rung() is not None
+        te_bootstrap.deliberate_for_turn(
+            fake_server, "Refactor the lock hierarchy", tier="code", model="c:latest",
+            check_reachable=lambda *_a: True,
+        )
+    assert seen == [None]
