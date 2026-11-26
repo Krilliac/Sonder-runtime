@@ -215,8 +215,8 @@ def test_server_full_help_matches_legacy_unfiltered_projection():
         if server._agent_run_tool_refusal(name):
             denied.add(name)
         else:
-            decision = pm.decide(name, interactive=False, record=False)
-            if not decision.allowed and decision.source in ("mode", "rule"):
+            decision = pm.decide(name, interactive=False, record=False, rule_lookup=lambda _tool: None)
+            if not decision.allowed and decision.source == "mode":
                 denied.add(name)
     expected = original if not denied else "\n".join(
         line for line in original.splitlines()

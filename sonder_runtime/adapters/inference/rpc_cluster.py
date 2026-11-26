@@ -14,6 +14,7 @@ explicit arguments; nothing here names a particular machine.
 """
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import logging
@@ -610,15 +611,18 @@ def probe_configured_sharded_server(
     return probe_sharded_server(settings.server_url, timeout=timeout, get_fn=get_fn)
 
 
+_PROBE_ERRORS = (OSError, ValueError, http.client.HTTPException, RecursionError)
+
+
 def run_sharded_backend_probe(
     env: Mapping[str, str],
     *,
     get_fn: HttpGetProbe | None = None,
 ) -> ShardedServerHealth | None:
-    """Probe the configured sharded server once and log one line. Never raises."""
+    """Probe the configured sharded server once and log one line."""
     try:
         health = probe_configured_sharded_server(env, get_fn=get_fn)
-    except Exception as exc:
+    except _PROBE_ERRORS as exc:
         _logger.warning("RPC sharded backend probe failed (%s)", type(exc).__name__)
         return None
     if health is None:
@@ -632,6 +636,19 @@ def run_sharded_backend_probe(
         health.error or "-",
     )
     return health
+
+
+def _run_sharded_backend_probe_background(
+    env: Mapping[str, str],
+    *,
+    get_fn: HttpGetProbe | None = None,
+) -> ShardedServerHealth | None:
+    """Keep daemon probe thread failures out of stderr without hiding bugs cleanly."""
+    try:
+        return run_sharded_backend_probe(env, get_fn=get_fn)
+    except Exception:
+        _logger.exception("RPC sharded backend probe raised unexpected error")
+        return None
 
 
 def start_sharded_backend_probe(
@@ -650,7 +667,7 @@ def start_sharded_backend_probe(
         return False
     try:
         thread = thread_factory(
-            target=run_sharded_backend_probe, args=(snapshot,),
+            target=_run_sharded_backend_probe_background, args=(snapshot,),
             name="sonder-rpc-probe", daemon=True,
         )
         thread.start()

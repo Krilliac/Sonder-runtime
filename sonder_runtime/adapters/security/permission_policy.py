@@ -69,8 +69,14 @@ class PermissionPolicyProvider:
         """The exception type ``set_mode_without_escalation`` raises."""
         return _engine().ModeEscalationRefused
 
+    def global_mode(self) -> str:
+        return _engine().global_mode()
+
     def set_global_mode(self, name: str) -> str:
         return _engine().set_global_mode(name)
+
+    def set_session_mode(self, name: str) -> str:
+        return _engine().set_session_mode(name)
 
     def attended_mode_change(self):
         """Context for a mode change a present person makes (console only)."""

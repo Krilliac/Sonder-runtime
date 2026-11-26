@@ -1487,6 +1487,50 @@ def set_mode(name: str) -> str:
     return match
 
 
+def global_mode() -> str:
+    """The process-global mode, whatever scope is bound: the ceiling for every session."""
+    _load()
+    with _LOCK:
+        return _STATE["mode"]
+
+
+def set_session_mode(name: str) -> str:
+    """Set the bound scope's mode, never above the global mode; returns the new mode.
+
+    This is the administrator's per-session control: a session may be made
+    stricter than the global mode, or left level with it, and never looser
+    (``MODES`` runs strictest first). ``bypass`` is not entered here -- it has
+    its own confirmed route (``set_mode`` under ``mode_scope``) -- and a scope
+    that is already in bypass may be lowered to any mode at or below the
+    global mode. Raises ``ModeEscalationRefused`` when a capped local-open
+    scope asks above ``manual``; ``ValueError`` for an unknown mode, for
+    ``bypass``, for a call with no bound scope, and for a mode above the
+    global one.
+    """
+    _load()
+    match = resolve_mode(name)
+    if match == BYPASS:
+        raise ValueError("bypass is entered with its own confirmation, not as a session mode")
+    pair = _MODE_SCOPE.get()
+    if pair is None or not _scope_key(pair[0], pair[1]):
+        raise ValueError("a session mode needs a principal or a session")
+    if _MODE_SCOPE_CAPPED.get() and _above_manual(match):
+        raise ModeEscalationRefused(current_mode(), match)
+    order = {mode: index for index, mode in enumerate(MODES)}  # strictest first
+    # One hold of the (re-entrant) lock across the ceiling check and the scoped
+    # write: a concurrent set_global_mode that lowers the global mode must not
+    # run between them, or the scope would be written above the new ceiling.
+    with _LOCK:
+        ceiling = _STATE["mode"]
+        if order[match] > order.get(ceiling, order[DEFAULT_MODE]):
+            raise ValueError(
+                "a session cannot be raised above the global mode (%s): %s is more "
+                "autonomous. Lower the request, or have an administrator change the "
+                'global mode with scope "global".' % (ceiling, match)
+            )
+        return set_mode(match)
+
+
 def set_global_mode(name: str) -> str:
     """Set the process-global mode for every caller; returns the new mode.
 

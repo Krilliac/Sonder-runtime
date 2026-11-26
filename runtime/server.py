@@ -16564,8 +16564,8 @@ def _agent_tool_help(
             project_bound=project_bound, allow_web=allow_web, allow_location=allow_location,
         ) or _role_tool_policy.agent_refusal(name):
             return True
-        decision = permission_modes.decide(name, interactive=False, record=False)
-        return not decision.allowed and decision.source in ("mode", "rule")
+        decision = permission_modes.decide(name, interactive=False, record=False, rule_lookup=lambda _t: None)
+        return not decision.allowed and decision.source == "mode"
 
     return build_agent_tool_help(
         help_text, generated_lines=generated, advertised_names=advertised,
