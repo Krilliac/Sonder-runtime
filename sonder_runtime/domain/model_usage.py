@@ -2,26 +2,29 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any, cast
+
 
 # ``token_source`` values that mean the provider counted the tokens; every other
 # non-empty source is a local estimate (or a mix) and is totalled separately.
 PROVIDER_TOKEN_SOURCES = frozenset(("ollama", "provider"))
 
 
-def usage_count(value):
+def usage_count(value: object) -> int | None:
     """Return a non-negative integer usage count, or ``None`` if invalid."""
     if value is None:
         return None
     try:
-        value = int(value)
+        parsed = int(cast(Any, value))
     except (TypeError, ValueError, OverflowError):
         return None
-    return value if value >= 0 else None
+    return parsed if parsed >= 0 else None
 
 
-def merge_reasoning_response_usage(first, later, *, segments: int) -> dict:
+def merge_reasoning_response_usage(first: object, later: object, *, segments: int) -> dict[str, Any]:
     """Combine provider counters while retaining only the final response body."""
-    merged = dict(later if isinstance(later, dict) else {})
+    merged: dict[str, Any] = dict(later if isinstance(later, dict) else {})
     for key in (
         "total_duration",
         "load_duration",
@@ -32,9 +35,9 @@ def merge_reasoning_response_usage(first, later, *, segments: int) -> dict:
     ):
         left = first.get(key) if isinstance(first, dict) else None
         right = later.get(key) if isinstance(later, dict) else None
-        if all(
-            isinstance(value, int) and not isinstance(value, bool) and value >= 0
-            for value in (left, right)
+        if (
+            isinstance(left, int) and not isinstance(left, bool) and left >= 0
+            and isinstance(right, int) and not isinstance(right, bool) and right >= 0
         ):
             merged[key] = left + right
         elif isinstance(left, int) and not isinstance(left, bool) and left >= 0:
@@ -76,7 +79,7 @@ _RESPONSE_METADATA_KEYS = (
 )
 
 
-def response_metadata(out, served_model: str = "") -> dict:
+def response_metadata(out: Mapping[str, object], served_model: str = "") -> dict[str, Any]:
     """The backend's bounded, non-content inference metadata for one response.
 
     Gateways can expose measured phase timing without retaining prompts,

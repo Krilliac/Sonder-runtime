@@ -182,8 +182,14 @@ def test_status_reports_fallback_and_count_and_forwards_metadata():
     assert gateway.request_admission is primary.request_admission
     assert gateway.resolve_route(ModelRequest(prompt="x", tier="fast"), _ctx()) is None
     assert gateway.capability_health().provider == "sonder_inference"
-    with pytest.raises(DependencyUnavailable, match="SONDER_EMBEDDING_PROVIDER"):
+    # Embeddings never fall back to Ollama even when the primary is unreachable.
+    with pytest.raises(SonderInferenceUnreachable):
         gateway.embed(["x"], _ctx())
+    # A ready primary without embeddings capability forwards its exact refusal.
+    healthy_primary, _ = _primary()
+    healthy_gateway = PreSendFallbackGateway(healthy_primary, fallback=FakeOllama())
+    with pytest.raises(DependencyUnavailable, match="SONDER_EMBEDDING_PROVIDER"):
+        healthy_gateway.embed(["x"], _ctx())
 
 
 def test_served_tier_models_describe_the_primary():

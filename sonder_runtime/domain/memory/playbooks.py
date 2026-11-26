@@ -13,7 +13,7 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Iterable
+from typing import Any, Collection, Iterable, Mapping
 
 from sonder_runtime.domain.security.redaction import redact_text
 from sonder_runtime.domain.memory.write_quality import classify
@@ -31,7 +31,7 @@ MAX_ENTRY_CHARS = 32 * 1024
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
-def content_digest(entry: dict) -> str:
+def content_digest(entry: Mapping[str, Any]) -> str:
     material = {key: entry.get(key) for key in (
         "id", "topic", "category", "title", "body", "evidence", "triggers",
         "date", "provenance", "tainted", "supersedes",
@@ -168,7 +168,7 @@ def quality_findings(title: str, body: str, evidence: str = "", *, category: str
 
 
 def make_entry(topic: str, category: str, title: str, body: str, evidence: Any = "", *,
-               triggers: Iterable[str] | None = None, provenance: dict[str, Any] | None = None,
+               triggers: Collection[str] | None = None, provenance: dict[str, Any] | None = None,
                tainted: bool = True, owner_correction: bool = False,
                policy: PlaybookPolicy | None = None, entry_id: str | None = None,
                created: str | None = None) -> dict[str, Any]:

@@ -47,6 +47,7 @@ class ChatSession {
       ..temperature = settings.temperature
       ..reasoningEffort = settings.reasoningEffort
       ..persona = settings.persona
+      ..executionMode = settings.executionMode
       ..allowApproximateLocation = settings.allowApproximateLocation
       ..clientExecEnabled = settings.clientExecEnabled
       ..clientPermissionMode = settings.clientPermissionMode
@@ -59,6 +60,10 @@ class ChatSession {
       }
       ..onPersonaChanged = (persona) {
         _settings.persona = persona;
+        unawaited(_settings.save());
+      }
+      ..onExecutionModeChanged = (mode) {
+        _settings.executionMode = mode;
         unawaited(_settings.save());
       }
       ..onClientModeChanged = (mode) {
@@ -152,6 +157,7 @@ class ChatSession {
     chat.updateBackend(_backendFor(next), identityChanged: changed);
     chat.syncModel(next.model);
     chat.syncPersona(next.persona);
+    chat.syncExecutionMode(next.executionMode);
   }
 
   /// Settings saved [next]: a different account, origin or key means the

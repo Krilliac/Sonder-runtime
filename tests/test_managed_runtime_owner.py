@@ -239,3 +239,166 @@ def test_workstation_profile_launches_with_only_its_pinned_site(tmp_path):
         assert owner.execute(owner.prepare("stop", "stop", {}))["state"] == "STOPPED_CLEAN"
     finally:
         owner.close()
+
+
+def test_journal_read_only_queries_do_not_contend_with_writer_begin_immediate(tmp_path):
+    """Child control polling must not take a write lock while the owner writes."""
+    import sqlite3
+    from sonder_runtime.adapters.persistence.runtime_owner import (
+        SQLiteManagedRuntimeOwnerJournal,
+    )
+    from sonder_runtime.application.ports.managed_runtime_owner import managed_operation
+
+    db_path = tmp_path / "owner.sqlite"
+    journal = SQLiteManagedRuntimeOwnerJournal(db_path, namespace="ns", create=True)
+    select = managed_operation(
+        "select",
+        "select",
+        journal.status(),
+        {"config": {"generation": 1, "digest": "a" * 64, "selector_revision": 0}},
+    )
+    journal.prepare(select)
+    journal.complete(select, {"selected": True}, "STOPPED_CLEAN")
+    launch = managed_operation("launch0", "launch", journal.status(), {})
+    journal.prepare(launch)
+    journal.phase(launch, "STARTING", {"manifest": "m"})
+
+    reader = SQLiteManagedRuntimeOwnerJournal(db_path, namespace="ns")
+    writer = sqlite3.connect(db_path.as_uri() + "?mode=rw", uri=True, isolation_level=None)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        assert reader.status()["state"] == "STARTING"
+        assert reader.pending() == launch
+        assert reader.selected_config()["generation"] == 1
+        assert reader.phase_evidence(launch, "STARTING") == {"manifest": "m"}
+    finally:
+        writer.rollback()
+        writer.close()
+
+
+def test_journal_distinguishes_transient_busy_from_permanent_storage_error(
+    tmp_path, monkeypatch
+):
+    import sqlite3
+    import sonder_runtime.adapters.persistence.runtime_owner as persistence_owner
+
+    db_path = tmp_path / "owner.sqlite"
+    journal = persistence_owner.SQLiteManagedRuntimeOwnerJournal(
+        db_path, namespace="ns", create=True
+    )
+
+    def raise_busy(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(persistence_owner, "owned_sqlite_connect", raise_busy)
+        with pytest.raises(persistence_owner.OwnerStorageBusy, match="unavailable"):
+            journal.pending()
+
+    def raise_corrupt(*_args, **_kwargs):
+        raise sqlite3.DatabaseError("file is not a database")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(persistence_owner, "owned_sqlite_connect", raise_corrupt)
+        with pytest.raises(OwnerRefused, match="unavailable") as caught:
+            journal.pending()
+        assert type(caught.value) is OwnerRefused
+
+
+def test_managed_control_loop_retries_bounded_transient_busy_and_fails_closed():
+    from threading import Event
+    from types import SimpleNamespace
+    from sonder_runtime.adapters.persistence.runtime_owner import OwnerStorageBusy
+    from sonder_runtime.bootstrap import managed_http_runtime as managed
+
+    # 1. Transient SQLite busy spikes (< budget) recover cleanly and process stop.
+    outcomes = iter([
+        OwnerStorageBusy("owner storage is unavailable"),
+        OwnerStorageBusy("owner storage is unavailable"),
+        None,
+        OwnerStorageBusy("owner storage is unavailable"),
+        SimpleNamespace(action="stop"),
+    ])
+    ready_marks = []
+    drains = []
+    errors = []
+
+    def read_next():
+        item = next(outcomes)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    managed._run_control_loop(
+        stopped=Event(),
+        is_ready=lambda: True,
+        mark_ready=lambda: ready_marks.append("READY"),
+        read_pending=read_next,
+        drain=drains.append,
+        on_error=lambda err: errors.append(type(err).__name__),
+        poll_interval=0.0,
+        max_transient_busy=3,
+    )
+    assert ready_marks == ["READY"]
+    assert drains == ["owned runtime stop"]
+    assert errors == []
+
+    # 2. Persistent busy hitting the bound still fails closed.
+    persistent_drains = []
+    persistent_errors = []
+    managed._run_control_loop(
+        stopped=Event(),
+        is_ready=lambda: False,
+        mark_ready=lambda: None,
+        read_pending=lambda: (_ for _ in ()).throw(
+            OwnerStorageBusy("owner storage is unavailable")
+        ),
+        drain=persistent_drains.append,
+        on_error=lambda err: persistent_errors.append(type(err).__name__),
+        poll_interval=0.0,
+        max_transient_busy=3,
+    )
+    assert persistent_errors == ["OwnerStorageBusy"]
+    assert persistent_drains == ["owned control unavailable"]
+
+    # 3. Non-busy OwnerRefused (e.g. missing journal or integrity error) fails closed immediately.
+    immediate_calls = []
+    immediate_drains = []
+    immediate_errors = []
+
+    def missing_journal():
+        immediate_calls.append(1)
+        raise OwnerRefused("owner journal is missing")
+
+    managed._run_control_loop(
+        stopped=Event(),
+        is_ready=lambda: False,
+        mark_ready=lambda: None,
+        read_pending=missing_journal,
+        drain=immediate_drains.append,
+        on_error=lambda err: immediate_errors.append(type(err).__name__),
+        poll_interval=0.0,
+        max_transient_busy=5,
+    )
+    assert immediate_calls == [1]
+    assert immediate_errors == ["OwnerRefused"]
+    assert immediate_drains == ["owned control unavailable"]
+
+
+def test_finish_managed_runtime_includes_bounded_error_reason():
+    from types import SimpleNamespace
+    from sonder_runtime.bootstrap import managed_http_runtime as managed
+
+    recorded = []
+    with pytest.raises(
+        OwnerRefused, match=r"managed application cleanup is incomplete.*control-failed:OwnerRefused"
+    ):
+        managed._finish_managed_runtime(
+            errors=["control-failed:OwnerRefused"],
+            cleanup_errors=[],
+            receipt=SimpleNamespace(clean=True, components=()),
+            evidence=lambda phase, receipt: recorded.append((phase, receipt)),
+            primary_error=None,
+            primary_traceback=None,
+        )
+    assert len(recorded) == 1 and recorded[0][0] == "UNCLEAN"
