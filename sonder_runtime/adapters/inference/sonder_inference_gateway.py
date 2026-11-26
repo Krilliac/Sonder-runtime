@@ -32,9 +32,9 @@ taxonomy -- and adds what that generic peer cannot know:
 * **Health, identity and status** for doctor, the ecosystem route and the
   Flutter card: :meth:`capability_health`, :meth:`backend_identity` and
   :meth:`provider_status`.  None of them generates.
-
-Embeddings are not served by Inference v1; :meth:`embed` tells the operator
-to bind ``SONDER_EMBEDDING_PROVIDER=ollama``.
+* **Embeddings & reranking.** Capability-gated ``/v1/embeddings`` and
+  ``/v1/rerank`` execution with explicit model selection, index preservation,
+  bounded batching, and host-admission integration.
 """
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ import ipaddress
 import json
 import logging
 import math
+import numbers
 import os
 import re
 import socket
@@ -60,16 +61,17 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Sequence
+from typing import Sequence, TypeVar
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from ...application.chat import stream_sink
 from ...application.chat.provider_bridge import UnsupportedProviderFeature
-from ...application.context import OperationContext, current_operation_context
+from ...application.context import OperationContext, current_operation_context, local_owner_context
 from ...application.ports.model_gateway import (
     Embedding,
     ModelRequest,
     ModelResponse,
+    RerankScore,
     optional_token_count,
     require_model_text,
 )
@@ -97,6 +99,13 @@ from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_FIXED_ENDPOINT,
 )
 from ...domain.routing.backend_conformance import BackendIdentity
+from ...domain.routing.prefix_locality import (
+    DEFAULT_MAX_LOCALITY_ENTRIES,
+    LocalityMatch,
+    PrefixLocalityTable,
+    digest_key_parts,
+    score_endpoint_completion,
+)
 from ...platform.metrics import default_registry
 from ..model_request_admission import HostModelRequestAdmission
 from ..observability import activity_tracker
@@ -127,6 +136,7 @@ from .openai_compat_gateway import (
     GET_BODY_LIMIT,
     OpenAICompatibleConfig,
     OpenAICompatibleGateway,
+    ResidencyProbe,
     shared_https_context,  # noqa: F401  (re-exported)
 )
 from .request_tuning import thinking_supported, tune_request
@@ -162,6 +172,8 @@ ACCEPTED_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 ENV_BASE_URL = "SONDER_INFERENCE_BASE_URL"
 ENV_MODEL = "SONDER_INFERENCE_MODEL"
+ENV_EMBED_MODEL = "SONDER_INFERENCE_EMBED_MODEL"
+ENV_RERANK_MODEL = "SONDER_INFERENCE_RERANK_MODEL"
 ENV_TIER_MODELS = "SONDER_INFERENCE_TIER_MODELS"
 ENV_API_KEY = "SONDER_INFERENCE_API_KEY"
 ENV_ALLOW_REMOTE = "SONDER_ALLOW_REMOTE_INFERENCE"
@@ -187,8 +199,16 @@ NATIVE_TOOL_MARKERS = frozenset({"tool_calling", "tools", "native_tools"})
 STRUCTURED_OUTPUT_MARKERS = frozenset({"structured_output", "response_format", "json_schema"})
 LOGPROBS_MARKERS = frozenset({"logprobs", "token_logprobs"})
 EMBEDDING_MARKERS = frozenset({"embeddings", "embedding"})
+RERANK_MARKERS = frozenset({"rerank", "reranking", "cross_encoder"})
 MAX_TOP_LOGPROBS = 20
 MAX_EMBED_INPUTS = 256
+DEFAULT_RERANK_BATCH_SIZE = 32
+MAX_RERANK_BATCH_SIZE = 128
+MAX_RERANK_DOCUMENTS = 1024
+_CHAR_PER_TOKEN_ESTIMATE = 4
+_DEFAULT_EXPECTED_DECODE_TOKENS = 128
+_MAX_EXPECTED_DECODE_TOKENS = 2048
+_EMPTY_LOCALITY_MATCH = LocalityMatch(0.0, 0.0, 0.0, 0.0, False, 0.0, 0.0)
 NATIVE_TOOLS_REFUSAL = (
     "native tool calls are not supported by this sonder-inference endpoint: "
     "the worker does not advertise 'tool_calling' or 'tools' "
@@ -353,8 +373,9 @@ def _document_advertises_markers(
         else:
             matched_model = next((entry for entry in models if entry.get("id") == model), None)
         if matched_model is not None:
-            if _capability_names(matched_model.get("capabilities")) & markers:
-                return True
+            model_caps = _capability_names(matched_model.get("capabilities"))
+            if model_caps:
+                return bool(model_caps & markers)
             backend_name = matched_model.get("backend")
             if isinstance(backend_name, str) and backend_name:
                 matching_backends = [b for b in backends if b.get("name") == backend_name]
@@ -420,6 +441,15 @@ def embeddings_supported(
 ) -> bool:
     """Whether a ``sonder-inference`` health document advertises ``/v1/embeddings``."""
     return _document_advertises_markers(document, EMBEDDING_MARKERS, model=model)
+
+
+def rerank_supported(
+    document: Mapping[str, object] | None,
+    *,
+    model: str | None = None,
+) -> bool:
+    """Whether a ``sonder-inference`` health document advertises ``/v1/rerank``."""
+    return _document_advertises_markers(document, RERANK_MARKERS, model=model)
 
 
 def _normalize_tools(raw: object) -> list[dict[str, object]] | None:
@@ -902,6 +932,8 @@ class SonderInferenceConfig:
     private_worker: bool = False
     ca_bundle: str = ""
     max_inflight: int = 1
+    embed_model: str = ""
+    rerank_model: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "base_url", normalize_base_url(self.base_url))
@@ -911,6 +943,14 @@ class SonderInferenceConfig:
                                % MAX_WORKER_INFLIGHT)
         if not isinstance(self.model, str) or not _MODEL_ID.fullmatch(self.model):
             raise InvalidInput("sonder-inference model id must be 1-128 non-space characters")
+        if self.embed_model:
+            if not isinstance(self.embed_model, str) or not _MODEL_ID.fullmatch(self.embed_model.strip()):
+                raise InvalidInput("sonder-inference embed_model id must be 1-128 non-space characters")
+            object.__setattr__(self, "embed_model", self.embed_model.strip())
+        if self.rerank_model:
+            if not isinstance(self.rerank_model, str) or not _MODEL_ID.fullmatch(self.rerank_model.strip()):
+                raise InvalidInput("sonder-inference rerank_model id must be 1-128 non-space characters")
+            object.__setattr__(self, "rerank_model", self.rerank_model.strip())
         tiers = dict(self.tier_models or {})
         for tier, model in tiers.items():
             if tier not in PROVIDER_TIERS:
@@ -1216,6 +1256,8 @@ def config_from_env(env: Mapping[str, str] | None = None) -> SonderInferenceConf
         workers=workers,
         base_url=base_url,
         model=str(source.get(ENV_MODEL, "") or "").strip() or DEFAULT_MODEL,
+        embed_model=str(source.get(ENV_EMBED_MODEL, "") or "").strip(),
+        rerank_model=str(source.get(ENV_RERANK_MODEL, "") or "").strip(),
         tier_models=_parse_tier_models(str(source.get(ENV_TIER_MODELS, "") or "")),
         api_key=str(source.get(ENV_API_KEY, "") or "").strip(),
         allow_remote=allow_remote_raw == "1",
@@ -1393,6 +1435,17 @@ class IdentityObservation:
     reason: str | None
 
 
+@dataclass(frozen=True)
+class _RoutingHints:
+    """Compact, prompt-free routing signals for cache-aware endpoint placement."""
+
+    model: str
+    prefix_key: str
+    adapter_key: str
+    estimated_prompt_tokens: int
+    expected_decode_tokens: int
+
+
 class SonderInferenceGateway(OpenAICompatibleGateway):
     """ModelGateway over ``sonder-infer serve`` (Inference HTTP API v1)."""
 
@@ -1405,6 +1458,9 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         wall_clock: Callable[[], datetime] | None = None,
         ollama_pool=None,
         profile_cache: launch_profile_cache.ProfileCache | None = None,
+        residency_probe: ResidencyProbe | None = None,
+        is_model_resident: ResidencyProbe | None = None,
+        locality_max_entries: int = DEFAULT_MAX_LOCALITY_ENTRIES,
     ) -> None:
         super().__init__(
             None,
@@ -1415,6 +1471,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             http_error_classifier=self._classify_http_error,
             connect_error_classifier=self._classify_connect_error,
             get_transport=get_transport or direct_get_transport,
+            residency_probe=residency_probe,
+            is_model_resident=is_model_resident,
             spend_ledger=None,  # the owner's own LAN host: not metered
         )
         self._settings_override = config
@@ -1450,6 +1508,49 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         # Observed milliseconds per output token per endpoint (EWMA of
         # successful calls), so a much slower endpoint only gets overflow.
         self._ms_per_token: dict[str, float] = {}
+        # Observed prompt prefill ms/token, overall request latency EWMA, and
+        # bounded prefix-locality cache keyed by (endpoint, model, adapter, prefix).
+        self._prompt_ms_per_token: dict[str, float] = {}
+        self._request_ewma_ms: dict[str, float] = {}
+        self._locality_table = PrefixLocalityTable(max_entries=locality_max_entries)
+        self._last_routing_decision: dict[str, object] | None = None
+
+    def _probe_model_residency(
+        self, model: str, cfg: OpenAICompatibleConfig,
+    ) -> bool | None:
+        if self._residency_probe is not None:
+            return super()._probe_model_residency(model, cfg)
+        with self._lock:
+            cached = self._health_cache
+        if cached is None or cached.base_url != cfg.base_url or cached.document is None:
+            return None
+        models_raw = cached.document.get("models")
+        if not isinstance(models_raw, list):
+            return None
+        matched: Mapping[str, object] | None = None
+        for entry in models_raw:
+            if not isinstance(entry, Mapping):
+                continue
+            if model == DEFAULT_MODEL:
+                if entry.get("default") is True:
+                    matched = entry
+                    break
+            elif entry.get("id") == model:
+                matched = entry
+                break
+        if matched is None:
+            return None
+        resident = matched.get("resident")
+        if type(resident) is bool:
+            return resident
+        state = matched.get("state")
+        if isinstance(state, str):
+            norm = state.strip().lower()
+            if norm == "resident":
+                return True
+            if norm in ("unloaded", "unloading", "loading"):
+                return False
+        return None
 
     @property
     def last_response_meta(self) -> dict[str, object]:
@@ -1910,6 +2011,27 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         return self._supports_capability(
             embeddings_supported, tier=tier, model=model, refresh=refresh,
         )
+
+    def supports_rerank(
+        self,
+        *,
+        tier: str | None = None,
+        model: str | None = None,
+        refresh: bool = False,
+    ) -> bool:
+        """Return True only when a ready endpoint advertises ``/v1/rerank``."""
+        return self._supports_capability(
+            rerank_supported, tier=tier, model=model, refresh=refresh,
+        )
+
+    def prefix_locality_status(self) -> dict[str, object]:
+        """Bounded cache-locality counters and last routing decision (content-free)."""
+        with self._lock:
+            last = dict(self._last_routing_decision) if self._last_routing_decision else None
+        return {
+            "summary": self._locality_table.summary(),
+            "last_decision": last,
+        }
 
     # -- identity ----------------------------------------------------------
 
@@ -2389,6 +2511,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             )
         return SonderInferenceConfig(
             base_url=spec.url, model=settings.model, tier_models=dict(settings.tier_models),
+            embed_model=settings.embed_model, rerank_model=settings.rerank_model,
             api_key=token, allow_remote=True, timeout_seconds=settings.timeout_seconds,
             stream_idle_seconds=settings.stream_idle_seconds,
             stream_first_content_seconds=settings.stream_first_content_seconds,
@@ -2402,6 +2525,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                         spec: PrivateWorkerSpec) -> "SonderInferenceGateway":
         worker = self._worker_settings(settings, spec)
         key = (worker.base_url, worker.api_key, worker.ca_bundle, worker.max_inflight, worker.model,
+               worker.embed_model, worker.rerank_model,
                tuple(sorted(worker.tier_models.items())), worker.timeout_seconds,
                worker.stream_idle_seconds, worker.stream_first_content_seconds,
                worker.health_ttl_seconds, worker.health_timeout_seconds, worker.health_stale_seconds)
@@ -2414,6 +2538,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             worker, transport=transport, get_transport=get_transport,
             request_admission=self._request_admission, env=self._env,
             monotonic=self._monotonic, wall_clock=self._wall_clock,
+            residency_probe=self._residency_probe,
         )
         with self._lock:
             self._workers[spec.url] = (key, gateway)
@@ -2511,8 +2636,14 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             messages.append({"role": "user", "content": request.prompt})
         return messages
 
-    def _placement_candidates(self, request: ModelRequest, settings: SonderInferenceConfig,
-                              context: OperationContext):
+    def _operation_placement_candidates(
+        self,
+        settings: SonderInferenceConfig,
+        context: OperationContext,
+        *,
+        model: str,
+        predicate: Callable[[Mapping[str, object] | None], bool],
+    ):
         """``[(key, gateway, settings)]`` for the primary and each usable worker."""
         candidates = []
         try:
@@ -2530,21 +2661,6 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 logger.warning("private sonder-inference worker skipped: %s", _bounded(exc))
                 continue
             candidates.append((spec.url, gateway, gateway.settings()))
-        model = self.select_model(request, settings)
-        needs_tools = self._request_uses_native_tools(request)
-        opts = request.options or {}
-        needs_structured_output = _normalize_response_format(opts.get("response_format")) is not None
-        parsed_logprobs, _ = _normalize_logprobs_options(opts.get("logprobs"), opts.get("top_logprobs"))
-        needs_logprobs = parsed_logprobs is True
-
-        def _supports_all(doc: Mapping[str, object] | None) -> bool:
-            if needs_tools and not native_tools_supported(doc, model=model, env=self._env):
-                return False
-            if needs_structured_output and not structured_output_supported(doc, model=model):
-                return False
-            if needs_logprobs and not logprobs_supported(doc, model=model):
-                return False
-            return True
 
         usable = []
         for key, gateway, endpoint in candidates:
@@ -2556,7 +2672,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 worker_snap = self._worker_snapshot(gateway, endpoint, snapshot, model)
                 if worker_snap is None:
                     continue
-                if not _supports_all(worker_snap.document):
+                if not predicate(worker_snap.document):
                     continue
                 usable.append((key, gateway, endpoint))
                 continue
@@ -2573,10 +2689,33 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 continue
             if not self._serves(snapshot, model):
                 continue
-            if not _supports_all(snapshot.document if snapshot is not None else None):
+            if not predicate(snapshot.document if snapshot is not None else None):
                 continue
             usable.append((key, gateway, endpoint))
         return usable
+
+    def _placement_candidates(self, request: ModelRequest, settings: SonderInferenceConfig,
+                              context: OperationContext):
+        """``[(key, gateway, settings)]`` for the primary and each usable worker."""
+        model = self.select_model(request, settings)
+        needs_tools = self._request_uses_native_tools(request)
+        opts = request.options or {}
+        needs_structured_output = _normalize_response_format(opts.get("response_format")) is not None
+        parsed_logprobs, _ = _normalize_logprobs_options(opts.get("logprobs"), opts.get("top_logprobs"))
+        needs_logprobs = parsed_logprobs is True
+
+        def _supports_all(doc: Mapping[str, object] | None) -> bool:
+            if needs_tools and not native_tools_supported(doc, model=model, env=self._env):
+                return False
+            if needs_structured_output and not structured_output_supported(doc, model=model):
+                return False
+            if needs_logprobs and not logprobs_supported(doc, model=model):
+                return False
+            return True
+
+        return self._operation_placement_candidates(
+            settings, context, model=model, predicate=_supports_all,
+        )
 
     @staticmethod
     def _worker_snapshot(
@@ -2696,20 +2835,113 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 for item in usable
             )
 
-    def _acquire_endpoint(self, usable, excluded: set[str],
-                          context: OperationContext | None = None):
-        """Pick the lowest-cost endpoint with a free slot and count it; wait while all are full.
+    @staticmethod
+    def _extract_routing_hints(
+        request: ModelRequest,
+        context: OperationContext,
+        model: str,
+    ) -> _RoutingHints:
+        options = request.options or {}
+        manifest = getattr(request, "prefix_manifest", None)
+        manifest_key = (
+            manifest.get("cache_key")
+            if isinstance(manifest, Mapping)
+            else getattr(manifest, "cache_key", None)
+        )
+        raw_cache_key = options.get("prompt_cache_key")
+        conv_key = _conversation_key(context)
+        if isinstance(manifest_key, str) and manifest_key.strip():
+            prefix_key = "pfx:" + manifest_key.strip()
+        elif isinstance(raw_cache_key, str) and raw_cache_key.strip():
+            prefix_key = "key:" + raw_cache_key.strip()
+        elif conv_key:
+            prefix_key = "conv:" + conv_key
+        elif (request.system or "").strip() or request.history:
+            prefix_key = digest_key_parts(
+                "hist",
+                {
+                    "system": request.system or "",
+                    "history": list(request.history or ()),
+                },
+            )
+        else:
+            prefix_key = ""
+
+        raw_rf = options.get("response_format")
+        rf_type = str(raw_rf.get("type") or "") if isinstance(raw_rf, Mapping) else ""
+        raw_tools = options.get("tools")
+        tool_names = tuple(
+            sorted(
+                str(fn.get("name") or "")
+                for item in raw_tools
+                if isinstance(item, Mapping)
+                and isinstance(fn := item.get("function"), Mapping)
+                and fn.get("name")
+            )
+        ) if isinstance(raw_tools, (list, tuple)) else ()
+        adapter_key = digest_key_parts(
+            "adapt",
+            {
+                "adapter": str(options.get("adapter") or options.get("lora") or ""),
+                "num_ctx": options.get("num_ctx"),
+                "think": options.get("think"),
+                "reasoning_effort": options.get("reasoning_effort"),
+                "response_format": rf_type,
+                "tools": tool_names,
+            },
+        )
+
+        approx = options.get("approx_tokens")
+        if type(approx) is int and approx > 0:
+            est_prompt = approx
+        else:
+            total_chars = len(request.system or "") + len(request.prompt or "")
+            for entry in request.history or ():
+                if isinstance(entry, Mapping):
+                    content = entry.get("content")
+                    if isinstance(content, str):
+                        total_chars += len(content)
+                    if entry.get("tool_calls"):
+                        total_chars += len(str(entry.get("tool_calls")))
+                elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+                    total_chars += len(str(entry[1] or ""))
+            est_prompt = max(1, total_chars // _CHAR_PER_TOKEN_ESTIMATE) if total_chars > 0 else 0
+
+        raw_predict = options.get("num_predict", options.get("max_tokens"))
+        if type(raw_predict) is int and raw_predict > 0:
+            expected_decode = min(raw_predict, _MAX_EXPECTED_DECODE_TOKENS)
+        else:
+            expected_decode = _DEFAULT_EXPECTED_DECODE_TOKENS
+
+        return _RoutingHints(
+            model=model,
+            prefix_key=prefix_key,
+            adapter_key=adapter_key,
+            estimated_prompt_tokens=est_prompt,
+            expected_decode_tokens=expected_decode,
+        )
+
+    def _acquire_endpoint(
+        self,
+        usable,
+        excluded: set[str],
+        context: OperationContext | None = None,
+        *,
+        hints: _RoutingHints | None = None,
+    ):
+        """Pick the lowest estimated completion-cost endpoint with a free slot.
 
         Only endpoints below their ``max_inflight`` are eligible, so no
         endpoint is ever sent more concurrent requests than it allows; when
         every open endpoint is full the caller queues (cancel and deadline
         still apply) until a slot is released.
 
-        Cost = (in-flight + 1) / max_inflight x observed ms per output token.
-        An idle endpoint with no observation yet costs nothing, so each one is
-        measured once rather than starved; a busy unobserved one borrows the
-        fastest observed value (1.0 when there is none, i.e. plain
-        least-in-flight).  Ties rotate.
+        When no warm prefix locality exists across ready endpoints, an idle
+        unmeasured endpoint still gets an initial probe cost of ``0.0`` so each
+        worker's service rate is measured rather than starved.  Once warm
+        prefix locality or latency measurements apply, candidates are ranked by
+        predicted completion cost (projected queue delay + uncached prompt
+        work + expected decode work + restore cost minus locality saving).
         """
         with self._cond:
             while True:
@@ -2726,37 +2958,144 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 start = self._cursor % len(ready)
                 self._cursor += 1
                 rotated = ready[start:] + ready[:start]
+                now = self._monotonic()
+                matches: dict[str, LocalityMatch] = {}
+                if hints is not None and hints.prefix_key:
+                    for ep_key, _gw, _ep in rotated:
+                        matches[ep_key] = self._locality_table.lookup(
+                            endpoint=ep_key,
+                            model_identity=hints.model,
+                            adapter_key=hints.adapter_key,
+                            prefix_key=hints.prefix_key,
+                            now=now,
+                            estimated_prompt_tokens=hints.estimated_prompt_tokens,
+                        )
+                any_warm = any(m.effective_cached_tokens > 0.0 for m in matches.values())
+                estimates: dict[str, tuple[float, float, object]] = {}
 
-                def cost(item, *, default_rate=fallback):
-                    inflight = self._inflight.get(item[0], 0)
-                    load = (inflight + 1) / item[2].max_inflight
-                    if item[0] not in self._ms_per_token and inflight == 0:
-                        return (0.0, load)
-                    return (load * self._ms_per_token.get(item[0], default_rate), load)
+                for item in rotated:
+                    ep_key, _gw, ep_cfg = item
+                    inflight = self._inflight.get(ep_key, 0)
+                    load = (inflight + 1) / ep_cfg.max_inflight
+                    decode_rate = self._ms_per_token.get(ep_key, fallback)
+                    prompt_rate = self._prompt_ms_per_token.get(
+                        ep_key, max(0.05, decode_rate * 0.25),
+                    )
+                    est = score_endpoint_completion(
+                        endpoint=ep_key,
+                        inflight=inflight,
+                        max_inflight=ep_cfg.max_inflight,
+                        decode_ms_per_token=decode_rate,
+                        prompt_ms_per_token=prompt_rate,
+                        estimated_prompt_tokens=(
+                            hints.estimated_prompt_tokens if hints is not None else 0
+                        ),
+                        expected_decode_tokens=(
+                            hints.expected_decode_tokens
+                            if hints is not None
+                            else _DEFAULT_EXPECTED_DECODE_TOKENS
+                        ),
+                        match=matches.get(ep_key, _EMPTY_LOCALITY_MATCH),
+                        observed_request_ms=self._request_ewma_ms.get(ep_key),
+                    )
+                    unmeasured_idle = (
+                        not any_warm
+                        and ep_key not in self._ms_per_token
+                        and inflight == 0
+                    )
+                    rank = 0.0 if unmeasured_idle else est.total_cost_ms
+                    estimates[ep_key] = (rank, load, est)
 
-                chosen = min(rotated, key=cost)
-                load = cost(chosen)[1]
-                self._inflight[chosen[0]] = self._inflight.get(chosen[0], 0) + 1
+                chosen = min(rotated, key=lambda item: (estimates[item[0]][0], estimates[item[0]][1]))
+                chosen_key, _chosen_gw, chosen_ep = chosen
+                _rank, load, chosen_est = estimates[chosen_key]
+                self._inflight[chosen_key] = self._inflight.get(chosen_key, 0) + 1
+                decision = {
+                    "selected_endpoint": chosen_ep.display_base_url,
+                    "candidate_count": len(ready),
+                    "warm_hit": chosen_est.warm_hit,
+                    "effective_cached_tokens": chosen_est.effective_cached_tokens,
+                    "projected_queue_delay_ms": chosen_est.projected_queue_delay_ms,
+                    "uncached_prompt_work_ms": chosen_est.uncached_prompt_work_ms,
+                    "expected_decode_work_ms": chosen_est.expected_decode_work_ms,
+                    "locality_bonus_ms": chosen_est.locality_bonus_ms,
+                    "total_cost_ms": chosen_est.total_cost_ms,
+                }
+                self._last_routing_decision = decision
+                self._call.routing_decision = decision
                 return chosen, load
 
     def _observe_latency(self, key: str, response: ModelResponse, load: float) -> None:
-        """Fold one success into the endpoint's ms-per-token estimate.
-
-        The duration includes waiting behind the requests already in flight
-        there, so it is divided by the dispatch load ((in-flight + 1) /
-        max_inflight, at least 1): the estimate is the service rate, and
-        ``cost`` multiplies the current load back in exactly once.
-        """
-        tokens = getattr(response, "tokens_out", None)
+        """Fold one success into the endpoint's decode, request, and prompt rates."""
         duration = getattr(response, "duration_ms", None)
-        if not isinstance(tokens, int) or tokens <= 0 or not isinstance(duration, (int, float)) or duration < 0:
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration >= 0:
+            req_ms = max(1.0, float(duration))
+            with self._lock:
+                prev_req = self._request_ewma_ms.get(key)
+                self._request_ewma_ms[key] = req_ms if prev_req is None else (
+                    LATENCY_EWMA_ALPHA * req_ms + (1 - LATENCY_EWMA_ALPHA) * prev_req
+                )
+        tokens = getattr(response, "tokens_out", None)
+        if isinstance(tokens, int) and tokens > 0 and isinstance(duration, (int, float)) and duration >= 0:
+            sample = max(float(duration), 1.0) / tokens / max(1.0, load)
+            with self._lock:
+                previous = self._ms_per_token.get(key)
+                self._ms_per_token[key] = sample if previous is None else (
+                    LATENCY_EWMA_ALPHA * sample + (1 - LATENCY_EWMA_ALPHA) * previous
+                )
+        telemetry = getattr(response, "telemetry", None)
+        prompt_ms = getattr(telemetry, "prompt_eval_ms", None) if telemetry is not None else None
+        uncached = getattr(telemetry, "prompt_uncached_tokens", None) if telemetry is not None else None
+        if uncached is None and telemetry is not None:
+            uncached = getattr(telemetry, "prompt_tokens", None)
+        if (
+            isinstance(prompt_ms, (int, float))
+            and not isinstance(prompt_ms, bool)
+            and prompt_ms > 0
+            and isinstance(uncached, int)
+            and not isinstance(uncached, bool)
+            and uncached > 0
+        ):
+            prompt_sample = max(0.01, float(prompt_ms) / float(uncached))
+            with self._lock:
+                prev_prompt = self._prompt_ms_per_token.get(key)
+                self._prompt_ms_per_token[key] = (
+                    prompt_sample if prev_prompt is None else (
+                        LATENCY_EWMA_ALPHA * prompt_sample + (1 - LATENCY_EWMA_ALPHA) * prev_prompt
+                    )
+                )
+
+    def _observe_prefix_locality(
+        self,
+        key: str,
+        hints: _RoutingHints,
+        response: ModelResponse,
+    ) -> None:
+        if not hints.prefix_key:
             return
-        sample = max(float(duration), 1.0) / tokens / max(1.0, load)
-        with self._lock:
-            previous = self._ms_per_token.get(key)
-            self._ms_per_token[key] = sample if previous is None else (
-                LATENCY_EWMA_ALPHA * sample + (1 - LATENCY_EWMA_ALPHA) * previous
-            )
+        telemetry = getattr(response, "telemetry", None)
+        prompt_tokens = getattr(telemetry, "prompt_tokens", None) if telemetry is not None else None
+        if prompt_tokens is None:
+            prompt_tokens = getattr(response, "tokens_in", None)
+        cached_tokens = getattr(telemetry, "prompt_cached_tokens", None) if telemetry is not None else None
+        if cached_tokens is None:
+            timings = getattr(response, "timings", None)
+            if isinstance(timings, Mapping):
+                raw_cache_n = timings.get("cache_n")
+                if type(raw_cache_n) is int and raw_cache_n >= 0:
+                    cached_tokens = raw_cache_n
+        served_model = getattr(response, "model", None) or hints.model
+        model_id = hints.model if hints.model != DEFAULT_MODEL else str(served_model)
+        self._locality_table.observe(
+            endpoint=key,
+            model_identity=model_id,
+            adapter_key=hints.adapter_key,
+            prefix_key=hints.prefix_key,
+            now=self._monotonic(),
+            prompt_tokens=prompt_tokens,
+            cached_tokens=cached_tokens,
+            estimated_prompt_tokens=hints.estimated_prompt_tokens,
+        )
 
     def _release_endpoint(self, key: str) -> None:
         with self._cond:
@@ -2770,26 +3109,34 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
     def generate(self, request: ModelRequest, context: OperationContext) -> ModelResponse:
         context = self._with_request_cancel_token(request, context)
         settings = self.settings()
+        target_model = self.select_model(request, settings)
+        hints = self._extract_routing_hints(request, context, target_model)
         if settings.private_worker or not settings.workers:
             with self._local_slot(settings, context):
-                return self._generate_here(request, context)
+                response = self._generate_here(request, context)
+            self._observe_prefix_locality(settings.base_url, hints, response)
+            return response
         self._call.response_meta = {}
+        self._call.routing_decision = None
         with _cancellation_scope(context.cancellation):
             usable = self._placement_candidates(request, settings, context)
         if not usable:
             # Nothing is known to be able to take it: let the primary produce
             # the precise refusal (not ready, unknown model, consent, ...).
             with self._local_slot(settings, context):
-                return self._generate_here(request, context)
+                response = self._generate_here(request, context)
+            self._observe_prefix_locality(settings.base_url, hints, response)
+            return response
         excluded: set[str] = set()
         last_error: SonderError | None = None
         while True:
-            acquired = self._acquire_endpoint(usable, excluded, context)
+            acquired = self._acquire_endpoint(usable, excluded, context, hints=hints)
             if acquired is None:
                 assert last_error is not None
                 raise last_error
             chosen, load = acquired
             key, gateway, endpoint = chosen
+            decision = getattr(self._call, "routing_decision", None)
             try:
                 logger.info(
                     "sonder-inference placed request on %s (%s)",
@@ -2812,7 +3159,12 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 self._release_endpoint(key)
                 if gateway is not self:
                     self._call.response_meta = gateway.last_response_meta
+            if isinstance(decision, dict):
+                meta = dict(self._call.response_meta)
+                meta["routing_locality"] = dict(decision)
+                self._call.response_meta = meta
             self._observe_latency(key, response, load)
+            self._observe_prefix_locality(key, hints, response)
             if isinstance(response, SonderInferenceResponse):
                 response = replace(response, endpoint=endpoint.display_base_url)
             return response
@@ -3047,33 +3399,161 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         default_registry().observe_inference(PROVIDER_ID, telemetry)
         return response
 
-    # -- embed -------------------------------------------------------------
+    # -- embed & rerank ----------------------------------------------------
 
-    def embed(self, texts: Sequence[str], context: OperationContext) -> Sequence[Embedding]:
-        items = list(texts)
-        if not items:
-            raise InvalidInput("sonder-inference embed requires at least one input text")
-        if len(items) > MAX_EMBED_INPUTS:
-            raise InvalidInput(
-                "sonder-inference embed accepts at most %d inputs per request" % MAX_EMBED_INPUTS
+    @staticmethod
+    def _resolve_operation_model(
+        settings: SonderInferenceConfig,
+        explicit_model: str | None,
+        *,
+        tier: str,
+        configured: str,
+        operation: str,
+    ) -> str:
+        if explicit_model is not None:
+            if not isinstance(explicit_model, str) or not explicit_model.strip():
+                raise InvalidInput(
+                    "sonder-inference %s model must be a non-empty string" % operation
+                )
+            return explicit_model.strip()
+        tier_candidate = str(settings.tier_models.get(tier, "") or "").strip()
+        if tier_candidate:
+            return tier_candidate
+        configured_candidate = str(configured or "").strip()
+        if configured_candidate:
+            return configured_candidate
+        return settings.model
+
+    def _require_operation_snapshot(
+        self,
+        settings: SonderInferenceConfig,
+        timeout: float,
+        context: OperationContext,
+        *,
+        model: str,
+        explicit_model: str | None,
+    ) -> HealthSnapshot:
+        had_cached = self._peek_health(settings) is not None
+        with _cancellation_scope(context.cancellation):
+            snap = self._require_ready(settings, timeout)
+        # If cached health came from before a server model switch and does not
+        # list the explicitly requested model yet, refresh once before failing.
+        if (
+            had_cached
+            and explicit_model is not None
+            and model != DEFAULT_MODEL
+            and not self._serves(snap, model)
+        ):
+            with _cancellation_scope(context.cancellation):
+                refreshed = self.health(settings=settings, refresh=True)
+                if refreshed.state != "ready":
+                    snap = self._require_ready(settings, timeout)
+                else:
+                    snap = refreshed
+        return snap
+
+    @staticmethod
+    def _check_served_model(
+        data: Mapping[str, object],
+        *,
+        explicit_model: str | None,
+        operation: str,
+    ) -> str:
+        extension = data.get("sonder")
+        if isinstance(extension, dict) and "api_version" in extension:
+            if extension["api_version"] != API_VERSION:
+                raise DependencyUnavailable(
+                    "incompatible sonder-inference API version %r (this runtime speaks %d)"
+                    % (extension["api_version"], API_VERSION)
+                )
+        raw_served = data.get("model")
+        if not isinstance(raw_served, str) or not raw_served.strip() or raw_served.strip() == DEFAULT_MODEL:
+            raise DependencyUnavailable(
+                "incompatible sonder-inference API: the %s response did not name the served model"
+                % operation
             )
-        if any(not isinstance(item, str) for item in items):
-            raise InvalidInput("sonder-inference embed inputs must all be strings")
-        settings = self.settings()
-        model = settings.tier_models.get("embedding", settings.model)
+        served = raw_served.strip()
+        if (
+            explicit_model is not None
+            and explicit_model.strip() != DEFAULT_MODEL
+            and served != explicit_model.strip()
+        ):
+            raise DependencyUnavailable(
+                "sonder-inference served %s model %r instead of requested %r"
+                % (operation, served, explicit_model.strip())
+            )
+        return served
+
+    _OpResult = TypeVar("_OpResult")
+
+    def _dispatch_capability_operation(
+        self,
+        settings: SonderInferenceConfig,
+        context: OperationContext,
+        *,
+        model: str,
+        predicate: Callable[[Mapping[str, object] | None], bool],
+        runner: Callable[["SonderInferenceGateway"], _OpResult],
+    ) -> _OpResult:
+        if settings.private_worker or not settings.workers:
+            with self._local_slot(settings, context):
+                return runner(self)
+        with _cancellation_scope(context.cancellation):
+            usable = self._operation_placement_candidates(
+                settings, context, model=model, predicate=predicate,
+            )
+        if not usable:
+            with self._local_slot(settings, context):
+                return runner(self)
+        excluded: set[str] = set()
+        last_error: SonderError | None = None
+        while True:
+            acquired = self._acquire_endpoint(usable, excluded, context)
+            if acquired is None:
+                assert last_error is not None
+                raise last_error
+            chosen, _load = acquired
+            key, gateway, _endpoint = chosen
+            try:
+                return runner(gateway)
+            except (SonderInferenceUnreachable, SonderInferenceOverloaded) as exc:
+                excluded.add(key)
+                last_error = exc
+                saturated = isinstance(exc, SonderInferenceOverloaded) or exc.timed_out
+                if saturated and not self._has_free_endpoint(usable, excluded):
+                    raise
+                continue
+            finally:
+                self._release_endpoint(key)
+
+    def _embed_here(
+        self,
+        items: list[str],
+        context: OperationContext,
+        *,
+        settings: SonderInferenceConfig,
+        model: str,
+        explicit_model: str | None,
+    ) -> Sequence[Embedding]:
         cfg = OpenAICompatibleConfig(
             base_url=settings.base_url, api_key=settings.api_key, model=model,
         )
         self._enforce_consent(cfg, context)
         timeout = self._call_timeout(settings, context)
         self._call.settings = settings
-        with _cancellation_scope(context.cancellation):
-            snap = self._require_ready(settings, timeout)
+        snap = self._require_operation_snapshot(
+            settings, timeout, context, model=model, explicit_model=explicit_model,
+        )
         self._check_liveness(context, phase="before embedding call")
         if not embeddings_supported(snap.document, model=model):
             raise DependencyUnavailable(
                 "sonder-inference at %s does not advertise embeddings capability for %r; "
                 "set SONDER_EMBEDDING_PROVIDER=ollama" % (settings.display_base_url, model)
+            )
+        if explicit_model is not None and model != DEFAULT_MODEL and not self._serves(snap, model):
+            raise DependencyUnavailable(
+                "sonder-inference at %s does not serve requested embedding model %r"
+                % (settings.display_base_url, model)
             )
         with trust_scope(settings.ca_bundle):
             data = self._post(
@@ -3084,28 +3564,269 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 context=context,
             )
         self._check_liveness(context, phase="during embedding call")
-        extension = data.get("sonder")
-        if isinstance(extension, dict) and "api_version" in extension:
-            if extension["api_version"] != API_VERSION:
-                raise DependencyUnavailable(
-                    "incompatible sonder-inference API version %r (this runtime speaks %d)"
-                    % (extension["api_version"], API_VERSION)
+        served = self._check_served_model(
+            data, explicit_model=explicit_model, operation="embeddings",
+        )
+        embeddings = self._embedding_results(data, items, served)
+        activity_tracker.record_event(
+            "embedding_outcome",
+            provider=PROVIDER_ID,
+            summary=json.dumps({"model": served, "count": len(embeddings)}, sort_keys=True),
+            model=served,
+            count=len(embeddings),
+        )
+        return embeddings
+
+    def embed(
+        self,
+        texts: Sequence[str],
+        context: OperationContext,
+        *,
+        model: str | None = None,
+    ) -> Sequence[Embedding]:
+        if isinstance(texts, (str, bytes)):
+            raise InvalidInput("sonder-inference embed expects a sequence of strings")
+        items = list(texts)
+        if not items:
+            raise InvalidInput("sonder-inference embed requires at least one input text")
+        if len(items) > MAX_EMBED_INPUTS:
+            raise InvalidInput(
+                "sonder-inference embed accepts at most %d inputs per request" % MAX_EMBED_INPUTS
+            )
+        if any(not isinstance(item, str) for item in items):
+            raise InvalidInput("sonder-inference embed inputs must all be strings")
+        settings = self.settings()
+        target_model = self._resolve_operation_model(
+            settings, model, tier="embedding", configured=settings.embed_model, operation="embed",
+        )
+        return self._dispatch_capability_operation(
+            settings,
+            context,
+            model=target_model,
+            predicate=lambda doc: embeddings_supported(doc, model=target_model),
+            runner=lambda gateway: gateway._embed_here(
+                items, context, settings=gateway.settings(), model=target_model, explicit_model=model,
+            ),
+        )
+
+    @staticmethod
+    def _parse_rerank_chunk(
+        data: Mapping[str, object],
+        chunk: list[str],
+        *,
+        offset: int,
+        explicit_model: str | None,
+        return_documents: bool,
+    ) -> tuple[str, list[RerankScore]]:
+        served = SonderInferenceGateway._check_served_model(
+            data, explicit_model=explicit_model, operation="rerank",
+        )
+        raw_rows = data.get("results") if "results" in data else data.get("data")
+        if not isinstance(raw_rows, list) or any(not isinstance(row, Mapping) for row in raw_rows):
+            raise DependencyUnavailable("sonder-inference returned invalid rerank results")
+        if len(raw_rows) != len(chunk):
+            raise DependencyUnavailable(
+                "sonder-inference returned %d rerank results for %d documents"
+                % (len(raw_rows), len(chunk))
+            )
+        seen_indices: set[int] = set()
+        chunk_scores: list[RerankScore] = []
+        for row in raw_rows:
+            idx = row.get("index")
+            if type(idx) is not int or not (0 <= idx < len(chunk)) or idx in seen_indices:
+                raise DependencyUnavailable("sonder-inference returned invalid rerank indexes")
+            seen_indices.add(idx)
+            raw_score = row.get("relevance_score")
+            if (
+                isinstance(raw_score, bool)
+                or not isinstance(raw_score, numbers.Real)
+                or not math.isfinite(float(raw_score))
+            ):
+                raise DependencyUnavailable("sonder-inference returned invalid rerank relevance_score")
+            if "document" in row and row["document"] is not None:
+                raw_doc = row["document"]
+                valid_doc = isinstance(raw_doc, str) or (
+                    isinstance(raw_doc, Mapping) and isinstance(raw_doc.get("text"), str)
                 )
-        raw_served = data.get("model")
-        served = raw_served.strip() if isinstance(raw_served, str) and raw_served.strip() else model
-        return self._embedding_results(data, items, served)
+                if not valid_doc:
+                    raise DependencyUnavailable("sonder-inference returned invalid rerank document payload")
+            doc_text = chunk[idx] if return_documents else None
+            chunk_scores.append(
+                RerankScore(
+                    index=offset + idx,
+                    relevance_score=float(raw_score),
+                    model=served,
+                    document=doc_text,
+                )
+            )
+        if seen_indices != set(range(len(chunk))):
+            raise DependencyUnavailable("sonder-inference returned incomplete rerank indexes")
+        return served, chunk_scores
+
+    def _rerank_here(
+        self,
+        query: str,
+        items: list[str],
+        context: OperationContext,
+        *,
+        settings: SonderInferenceConfig,
+        model: str,
+        explicit_model: str | None,
+        top_n: int | None,
+        chunk_size: int,
+        return_documents: bool,
+    ) -> tuple[RerankScore, ...]:
+        cfg = OpenAICompatibleConfig(
+            base_url=settings.base_url, api_key=settings.api_key, model=model,
+        )
+        self._enforce_consent(cfg, context)
+        timeout = self._call_timeout(settings, context)
+        self._call.settings = settings
+        snap = self._require_operation_snapshot(
+            settings, timeout, context, model=model, explicit_model=explicit_model,
+        )
+        self._check_liveness(context, phase="before rerank call")
+        if not rerank_supported(snap.document, model=model):
+            raise UnsupportedProviderFeature(
+                "rerank is not supported by sonder-inference at %s "
+                "(endpoint does not advertise rerank capability for %r)"
+                % (settings.display_base_url, model)
+            )
+        if explicit_model is not None and model != DEFAULT_MODEL and not self._serves(snap, model):
+            raise DependencyUnavailable(
+                "sonder-inference at %s does not serve requested rerank model %r"
+                % (settings.display_base_url, model)
+            )
+        all_scores: list[RerankScore] = []
+        batch_served: str | None = None
+        batch_count = 0
+        with trust_scope(settings.ca_bundle):
+            for offset in range(0, len(items), chunk_size):
+                self._check_liveness(context, phase="before rerank batch")
+                chunk = items[offset:offset + chunk_size]
+                payload = {
+                    "model": model,
+                    "query": query,
+                    "documents": chunk,
+                    "top_n": len(chunk),
+                    "return_documents": return_documents,
+                }
+                data = self._post(
+                    "/v1/rerank", payload, cfg, timeout, context=context,
+                )
+                self._check_liveness(context, phase="during rerank call")
+                served, chunk_scores = self._parse_rerank_chunk(
+                    data,
+                    chunk,
+                    offset=offset,
+                    explicit_model=explicit_model,
+                    return_documents=return_documents,
+                )
+                if batch_served is None:
+                    batch_served = served
+                elif served != batch_served:
+                    raise DependencyUnavailable(
+                        "sonder-inference switched rerank served model mid-request (%r -> %r)"
+                        % (batch_served, served)
+                    )
+                all_scores.extend(chunk_scores)
+                batch_count += 1
+        all_scores.sort(key=lambda item: (-item.relevance_score, item.index))
+        selected = all_scores[:top_n] if top_n is not None else all_scores
+        assert batch_served is not None
+        activity_tracker.record_event(
+            "rerank_outcome",
+            provider=PROVIDER_ID,
+            summary=json.dumps(
+                {"model": batch_served, "documents": len(items), "batches": batch_count, "returned": len(selected)},
+                sort_keys=True,
+            ),
+            model=batch_served,
+            documents=len(items),
+            batches=batch_count,
+            returned=len(selected),
+        )
+        return tuple(selected)
+
+    def rerank(
+        self,
+        query: str,
+        documents: Sequence[str],
+        context: OperationContext | None = None,
+        *,
+        model: str | None = None,
+        top_n: int | None = None,
+        batch_size: int | None = None,
+        return_documents: bool = False,
+    ) -> tuple[RerankScore, ...]:
+        """Score ``documents`` against ``query`` via capability-gated ``/v1/rerank``."""
+        if not isinstance(query, str) or not query.strip():
+            raise InvalidInput("sonder-inference rerank query must be a non-empty string")
+        if isinstance(documents, (str, bytes)):
+            raise InvalidInput("sonder-inference rerank expects a sequence of document strings")
+        items = list(documents)
+        if not items:
+            raise InvalidInput("sonder-inference rerank requires at least one document")
+        if len(items) > MAX_RERANK_DOCUMENTS:
+            raise InvalidInput(
+                "sonder-inference rerank accepts at most %d documents per request" % MAX_RERANK_DOCUMENTS
+            )
+        if any(not isinstance(doc, str) for doc in items):
+            raise InvalidInput("sonder-inference rerank documents must all be strings")
+        if top_n is not None and (type(top_n) is not int or top_n <= 0):
+            raise InvalidInput("sonder-inference rerank top_n must be a positive integer")
+        if batch_size is not None and (
+            type(batch_size) is not int or not (1 <= batch_size <= MAX_RERANK_BATCH_SIZE)
+        ):
+            raise InvalidInput(
+                "sonder-inference rerank batch_size must be in 1..%d" % MAX_RERANK_BATCH_SIZE
+            )
+        if not isinstance(return_documents, bool):
+            raise InvalidInput("sonder-inference rerank return_documents must be a boolean")
+        chunk_size = batch_size if batch_size is not None else DEFAULT_RERANK_BATCH_SIZE
+        resolved_context = (
+            context
+            if context is not None
+            else (current_operation_context() or local_owner_context(correlation_id="sonder-rerank"))
+        )
+        settings = self.settings()
+        target_model = self._resolve_operation_model(
+            settings, model, tier="rerank", configured=settings.rerank_model, operation="rerank",
+        )
+        return self._dispatch_capability_operation(
+            settings,
+            resolved_context,
+            model=target_model,
+            predicate=lambda doc: rerank_supported(doc, model=target_model),
+            runner=lambda gateway: gateway._rerank_here(
+                query,
+                items,
+                resolved_context,
+                settings=gateway.settings(),
+                model=target_model,
+                explicit_model=model,
+                top_n=top_n,
+                chunk_size=chunk_size,
+                return_documents=return_documents,
+            ),
+        )
 
 
 __all__ = [
     "API_VERSION",
     "CORRELATION_VALUE",
     "DEFAULT_BASE_URL",
+    "DEFAULT_RERANK_BATCH_SIZE",
     "EMBEDDING_MARKERS",
+    "ENV_EMBED_MODEL",
     "ENV_NATIVE_TOOLS",
     "ENV_PRIVATE_WORKERS",
+    "ENV_RERANK_MODEL",
     "HealthSnapshot",
     "IdentityObservation",
     "LOGPROBS_MARKERS",
+    "MAX_RERANK_BATCH_SIZE",
+    "MAX_RERANK_DOCUMENTS",
     "MAX_RESPONSE_TOOL_CALLS",
     "MAX_TOP_LOGPROBS",
     "NATIVE_TOOLS_REFUSAL",
@@ -3114,6 +3835,8 @@ __all__ = [
     "PROVIDER_LABEL",
     "PrivateWorkerSpec",
     "Readiness",
+    "RERANK_MARKERS",
+    "RerankScore",
     "STATUS_KEYS",
     "STRUCTURED_OUTPUT_MARKERS",
     "SonderInferenceConfig",
@@ -3134,6 +3857,7 @@ __all__ = [
     "normalize_base_url",
     "parse_private_workers",
     "read_ready_file",
+    "rerank_supported",
     "structured_output_supported",
     "trust_scope",
 ]
