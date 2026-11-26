@@ -386,7 +386,8 @@ def _is_local_open_principal(principal) -> bool:
 
 
 def _scope_key_is_local_open(key) -> bool:
-    return _is_local_open_principal(str(key or "").split("|", 1)[0])
+    parts = _split_scope_key(key)
+    return parts is not None and _is_local_open_principal(parts[0])
 
 
 def _above_manual(mode) -> bool:
@@ -1151,9 +1152,18 @@ def _load() -> None:
         if mode in _MATRIX and mode != BYPASS:
             _STATE["mode"] = mode
         raw_scopes = saved.get("scopes")
+        current_format = saved.get("scope_format") == _SCOPE_FORMAT
         if isinstance(raw_scopes, dict):
             for key, value in raw_scopes.items():
-                scope_key = str(key or "").strip()
+                if current_format:
+                    parts = _split_scope_key(key)
+                    scope_key = _scope_key(*parts) if parts is not None else None
+                else:
+                    # Legacy "principal|session" keys: migrate only when the
+                    # split is unambiguous (exactly one "|"); anything else
+                    # could belong to another principal, so it is dropped,
+                    # which fails closed.
+                    scope_key = _migrate_legacy_scope_key(key)
                 scope_mode = str(value or "").strip()
                 # Bypass is never restored, for a scope any more than for the
                 # global mode: each entry needs a fresh, attended confirmation.
@@ -1161,6 +1171,7 @@ def _load() -> None:
                     if _scope_key_is_local_open(scope_key) and _above_manual(scope_mode):
                         scope_mode = MANUAL
                     _SCOPED_MODES[scope_key] = scope_mode
+        _clamp_scopes_unlocked(_STATE["mode"])
         # Elevation is deliberately NOT restored from disk. It is a decision
         # about this session made by whoever is at the keyboard now; silently
         # resuming it days later is exactly the surprise to avoid.
@@ -1196,6 +1207,7 @@ def _write_state(mode: str, scopes: dict[str, str] | None = None) -> None:
     }
     if kept:
         payload["scopes"] = kept
+        payload["scope_format"] = _SCOPE_FORMAT
     handle, temporary = tempfile.mkstemp(
         prefix=os.path.basename(path) + ".tmp-", dir=directory,
     )
@@ -1266,12 +1278,78 @@ def _save(previous: str, *, scope: str | None = None, scope_prior: str | None = 
 # --- mode state -----------------------------------------------------------
 
 
+_SCOPE_FORMAT = 2
+_MAX_SCOPE_PRINCIPAL = 256
+_MAX_SCOPE_SESSION = 128
+
+
+def _scope_text_valid(text: str, limit: int) -> bool:
+    return len(text) <= limit and not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text)
+
+
 def _scope_key(principal: str = "", session: str = "") -> str | None:
+    """Unambiguous scope key: a compact JSON array ``[principal, session]``.
+
+    ``None`` for an empty scope or an over-long / control-character id, so an
+    invalid id never names a stored scope (callers that write refuse it).
+    """
     p = str(principal or "").strip()
     s = str(session or "").strip()
     if not p and not s:
         return None
-    return "%s|%s" % (p, s)
+    if not (_scope_text_valid(p, _MAX_SCOPE_PRINCIPAL) and _scope_text_valid(s, _MAX_SCOPE_SESSION)):
+        return None
+    return json.dumps([p, s], separators=(",", ":"), ensure_ascii=True)
+
+
+def _split_scope_key(key) -> tuple[str, str] | None:
+    try:
+        parts = json.loads(str(key or ""))
+    except ValueError:
+        return None
+    if (isinstance(parts, list) and len(parts) == 2
+            and all(isinstance(part, str) for part in parts)):
+        return parts[0], parts[1]
+    return None
+
+
+def _migrate_legacy_scope_key(key) -> str | None:
+    text = str(key or "").strip()
+    if text.count("|") != 1:
+        return None
+    principal, session = text.split("|")
+    return _scope_key(principal, session)
+
+
+def _require_scope_key(pair) -> str | None:
+    """The key for a bound scope, ``None`` when unscoped; refuses an invalid scope."""
+    if pair is None:
+        return None
+    key = _scope_key(pair[0], pair[1])
+    if key is None:
+        raise ValueError(
+            "invalid permission-mode scope: the principal must be at most %d and the "
+            "session id at most %d characters, without control characters"
+            % (_MAX_SCOPE_PRINCIPAL, _MAX_SCOPE_SESSION)
+        )
+    return key
+
+
+def _clamp_scopes_unlocked(ceiling: str) -> dict[str, str]:
+    """Drop every scope not stricter than *ceiling*; returns what was dropped.
+
+    Caller holds ``_LOCK``. A dropped scope follows the global mode, which is
+    never looser than the ceiling it was clamped to.
+    """
+    order = {mode: index for index, mode in enumerate(MODES)}  # strictest first
+    limit = order.get(ceiling, order[DEFAULT_MODE])
+    dropped = {
+        key: value for key, value in _SCOPED_MODES.items()
+        if order.get(value, len(MODES)) >= limit
+    }
+    for key in dropped:
+        del _SCOPED_MODES[key]
+    return dropped
 
 
 class mode_scope:
@@ -1364,9 +1442,14 @@ def _current_mode_uncapped() -> str:
     pair = _MODE_SCOPE.get()
     with _LOCK:
         scoped = _scoped_mode_unlocked(pair)
-        if scoped is not None:
-            return scoped
         mode = _STATE["mode"]
+        if scoped is not None:
+            # The stricter of scope and global. A scope an administrator
+            # entered in bypass (attended confirmation, never persisted) is the
+            # one deliberate exception; every global write clears it.
+            if scoped != BYPASS and mode in MODES and MODES.index(scoped) > MODES.index(mode):
+                return mode
+            return scoped
         if pair is not None and mode == BYPASS:
             return DEFAULT_MODE
         return mode
@@ -1471,7 +1554,7 @@ def set_mode(name: str) -> str:
     _load()
     match = resolve_mode(name)
     pair = _MODE_SCOPE.get()
-    scope = _scope_key(pair[0], pair[1]) if pair is not None else None
+    scope = _require_scope_key(pair)
     if _MODE_SCOPE_CAPPED.get() and _above_manual(match):
         raise ValueError(LOCAL_OPEN_SCOPE_REFUSAL)
     with _LOCK:
@@ -1481,10 +1564,26 @@ def set_mode(name: str) -> str:
             _SCOPED_MODES[scope] = match
             _save(previous, scope=scope, scope_prior=prior)
         else:
-            previous = _STATE["mode"]
-            _STATE["mode"] = match
-            _save(previous)
+            _write_global_unlocked(match)
     return match
+
+
+def _write_global_unlocked(match: str) -> None:
+    """Set and save the global mode, clamping stored scopes to it (caller holds ``_LOCK``).
+
+    A scope may never outlive a lowering of the global mode above it. A refused
+    save restores the mode and the scopes it would have cleared; a lowering
+    that could not be saved still holds for this process.
+    """
+    previous = _STATE["mode"]
+    _STATE["mode"] = match
+    dropped = _clamp_scopes_unlocked(match)
+    try:
+        _save(previous)
+    except ModePersistenceError:
+        if _STATE["mode"] != match:
+            _SCOPED_MODES.update(dropped)
+        raise
 
 
 def global_mode() -> str:
@@ -1512,8 +1611,9 @@ def set_session_mode(name: str) -> str:
     if match == BYPASS:
         raise ValueError("bypass is entered with its own confirmation, not as a session mode")
     pair = _MODE_SCOPE.get()
-    if pair is None or not _scope_key(pair[0], pair[1]):
+    if pair is None:
         raise ValueError("a session mode needs a principal or a session")
+    _require_scope_key(pair)
     if _MODE_SCOPE_CAPPED.get() and _above_manual(match):
         raise ModeEscalationRefused(current_mode(), match)
     order = {mode: index for index, mode in enumerate(MODES)}  # strictest first
@@ -1529,6 +1629,23 @@ def set_session_mode(name: str) -> str:
                 'global mode with scope "global".' % (ceiling, match)
             )
         return set_mode(match)
+
+
+def set_session_mode_lowering_only(name: str) -> str:
+    """``set_session_mode`` for an unattended caller: it may only lower the mode.
+
+    The check and the write share one hold of ``_LOCK``. Raises
+    ``ModeEscalationRefused`` (nothing changed) for a raise; going from plan
+    back to manual is allowed, as for every unattended caller
+    (``is_unattended_escalation``). A raise is made at the console.
+    """
+    _load()
+    target = resolve_mode(name)
+    with _LOCK:
+        current = current_mode()
+        if is_unattended_escalation(current, target):
+            raise ModeEscalationRefused(current, target)
+        return set_session_mode(target)
 
 
 def set_global_mode(name: str) -> str:
@@ -1550,23 +1667,8 @@ def set_global_mode(name: str) -> str:
         raise ValueError("bypass is entered per session, never as the global mode over HTTP")
     if _MODE_SCOPE_CAPPED.get() and _above_manual(match):
         raise ValueError(LOCAL_OPEN_SCOPE_REFUSAL)
-    order = {mode: index for index, mode in enumerate(MODES)}  # strictest first
     with _LOCK:
-        previous = _STATE["mode"]
-        prior_scopes = dict(_SCOPED_MODES)
-        _STATE["mode"] = match
-        for scope, scoped in prior_scopes.items():
-            if order.get(scoped, len(MODES)) >= order[match]:
-                del _SCOPED_MODES[scope]
-        try:
-            _save(previous)
-        except ModePersistenceError:
-            # A refused raise restored the global mode; the scopes it would
-            # have cleared come back too. A lowering that could not be saved
-            # still holds for this process, looser scopes cleared.
-            if _STATE["mode"] != match:
-                _SCOPED_MODES.update(prior_scopes)
-            raise
+        _write_global_unlocked(match)
     return match
 
 
@@ -1635,7 +1737,7 @@ def cycle_mode(step: int = 1) -> str:
     """Advance to the next non-bypass mode. Backs the Shift+Tab keybinding."""
     _load()
     pair = _MODE_SCOPE.get()
-    scope = _scope_key(pair[0], pair[1]) if pair is not None else None
+    scope = _require_scope_key(pair)
     with _LOCK:
         previous = (_scoped_mode_unlocked(pair) if pair is not None else None) or _STATE["mode"]
         if previous in _CYCLE_MODES:
@@ -1650,8 +1752,7 @@ def cycle_mode(step: int = 1) -> str:
             _SCOPED_MODES[scope] = new
             _save(previous, scope=scope, scope_prior=prior)
         else:
-            _STATE["mode"] = new
-            _save(previous)
+            _write_global_unlocked(new)
     return new
 
 

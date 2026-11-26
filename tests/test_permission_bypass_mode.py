@@ -305,7 +305,9 @@ def test_scoped_mode_persistence_keeps_default_shape_when_empty(monkeypatch, tmp
     with pm.mode_scope("dev-1", "s-2"):
         pm.set_mode(pm.PLAN)
     raw = json.loads(state_file.read_text(encoding="utf-8"))
-    assert raw == {"mode": pm.AUTO, "scopes": {"dev-1|s-2": pm.PLAN}}
+    assert raw == {
+            "mode": pm.AUTO, "scopes": {'["dev-1","s-2"]': pm.PLAN}, "scope_format": 2,
+        }
 
     # Ensure concurrent _SCOPED_MODES reads remain thread-safe under scope churn.
     errors = []
@@ -334,23 +336,26 @@ def test_saved_scoped_bypass_loads_as_manual(monkeypatch, tmp_path, scope_key):
     hand edit) restores that scope to the default, never to bypass."""
     state_file = tmp_path / "permission_mode.json"
     state_file.write_text(json.dumps({
-        "mode": pm.MANUAL,
+        "mode": pm.AUTO,
         "scopes": {scope_key: pm.BYPASS, "other|s-9": pm.AUTO},
     }), encoding="utf-8")
     monkeypatch.setattr(pm, "_state_path", lambda: str(state_file))
     pm._reset_for_tests()
     principal, _, session = scope_key.partition("|")
     with pm.mode_scope(principal, session):
-        assert pm.current_mode() == pm.MANUAL
+        assert pm.current_mode() == (pm.MANUAL if principal == "local-open" else pm.AUTO)
         assert pm.bypass_root_containment_active() is False
     with pm.mode_scope("other", "s-9"):
         assert pm.current_mode() == pm.AUTO
-    assert scope_key not in pm._SCOPED_MODES
+    assert pm._scope_key(principal, session) not in pm._SCOPED_MODES
     # The next save rewrites the file without the dropped entry.
     with pm.mode_scope("other", "s-9"):
         pm.set_mode(pm.ACCEPT_EDITS)
     raw = json.loads(state_file.read_text(encoding="utf-8"))
-    assert raw == {"mode": pm.MANUAL, "scopes": {"other|s-9": pm.ACCEPT_EDITS}}
+    assert raw == {
+        "mode": pm.AUTO, "scopes": {pm._scope_key("other", "s-9"): pm.ACCEPT_EDITS},
+        "scope_format": 2,
+    }
 
 
 # --- cloud_opt_in: consent only a person may give ---------------------------

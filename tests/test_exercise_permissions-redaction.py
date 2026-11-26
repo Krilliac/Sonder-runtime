@@ -1029,7 +1029,7 @@ def test_two_sessions_keep_their_own_modes_under_the_global_ceiling(mode_state):
 def test_a_session_can_never_be_raised_above_the_global_mode(mode_state):
     assert pm.global_mode() == pm.MANUAL
     status, payload = _post_mode(_PermissionModeHandler("sess-A"), {"mode": "auto", "scope": "session"})
-    assert status == 400 and "global" in payload["error"]
+    assert status == 403, payload
     with pm.mode_scope("owner", "sess-A"):
         assert pm.current_mode() == pm.MANUAL
     assert pm.global_mode() == pm.MANUAL

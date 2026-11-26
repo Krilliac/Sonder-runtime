@@ -210,7 +210,7 @@ def handle_permission_mode_post(
         def apply_mode() -> Any:
             try:
                 if scoped and not is_bypass:
-                    return permission_policy.set_session_mode(resolved)
+                    return _session_setter(permission_policy)(resolved)
                 return permission_policy.set_mode_without_escalation(resolved)
             except refused_type as refused:
                 return refused
@@ -218,11 +218,14 @@ def handle_permission_mode_post(
         change = (
             permission_policy.set_mode
             if is_bypass
-            else (permission_policy.set_session_mode if scoped else permission_policy.set_global_mode)
+            else (_session_setter(permission_policy) if scoped else permission_policy.set_global_mode)
         )
 
         def apply_mode() -> Any:
-            return change(resolved)
+            try:
+                return change(resolved)
+            except refused_type as refused:
+                return refused
 
     scope_tag = f"\0{scope}" if scope in ("session", "global") else ""
     try:
@@ -279,6 +282,11 @@ def handle_permission_mode_post(
         payload["scope"] = "session" if scoped else "global"
         payload["session_id"] = session_id if scoped else ""
     handler._send_json_payload(payload)
+
+
+def _session_setter(permission_policy: Any) -> Callable[[str], str]:
+    """The unattended HTTP session setter: it may only lower a mode, never raise it."""
+    return permission_policy.set_session_mode_lowering_only
 
 
 def turn_refusal_receipt(
