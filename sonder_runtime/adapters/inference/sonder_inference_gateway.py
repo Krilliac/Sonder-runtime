@@ -273,8 +273,11 @@ class SonderInferenceUnreachable(DependencyUnavailable):
     """Sonder Inference provably did not execute the request.
 
     Raised only for: connection refused, an unresolvable host, cached health
-    that is not ready, or HTTP 503 ``not_ready``.  It is the sole trigger for
-    the fail-closed Ollama fallback, and keeps ``DEPENDENCY_UNAVAILABLE`` as
+    that is not ready, HTTP 503 ``not_ready``, or a proxy 503
+    ``upstream_unreachable`` carrying ``X-Sonder-Proxy-Upstream: unreachable``
+    (the proxy could not dial the upstream).  It is the sole trigger for the
+    fail-closed Ollama fallback (a proxy dial failure on the primary included),
+    and keeps ``DEPENDENCY_UNAVAILABLE`` as
     its code so evidence capture treats it as an ordinary provider outage.
 
     ``reason`` is the short cause ("connection refused") and ``summary`` the
@@ -301,7 +304,11 @@ class SonderInferenceBusyTimeout(DependencyUnavailable):
 
 
 class SonderInferenceOverloaded(CapacityExceeded):
-    """The endpoint reported 503 ``overloaded`` before executing the request.
+    """The endpoint reported ``overloaded`` (HTTP 503, or HTTP 429).
+
+    A 429 ``overloaded`` is either the queue-full rejection (nothing executed)
+    or the engine-scheduler rejection, which may follow prefill but delivered
+    no output; both are retried elsewhere on purpose.
 
     Still a ``CapacityExceeded`` (never the Ollama fallback); with private
     workers, placement may move it to an endpoint that has a free slot.
@@ -1704,8 +1711,12 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         if status in (401, 403):
             return self._forbidden(status, code, message)
         if status == 429 and code == "overloaded":
-            # SI answers 429 overloaded only before executing anything; any
-            # other 429 (scheduler rejection) stays final.
+            # SI uses 429 overloaded for both the queue-full rejection (nothing
+            # executed) and the engine-scheduler rejection (openai.cpp:1322,
+            # session.cpp:2464), which can follow prefill.  The two cannot be
+            # told apart on the wire.  Retrying both is accepted on purpose:
+            # in either case no output was delivered to the caller, and
+            # generation is not a side effect.  Any other 429 stays final.
             return SonderInferenceOverloaded(
                 "sonder-inference rejected the request before executing it (%s)" % label)
         if status == 429:
