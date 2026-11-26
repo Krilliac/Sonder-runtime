@@ -88,6 +88,7 @@ def _connect() -> sqlite3.Connection:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             conn = owned_sqlite_connect(path, timeout=5)
             try:
+                conn.execute("PRAGMA busy_timeout=5000")
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.executescript(_SCHEMA)
                 # Additive migration for databases created before narration.

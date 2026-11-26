@@ -66,6 +66,13 @@ def connect(
     row_factory: bool = True,
     check_same_thread: bool = True,
 ) -> sqlite3.Connection:
+    if (
+        isinstance(busy_timeout_ms, bool)
+        or not isinstance(busy_timeout_ms, int)
+        or busy_timeout_ms < 0
+    ):
+        raise ValueError("busy_timeout_ms must be a non-negative integer")
+
     path = str(db_path)
 
     if path != ":memory:":
@@ -117,6 +124,10 @@ def cached_connection(
         return existing_conn
 
     if existing_conn is not None:
+        # Clear cached references before closing/reconnecting so a failed
+        # reconnect can never leave a closed handle published for old_path.
+        setattr(_thread_local, conn_attr, None)
+        setattr(_thread_local, path_attr, None)
         try:
             existing_conn.close()
         except sqlite3.Error:
@@ -125,7 +136,15 @@ def cached_connection(
     conn = connect(db_path, **kwargs)
 
     if schema_sql:
-        conn.executescript(schema_sql)
+        try:
+            conn.executescript(schema_sql)
+        except BaseException:
+            try:
+                conn.close()
+            except BaseException as cleanup_error:
+                raise SQLiteConnectionSetupCleanupError(
+                    "SQLite connection setup cleanup failed") from cleanup_error
+            raise
 
     setattr(_thread_local, conn_attr, conn)
     setattr(_thread_local, path_attr, path)
@@ -148,11 +167,18 @@ def close_cached(cache_key: str) -> None:
 
 def close_current_thread() -> None:
     """Close actual cached handles without suppressing missing cleanup proof."""
+    first_error: BaseException | None = None
     for name, connection in tuple(vars(_thread_local).items()):
         if name.startswith("_sqlite_factory_") and name.endswith("_conn") and connection is not None:
-            connection.close()
             setattr(_thread_local, name, None)
             setattr(_thread_local, name[:-5] + "_path", None)
+            try:
+                connection.close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+    if first_error is not None:
+        raise first_error
 
 
 __all__ = [

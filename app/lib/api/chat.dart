@@ -71,6 +71,7 @@ ChatResponseMetadata chatMetadataFrom(
     'work_status': work['status'],
     'acknowledgement': work['acknowledgement'],
     'overflow': receipt['overflow'],
+    'execution_route': receipt['execution_route'],
     'agent_lane': receipt['agent_lane'],
     'orchestration': receipt['orchestration'],
     if (receipt['client_tool_handoff'] != null)
