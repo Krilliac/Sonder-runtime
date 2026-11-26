@@ -3,16 +3,20 @@
 Two request-shaping decisions the gateway makes after the readiness check,
 kept out of the gateway so they can be tested (and changed) on their own:
 
-**Thinking.**  Qwen-style chat templates take ``enable_thinking`` through
-``chat_template_kwargs``.  Sonder Inference ignored that field before its
-request-path work, so forwarding it blindly would silently do nothing.  The
-runtime forwards ``think`` only when the server says it honours it, read from
-the (already cached) health document -- a ``thinking``,
-``chat_template_kwargs`` or ``enable_thinking`` entry in a top-level or
-``sonder`` ``features``/``capabilities`` list, or in any ``backends[]`` or
-``models[]`` ``capabilities`` list -- or when the operator says so with
+**Thinking.**  Qwen-style chat templates take ``enable_thinking`` (and
+``reasoning_effort``) through ``chat_template_kwargs``.  Sonder Inference
+ignored that field before its request-path work, so forwarding it blindly
+would silently do nothing.  The runtime forwards ``think`` and
+``reasoning_effort`` when the server says it honours them, read from the
+(already cached) health document -- a ``thinking``, ``chat_template_kwargs``,
+``enable_thinking`` or ``reasoning_effort`` entry in a top-level or
+``sonder`` ``features``/``capabilities`` list, or in any available
+``backends[]`` or ``models[]`` ``capabilities``/``features`` list, or a
+non-synthetic direct ``llamacpp`` backend advertising its native engine
+capabilities -- or when the operator says so with
 ``SONDER_INFERENCE_THINKING=on``.  Otherwise the historical behaviour holds:
-``think=True`` is refused and ``think=False`` is dropped.
+``think=True`` is refused and ``think=False`` / ``reasoning_effort`` are
+dropped.
 
 **Sampling defaults.**  A GGUF may carry the model's recommended
 temperature/top_p/top_k but not ``min_p``, so llama.cpp silently samples
@@ -34,12 +38,33 @@ from types import MappingProxyType
 
 from ...application.chat.provider_bridge import UnsupportedProviderFeature
 from ...domain.common.errors import InvalidInput
+from ...domain.reasoning_effort import check_effort
 
 ENV_THINKING = "SONDER_INFERENCE_THINKING"
 ENV_SAMPLING_DEFAULTS = "SONDER_INFERENCE_SAMPLING_DEFAULTS"
 ENV_SAMPLING_TABLE = "SONDER_INFERENCE_SAMPLING_TABLE"
 
-THINKING_MARKERS = frozenset({"thinking", "chat_template_kwargs", "enable_thinking"})
+THINKING_MARKERS = frozenset({
+    "thinking", "chat_template_kwargs", "enable_thinking", "reasoning_effort",
+})
+DIRECT_LLAMACPP_BACKENDS = frozenset({"llamacpp", "llama.cpp", "llama_cpp"})
+# Direct llama.cpp backend capabilities from Sonder-Inference
+# ``LlamaCppCoreBackend::capabilities()``.  Direct llamacpp handles
+# ``enable_thinking`` / ``reasoning_effort`` in the chat path even when an
+# older ``health_features.cpp`` leaves ``sonder.features`` empty.
+DIRECT_LLAMACPP_CAPABILITY_MARKERS = frozenset({
+    "tokenization",
+    "batched_prefill",
+    "continuous_batch_decode",
+    "prefix_reuse",
+    "speculative_decode",
+    "structured_output",
+    "embeddings",
+    "recurrent_checkpoint",
+    "logprobs",
+    "multimodal",
+    "tool_calling",
+})
 THINKING_REFUSAL = (
     "model thinking is only available on Ollama tiers: this Sonder Inference "
     "server does not advertise thinking support (set %s=on if it honours "
@@ -89,12 +114,44 @@ def _flag(env: Mapping[str, str], name: str, *, default: str) -> str:
     raise InvalidInput("%s must be auto, on or off, got %r" % (name, raw))
 
 
+def _enabled(value: object) -> bool:
+    if isinstance(value, Mapping):
+        if "supported" in value:
+            return value.get("supported") is True
+        if "enabled" in value:
+            return value.get("enabled") is True
+        return bool(value)
+    return bool(value)
+
+
 def _names(value: object) -> set[str]:
     if isinstance(value, Mapping):
-        return {str(item).strip().lower() for item, enabled in value.items() if enabled}
+        return {
+            item.strip().lower()
+            for item, enabled in value.items()
+            if isinstance(item, str) and item.strip() and _enabled(enabled)
+        }
     if isinstance(value, (list, tuple, set, frozenset)):
-        return {item.strip().lower() for item in value if isinstance(item, str)}
+        return {item.strip().lower() for item in value if isinstance(item, str) and item.strip()}
     return set()
+
+
+def _disabled_names(value: object) -> set[str]:
+    if isinstance(value, Mapping):
+        return {
+            item.strip().lower()
+            for item, enabled in value.items()
+            if isinstance(item, str) and item.strip() and not _enabled(enabled)
+        }
+    return set()
+
+
+def _container_features(container: Mapping[str, object]) -> set[str]:
+    return _names(container.get("features")) | _names(container.get("capabilities"))
+
+
+def _container_disabled(container: Mapping[str, object]) -> set[str]:
+    return _disabled_names(container.get("features")) | _disabled_names(container.get("capabilities"))
 
 
 def advertised_features(document: Mapping[str, object] | None) -> frozenset[str]:
@@ -102,29 +159,121 @@ def advertised_features(document: Mapping[str, object] | None) -> frozenset[str]
     if not isinstance(document, Mapping):
         return frozenset()
     names: set[str] = set()
-    containers = [document]
+    containers: list[Mapping[str, object]] = [document]
     extension = document.get("sonder")
     if isinstance(extension, Mapping):
         containers.append(extension)
     for container in containers:
-        names |= _names(container.get("features"))
-        names |= _names(container.get("capabilities"))
-    for key in ("backends", "models"):
-        entries = document.get(key)
-        if isinstance(entries, list):
-            for entry in entries:
-                if isinstance(entry, Mapping):
-                    names |= _names(entry.get("capabilities"))
+        names |= _container_features(container)
+    backends = document.get("backends")
+    if isinstance(backends, list):
+        for entry in backends:
+            if isinstance(entry, Mapping) and entry.get("available") is not False:
+                names |= _container_features(entry)
+    models = document.get("models")
+    if isinstance(models, list):
+        for entry in models:
+            if isinstance(entry, Mapping):
+                names |= _container_features(entry)
     return frozenset(names)
+
+
+def _disabled_features(document: Mapping[str, object] | None) -> frozenset[str]:
+    if not isinstance(document, Mapping):
+        return frozenset()
+    disabled: set[str] = set()
+    containers: list[Mapping[str, object]] = [document]
+    extension = document.get("sonder")
+    if isinstance(extension, Mapping):
+        containers.append(extension)
+    for container in containers:
+        disabled |= _container_disabled(container)
+    backends = document.get("backends")
+    if isinstance(backends, list):
+        for entry in backends:
+            if isinstance(entry, Mapping) and entry.get("available") is not False:
+                disabled |= _container_disabled(entry)
+    models = document.get("models")
+    if isinstance(models, list):
+        for entry in models:
+            if isinstance(entry, Mapping):
+                disabled |= _container_disabled(entry)
+    return frozenset(disabled)
+
+
+def _backend_name(value: object) -> str:
+    return value.strip().lower() if isinstance(value, str) else ""
+
+
+def _direct_llamacpp_capabilities(document: Mapping[str, object] | None) -> frozenset[str]:
+    """Capabilities advertised for an active, non-synthetic direct ``llamacpp`` backend."""
+    if not isinstance(document, Mapping) or document.get("synthetic") is True:
+        return frozenset()
+    models = document.get("models")
+    default_backend = ""
+    llamacpp_models: list[Mapping[str, object]] = []
+    if isinstance(models, list):
+        for entry in models:
+            if not isinstance(entry, Mapping):
+                continue
+            backend = _backend_name(entry.get("backend"))
+            if entry.get("default") is True and backend:
+                default_backend = backend
+            if backend in DIRECT_LLAMACPP_BACKENDS:
+                llamacpp_models.append(entry)
+    if default_backend and default_backend not in DIRECT_LLAMACPP_BACKENDS:
+        return frozenset()
+
+    top_caps = _container_features(document)
+    extension = document.get("sonder")
+    if isinstance(extension, Mapping):
+        top_caps |= _container_features(extension)
+    model_caps: set[str] = set()
+    for entry in llamacpp_models:
+        model_caps |= _container_features(entry)
+
+    backends = document.get("backends")
+    if isinstance(backends, list):
+        backend_entries = [entry for entry in backends if isinstance(entry, Mapping)]
+        if backend_entries:
+            matched = [
+                entry for entry in backend_entries
+                if _backend_name(entry.get("name")) in DIRECT_LLAMACPP_BACKENDS
+                and entry.get("available") is not False
+            ]
+            if not matched:
+                return frozenset()
+            caps = set(top_caps) | model_caps
+            for entry in matched:
+                caps |= _container_features(entry)
+            return frozenset(caps)
+
+    if llamacpp_models:
+        return frozenset(top_caps | model_caps)
+    return frozenset()
+
+
+def _direct_llamacpp_thinking_supported(document: Mapping[str, object] | None) -> bool:
+    if _disabled_features(document) & THINKING_MARKERS:
+        return False
+    return bool(_direct_llamacpp_capabilities(document) & DIRECT_LLAMACPP_CAPABILITY_MARKERS)
 
 
 def thinking_supported(document: Mapping[str, object] | None,
                        env: Mapping[str, str] | None = None) -> bool:
-    """Whether ``think`` may be forwarded as ``enable_thinking``."""
+    """Whether ``think`` (and ``reasoning_effort``) may be forwarded."""
     mode = _flag(os.environ if env is None else env, ENV_THINKING, default="auto")
     if mode != "auto":
         return mode == "on"
-    return bool(advertised_features(document) & THINKING_MARKERS)
+    if advertised_features(document) & THINKING_MARKERS:
+        return True
+    return _direct_llamacpp_thinking_supported(document)
+
+
+def reasoning_effort_supported(document: Mapping[str, object] | None,
+                               env: Mapping[str, str] | None = None) -> bool:
+    """Whether ``reasoning_effort`` may be forwarded in ``chat_template_kwargs``."""
+    return thinking_supported(document, env)
 
 
 def apply_thinking(payload: dict, think: object, *, supported: bool) -> bool | None:
@@ -145,6 +294,25 @@ def apply_thinking(payload: dict, think: object, *, supported: bool) -> bool | N
     kwargs["enable_thinking"] = think
     payload["chat_template_kwargs"] = kwargs
     return think
+
+
+def apply_reasoning_effort(
+    payload: dict,
+    reasoning_effort: object,
+    *,
+    supported: bool,
+) -> str | None:
+    """Put canonical ``reasoning_effort`` on ``payload`` when supported."""
+    if reasoning_effort is None:
+        return None
+    canonical = check_effort(reasoning_effort)
+    if canonical is None or not supported:
+        return None
+    kwargs = payload.get("chat_template_kwargs")
+    merged = dict(kwargs) if isinstance(kwargs, Mapping) else {}
+    merged["reasoning_effort"] = canonical
+    payload["chat_template_kwargs"] = merged
+    return canonical
 
 
 @dataclass(frozen=True)
@@ -265,11 +433,29 @@ def default_model_hint(document: Mapping[str, object] | None) -> str | None:
 
 
 
-def tune_request(payload: dict, think: object, document: Mapping[str, object] | None,
-                 env: Mapping[str, str] | None = None) -> None:
-    """Apply the thinking decision, then the sampling defaults, to ``payload``."""
-    supported = thinking_supported(document, env) if think is not None else False
-    forwarded = apply_thinking(payload, think, supported=supported)
+def tune_request(
+    payload: dict,
+    think: object,
+    document: Mapping[str, object] | None,
+    env: Mapping[str, str] | None = None,
+    *,
+    reasoning_effort: object = None,
+) -> None:
+    """Apply the thinking/effort decision, then the sampling defaults, to ``payload``."""
+    canonical_effort = check_effort(reasoning_effort) if reasoning_effort is not None else None
+    supported = (
+        thinking_supported(document, env)
+        if (think is not None or canonical_effort is not None)
+        else False
+    )
+    effective_think = think
+    if canonical_effort is not None and effective_think is None:
+        if canonical_effort == "off":
+            effective_think = False
+        elif supported:
+            effective_think = True
+    forwarded = apply_thinking(payload, effective_think, supported=supported)
+    apply_reasoning_effort(payload, canonical_effort, supported=supported)
     profile = payload.pop("sampling_profile", None)
     model = payload.get("model")
     if model == "default":
@@ -282,15 +468,20 @@ def tune_request(payload: dict, think: object, document: Mapping[str, object] | 
 __all__ = [
     "BUILTIN_FAMILIES",
     "DECISION_SAMPLING",
+    "DIRECT_LLAMACPP_BACKENDS",
+    "DIRECT_LLAMACPP_CAPABILITY_MARKERS",
     "ENV_SAMPLING_DEFAULTS",
     "ENV_SAMPLING_TABLE",
     "ENV_THINKING",
+    "THINKING_MARKERS",
     "THINKING_REFUSAL",
     "SamplingFamily",
     "advertised_features",
+    "apply_reasoning_effort",
     "apply_sampling_defaults",
     "apply_thinking",
     "default_model_hint",
+    "reasoning_effort_supported",
     "sampling_defaults_enabled",
     "sampling_families",
     "thinking_supported",
