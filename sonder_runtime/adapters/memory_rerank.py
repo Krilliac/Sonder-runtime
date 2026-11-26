@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 import sonder_runtime.adapters.embeddings
@@ -68,12 +69,37 @@ def mmr_from_blobs(
     sim_fn: Callable[[_VecT, _VecT], float] = sonder_runtime.adapters.embeddings.cosine,
     from_blob: Callable[[_BlobT], _VecT] = sonder_runtime.adapters.embeddings.from_blob,
 ) -> list[_ItemT]:
-    """Decode stored embeddings, omit empty values, and apply MMR."""
-    candidates = [
-        (candidate_id, from_blob(blob))
-        for candidate_id, blob in id_blob_pairs
-        if blob
-    ]
+    """Decode stored embeddings, omit empty/corrupt values, and apply MMR."""
+    candidates: list[tuple[_ItemT, _VecT]] = []
+    skipped_corrupt = 0
+    validate_float_vec = from_blob is sonder_runtime.adapters.embeddings.from_blob
+    for candidate_id, blob in id_blob_pairs:
+        if not blob:
+            continue
+        try:
+            vec = from_blob(blob)
+        except (TypeError, ValueError, EOFError, BufferError):
+            skipped_corrupt += 1
+            continue
+        if validate_float_vec and isinstance(vec, list):
+            if (
+                not vec
+                or not any(x != 0 for x in vec)
+                or not all(
+                    isinstance(x, (int, float))
+                    and not isinstance(x, bool)
+                    and math.isfinite(x)
+                    for x in vec
+                )
+            ):
+                skipped_corrupt += 1
+                continue
+        candidates.append((candidate_id, vec))
+    if skipped_corrupt:
+        logger.warning(
+            "mmr_from_blobs skipped %d corrupt or non-finite embedding blob(s)",
+            skipped_corrupt,
+        )
     return mmr_rerank(
         query_vec,
         candidates,
