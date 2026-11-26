@@ -100,13 +100,18 @@ def test_format_check_only_never_runs_a_writing_formatter(tmp_path, captured, to
     ("prettier", ["npx", "--no-install", "prettier", "--check", "."]),
     ("biome", ["npx", "--no-install", "@biomejs/biome", "format", "."]),
     ("dart", ["dart", "format", "--output=none", "--set-exit-if-changed", "."]),
-    ("dotnet", ["dotnet", "format", "--verify-no-changes"]),
-    ("rustfmt", ["cargo", "fmt", "--check"]),
 ])
 def test_format_check_only_keeps_the_existing_check_forms(tmp_path, captured, tool, check):
     result = harness_tools.format_code(root=str(tmp_path), tool=tool, check_only=True)
     assert result["ok"] is True
     assert captured == [check]
+
+
+@pytest.mark.parametrize("tool", ["dotnet", "rustfmt"])
+def test_format_check_only_refuses_project_evaluating_formatters(tmp_path, no_child, tool):
+    result = harness_tools.format_code(root=str(tmp_path), tool=tool, check_only=True)
+    assert result["ok"] is False
+    assert "refusing to run" in result["error"]
 
 
 @pytest.mark.parametrize("tool", ["zig", "swift-format", "mix", "shfmt", "stylua", "ktlint", "rubocop"])
@@ -924,7 +929,7 @@ def test_prettier_guard_parses_data_configs_before_trusting_keys(tmp_path, name,
 
 @pytest.mark.parametrize("name, text", [
     (".prettierrc", '{"semi": false}'),
-    (".prettierrc.yaml", "semi: false\n"),
+    (".prettierrc.yaml", '{"semi": false}'),
     (".prettierrc.toml", "semi = false\n"),
     ("package.json", '{"name": "x", "prettier": {"semi": false}}'),
     ("package.yaml", "name: x\ndependencies:\n  prettier: 3.0.0\n"),
@@ -988,7 +993,7 @@ def test_requirements_guard_refuses_variable_expansion_and_url_schemes(tmp_path,
 
     (tmp_path / "requirements.txt").write_text(line + "\n", encoding="utf-8")
     (tmp_path / "x.txt").write_text("requests\n", encoding="utf-8")
-    assert requirements_guard.requirements_content_error(tmp_path) is not None, line
+    assert requirements_guard.requirements_content_error(tmp_path, is_protected=lambda _p: False) is not None, line
 
 
 def test_requirements_guard_still_allows_plain_relative_includes(tmp_path):
@@ -996,4 +1001,72 @@ def test_requirements_guard_still_allows_plain_relative_includes(tmp_path):
 
     (tmp_path / "requirements.txt").write_text("-r base.txt\nrequests==2.0\n", encoding="utf-8")
     (tmp_path / "base.txt").write_text("idna\n", encoding="utf-8")
-    assert requirements_guard.requirements_content_error(tmp_path) is None
+    assert requirements_guard.requirements_content_error(tmp_path, is_protected=lambda _p: False) is None
+
+
+# ---- review round 3: shared-config strings, globs, .npmrc, dotnet/cargo, archives, include secrets ----
+
+@pytest.mark.parametrize("name,text", [
+    (".prettierrc.json", '"./lib/x.cjs"'),
+    (".prettierrc", "./lib/x.cjs"),
+    (".prettierrc.yaml", "some-shared-config"),
+    (".prettierrc.json5", '"evil-config"'),
+    (".prettierrc.toml", "a = 1\n[[x"),
+    (".prettierrc.json", "[]"),
+])
+def test_prettier_guard_refuses_non_mapping_data_configs(tmp_path, name, text):
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    assert _guard("prettier", tmp_path, ".") is not None
+
+
+def test_prettier_guard_allows_plain_json_object_config(tmp_path):
+    (tmp_path / ".prettierrc").write_text('{"semi": false}', encoding="utf-8")
+    assert _guard("prettier", tmp_path, ".") is None
+
+
+@pytest.mark.parametrize("target", ["**/*.js", "{sub,x}", "su?", "[s]ub", "!sub", "missing", "sub/missing.js"])
+def test_prettier_guard_refuses_globs_and_missing_paths(tmp_path, target):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / ".prettierrc.cjs").write_text("module.exports = {}\n", encoding="utf-8")
+    assert _guard("prettier", tmp_path, target) is not None
+
+
+@pytest.mark.parametrize("tool", ["prettier", "biome"])
+def test_node_guards_refuse_a_project_npmrc_at_root_and_prefix(tmp_path, tool):
+    (tmp_path / ".npmrc").write_text("script-shell=./tools/evil.cmd\n", encoding="utf-8")
+    assert ".npmrc" in _guard(tool, tmp_path, ".")
+    sub = tmp_path / "pkg" / "deep"
+    sub.mkdir(parents=True)
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    assert ".npmrc" in _guard(tool, sub, ".")
+
+
+@pytest.mark.parametrize("tool", ["dotnet", "rustfmt"])
+def test_dotnet_and_cargo_fmt_are_refused_in_check_mode(tmp_path, tool):
+    assert _guard(tool, tmp_path, ".") is not None
+
+
+@pytest.mark.parametrize("line", ["evil-1.0.tar.gz", "evil.zip", "evil-1.0-py3-none-any.whl", "y.tar.bz2"])
+def test_requirements_guard_refuses_bare_local_archive_names(tmp_path, line):
+    from sonder_runtime.adapters import requirements_guard
+
+    (tmp_path / "requirements.txt").write_text(line + "\n", encoding="utf-8")
+    assert requirements_guard.requirements_content_error(tmp_path, is_protected=lambda _p: False) is not None
+
+
+def test_requirements_include_of_a_secret_file_is_refused_without_echoing_it(tmp_path):
+    (tmp_path / "requirements.txt").write_text("-r .env\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-live-THISISASECRET0123456789\n", encoding="utf-8")
+    error = harness_tools._requirements_link_error(tmp_path)
+    assert error is not None
+    assert "THISISASECRET" not in error and "sk-live" not in error
+
+
+def test_requirements_include_error_names_file_and_line_never_content(tmp_path):
+    from sonder_runtime.adapters import requirements_guard
+
+    (tmp_path / "requirements.txt").write_text("-r base.txt\n", encoding="utf-8")
+    (tmp_path / "base.txt").write_text("idna\nSECRET_TOKEN=abc123\n", encoding="utf-8")
+    error = requirements_guard.requirements_content_error(tmp_path, is_protected=lambda _p: False)
+    assert error is not None and "base.txt line 2" in error
+    assert "SECRET_TOKEN" not in error and "abc123" not in error

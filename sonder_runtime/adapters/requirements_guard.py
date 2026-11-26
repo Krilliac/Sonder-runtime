@@ -13,12 +13,13 @@ and refuses:
 - an include that is a URL, escapes the root, is a link, or is missing/too large;
 - an include cycle or a tree deeper/larger than the caps below;
 - editables (``-e``/``--editable``), direct references (``name @ url``, bare URLs,
-  ``git+...``, local paths and archives);
+  ``git+...``, local paths and archives, including bare names such as ``evil-1.0.tar.gz``);
 - index and fetch overrides (``-i``, ``--index-url``, ``--extra-index-url``,
   ``-f``/``--find-links``, ``--trusted-host``) and every option outside a small
   allow-list.
 
-Every file is read through ``confined_read`` (no-follow open, handle-path check).
+Every file is read through ``confined_read`` (no-follow open, handle-path check, protected-read
+predicate) and error text never contains a line from the file.
 Stateless; any thread.
 """
 from __future__ import annotations
@@ -27,6 +28,7 @@ import os
 import re
 import shlex
 from pathlib import Path
+from typing import Callable
 
 from .confined_read import ConfinedReadRefused, read_confined_bytes
 
@@ -38,6 +40,12 @@ _INCLUDE_OPTIONS = frozenset({"-r", "--requirement", "-c", "--constraint"})
 _ALLOWED_OPTIONS = frozenset({
     "--hash", "--require-hashes", "--only-binary", "--no-binary", "--prefer-binary", "--pre",
 })
+# pip (req/constructors.py ``is_archive_file``) turns an existing file with one of these
+# extensions into a ``file:`` URL even when the name has no separator, then builds it.
+_ARCHIVE_EXTENSIONS = (
+    ".zip", ".whl", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz",
+    ".tar.xz", ".txz", ".tlz", ".tar.lz", ".tar.lzma",
+)
 _NAME = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]*"
     r"(?:\[[A-Za-z0-9._,\s-]*\])?"
@@ -50,11 +58,15 @@ _NAME = re.compile(
 _URL_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]+:")
 
 
-def _logical_lines(text: str) -> list[str]:
-    lines: list[str] = []
+def _logical_lines(text: str) -> list[tuple[int, str]]:
+    """Logical lines as ``(first physical line number, text)``."""
+    lines: list[tuple[int, str]] = []
     pending = ""
-    for raw in text.splitlines():
+    start = 0
+    for number, raw in enumerate(text.splitlines(), 1):
         piece = raw.rstrip()
+        if not pending:
+            start = number
         if piece.endswith("\\"):
             pending += piece[:-1] + " "
             continue
@@ -62,19 +74,18 @@ def _logical_lines(text: str) -> list[str]:
         pending = ""
         stripped = re.sub(r"(^|\s)#.*$", "", line).strip()
         if stripped:
-            lines.append(stripped)
+            lines.append((start, stripped))
     if pending.strip():
-        lines.append(re.sub(r"(^|\s)#.*$", "", pending).strip())
-    return [line for line in lines if line]
-
-
-def _no_protection(_path: Path) -> bool:
-    return False
+        tail = re.sub(r"(^|\s)#.*$", "", pending).strip()
+        if tail:
+            lines.append((start, tail))
+    return lines
 
 
 class _Walk:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, is_protected: Callable[[Path], bool]) -> None:
         self.root = root
+        self.is_protected = is_protected
         self.seen: set[str] = set()
 
     def file(self, path: Path, depth: int) -> str | None:
@@ -88,30 +99,31 @@ class _Walk:
         self.seen.add(key)
         try:
             data = read_confined_bytes(
-                self.root, path, max_bytes=MAX_FILE_BYTES, is_protected=_no_protection)
+                self.root, path, max_bytes=MAX_FILE_BYTES, is_protected=self.is_protected)
         except FileNotFoundError:
             return "requirements include %s does not exist" % path.name
         except ConfinedReadRefused as exc:
             return "requirements include %s was refused: %s" % (path.name, exc)
         except OSError:
             return "requirements include %s could not be read safely" % path.name
-        for line in _logical_lines(data.decode("utf-8", errors="replace")):
+        for number, line in _logical_lines(data.decode("utf-8", errors="replace")):
             error = self.line(line, path, depth)
             if error:
-                return error
+                # Never echo the line: an include may be a credential file read as requirements.
+                return "%s line %d: %s" % (path.name, number, error)
         return None
 
     def include(self, value: str, parent: Path, depth: int) -> str | None:
         if (not value or "://" in value or "\0" in value or "${" in value
                 or _URL_SCHEME.match(value) or value.startswith(("\\\\", "//"))):
-            return "requirements include %r is a URL or network path" % value[:80]
+            return "an include is a URL or network path"
         target = Path(os.path.normpath(str(parent.parent / value)))
         return self.file(target, depth + 1)
 
     def line(self, line: str, parent: Path, depth: int) -> str | None:
         if "${" in line:
             # pip expands ${VAR} from the environment before it resolves includes.
-            return "requirements line uses ${VAR} expansion: %r" % line[:80]
+            return "uses ${VAR} expansion"
         try:
             # Non-POSIX splitting keeps Windows backslashes; quotes are stripped by hand.
             tokens = [
@@ -119,7 +131,7 @@ class _Walk:
                 for token in shlex.split(line, posix=False)
             ]
         except ValueError:
-            return "requirements line is not parseable: %r" % line[:80]
+            return "is not parseable"
         index = 0
         spec: list[str] = []
         while index < len(tokens):
@@ -132,7 +144,7 @@ class _Walk:
             if name.startswith("-") and not name.startswith("--") and len(name) > 2:
                 name, inline, equals = name[:2], name[2:], "="
             if name in ("-e", "--editable"):
-                return "editable requirements are not allowed: %r" % line[:80]
+                return "editable requirements are not allowed"
             if name in _INCLUDE_OPTIONS:
                 if equals:
                     value = inline
@@ -149,7 +161,7 @@ class _Walk:
                     index += 1
                 index += 1
                 continue
-            return "requirements option %s is not allowed (index overrides, links and flags)" % name
+            return "an option is not allowed (index overrides, links and flags)"
         if spec:
             return self.requirement(" ".join(spec))
         return None
@@ -157,13 +169,26 @@ class _Walk:
     @staticmethod
     def requirement(text: str) -> str | None:
         main = text.split(";", 1)[0].strip()
-        if "@" in main or "://" in main or "/" in main or "\\" in main or not _NAME.fullmatch(main):
-            return "requirement %r is a link, path or unsupported form; only pinned names are allowed" % main[:80]
+        if (
+            "@" in main or "://" in main or "/" in main or "\\" in main
+            or not _NAME.fullmatch(main)
+            or main.lower().endswith(_ARCHIVE_EXTENSIONS)
+        ):
+            return "a requirement is a link, path or unsupported form (including local archives); only pinned names are allowed"
         return None
 
 
-def requirements_content_error(root: Path | str, name: str = "requirements.txt") -> str | None:
+def requirements_content_error(
+    root: Path | str,
+    name: str = "requirements.txt",
+    *,
+    is_protected: Callable[[Path], bool],
+) -> str | None:
     """Why ``root/name`` (or an include of it) must not be handed to pip, or None.
+
+    ``is_protected`` is the file tools' protected-read predicate, applied to the
+    opened handle path of the file and of every include. Error text names a file
+    and line number, never the line.
 
     A missing top-level file is not an error here; callers decide what a missing
     file means.
@@ -172,4 +197,4 @@ def requirements_content_error(root: Path | str, name: str = "requirements.txt")
     top = root_path / name
     if not os.path.lexists(top):
         return None
-    return _Walk(root_path).file(top, 0)
+    return _Walk(root_path, is_protected).file(top, 0)
