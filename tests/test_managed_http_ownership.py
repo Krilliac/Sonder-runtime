@@ -1,5 +1,5 @@
-from http.server import BaseHTTPRequestHandler
 import socket
+from http.server import BaseHTTPRequestHandler
 from threading import Event
 from urllib.request import urlopen
 
@@ -24,13 +24,16 @@ def test_real_owned_http_request_workers_and_sockets_close():
     serving = workers.thread(target=lambda: server.serve_forever(poll_interval=0.01))
     serving.start()
     try:
-        with urlopen("http://127.0.0.1:%s/" % server.server_port, timeout=2) as response:
+        with urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=2) as response:
             assert response.read() == b"ok"
     finally:
         server.shutdown()
         server.server_close()
-    assert server.sockets_closed
+    # Join request workers before asserting sockets_closed: the handler's
+    # makefile() readers unwind in StreamRequestHandler.finish() after the
+    # response bytes are written (matching CLOSE_ORDER: workers -> http-sockets).
     assert workers.close(timeout=2).clean
+    assert server.sockets_closed
     assert not serving.is_alive()
 
 
