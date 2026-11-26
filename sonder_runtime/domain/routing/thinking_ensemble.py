@@ -2,14 +2,15 @@
 
 When an operator binds a local thinking tier (``thinking`` or ``reasoning``, for
 example a large reasoning model hosted on Node1 or a secondary worker), this
-module decides:
+module decides whether main-workstation Sonder (``sonder`` / ``general`` /
+``code`` / ``security``) should delegate its pre-turn ``Thinking`` phase to the
+bound thinking tier and feed the resulting advisory reasoning brief into the
+fast primary model.
 
-1. Whether a ``code`` or ``security`` lane automatically ensembles with that
-   bound thinking tier (deduplicated by resolved model, local-only by default).
-2. Whether main-workstation Sonder (``sonder`` / ``general`` / ``code`` /
-   ``security``) should delegate its pre-turn ``Thinking`` phase to the bound
-   thinking tier and feed the resulting advisory reasoning brief into the fast
-   primary model.
+Delegation is OPT-IN: it runs only when ``SONDER_THINKING_ENSEMBLE`` (or its
+alias ``SONDER_THINKING_DELEGATION``) is truthy.  Prior measurements found
+ensembles did not improve accuracy, so nothing here is on by default pending a
+measured A/B.  Explicit tier lists are never expanded.
 
 Pure stdlib; no I/O, no network, no server imports.
 """
@@ -25,7 +26,7 @@ MAIN_THINKING_LANES: frozenset[str] = frozenset({"", "sonder", "local", "code", 
 THINKING_ENSEMBLE_ENV = "SONDER_THINKING_ENSEMBLE"
 THINKING_DELEGATION_ENV = "SONDER_THINKING_DELEGATION"
 
-_FALSE_TOKENS = frozenset({"0", "false", "no", "off", "disabled"})
+_TRUE_TOKENS = frozenset({"1", "true", "yes", "on", "enabled"})
 _SUBSTANTIVE_CUES = re.compile(
     r"\b(?:fix|implement|refactor|design|architect|debug|audit|security|vulnerability|"
     r"exploit|threat|review|analy[sz]e|explain|why|how|compare|trade[- ]?off|plan|"
@@ -47,13 +48,17 @@ def is_cloud_model(model: object) -> bool:
 
 
 def thinking_ensemble_enabled(environ: Mapping[str, str] | None = None) -> bool:
-    """Return True unless explicitly disabled via ``SONDER_THINKING_ENSEMBLE``."""
+    """Return True only when delegation is explicitly opted in (default: off).
+
+    ``SONDER_THINKING_ENSEMBLE`` decides when it is set; otherwise the
+    ``SONDER_THINKING_DELEGATION`` alias does.
+    """
     env = environ or {}
     for key in (THINKING_ENSEMBLE_ENV, THINKING_DELEGATION_ENV):
         raw = str(env.get(key, "") or "").strip().lower()
-        if raw in _FALSE_TOKENS:
-            return False
-    return True
+        if raw:
+            return raw in _TRUE_TOKENS
+    return False
 
 
 def normalize_tier_alias(tier: str, tiers: Mapping[str, str]) -> str:
@@ -97,36 +102,9 @@ def resolve_thinking_tier(
     return None
 
 
-def expand_lane_ensemble_tiers(
-    requested: Sequence[str],
-    tiers: Mapping[str, str],
-    *,
-    enabled: bool = True,
-    is_cloud_fn: Callable[[str, str], bool] | None = None,
-) -> list[str]:
-    """Automatically pair a single ``code`` or ``security`` lane with the bound thinking tier.
-
-    When ``requested`` names multiple tiers or a non-code/security tier, returns
-    the normalized list unchanged. Never silently adds a cloud model.
-    """
-    normalized = [normalize_tier_alias(t, tiers) for t in requested if str(t or "").strip()]
-    if not enabled or len(normalized) != 1:
-        return normalized
-    primary = normalized[0]
-    if primary not in AUTO_ENSEMBLE_LANES:
-        return normalized
-    resolved = resolve_thinking_tier(
-        tiers,
-        primary_tier=primary,
-        primary_model=str(tiers.get(primary) or ""),
-        is_cloud_fn=is_cloud_fn,
-    )
-    if resolved is None:
-        return normalized
-    thinking_tier, _thinking_model = resolved
-    if thinking_tier not in normalized:
-        return [primary, thinking_tier]
-    return normalized
+def normalize_requested_tiers(requested: Sequence[str], tiers: Mapping[str, str]) -> list[str]:
+    """Return exactly the tiers the caller named (lower-cased, alias-resolved, never expanded)."""
+    return [normalize_tier_alias(t, tiers) for t in requested if str(t or "").strip()]
 
 
 def should_delegate_thinking(
@@ -135,7 +113,7 @@ def should_delegate_thinking(
     tiers: Mapping[str, str],
     *,
     primary_model: str = "",
-    enabled: bool = True,
+    enabled: bool = False,
     cloud: bool = False,
     is_cloud_fn: Callable[[str, str], bool] | None = None,
 ) -> tuple[str, str] | None:
@@ -259,23 +237,23 @@ def format_thinking_brief(
 def thinking_ensemble_status(
     tiers: Mapping[str, str],
     *,
-    enabled: bool = True,
+    enabled: bool = False,
+    auto_offload: bool = False,
     is_cloud_fn: Callable[[str, str], bool] | None = None,
 ) -> dict[str, Any]:
     """Return a content-free status snapshot for ``runtime_policy_data`` and diagnostics."""
     resolved = resolve_thinking_tier(tiers, is_cloud_fn=is_cloud_fn)
     bound_tier = resolved[0] if resolved is not None else ""
     bound_model = resolved[1] if resolved is not None else ""
-    code_pair = resolve_thinking_tier(tiers, primary_tier="code", is_cloud_fn=is_cloud_fn)
-    sec_pair = resolve_thinking_tier(tiers, primary_tier="security", is_cloud_fn=is_cloud_fn)
     return {
+        "default_enabled": False,
+        "default": "off (opt-in via SONDER_THINKING_ENSEMBLE=1 pending a measured A/B)",
         "enabled": bool(enabled),
         "bound_tier": bound_tier,
         "bound_model": bound_model,
         "active": bool(enabled and resolved is not None),
+        "auto_offload_enabled": bool(auto_offload),
         "auto_ensemble_lanes": sorted(AUTO_ENSEMBLE_LANES),
-        "code_ensembles_with": code_pair[0] if (enabled and code_pair is not None) else "",
-        "security_ensembles_with": sec_pair[0] if (enabled and sec_pair is not None) else "",
     }
 
 
@@ -286,10 +264,10 @@ __all__ = [
     "THINKING_ENSEMBLE_ENV",
     "THINKING_TIER_CANDIDATES",
     "build_thinking_prompt",
-    "expand_lane_ensemble_tiers",
     "extract_thinking_and_brief",
     "format_thinking_brief",
     "is_cloud_model",
+    "normalize_requested_tiers",
     "normalize_tier_alias",
     "resolve_thinking_tier",
     "should_delegate_thinking",

@@ -1,13 +1,19 @@
 """Composition-root helpers for bound thinking-tier deliberation and auto-ensembling.
 
+Everything here is OPT-IN: thinking delegation runs only when
+``SONDER_THINKING_ENSEMBLE`` (alias ``SONDER_THINKING_DELEGATION``) is truthy, and
+auto-ensemble offload only when ``SONDER_AUTO_ENSEMBLE_OFFLOAD`` is truthy.  With
+an empty environment no thinking-tier call happens on any path, pending a
+measured A/B.
+
 Coordinates:
 1. Main-workstation Sonder delegating its pre-turn ``Thinking`` phase to a bound
    local thinking tier (``thinking`` or ``reasoning``) when distinct from the
    primary model, recording reasoning via ``activity_tracker`` and the active
    ``AgentProgressBoard`` while failing soft on timeout/unreachability.
-2. Automatic ``code`` and ``security`` lane ensembling with the bound local
-   thinking tier across ``ensemble_answer``, ``ensemble_codegen_build_loop``,
-   ``offload``, and delegated ``coder``/``security`` child lanes.
+2. The learned ``code``/``security`` offload brief and the delegated
+   ``coder``/``security`` child-lane brief, plus the separately opted-in
+   auto-ensemble offload.
 """
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ from typing import Any
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.agents import delegation_runtime as _delegation
 from sonder_runtime.application.chat import provider_bridge as _provider_bridge
+from sonder_runtime.application.session.provider_attempts import report_thinking_delegation_event
 from sonder_runtime.application.tasks.account_scope import active_task_account_scope
 from sonder_runtime.domain import thinking_controls as _thinking_controls
 from sonder_runtime.domain.cloud_access import has_legacy_error_prefix
@@ -43,7 +50,7 @@ _TRUE_TOKENS = frozenset({"1", "true", "yes", "on", "enabled"})
 
 
 def thinking_ensemble_enabled(environ: Mapping[str, str] | None = None) -> bool:
-    """Return True unless explicitly disabled in process environment."""
+    """Return True only when opted in via the process environment (default: off)."""
     return _domain.thinking_ensemble_enabled(os.environ if environ is None else environ)
 
 
@@ -149,8 +156,9 @@ def _record_thinking_visibility(
     brief_text: str,
     elapsed_ms: int,
     lane: str = "",
+    emit_board: bool = True,
 ) -> None:
-    """Publish thinking-tier deliberation to activity_tracker and active AgentProgressBoard."""
+    """Publish thinking-tier deliberation to activity_tracker and (optionally) the active AgentProgressBoard."""
     tracker = getattr(server, "activity_tracker", None)
     exposure_fn = getattr(server, "reasoning_exposure_enabled", None)
     expose = bool(callable(exposure_fn) and exposure_fn())
@@ -172,7 +180,7 @@ def _record_thinking_visibility(
                         model=thinking_model,
                     )
     summary_src = thinking_text or brief_text
-    if summary_src and _delegation.current_board() is not None:
+    if emit_board and summary_src and _delegation.current_board() is not None:
         if expose:
             compact = " ".join(summary_src.split()).strip()[:260]
             thinking_field = compact
@@ -195,6 +203,40 @@ def _record_thinking_visibility(
             )
 
 
+def _report_delegation(
+    tier: str, model: str, lane: str, started: float | None, brief_chars: int, outcome: str,
+) -> None:
+    """One content-free telemetry record per delegated turn (never raises)."""
+    wall_ms = int((time.monotonic() - started) * 1000) if started is not None else 0
+    with contextlib.suppress(Exception):
+        report_thinking_delegation_event({
+            "tier": tier, "model": model, "lane": lane, "wall_ms": wall_ms,
+            "brief_chars": int(brief_chars), "outcome": outcome,
+        })
+
+
+def thinking_identity_token(server: Any, tier: str, model: str) -> str:
+    """Request-cache identity fragment for the thinking-ensemble state.
+
+    Empty when delegation is off (or no distinct local thinking tier is bound),
+    so the default cache identity is unchanged; otherwise it names the enabled
+    flag and the bound thinking tier and model, so toggling or rebinding never
+    serves an answer cached under the other setting.
+    """
+    if not thinking_ensemble_enabled():
+        return ""
+    tiers = getattr(server, "TIERS", None)
+    if not isinstance(tiers, Mapping):
+        return ""
+    resolved = _domain.resolve_thinking_tier(
+        tiers, primary_tier=(tier or "").strip().lower(), primary_model=model,
+        is_cloud_fn=_is_cloud_checker(server),
+    )
+    if resolved is None:
+        return ""
+    return f"thinking-ensemble:on:{resolved[0]}:{resolved[1]}"
+
+
 def deliberate_for_turn(
     server: Any,
     prompt: str,
@@ -208,8 +250,15 @@ def deliberate_for_turn(
     timeout: int = _DEFAULT_THINKING_TIMEOUT,
     cancel_check: Callable[[], bool] | None = None,
     check_reachable: Callable[[Any, str, str], bool] | None = None,
+    emit_board: bool = True,
 ) -> ThinkingDelegationResult | None:
-    """Consult the bound local thinking tier for a pre-turn reasoning brief (fail-soft)."""
+    """Consult the bound local thinking tier for a pre-turn reasoning brief (fail-soft).
+
+    Opt-in: returns ``None`` without any model call unless the thinking
+    ensemble is enabled.  ``emit_board=False`` lets a delegated child publish
+    its own single board event.  One telemetry record is reported per call that
+    reaches a bound thinking tier.
+    """
     if (
         cloud
         or in_thinking_delegation()
@@ -236,6 +285,7 @@ def deliberate_for_turn(
     thinking_tier, thinking_model = resolved
     reach_fn = check_reachable or thinking_tier_reachable
     if not reach_fn(server, thinking_tier, thinking_model):
+        _report_delegation(thinking_tier, thinking_model, effective_lane, None, 0, "unreachable")
         return None
 
     delib_prompt = _domain.build_thinking_prompt(
@@ -295,6 +345,10 @@ def deliberate_for_turn(
             thinking_model,
             exc,
         )
+        _report_delegation(
+            thinking_tier, thinking_model, effective_lane, started, 0,
+            "timeout" if isinstance(exc, TimeoutError) else "unreachable",
+        )
         return None
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -302,7 +356,9 @@ def deliberate_for_turn(
         raw_msg if isinstance(raw_msg, (Mapping, str)) else str(raw_msg or "")
     )
     if not brief_text and not thinking_text:
+        _report_delegation(thinking_tier, thinking_model, effective_lane, started, 0, "skipped")
         return None
+    _report_delegation(thinking_tier, thinking_model, effective_lane, started, len(brief_text), "ok")
     _record_thinking_visibility(
         server,
         thinking_tier=thinking_tier,
@@ -311,6 +367,7 @@ def deliberate_for_turn(
         brief_text=brief_text,
         elapsed_ms=elapsed_ms,
         lane=effective_lane,
+        emit_board=emit_board,
     )
     return ThinkingDelegationResult(
         tier=thinking_tier,
@@ -451,7 +508,6 @@ def maybe_auto_ensemble_offload(
         or fleet_synthesis
         or lane not in _domain.AUTO_ENSEMBLE_LANES
         or in_thinking_delegation()
-        or not thinking_ensemble_enabled()
         or active_task_account_scope() is not None
     ):
         return None
@@ -503,43 +559,17 @@ def resolve_ensemble_requested_tiers(
     tiers_map: Mapping[str, str],
     configured_local_tiers: Sequence[str],
     skip_tiers: frozenset[str] | set[str] | Sequence[str],
-    *,
-    auto_expand: bool = True,
-    is_cloud_fn: Callable[[str, str], bool] | None = None,
 ) -> tuple[list[str], bool]:
-    """Return ``(requested_tiers, explicit)`` with automatic code/security thinking-tier pairing."""
+    """Return ``(requested_tiers, explicit)``: exactly the tiers the caller named.
+
+    An explicit list is never expanded (only the ``thinking`` -> ``reasoning``
+    alias is resolved); an empty list falls back to the configured local tiers.
+    """
     raw = [t.strip().lower() for t in (tiers_arg or "").split(",") if t.strip()]
-    explicit = bool(raw)
     if not raw:
         skip = set(skip_tiers)
         return [t for t in configured_local_tiers if t not in skip], False
-    allow_expand = bool(
-        auto_expand
-        and not in_thinking_delegation()
-        and thinking_ensemble_enabled()
-    )
-    expanded = _domain.expand_lane_ensemble_tiers(
-        raw,
-        tiers_map,
-        enabled=allow_expand,
-        is_cloud_fn=is_cloud_fn,
-    )
-    return expanded, explicit
-
-
-def resolve_codegen_ensemble_tiers(
-    tiers_map: Mapping[str, str],
-    *,
-    is_cloud_fn: Callable[[str, str], bool] | None = None,
-) -> str:
-    """Return ``code,<thinking_tier>`` for ``ensemble_codegen_build_loop``."""
-    resolved = _domain.resolve_thinking_tier(
-        tiers_map,
-        primary_tier="code",
-        primary_model=str(tiers_map.get("code") or ""),
-        is_cloud_fn=is_cloud_fn,
-    )
-    return f"code,{resolved[0]}" if resolved is not None else "code,reasoning"
+    return _domain.normalize_requested_tiers(raw, tiers_map), True
 
 
 def normalize_tier_alias(tier: str, tiers_map: Mapping[str, str]) -> str:
@@ -556,6 +586,7 @@ def status_dict(
     return _domain.thinking_ensemble_status(
         tiers_map,
         enabled=thinking_ensemble_enabled(),
+        auto_offload=str(os.environ.get(AUTO_ENSEMBLE_OFFLOAD_ENV, "") or "").strip().lower() in _TRUE_TOKENS,
         is_cloud_fn=is_cloud_fn,
     )
 
@@ -569,9 +600,9 @@ __all__ = [
     "in_thinking_delegation",
     "maybe_auto_ensemble_offload",
     "normalize_tier_alias",
-    "resolve_codegen_ensemble_tiers",
     "resolve_ensemble_requested_tiers",
     "status_dict",
+    "thinking_identity_token",
     "thinking_delegation_scope",
     "thinking_tier_reachable",
 ]

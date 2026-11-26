@@ -7008,7 +7008,8 @@ def _answer_with_history_impl(
             learn = _should_learn(_canonical_learn_tier(tier_label), True)
             # One deliberation per turn, on the first local, non-hosted rung.  A pure
             # non-learning route defers it past the request-cache lookup.
-            off_box = cloud or (bridged_provider is not None and _provider_bridge.is_hosted(bridged_provider)) or active_task_account_scope() is not None
+            # An explicit serve selection is answered by the named target alone: no deliberation.
+            off_box = cloud or (bridged_provider is not None and _provider_bridge.is_hosted(bridged_provider)) or active_task_account_scope() is not None or _explicit_serve_selection(tier, "")
             defer_thinking = not learn and not _has_chat_tools and not off_box
             effective_system = thinking_turn.system(
                 effective_system, tier_label, model, _has_chat_tools, off_box, defer_thinking,
@@ -7093,6 +7094,7 @@ def _answer_with_history_impl(
                                 environ=os.environ,
                             ),
                             cloud_allowed=_cloud_allowed_policy(os.environ),
+                            extra="" if off_box else _thinking_ensemble.thinking_identity_token(sys.modules[__name__], tier_label, model),
                         )
                         response = request_cache.get(request_cache_key)
                         request_cache_status = "hit" if response is not None else "miss"
@@ -22321,8 +22323,8 @@ def _fanout_synthesize_run(run, synth_model=""):
 
 
 def _ensemble_targets(tiers: str = ""):
-    """Resolve the tiers to poll into a deduped [(tier, model)] list (auto-pairing code/security with a bound thinking tier)."""
-    requested, explicit = _thinking_ensemble.resolve_ensemble_requested_tiers(tiers, TIERS, _configured_local_tiers(), ENSEMBLE_SKIP_TIERS, is_cloud_fn=_is_cloud_tier)
+    """Resolve the tiers to poll into a deduped [(tier, model)] list (an explicit list is never expanded)."""
+    requested, explicit = _thinking_ensemble.resolve_ensemble_requested_tiers(tiers, TIERS, _configured_local_tiers(), ENSEMBLE_SKIP_TIERS)
     targets, seen_models, unknown = [], set(), []
     for tier in requested:
         if _is_cloud_tier(tier) or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier)):
@@ -22570,12 +22572,10 @@ def consult(
     # create a second module instance whose process-local cloud override is
     # still unset.  Status would truthfully say cloud is enabled while the
     # consult leg rejected the same tier as disabled.
-    with _thinking_ensemble.thinking_delegation_scope():
-        result = consult_flow.consult(
-            prompt, chosen,
-            ask_fn=lambda question, tier: ensemble_answer(question, tiers=tier, mode="general"),
-            cloud_ok=cloud_allowed(), lookup=_reference_lookup_multi.consult_scope(_ensemble_targets),  # members share one lookup; the judge runs without
-        )
+    result = consult_flow.consult(
+        prompt, chosen, ask_fn=lambda question, tier: ensemble_answer(question, tiers=tier, mode="general"),
+        cloud_ok=cloud_allowed(), lookup=_reference_lookup_multi.consult_scope(_ensemble_targets),  # members share one lookup; the judge runs without
+    )
     return consult_flow.format_result(result)
 
 
@@ -23419,7 +23419,7 @@ def _ensemble_codegen_build_loop(
         files_json=files_json,
         build_program=build_program,
         build_args_json=build_args_json,
-        tiers=_thinking_ensemble.resolve_codegen_ensemble_tiers(TIERS, is_cloud_fn=_is_cloud_tier),
+        tiers="code,reasoning",
         attempts=2,
         error_regex=error_regex,
         slips_json=slips_json,
