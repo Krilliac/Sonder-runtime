@@ -100,7 +100,11 @@ def _windows_can_open(path: str, access: int) -> bool:
         import ctypes
         from ctypes import wintypes
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        win_dll = getattr(ctypes, "WinDLL", None)
+        get_last_error = getattr(ctypes, "get_last_error", None)
+        if win_dll is None or get_last_error is None:
+            return True
+        kernel32 = win_dll("kernel32", use_last_error=True)
     except (ImportError, OSError, AttributeError):
         return True
     kernel32.CreateFileW.argtypes = [
@@ -116,7 +120,7 @@ def _windows_can_open(path: str, access: int) -> bool:
         # Access is checked before sharing, so any other refusal (a sharing
         # violation on a running image included) does not show the right is
         # missing -- fail closed.
-        return ctypes.get_last_error() != _ERROR_ACCESS_DENIED
+        return bool(get_last_error() != _ERROR_ACCESS_DENIED)
     kernel32.CloseHandle(handle)
     return True
 
