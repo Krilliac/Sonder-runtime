@@ -5832,7 +5832,7 @@ def _offload_tier_impl(
         retrieve_kwargs["retrieve_fn"] = _no_retrieve_policy
     else:
         if tier in ("code", "security") and schema is None and not fleet_synthesis:
-            system, _ = _thinking_ensemble.augment_system_with_thinking(sys.modules[__name__], system, prompt, tier=tier, model=model, cloud=False)
+            system, _ = _thinking_ensemble.augment_system_with_thinking(sys.modules[__name__], system, prompt, tier=tier, model=model, cloud=False, timeout=min(int(request_timeout), 45), cancel_check=cancel_check)
         # Learned calls use the tier's own binding, as learn=False does; the strict
         # sonder:latest alias belongs to the default chat route (_serve_target).
         gen = _make_tier_generate(
@@ -6981,6 +6981,7 @@ def _answer_with_history_impl(
         attempt = 0
         code_repaired = False
         repair_usage = {}
+        thinking_turn = _thinking_ensemble.TurnDeliberation(sys.modules[__name__], prompt, history)
         while True:
             rung = escalation_plan.rungs[attempt]
             model, cloud, model_augment, tier_label = (
@@ -6998,19 +6999,21 @@ def _answer_with_history_impl(
             # which is not the route the request resolved to.
             _observe_target(model, tier_label, cloud)
             from sonder_runtime.application.chat import tool_loop as _chat_tool_loop
-            from sonder_runtime.application.chat.honesty import no_verification_claims_system
             _active_tool_turn = _chat_tool_loop.current_turn()
             _has_chat_tools = _active_tool_turn is not None and bool(_active_tool_turn.manifest.tools)
             _persona_choice = persona if (persona and str(persona).strip()) else personas.active_scope_persona()
             _resolved_persona = personas.resolve(_persona_choice, prompt=prompt, tier=tier_label)
             effective_system = _build_system("", trace, _resolved_persona, cloud=cloud, provider=bridged_provider, model=(
                 _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
-            effective_system, _ = _thinking_ensemble.augment_system_with_thinking(sys.modules[__name__], effective_system, prompt, tier=tier_label, model=model, cloud=cloud or (bridged_provider is not None and _provider_bridge.is_hosted(bridged_provider)) or active_task_account_scope() is not None, history=history)
-            if not _has_chat_tools:
-                effective_system = no_verification_claims_system(effective_system)
-            effective_system = _reference_lookup_lanes.system_for(model, _chat_tool_manifest.chat_system(  # one tools block, last, every route
-                effective_system, prompt, file_guidance=not cloud and not _explicit_serve_selection(tier, "")))
             learn = _should_learn(_canonical_learn_tier(tier_label), True)
+            # One deliberation per turn, on the first local, non-hosted rung.  A pure
+            # non-learning route defers it past the request-cache lookup.
+            off_box = cloud or (bridged_provider is not None and _provider_bridge.is_hosted(bridged_provider)) or active_task_account_scope() is not None
+            defer_thinking = not learn and not _has_chat_tools and not off_box
+            effective_system = thinking_turn.system(
+                effective_system, tier_label, model, _has_chat_tools, off_box, defer_thinking,
+                lambda composed, model=model, cloud=cloud: _reference_lookup_lanes.system_for(model, _chat_tool_manifest.chat_system(  # one tools block, last, every route
+                    composed, prompt, file_guidance=not cloud and not _explicit_serve_selection(tier, ""))))
             req_ctx = (
                 pinned_ctx if pinned_ctx is not None
                 else 0 if cloud
@@ -7094,6 +7097,8 @@ def _answer_with_history_impl(
                         response = request_cache.get(request_cache_key)
                         request_cache_status = "hit" if response is not None else "miss"
                     if response is None:
+                        if defer_thinking:  # cache miss: deliberate now; the brief stays out of the cached identity
+                            effective_system = thinking_turn.resolve_deferred()
                         gen = _reference_lookup_lanes.chat_generate(
                             _make_generate, prompt, model, effective_system, temperature, reply_num_predict, req_ctx,
                             cloud=cloud, text_only=True,

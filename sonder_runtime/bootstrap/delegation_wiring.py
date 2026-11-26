@@ -464,43 +464,46 @@ def _run_one_child(
         peers=[p for p in peer_handles if p != spec.agent_id],
         depth=1,
     )
-    thinking_section = ""
-    if spec.role in {"coder", "security"} or str(tier or "").strip().lower() in {"code", "security"}:
-        import sonder_runtime.bootstrap.thinking_ensemble as _thinking_ensemble
-        from sonder_runtime.domain.routing.thinking_ensemble import format_thinking_brief
+    def _child_thinking_section() -> str:
+        """Deliberate for a coder/security child; runs inside its admission scope."""
+        thinking_section = ""
+        if spec.role in {"coder", "security"} or str(tier or "").strip().lower() in {"code", "security"}:
+            import sonder_runtime.bootstrap.thinking_ensemble as _thinking_ensemble
+            from sonder_runtime.domain.routing.thinking_ensemble import format_thinking_brief
 
-        child_lane = "security" if (spec.role == "security" or str(tier or "").strip().lower() == "security") else "code"
-        delib = _thinking_ensemble.deliberate_for_turn(
-            server,
-            spec.task,
-            tier=child_lane,
-            model=resolved_model,
-            cloud=False,
-            lane=child_lane,
-        )
-        if delib is not None and delib.brief:
-            thinking_section = "\n\n" + format_thinking_brief(
-                delib.brief,
-                thinking_tier=delib.tier,
-                thinking_model=delib.model,
+            child_lane = "security" if (spec.role == "security" or str(tier or "").strip().lower() == "security") else "code"
+            delib = _thinking_ensemble.deliberate_for_turn(
+                server,
+                spec.task,
+                tier=child_lane,
+                model=resolved_model,
+                cloud=False,
                 lane=child_lane,
             )
-            _expose_fn = getattr(server, "reasoning_exposure_enabled", None)
-            _expose = bool(callable(_expose_fn) and _expose_fn())
-            board.emit(
-                agent_id=spec.agent_id,
-                parent_id=parent_agent_id,
-                depth=1,
-                phase="thinking",
-                tier=delib.tier,
-                model=delib.model,
-                elapsed_ms=delib.elapsed_ms,
-                thinking=(
-                    compact_text(delib.thinking or delib.brief, limit=240) if _expose else ""
-                ),
-                summary=f"thinking brief from {delib.tier} ({delib.model})",
-            )
-    child_prompt = f"{preamble}{thinking_section}\n\n[DELEGATED TASK]\n{spec.task}"
+            if delib is not None and delib.brief:
+                thinking_section = "\n\n" + format_thinking_brief(
+                    delib.brief,
+                    thinking_tier=delib.tier,
+                    thinking_model=delib.model,
+                    lane=child_lane,
+                )
+                _expose_fn = getattr(server, "reasoning_exposure_enabled", None)
+                _expose = bool(callable(_expose_fn) and _expose_fn())
+                board.emit(
+                    agent_id=spec.agent_id,
+                    parent_id=parent_agent_id,
+                    depth=1,
+                    phase="thinking",
+                    tier=delib.tier,
+                    model=delib.model,
+                    elapsed_ms=delib.elapsed_ms,
+                    thinking=(
+                        compact_text(delib.thinking or delib.brief, limit=240) if _expose else ""
+                    ),
+                    summary=f"thinking brief from {delib.tier} ({delib.model})",
+                )
+        return thinking_section
+
     origin_info = {"origin": "", "model": resolved_model}
 
     pool = getattr(server, "OLLAMA_POOL", None)
@@ -541,6 +544,8 @@ def _run_one_child(
                 "auto_checklist": False,
                 "return_host_receipt": False,
             }
+            thinking_section = _child_thinking_section()
+            child_prompt = f"{preamble}{thinking_section}\n\n[DELEGATED TASK]\n{spec.task}"
             output = str(server._agent_impl(child_prompt, **call_kwargs) or "")
             origin_info["model"] = _rt.current_agent_model() or origin_info["model"]
             last_route_fn = getattr(pool, "last_route", None)

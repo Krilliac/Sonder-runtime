@@ -490,3 +490,110 @@ def test_deliberation_clears_inherited_primary_rung(monkeypatch):
             check_reachable=lambda *_a: True,
         )
     assert seen == [None]
+
+
+# --- once-per-turn, cache-safe and cancel-bound deliberation -------------------
+
+
+def _fake_thinking_server(chat_calls):
+    return SimpleNamespace(
+        TIERS={"code": "sonder:latest", "general": "sonder:latest", "reasoning": "think:latest"},
+        OLLAMA_POOL=SimpleNamespace(enabled=False),
+        _is_cloud_tier=lambda _t, m="": ":cloud" in str(m),
+        _bridge_provider_for_tier=lambda _t: None,
+        _chat_request=lambda payload, **kw: (
+            chat_calls.append(kw) or {},
+            {"role": "assistant", "content": "- brief"},
+        ),
+    )
+
+
+def test_deliberation_passes_caller_cancel_check_and_bounded_timeout(monkeypatch):
+    monkeypatch.delenv("SONDER_THINKING_ENSEMBLE", raising=False)
+    calls: list[dict[str, Any]] = []
+    cancel = lambda: False  # noqa: E731
+    _sys, res = te_bootstrap.augment_system_with_thinking(
+        _fake_thinking_server(calls),
+        "BASE",
+        "Refactor the task scheduler lock hierarchy to prevent deadlock",
+        tier="general",
+        model="sonder:latest",
+        timeout=10,
+        cancel_check=cancel,
+        check_reachable=lambda *_a: True,
+    )
+    assert res is not None
+    assert len(calls) == 1
+    assert calls[0]["cancel_check"] is cancel
+    assert calls[0]["timeout"] <= 10
+
+
+def _chat_turn_fakes(monkeypatch, tmp_path):
+    import request_cache
+
+    monkeypatch.setenv("SONDER_MODEL_ESCALATION", "0")
+    monkeypatch.setenv("SONDER_REQUEST_CACHE", "1")
+    monkeypatch.setenv("SONDER_SERVE_TEMPERATURE", "0")
+    monkeypatch.setattr(server, "_DB_PATH", str(tmp_path / "mem.db"))
+    monkeypatch.setattr(server, "BASE", "http://127.0.0.1:11434")
+    monkeypatch.setattr(server, "_cache_model_revision", lambda _m: "sha256:test")
+    monkeypatch.setattr(server, "_maybe_live_reload", lambda: None)
+    monkeypatch.setattr(server.web_tools, "enabled", lambda: False)
+    monkeypatch.setattr(server, "_should_learn", lambda *_a: False)
+    monkeypatch.setattr(server, "_serve_target", lambda tier, strict: ("fake-model", False, True, "general"))
+    request_cache.reset_for_tests()
+    systems: list[str] = []
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *a, **k: (lambda p, h=None: systems.append(" ".join(x for x in a if isinstance(x, str))) or "answer"),
+    )
+    deliberations: list[int] = []
+
+    def fake_deliberate(_server, _prompt, **kw):
+        deliberations.append(1)
+        return te_bootstrap.ThinkingDelegationResult(
+            tier="reasoning", model="think:latest", thinking="",
+            brief=f"- brief number {len(deliberations)}", elapsed_ms=1,
+        )
+
+    monkeypatch.setattr(server._thinking_ensemble, "deliberate_for_turn", fake_deliberate)
+    return systems, deliberations
+
+
+def test_cache_hit_skips_deliberation_and_identity_ignores_brief(monkeypatch, tmp_path):
+    systems, deliberations = _chat_turn_fakes(monkeypatch, tmp_path)
+    statuses: list[str] = []
+    for _ in range(2):
+        out = server._answer_with_history_impl(
+            "explain what a mutex is", [], cache_scope="owner", cache_observer=statuses.append,
+        )
+        assert "answer" in out
+    assert statuses == ["miss", "hit"]
+    assert len(deliberations) == 1
+    assert len(systems) == 1
+    assert "brief number 1" in systems[0]
+
+
+def test_escalation_deliberates_once_per_turn(monkeypatch, tmp_path):
+    from sonder_runtime.application.routing import tier_escalation
+
+    systems, deliberations = _chat_turn_fakes(monkeypatch, tmp_path)
+    monkeypatch.setenv("SONDER_REQUEST_CACHE", "0")
+    plan = tier_escalation.Plan(
+        task="", confidence=0.0,
+        rungs=(
+            tier_escalation.Rung(tier="general", model="fake-model"),
+            tier_escalation.Rung(tier="code", model="fake-model-2"),
+        ),
+    )
+    monkeypatch.setattr(server, "_default_route_plan", lambda prompt, start, **k: plan)
+    replies = ["", "second answer"]
+    monkeypatch.setattr(
+        server, "_make_generate",
+        lambda *a, **k: (lambda p, h=None: systems.append(" ".join(x for x in a if isinstance(x, str))) or replies.pop(0)),
+    )
+    out = server._answer_with_history_impl("explain what a mutex is", [])
+    assert "second answer" in out
+    assert len(systems) == 2
+    assert len(deliberations) == 1
+    assert all("brief number 1" in s for s in systems)
