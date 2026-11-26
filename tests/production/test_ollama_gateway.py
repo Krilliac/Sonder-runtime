@@ -314,7 +314,8 @@ def test_generate_preserves_backend_measured_phases(monkeypatch):
     assert response.tokens_in == 20 and response.tokens_out == 10
     assert response.telemetry.backend_total_ms == 4000.0
     assert response.telemetry.load_ms == 500.0
-    assert response.telemetry.prompt_tokens_per_second == 10.0
+    # Uncached prefill rate: 8 uncached prompt tokens / 2.0s (avoids KV-cache inflation).
+    assert response.telemetry.prompt_tokens_per_second == 4.0
     assert response.telemetry.prompt_tokens == 20
     assert response.telemetry.prompt_cached_tokens == 12
     assert response.telemetry.prompt_uncached_tokens == 8

@@ -468,8 +468,12 @@ class SQLiteMemoryReplicationJournal:
                 )
             return self._memory_connection
         connection = owned_sqlite_connect(self.path)
-        connection.execute("PRAGMA busy_timeout=30000")
-        connection.execute("PRAGMA journal_mode=WAL")
+        try:
+            connection.execute("PRAGMA busy_timeout=30000")
+            connection.execute("PRAGMA journal_mode=WAL")
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
     def close(self) -> None:
@@ -509,10 +513,16 @@ class SQLiteMemoryReplicationJournal:
 
     @staticmethod
     def _row_to_mutation(row) -> MemoryMutation:
+        try:
+            payload = json.loads(row[8])
+        except (TypeError, ValueError) as exc:
+            raise MemoryReplicationError("stored journal payload is malformed JSON") from exc
+        if not isinstance(payload, dict):
+            raise MemoryReplicationError("stored journal payload must be a JSON object")
         return MemoryMutation(
             source_id=row[0], source_epoch=row[1], sequence=row[2],
             entity_kind=row[3], entity_id=row[4], version=row[5],
-            operation=row[6], project=row[7], payload=json.loads(row[8]),
+            operation=row[6], project=row[7], payload=payload,
             recorded_at=row[9],
         )
 
@@ -646,32 +656,21 @@ class SQLiteMemoryReplicationJournal:
             raise ValueError(f"limit must be within 1..{_MAX_PRUNE_ROWS}")
         with self._session() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            protected = connection.execute(
-                "SELECT project,entity_kind,entity_id,MAX(version),"
-                "(SELECT operation FROM memory_replication_log latest "
-                " WHERE latest.source_id=memory_replication_log.source_id "
-                " AND latest.project=memory_replication_log.project "
-                " AND latest.entity_kind=memory_replication_log.entity_kind "
-                " AND latest.entity_id=memory_replication_log.entity_id "
-                " ORDER BY latest.version DESC LIMIT 1) "
-                "FROM memory_replication_log "
-                "WHERE source_id=? GROUP BY project,entity_kind,entity_id",
-                (self.source_id,),
-            ).fetchall()
-            predicates = []
-            parameters: list[object] = [self.source_id, sequence]
-            for project, kind, entity_id, version, operation in protected:
-                if operation == "delete" and not retain_tombstones:
-                    continue
-                predicates.append("NOT (project=? AND entity_kind=? AND entity_id=? AND version=?)")
-                parameters.extend((project, kind, entity_id, version))
-            where = " AND ".join(predicates) if predicates else "1"
+            # Rank each entity's full history with a window function instead of
+            # building one dynamic SQL predicate per distinct entity, which hits
+            # SQLite's expression-depth and bind-variable limits at ~250 entities.
             if retain_tombstones:
-                where += " AND operation='upsert'"
+                predicate = "row_number > 1 AND operation='upsert'"
+            else:
+                predicate = "(row_number > 1 OR operation='delete')"
             rows = connection.execute(
-                "SELECT source_id,sequence FROM memory_replication_log WHERE source_id=? AND sequence<? AND "
-                + where + " ORDER BY sequence LIMIT ?",
-                (*parameters, limit),
+                "SELECT source_id, sequence FROM ("
+                "SELECT source_id, sequence, operation, "
+                "ROW_NUMBER() OVER (PARTITION BY project, entity_kind, entity_id "
+                "ORDER BY version DESC, sequence DESC) AS row_number "
+                "FROM memory_replication_log WHERE source_id=?"
+                ") WHERE sequence<? AND " + predicate + " ORDER BY sequence LIMIT ?",
+                (self.source_id, sequence, limit),
             ).fetchall()
             connection.executemany(
                 "DELETE FROM memory_replication_log WHERE source_id=? AND sequence=?",

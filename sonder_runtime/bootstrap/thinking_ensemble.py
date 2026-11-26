@@ -169,14 +169,24 @@ def _record_thinking_visibility(
                     )
     summary_src = thinking_text or brief_text
     if summary_src and _delegation.current_board() is not None:
-        compact = " ".join(summary_src.split()).strip()[:260]
+        if expose:
+            compact = " ".join(summary_src.split()).strip()[:260]
+            thinking_field = compact
+            summary = f"[{thinking_tier}] {compact[:150]}"
+        else:
+            # Exposure off: metadata only; no text derived from thinking/brief.
+            thinking_field = ""
+            summary = (
+                f"[{thinking_tier}] thinking via {thinking_model} "
+                f"in {elapsed_ms}ms ({len(summary_src)} chars)"
+            )
         with contextlib.suppress(*_SOFT_ERRORS):
             _delegation.emit_agent_event(
                 phase="thinking",
                 tier=thinking_tier,
                 model=thinking_model,
-                thinking=compact if expose else "",
-                summary=f"[{thinking_tier}] {compact[:150]}",
+                thinking=thinking_field,
+                summary=summary,
                 elapsed_ms=elapsed_ms,
             )
 

@@ -161,8 +161,44 @@ def summarize_memory_quality(
     return {"status": "ok", "detail": "%d lessons clean" % total}
 
 
+def summarize_inference_node_diagnostics(report: Mapping[str, Any]) -> dict[str, str]:
+    """Roll up a structured ``inspect_inference_nodes`` report into a doctor verdict."""
+    primary = report.get("primary")
+    primary_map = primary if isinstance(primary, Mapping) else {}
+    primary_state = str(primary_map.get("state") or "error")
+    workers_raw = report.get("workers")
+    worker_rows = [row for row in workers_raw if isinstance(row, Mapping)] if isinstance(workers_raw, list) else []
+    summary = str(report.get("summary") or "").strip()
+
+    if primary_state == "absent" and not worker_rows:
+        return {
+            "status": "skipped",
+            "detail": str(primary_map.get("detail") or "node GPU pool endpoint unavailable"),
+        }
+    if primary_state == "error" and not any(row.get("state") == "ok" for row in worker_rows):
+        return {
+            "status": "warn",
+            "detail": str(primary_map.get("detail") or "node GPU pool inspection failed"),
+        }
+    failed_workers = [
+        "%s (%s)" % (str(row.get("base_url") or "worker"), str(row.get("detail") or "error"))
+        for row in worker_rows
+        if row.get("state") == "error"
+    ]
+    if failed_workers:
+        detail = "; ".join(
+            part for part in (summary, "worker node errors: %s" % bounded_join(failed_workers)) if part
+        )
+        return {"status": "warn", "detail": detail or "worker node inspection errors"}
+    return {
+        "status": "ok",
+        "detail": summary or "node reported no GPU pool metadata",
+    }
+
+
 __all__ = [
     "bounded_join",
+    "summarize_inference_node_diagnostics",
     "summarize_memory_quality",
     "summarize_self_heal",
     "summarize_worker_probe",

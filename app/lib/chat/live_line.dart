@@ -16,10 +16,35 @@ const slowTurnSeconds = 20;
 const _glyphColumn = SonderSpace.lg;
 const _glyphGap = SonderSpace.sm;
 
+/// Live streaming speed metrics derived while a turn is emitting output.
+class LiveStreamMetrics {
+  /// Milliseconds from turn start until the first streamed output arrived.
+  final int ttftMs;
+
+  /// Estimated generation rate in tokens/second once enough output and time
+  /// have elapsed, or null while still warming up.
+  final double? tokensPerSecond;
+
+  const LiveStreamMetrics({
+    required this.ttftMs,
+    this.tokensPerSecond,
+  });
+
+  String get ttftLabel => 'TTFT ${durationLabel(ttftMs)}';
+
+  String? get rateLabel {
+    final tps = tokensPerSecond;
+    if (tps == null || !tps.isFinite || tps <= 0) return null;
+    final formatted = tps >= 100 ? '${tps.round()}' : tps.toStringAsFixed(1);
+    return '~$formatted tok/s';
+  }
+}
+
 /// The live line of an in-flight turn (P1-1, §2.2):
 ///
 /// ```
 /// ◈  working · reading files · 12s · sonder:latest              ■ Stop
+///    TTFT 420ms  ~34.2 tok/s
 ///    ! no output for 24s · slow local model? try the fast route
 /// ```
 ///
@@ -29,18 +54,27 @@ const _glyphGap = SonderSpace.sm;
 /// animations off. After [slowTurnSeconds] with no output — no new text
 /// ([outputLength]) and no progress from the server ([live] changing within
 /// a second) — the glyph turns warn and the stall line opens.
+///
+/// When [live] clears to `null` (for example after an aborted or cancelled SSE
+/// stream), the spinner clears immediately instead of showing a stuck working
+/// indicator.
 class LiveLineView extends StatefulWidget {
   final ValueListenable<LiveTurn?> live;
   final VoidCallback? onStop;
 
-  /// Characters of answer text received so far. Growth is output.
+  /// Characters of streamed output (answer + reasoning) received so far.
+  /// Growth counts as progress and drives live TTFT / tok/s metrics.
   final int outputLength;
+
+  /// Clock override for deterministic timing tests; defaults to [DateTime.now].
+  final DateTime Function()? clock;
 
   const LiveLineView({
     super.key,
     required this.live,
     this.onStop,
     this.outputLength = 0,
+    this.clock,
   });
 
   @override
@@ -49,15 +83,32 @@ class LiveLineView extends StatefulWidget {
 
 class _LiveLineViewState extends State<LiveLineView> {
   LiveTurn? _turn;
+  DateTime? _turnStartedAt;
 
   /// [LiveTurn.elapsedSeconds] when the turn last showed progress.
   int _lastProgress = 0;
+
+  /// Elapsed milliseconds from turn start when output first became non-empty.
+  int? _firstOutputMs;
+
+  DateTime _now() => (widget.clock ?? DateTime.now)();
+
+  int _elapsedMs(LiveTurn turn) {
+    final wall = _now().difference(turn.startedAt).inMilliseconds;
+    final ticks = turn.elapsedSeconds * 1000;
+    final best = wall > ticks ? wall : ticks;
+    return best < 0 ? 0 : best;
+  }
 
   @override
   void initState() {
     super.initState();
     _turn = widget.live.value;
+    _turnStartedAt = _turn?.startedAt;
     _lastProgress = _turn?.elapsedSeconds ?? 0;
+    if (_turn != null && widget.outputLength > 0) {
+      _firstOutputMs = _elapsedMs(_turn!);
+    }
     widget.live.addListener(_onLive);
   }
 
@@ -71,6 +122,11 @@ class _LiveLineViewState extends State<LiveLineView> {
     }
     if (widget.outputLength > oldWidget.outputLength) {
       _lastProgress = _turn?.elapsedSeconds ?? _lastProgress;
+      if (_turn != null && _firstOutputMs == null) {
+        _firstOutputMs = _elapsedMs(_turn!);
+      }
+    } else if (widget.outputLength == 0 && oldWidget.outputLength > 0) {
+      _firstOutputMs = null;
     }
   }
 
@@ -88,7 +144,12 @@ class _LiveLineViewState extends State<LiveLineView> {
     final next = widget.live.value;
     final prev = _turn;
     if (next != null) {
-      final newTurn = prev == null || next.startedAt != prev.startedAt;
+      final newTurn = prev == null || next.startedAt != _turnStartedAt;
+      if (newTurn) {
+        _turnStartedAt = next.startedAt;
+        _firstOutputMs =
+            widget.outputLength > 0 ? _elapsedMs(next) : null;
+      }
       // A status comment is the server explaining the wait, never progress:
       // a change of waitStatus (new text or a clear) is not a server event
       // here. A status that merely repeats the current text never reaches
@@ -97,40 +158,68 @@ class _LiveLineViewState extends State<LiveLineView> {
       // could not be told apart here).
       final tick = next.elapsedSeconds != prev?.elapsedSeconds;
       final statusChanged = next.waitStatus != prev?.waitStatus;
+      final toolsChanged = !identical(next.toolCalls, prev?.toolCalls);
       final progressed = (!tick && !statusChanged) ||
           next.phase != prev?.phase ||
-          next.tokensIn != prev?.tokensIn;
+          next.tokensIn != prev?.tokensIn ||
+          toolsChanged;
       if (newTurn || progressed) _lastProgress = next.elapsedSeconds;
+    } else {
+      _turnStartedAt = null;
+      _firstOutputMs = null;
     }
     if (mounted) setState(() => _turn = next);
   }
 
+  LiveStreamMetrics? _metricsFor(LiveTurn turn) {
+    final firstMs = _firstOutputMs;
+    if (firstMs == null || widget.outputLength <= 0) return null;
+    final nowMs = _elapsedMs(turn);
+    final genMs = nowMs - firstMs;
+    double? tps;
+    if (widget.outputLength >= 16 && genMs >= 250) {
+      final estTokens = widget.outputLength / 4.0;
+      tps = estTokens * 1000.0 / genMs;
+    }
+    return LiveStreamMetrics(ttftMs: firstMs, tokensPerSecond: tps);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final tokens = SonderTokens.of(context);
     final turn = _turn;
-    final seconds = turn?.elapsedSeconds ?? 0;
+    if (turn == null) {
+      return const SizedBox.shrink(key: Key('live-line-idle'));
+    }
+    final tokens = SonderTokens.of(context);
+    final seconds = turn.elapsedSeconds;
     final quiet = seconds - _lastProgress < 0 ? 0 : seconds - _lastProgress;
-    final stalled = turn != null &&
-        turn.phase != 'awaiting approval' &&
-        quiet >= slowTurnSeconds;
+    final awaitingApproval = turn.phase == 'awaiting approval' ||
+        turn.toolCalls
+            .any((t) => t.isAwaitingApproval || t.isAwaitingClientApproval);
+    final stalled = !awaitingApproval && quiet >= slowTurnSeconds;
     final state = LiveState(
-      phase: turn?.phase ?? 'working',
+      phase: turn.phase,
       elapsedS: seconds,
-      model: turn?.model ?? '',
-      tokensIn: turn?.tokensIn,
+      model: turn.model,
+      tokensIn: turn.tokensIn,
     );
     final tone = stalled ? tokens.warn : StatusKind.running.color(tokens);
     final style = tokens.mono(12, color: tokens.text2);
     final quietText = 'no output for ${elapsedLabel(quiet)}';
     // The server's own reason for the wait, when it gave one, replaces the
     // generic slow-model hint. Plain text only.
-    final hint = turn?.waitStatus ?? const LiveState().slowHint;
+    final hint = turn.waitStatus ?? const LiveState().slowHint;
+    final metrics = _metricsFor(turn);
+    final metricsSpeech = metrics == null
+        ? ''
+        : ', ${metrics.ttftLabel}'
+            '${metrics.rateLabel != null ? ', ${metrics.rateLabel}' : ''}';
     return Semantics(
       key: const Key('live-line'),
       container: true,
       label: 'Sonder Runtime is working, ${state.phase}, '
-          '${elapsedLabel(seconds)}${stalled ? ', $quietText, $hint' : ''}',
+          '${elapsedLabel(seconds)}$metricsSpeech'
+          '${stalled ? ', $quietText, $hint' : ''}',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
@@ -151,8 +240,10 @@ class _LiveLineViewState extends State<LiveLineView> {
                     // The glyph and its space are drawn beside the text,
                     // so the REPL line gets two extra cells and drops them.
                     final cell = monoCellWidth(context, style);
-                    final cols =
-                        cell <= 0 ? 80 : (constraints.maxWidth / cell).floor();
+                    final rawCols = cell <= 0 || !constraints.hasBoundedWidth
+                        ? 80
+                        : (constraints.maxWidth / cell).floor();
+                    final cols = rawCols < 1 ? 1 : rawCols;
                     var line = liveLine(state, cols + 2);
                     final glyph = '${StatusKind.running.glyph} ';
                     if (line.startsWith(glyph)) {
@@ -187,6 +278,34 @@ class _LiveLineViewState extends State<LiveLineView> {
                 ),
             ],
           ),
+          if (metrics != null)
+            Padding(
+              padding: const EdgeInsets.only(
+                left: _glyphColumn + _glyphGap,
+                top: SonderSpace.xxs,
+                bottom: SonderSpace.xs,
+              ),
+              child: ExcludeSemantics(
+                child: Wrap(
+                  key: const Key('live-metrics-badge'),
+                  spacing: SonderSpace.xs,
+                  runSpacing: SonderSpace.xs,
+                  children: [
+                    _LiveMetricPill(
+                      key: const Key('live-ttft-badge'),
+                      label: metrics.ttftLabel,
+                      color: tokens.muted,
+                    ),
+                    if (metrics.rateLabel != null)
+                      _LiveMetricPill(
+                        key: const Key('live-tps-badge'),
+                        label: metrics.rateLabel!,
+                        color: stalled ? tokens.warn : tokens.info,
+                      ),
+                  ],
+                ),
+              ),
+            ),
           SonderReveal(
             visible: stalled,
             child: Padding(
@@ -223,6 +342,39 @@ class _LiveLineViewState extends State<LiveLineView> {
           style: style.copyWith(color: tone, fontWeight: FontWeight.w600)),
       TextSpan(text: line.substring(head.length), style: style),
     ]);
+  }
+}
+
+class _LiveMetricPill extends StatelessWidget {
+  final String label;
+  final Color color;
+
+  const _LiveMetricPill({
+    super.key,
+    required this.label,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = SonderTokens.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: SonderSpace.tight,
+        vertical: SonderSpace.xxs,
+      ),
+      decoration: BoxDecoration(
+        color: tokens.sunken,
+        borderRadius: BorderRadius.circular(SonderRadius.control),
+        border: Border.all(color: tokens.hairline),
+      ),
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: tokens.mono(11, color: color, weight: FontWeight.w500),
+      ),
+    );
   }
 }
 

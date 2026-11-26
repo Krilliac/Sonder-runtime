@@ -119,9 +119,20 @@ class RecallService:
         )
 
         scored: list[tuple[str, Sequence[float], float, str]] = []
+        skipped_malformed = 0
         for c in candidates:
+            if not isinstance(c, dict):
+                skipped_malformed += 1
+                continue
+            cid = c.get("id")
+            text = c.get("text")
+            if not isinstance(cid, str) or not cid or not isinstance(text, str):
+                skipped_malformed += 1
+                continue
             vec = c.get("embedding")
             if vec is None or not _valid_vector(vec) or len(vec) != len(query_vec):
+                if vec is not None and not _valid_vector(vec):
+                    skipped_malformed += 1
                 continue
             if embedding_model and c.get("embedding_model") != embedding_model:
                 continue
@@ -131,8 +142,16 @@ class RecallService:
             ):
                 continue
             sim = self._sim_fn(query_vec, vec)
+            if not isinstance(sim, (int, float)) or isinstance(sim, bool) or not math.isfinite(sim):
+                skipped_malformed += 1
+                continue
             if passes_similarity(sim, effective_min_sim):
-                scored.append((c["id"], vec, sim, c["text"]))
+                scored.append((cid, vec, float(sim), text))
+        if skipped_malformed:
+            logger.warning(
+                "RecallService.recall skipped %d malformed semantic candidate(s)",
+                skipped_malformed,
+            )
 
         if not scored:
             logger.warning(f"no semantic candidates passed similarity threshold (min_sim={effective_min_sim}), falling back to lexical results")
@@ -151,12 +170,26 @@ class RecallService:
         return [id_to_text[cid] for cid in mmr_ids if cid in id_to_text]
 
 
-def _valid_vector(v: Sequence[float]) -> bool:
-    """Non-empty, all finite numbers, not the zero vector."""
-    return len(v) > 0 and any(x != 0 for x in v) and all(
-        isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
-        for x in v
-    )
+def _valid_vector(v: object) -> bool:
+    """Non-empty numeric sequence, all finite numbers, not the zero vector."""
+    if isinstance(v, (str, bytes, bytearray, memoryview)):
+        return False
+    try:
+        length = len(v)  # type: ignore[arg-type]
+    except TypeError:
+        return False
+    if length <= 0:
+        return False
+    try:
+        has_nonzero = False
+        for x in v:  # type: ignore[attr-defined]
+            if not isinstance(x, (int, float)) or isinstance(x, bool) or not math.isfinite(x):
+                return False
+            if x != 0:
+                has_nonzero = True
+        return has_nonzero
+    except TypeError:
+        return False
 
 
 def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
