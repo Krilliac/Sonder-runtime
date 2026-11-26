@@ -111,3 +111,36 @@ def test_restricted_tool_lane_admin_opt_in_and_agent_approval_hook(monkeypatch, 
     with pm.agent_approval_hook(hook):
         err = server._agent_permission_gate_error("file_write", {"path": "x.txt", "content": "hi"})
     assert err == ""
+
+
+def test_tool_help_handles_malformed_and_union_typed_schemas():
+    from sonder_runtime.domain.agents.tool_help import filtered_schema, tool_help_text
+
+    assert filtered_schema({"properties": None, "required": None}) == {
+        "type": "object", "properties": {}, "required": [],
+    }
+    catalog = {
+        "union_tool": {
+            "description": "Accepts union-typed fields.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": ["string", "null"]},
+                    "count": {"type": ["integer", "null"], "minimum": 3},
+                },
+                "required": ["target", "count"],
+            },
+        },
+        "non_mapping_schema_tool": {
+            "description": "Schema is unexpectedly a list.",
+            "input_schema": ["not", "a", "mapping"],
+        },
+    }
+    union_text = tool_help_text(name="union_tool", catalog=catalog)
+    assert '"target":"<target>"' in union_text
+    assert '"count":3' in union_text
+    assert "target (required)" in union_text
+    assert "count (required)" in union_text
+
+    malformed_text = tool_help_text(name="non_mapping_schema_tool", catalog=catalog)
+    assert "Arguments: none." in malformed_text
