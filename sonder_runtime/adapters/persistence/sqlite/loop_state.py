@@ -95,15 +95,27 @@ class SQLiteLoopStateRepository(OutboxCASRepository):
         if row is None:
             return None
         aggregate_id, revision, schema_version, payload = row
+        try:
+            decoded = json.loads(payload)
+        except (TypeError, ValueError) as exc:
+            raise PersistenceError("corrupt loop idempotency payload JSON") from exc
+        if not isinstance(decoded, Mapping):
+            raise PersistenceError("loop idempotency payload must be a JSON object")
         return TransactionNeutralRecord(
-            aggregate_id, revision, json.loads(payload), schema_version=schema_version
+            aggregate_id, revision, decoded, schema_version=schema_version
         )
 
     @staticmethod
     def _event(row: tuple[str, str, str, int, int, str, str]) -> OutboxEvent:
         event_id, aggregate_id, event_type, revision, schema_version, payload, occurred_at = row
+        try:
+            decoded = json.loads(payload)
+        except (TypeError, ValueError) as exc:
+            raise PersistenceError("corrupt loop outbox event payload JSON") from exc
+        if not isinstance(decoded, Mapping):
+            raise PersistenceError("loop outbox event payload must be a JSON object")
         return OutboxEvent(
-            event_id, aggregate_id, event_type, revision, json.loads(payload), occurred_at,
+            event_id, aggregate_id, event_type, revision, decoded, occurred_at,
             schema_version=schema_version,
         )
 
@@ -127,6 +139,7 @@ class SQLiteLoopStateRepository(OutboxCASRepository):
             ).fetchone())
             actual = -1 if current is None else current.revision
             if actual != expected_revision or record.revision != expected_revision + 1:
+                connection.rollback()
                 return None
             try:
                 payload = json.dumps(
@@ -138,13 +151,14 @@ class SQLiteLoopStateRepository(OutboxCASRepository):
                         (record.aggregate_id, record.revision, record.schema_version, payload),
                     )
                 else:
-                    connection.execute(
+                    cursor = connection.execute(
                         "UPDATE loop_idempotency_records SET revision=?,schema_version=?,payload_json=? "
                         "WHERE aggregate_id=? AND revision=?",
                         (record.revision, record.schema_version, payload,
                          record.aggregate_id, expected_revision),
                     )
-                    if connection.total_changes != 1:
+                    if cursor.rowcount != 1:
+                        connection.rollback()
                         return None
                 connection.execute(
                     "INSERT INTO loop_outbox_events VALUES (?,?,?,?,?,?,?)",
@@ -153,6 +167,7 @@ class SQLiteLoopStateRepository(OutboxCASRepository):
                      event.occurred_at),
                 )
             except sqlite3.IntegrityError:
+                connection.rollback()
                 return None
             return record
 
@@ -182,8 +197,14 @@ class SQLiteRetryEvidenceLedger:
         self._max_records = max_records
         self._clock = clock
         self._lock = Lock()
-        with owned_sqlite_transaction(str(self._path)) as connection:
+        with self._connect() as connection:
             connection.executescript(_DDL)
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        with owned_sqlite_transaction(str(self._path), timeout=5.0) as connection:
+            connection.execute("PRAGMA busy_timeout=5000")
+            yield connection
 
     def record(
         self, operation_id: str, decision: RetryDecision, *, attempt: int = 1,
@@ -204,7 +225,8 @@ class SQLiteRetryEvidenceLedger:
             decision.classification.value, decision.backoff.cap_for_attempt(1),
             decision.side_effect.effect, digest, recorded_at,
         )
-        with self._lock, owned_sqlite_transaction(str(self._path)) as connection:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "INSERT INTO loop_retry_evidence "
                 "(operation_id,attempt,failure_code,action,classification,delay_cap_seconds,"
@@ -221,7 +243,7 @@ class SQLiteRetryEvidenceLedger:
         return evidence
 
     def snapshot(self) -> tuple[RetryEvidence, ...]:
-        with owned_sqlite_transaction(str(self._path)) as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 "SELECT operation_id,attempt,failure_code,action,classification,delay_cap_seconds,"
                 "side_effect,evidence_digest,recorded_at FROM loop_retry_evidence ORDER BY evidence_id"

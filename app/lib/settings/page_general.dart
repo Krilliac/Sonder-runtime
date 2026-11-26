@@ -105,6 +105,18 @@ extension _GeneralPage on _SettingsScreenState {
                 onChanged: _setPersona,
               ),
             ),
+            SettingRow(
+              label: 'Execution mode',
+              description:
+                  'Controls how turns run (also via /exec_mode or the composer '
+                  '+ menu). Auto lets the difficulty router pick Single, '
+                  'Ensemble, or Fanout.',
+              modified: _executionModeChanged,
+              below: ExecutionModeSelector(
+                value: _executionMode,
+                onChanged: _setExecutionMode,
+              ),
+            ),
           ]),
         _clientExecSection(context),
       ],

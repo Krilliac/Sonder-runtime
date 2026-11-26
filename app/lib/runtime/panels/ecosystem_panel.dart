@@ -97,6 +97,9 @@ class EcosystemPanel extends StatefulWidget {
   final bool usesCredential;
   final Set<EcosystemPart> parts;
 
+  /// Explicit retry action shown when loading fails.
+  final VoidCallback? onRetry;
+
   const EcosystemPanel({
     super.key,
     required this.reading,
@@ -107,6 +110,7 @@ class EcosystemPanel extends StatefulWidget {
     this.canStartProcesses = true,
     this.usesCredential = false,
     this.parts = const {EcosystemPart.inference, EcosystemPart.observatory},
+    this.onRetry,
   });
 
   @override
@@ -156,11 +160,18 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
     ObservatoryLaunchResult result;
     try {
       result = await widget.onLaunch(urls);
-    } catch (error) {
+    } on SonderException catch (error) {
       result = ObservatoryLaunchResult(
         ok: false,
         mode: ObservatoryLaunchMode.unavailable,
-        message: 'Could not open the Observatory: $error',
+        message: 'Could not open the Observatory: ${error.message}',
+      );
+    } catch (_) {
+      result = const ObservatoryLaunchResult(
+        ok: false,
+        mode: ObservatoryLaunchMode.unavailable,
+        message: 'Could not open the Observatory. Check the Observatory '
+            'executable or web URL in Settings.',
       );
     }
     if (!mounted) return;
@@ -285,9 +296,18 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
       key: const Key('ecosystem-error'),
       kind: StatusKind.fail,
       title: 'Could not load Sonder Inference and Observatory status.',
-      detail: error is SonderException ? error.message : error.toString(),
+      detail: error is SonderException
+          ? error.message
+          : RequestFailure.read(error, resource: 'ecosystem status').message,
       framed: false,
       liveRegion: false,
+      actions: [
+        if (widget.onRetry != null)
+          TextButton(
+            onPressed: widget.loading ? null : widget.onRetry,
+            child: const Text(SonderStrings.retry),
+          ),
+      ],
     );
   }
 
@@ -475,9 +495,13 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
               children: [
                 Text('To use it', style: text.labelMedium),
                 const SizedBox(height: SonderSpace.xs),
-                SelectableText(inferenceEnvHint,
-                    key: const Key('ecosystem-inference-hint'),
-                    style: tokens.mono(12, color: tokens.text2)),
+                Semantics(
+                  label: inferenceEnvHint,
+                  excludeSemantics: true,
+                  child: SelectableText(inferenceEnvHint,
+                      key: const Key('ecosystem-inference-hint'),
+                      style: tokens.mono(12, color: tokens.text2)),
+                ),
               ],
             ),
           ),
@@ -631,9 +655,13 @@ class _EcosystemPanelState extends State<EcosystemPanel> {
               if (urls.isNotEmpty) ...[
                 Text('Connect URLs', style: text.labelMedium),
                 const SizedBox(height: SonderSpace.xs),
-                SelectableText(urls.join('\n'),
-                    key: const Key('ecosystem-connect-urls'),
-                    style: tokens.mono(12.5, color: tokens.text)),
+                Semantics(
+                  label: urls.join(', '),
+                  excludeSemantics: true,
+                  child: SelectableText(urls.join('\n'),
+                      key: const Key('ecosystem-connect-urls'),
+                      style: tokens.mono(12.5, color: tokens.text)),
+                ),
                 const SizedBox(height: SonderSpace.md),
               ],
               Wrap(

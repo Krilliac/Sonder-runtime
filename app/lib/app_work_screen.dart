@@ -26,6 +26,18 @@ class _AppWorkScreenState extends State<AppWorkScreen> {
     _prompt.addListener(_changed);
   }
 
+  @override
+  void didUpdateWidget(covariant AppWorkScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.client != widget.client) {
+      oldWidget.client.removeListener(_changed);
+      _generation = client.contextRevision;
+      _prompt.text = client.workPrompt;
+      _notice = null;
+      client.addListener(_changed);
+    }
+  }
+
   void _changed() {
     if (!mounted) return;
     if (_generation != client.contextRevision) {
