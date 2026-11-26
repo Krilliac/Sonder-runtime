@@ -513,6 +513,7 @@ def build_application(
     extension_provenance: ProvenanceInventory | None = None,
     control_plane_snapshot_service: ControlPlaneSnapshotService | None = None,
     child_repository_factory=None,
+    responses_client: object | None = None,
     _artifact_mobility_source_binding: ArtifactMobilitySourceBinding | None = None,
 ) -> Application:
     """Assemble one application graph for the selected profile.
@@ -2046,6 +2047,36 @@ def build_application(
         ),),
     )
     typed_tools_ref["tools"] = tools
+    responses_client_instance = responses_client
+    responses_client_lock = RLock()
+
+    def get_responses_client():
+        nonlocal responses_client_instance
+        with responses_client_lock:
+            if responses_client_instance is None:
+                from ..adapters.inference.sonder_inference_gateway import (
+                    config_from_env as _inference_config_from_env,
+                )
+                from ..adapters.inference.sonder_responses_client import (
+                    MAX_TIMEOUT_SECONDS as _MAX_RESPONSES_TIMEOUT,
+                    SonderResponsesClient,
+                    SonderResponsesConfig,
+                )
+                inf_cfg = _inference_config_from_env()
+                responses_cfg = SonderResponsesConfig(
+                    base_url=inf_cfg.base_url,
+                    model=inf_cfg.model,
+                    api_key=inf_cfg.api_key,
+                    allow_remote=inf_cfg.allow_remote,
+                    ca_bundle=inf_cfg.ca_bundle,
+                    timeout_seconds=min(
+                        float(inf_cfg.timeout_seconds),
+                        float(_MAX_RESPONSES_TIMEOUT),
+                    ),
+                )
+                responses_client_instance = SonderResponsesClient(responses_cfg)
+            return responses_client_instance
+
     # The portable client/SDK schema (API-007/008) is derived from the same
     # served tool catalog, so its digest changes exactly when that catalog
     # does.  The facade is deny-by-default: the hosting interface supplies
@@ -2158,6 +2189,7 @@ def build_application(
         telemetry=live_telemetry.telemetry,
         telemetry_feed=live_telemetry.producer,
         close_telemetry=live_telemetry.close,
+        responses_client=get_responses_client,
     )
     if config is not None and config.child_storage.backend == 'postgresql':
         try:

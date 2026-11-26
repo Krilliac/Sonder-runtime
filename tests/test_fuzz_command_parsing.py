@@ -58,6 +58,7 @@ from sonder_runtime.domain.testing.selectors import (
     SelectorRejected,
     parse_selector,
 )
+from tests._fuzz_timing import assert_scales_linearly, machine_unit
 
 pytestmark = pytest.mark.unit
 
@@ -1405,15 +1406,7 @@ def test_clean_location_articles_and_placeholders(value, want):
 
 
 def _machine_unit() -> float:
-    """Seconds one fixed pure-Python loop takes on this machine: yardstick for machine-relative budgets."""
-    best = float("inf")
-    for _ in range(5):
-        started = time.perf_counter()
-        total = 0
-        for index in range(200_000):
-            total += index & 3
-        best = min(best, time.perf_counter() - started)
-    return best
+    return machine_unit()
 
 
 def _assert_scales_linearly(
@@ -1426,25 +1419,15 @@ def _assert_scales_linearly(
     ceiling_s: float = 2.0,
 ) -> None:
     """Interleaved running-minima 4x scaling check: linear ~4x, quadratic ~16x."""
-    assert len(big_input) >= 3 * len(small_input), label
-    small = big = float("inf")
-    ratio = 0.0
-    for repeats in (3, 5, 8):
-        for _ in range(repeats):
-            start = time.perf_counter()
-            fn(small_input)
-            small = min(small, time.perf_counter() - start)
-            start = time.perf_counter()
-            fn(big_input)
-            big = min(big, time.perf_counter() - start)
-        ratio = big / max(small, 1e-3)
-        if ratio < ratio_limit:
-            break
-    assert ratio < ratio_limit, (
-        f"{label}: x{len(big_input) / len(small_input):.1f} input cost x{ratio:.1f} "
-        f"({small * 1000:.1f} ms -> {big * 1000:.1f} ms), super-linear ({_info('scaling')})"
+    assert_scales_linearly(
+        fn,
+        small_input,
+        big_input,
+        label=label,
+        ratio_limit=ratio_limit,
+        ceiling_s=ceiling_s,
+        context=_info("scaling"),
     )
-    assert big < ceiling_s, f"{label}: {len(big_input)} characters took {big:.3f}s (ceiling {ceiling_s:.3f}s)"
 
 
 def test_clean_location_cost_grows_with_the_input_not_its_square():
