@@ -61,7 +61,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Sequence, TypeVar
+from typing import Any, Sequence, TypeVar
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from ...application.chat import stream_sink
@@ -1351,6 +1351,17 @@ def _rfc3339(moment: datetime) -> str:
     )
 
 
+def _proxy_upstream_unreachable(headers: Any) -> bool:
+    """True only for ``X-Sonder-Proxy-Upstream: unreachable`` (Caddy dial failure)."""
+    if headers is None:
+        return False
+    try:
+        value = headers.get("X-Sonder-Proxy-Upstream")
+    except Exception:
+        return False
+    return isinstance(value, str) and value.strip().lower() == "unreachable"
+
+
 def _error_fields(body: bytes) -> tuple[str, str]:
     """Return ``(code, message)`` from an Inference error document."""
     try:
@@ -1659,8 +1670,18 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             % (label, ENV_API_KEY, suffix)
         )
 
-    def _classify_http_error(self, status: int, body: bytes) -> SonderError | None:
+    def _classify_http_error(
+        self, status: int, body: bytes, headers: Any = None,
+    ) -> SonderError | None:
         code, message = _error_fields(body)
+        if status == 503 and code == "upstream_unreachable" and _proxy_upstream_unreachable(headers):
+            # The fronting proxy (Caddy handle_errors) failed to dial the
+            # upstream: nothing reached Sonder Inference, so it is retryable.
+            detail = "HTTP 503 upstream_unreachable"
+            return SonderInferenceUnreachable(
+                "the proxy in front of sonder-inference could not reach it (%s)" % detail,
+                reason=detail,
+            )
         busy_timeout = status == 503 and code == "backend_unavailable" and "read timed out" in message.lower()
         message = _bounded(message)
         label = "HTTP %d%s" % (status, " %s" % code if code else "")
@@ -1682,6 +1703,11 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             )
         if status in (401, 403):
             return self._forbidden(status, code, message)
+        if status == 429 and code == "overloaded":
+            # SI answers 429 overloaded only before executing anything; any
+            # other 429 (scheduler rejection) stays final.
+            return SonderInferenceOverloaded(
+                "sonder-inference rejected the request before executing it (%s)" % label)
         if status == 429:
             return CapacityExceeded("sonder-inference scheduler rejected the request (%s)%s" % (label, suffix))
         if status in (400, 404, 405, 411, 413, 501):
@@ -1690,6 +1716,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         # unexpected: the request may have reached the backend, so it is
         # never "unreachable".
         return DependencyUnavailable("sonder-inference failed the request (%s)%s" % (label, suffix))
+
+    _classify_http_error.accepts_headers = True
 
     # -- health ------------------------------------------------------------
 
