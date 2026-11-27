@@ -1825,13 +1825,14 @@ def _model_context_metadata(model):
     context_length = parameter_size = None
     declared = False  # stays False unless the whole probe parses
     try:
-        details = _get("/v1/models")
-        rows = (details.get("data") or details.get("models")) if isinstance(details, dict) else ()
-        matched = next((r for r in (rows or ()) if isinstance(r, dict) and str(r.get("id") or r.get("name") or "").strip().casefold() == key), {})
-        sonder_meta = matched.get("sonder") if isinstance(matched.get("sonder"), dict) else {}
-        context_length = context_policy.parse_strict(sonder_meta.get("context_length"))
-        parameter_size = sonder_meta.get("parameter_size")
-        declared = context_length is not None
+        try:
+            details = _get("/v1/models", model=model)
+        except TypeError:
+            details = _get("/v1/models")
+        from sonder_runtime.adapters.inference.model_context_probe import parse_model_metadata
+        context_length, parameter_size, geometry, declared = parse_model_metadata(details, key)
+        with _MODEL_CONTEXT_CACHE_LOCK:
+            _MODEL_GEOMETRY_CACHE[key] = geometry
     except Exception:
         pass
     with _MODEL_CONTEXT_CACHE_LOCK:
@@ -1939,11 +1940,12 @@ def _make_generate(
             total_tokens=reasoning_total_tokens,
         )
     if not cloud and (num_ctx is None or int(num_ctx or 0) <= 0):
-        # /api/show is an Ollama probe.  A non-Ollama rung requests the
-        # runtime's default window instead of probing a model it never uses.
+        # External hosted/non-SI rungs use the provider's default window; local
+        # Sonder Inference rungs size context from cached model metadata.
+        active = _provider_bridge.active_rung()
         num_ctx = (
             _auto_model_context(model)
-            if _provider_bridge.active_rung() is None else None
+            if active is None or active.provider == "sonder_inference" else None
         )
 
     def gen(prompt, history=None):
@@ -5362,7 +5364,7 @@ def _post(
                     from sonder_runtime.application.agents.delegation_runtime import note_agent_execution as _note_exec; _note_exec(origin=origin)
                 with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
                     _record_residency_dispatch(
-                        path, wire_obj, _residency_feedback, _is_cloud_model_name,
+                        path, json.loads(wire_bytes.decode("utf-8")), _residency_feedback, _is_cloud_model_name,
                         origin=origin if getattr(OLLAMA_POOL, "enabled", False) else None,
                     )
                     parsed = json.loads(_read_ollama_response_bytes(resp).decode("utf-8"))
@@ -5442,11 +5444,11 @@ def prewarm_model(tier: str = "", *, announce: bool = False) -> bool:
     return True
 
 
-def _get(path: str) -> dict:
-    """Fetch a bounded JSON control-plane response from Ollama.
+def _get(path: str, *, model: str | None = None) -> dict:
+    """Fetch a bounded JSON control-plane response from Sonder Inference.
 
     Discovery and residency checks use GET, but they still cross the configured
-    Ollama trust boundary (which may be an explicitly approved remote endpoint).
+    inference trust boundary (which may be an explicitly approved remote endpoint).
     Keep their response budget identical to model POST responses so a malformed
     catalog cannot make a chat request allocate an unbounded body before model
     selection or prewarm has a chance to fail safely.
@@ -5459,7 +5461,7 @@ def _get(path: str) -> dict:
             return json.loads(raw.decode("utf-8"))
 
     return (
-        OLLAMA_POOL.request(send, idempotent=True)
+        OLLAMA_POOL.request(send, model=model, idempotent=True)
         if OLLAMA_POOL.enabled else OLLAMA_POOL.request_primary(send, origin=BASE)
     )
 
@@ -5677,17 +5679,17 @@ def _offload_tier_impl(
             "configuration",
             "unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names()),
         )
-    provider = _bridge_provider_for_tier(tier)
+    cloud = _is_cloud_tier(tier, model)
+    provider = None if cloud else _bridge_provider_for_tier(tier)
     if fleet_synthesis:
         num_predict = _fleet_synthesis.json_num_predict(num_predict, bridged=provider == "sonder_inference")
-    cloud = provider is None and _is_cloud_tier(tier, model)
     if cloud and not _cloud_allowed_policy(os.environ):
         raise ModelCallError(
             "configuration",
             _cloud_disabled_message().removeprefix("ERROR: "),
             cloud=True,
         )
-    if not cloud and provider is None and (num_ctx is None or int(num_ctx or 0) <= 0):
+    if not cloud and provider in (None, "sonder_inference") and (num_ctx is None or int(num_ctx or 0) <= 0):
         num_ctx = _auto_model_context(model)
 
     if not _should_learn(tier, learn):
@@ -6581,7 +6583,7 @@ def _sonder_impl_serialized(
         provider = provider.provider if provider is not None else None
         ctx = pinned_ctx
         if ctx is None:
-            ctx = None if provider else 0 if rung.cloud else _auto_model_context(rung.model)
+            ctx = None if (provider and provider != "sonder_inference") else 0 if rung.cloud else _auto_model_context(rung.model)
         resolved_persona = personas.resolve(persona, prompt=prompt, tier=rung.tier)
         return (  # a reference-lookup model gets no Sonder system prompt (its Modelfile rules stay), only the caller's
             _reference_lookup_lanes.system_for(rung.model, _build_system(system, trace, resolved_persona, model=rung.model, cloud=rung.cloud, provider=provider), system),
@@ -7016,9 +7018,9 @@ def _answer_with_history_impl(
             req_ctx = (
                 pinned_ctx if pinned_ctx is not None
                 else 0 if cloud
-                # No Ollama context probe for a model a non-Ollama rung never
-                # loads; _make_generate requests the default window instead.
-                else None if bridged_provider is not None
+                # External hosted/non-SI rungs use the provider's default window;
+                # local Sonder Inference rungs size context from model metadata.
+                else None if (bridged_provider is not None and bridged_provider != "sonder_inference")
                 else _auto_model_context(model)
             )
             req_ctx = _overflow_route.rung_started(rung, overflow, req_ctx, pinned_ctx)
@@ -7072,7 +7074,7 @@ def _answer_with_history_impl(
                     model_revision = (
                         _cache_model_revision(model)
                         if not cloud and endpoint_is_local
-                        and bridged_provider is None else ""
+                        and bridged_provider in (None, "sonder_inference") else ""
                     )
                     if model_revision and not _reference_lookup_lanes.lookup_turn(model) and request_cache.eligible(  # a lookup turn is never cached
                         scope=cache_scope, cloud=cloud, temperature=temperature,

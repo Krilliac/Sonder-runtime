@@ -78,8 +78,19 @@ def ollama(monkeypatch):
     return sent
 
 
-def serve_through(monkeypatch, gateway):
+def serve_through(monkeypatch, gateway, *, target_tier=None):
     """Hand the bridge ``gateway`` with the provider bindings the environment now names."""
+    real_pft = server._legacy_chat_bridge.provider_for_tier
+    if target_tier is not None:
+        monkeypatch.setattr(
+            server._legacy_chat_bridge,
+            "provider_for_tier",
+            lambda tier, cloud, graph: (
+                real_pft(tier, cloud, graph)
+                if str(tier or "").strip().lower() == target_tier
+                else None
+            ),
+        )
     monkeypatch.setattr(server, "_APP_GRAPH", SimpleNamespace(
         provider_bindings=provider_bindings_from_env(), model_gateway=gateway,
         recall=SimpleNamespace(retrieve=lambda *a, **k: [])))  # memory recall is not under test
@@ -91,7 +102,7 @@ def bridge_reasoning(monkeypatch, served=DENIED, configured=DENIED):
     monkeypatch.setenv("SONDER_REASONING_PROVIDER", "sonder-inference")
     if configured:
         monkeypatch.setenv("SONDER_INFERENCE_TIER_MODELS", "reasoning=" + configured)
-    return serve_through(monkeypatch, Gateway(served))
+    return serve_through(monkeypatch, Gateway(served), target_tier="reasoning")
 
 
 def bind_reasoning_on_first_call(monkeypatch, ollama):
@@ -210,7 +221,7 @@ def bridge_code(monkeypatch, served=DENIED, configured=DENIED, provider="sonder-
         monkeypatch.setenv("SONDER_INFERENCE_TIER_MODELS", "code=" + configured)
     if configured and provider == "openai_compatible":
         monkeypatch.setenv("SONDER_OPENAI_MODEL", configured)
-    return serve_through(monkeypatch, Gateway(served, text=text))
+    return serve_through(monkeypatch, Gateway(served, text=text), target_tier="code")
 
 
 CODE_REFUSAL = served_refusal("code", "sonder_inference", DENIED)

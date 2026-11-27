@@ -1,8 +1,8 @@
 """Reusable test helper binding a real SonderInferenceGateway with fake transport into ``server``."""
 from __future__ import annotations
 
+import inspect
 import json
-import types
 from collections.abc import Callable
 from typing import Any
 
@@ -132,6 +132,96 @@ def make_si_gateway(
     )
 
 
+def _from_openai_request(payload: dict[str, Any]) -> dict[str, Any]:
+    """Translate an OpenAI ``/v1/chat/completions`` payload back to Ollama-shaped keys for legacy post stubs."""
+    out: dict[str, Any] = {
+        "model": payload.get("model", ""),
+        "messages": list(payload.get("messages") or ()),
+        "stream": bool(payload.get("stream", False)),
+    }
+    opts: dict[str, Any] = {}
+    if "max_tokens" in payload and payload["max_tokens"] is not None:
+        opts["num_predict"] = payload["max_tokens"]
+    if "temperature" in payload and payload["temperature"] is not None:
+        opts["temperature"] = payload["temperature"]
+    if "top_p" in payload and payload["top_p"] is not None:
+        opts["top_p"] = payload["top_p"]
+    if "top_k" in payload and payload["top_k"] is not None:
+        opts["top_k"] = payload["top_k"]
+    if "seed" in payload and payload["seed"] is not None:
+        opts["seed"] = payload["seed"]
+    if "stop" in payload and payload["stop"] is not None:
+        opts["stop"] = payload["stop"]
+    extra = payload.get("extra_body") if isinstance(payload.get("extra_body"), dict) else {}
+    if "num_ctx" in payload and payload["num_ctx"] is not None:
+        opts["num_ctx"] = payload["num_ctx"]
+    elif "num_ctx" in extra and extra["num_ctx"] is not None:
+        opts["num_ctx"] = extra["num_ctx"]
+    if opts:
+        out["options"] = opts
+    ctk = payload.get("chat_template_kwargs")
+    if isinstance(ctk, dict) and "enable_thinking" in ctk:
+        out["think"] = bool(ctk["enable_thinking"])
+    rf = payload.get("response_format")
+    if isinstance(rf, dict):
+        if rf.get("type") == "json_object":
+            out["format"] = "json"
+        elif rf.get("type") == "json_schema" and isinstance(rf.get("json_schema"), dict):
+            out["format"] = rf["json_schema"].get("schema")
+    if "tools" in payload and payload["tools"]:
+        out["tools"] = payload["tools"]
+    if "tool_choice" in payload and payload["tool_choice"] is not None:
+        out["tool_choice"] = payload["tool_choice"]
+    return out
+
+
+def bind_fake_si_post(
+    monkeypatch: Any,
+    server_mod: Any,
+    post_fn: Callable[..., Any],
+    *,
+    session_capture: Any = None,
+    models: tuple[str, ...] = ("sonder:latest", "fixture"),
+    default_model: str = "sonder:latest",
+) -> SonderInferenceGateway:
+    """Bind a fake ``_post(path, payload, *args, **kwargs)`` onto both ``server._post`` and the SI gateway."""
+    monkeypatch.setattr(server_mod, "_post", post_fn)
+
+    sig = inspect.signature(post_fn)
+    params = list(sig.parameters.values())
+    accepts_timeout = any(
+        p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        or p.name == "timeout"
+        for p in params
+    ) or len(params) >= 3
+
+    def transport(url: str, openai_payload: dict[str, Any], headers: dict[str, str], timeout: float) -> Any:
+        del url, headers
+        ollama_like = _from_openai_request(openai_payload)
+        req_model = str(ollama_like.get("model") or "").strip()
+        if not req_model or req_model == "default":
+            ollama_like["model"] = default_model
+        try:
+            if accepts_timeout:
+                return post_fn("/v1/chat/completions", ollama_like, timeout)
+            return post_fn("/v1/chat/completions", ollama_like)
+        except Exception as exc:
+            if getattr(exc, "kind", None) == "cancelled":
+                from sonder_runtime.domain.common.errors import Cancelled
+
+                raise Cancelled(str(getattr(exc, "detail", None) or exc)) from exc
+            raise
+
+    return bind_fake_si_server(
+        monkeypatch,
+        server_mod,
+        transport,
+        session_capture=session_capture,
+        models=models,
+        default_model=default_model,
+    )
+
+
 def bind_fake_si_server(
     monkeypatch: Any,
     server_mod: Any,
@@ -144,13 +234,31 @@ def bind_fake_si_server(
     """Bind a real ``SonderInferenceGateway`` (with fake transport) into ``server._application``."""
     gw = make_si_gateway(handler, models=models, default_model=default_model)
     bindings = provider_bindings_from_env()
-    app_attrs: dict[str, Any] = {
-        "model_gateway": gw,
-        "provider_bindings": bindings,
-    }
-    if session_capture is not None:
-        app_attrs["session_capture_service"] = lambda: session_capture
-    app = types.SimpleNamespace(**app_attrs)
+    real_application = server_mod._application
+
+    class _StubApp:
+        def __init__(self) -> None:
+            self.model_gateway = gw
+            self.provider_bindings = bindings
+            self._real: Any = None
+            if session_capture is not None:
+                self.session_capture_service = lambda: session_capture
+
+        def _ensure_real(self) -> Any:
+            if self._real is None:
+                from sonder_runtime.bootstrap import app as _bootstrap_app
+
+                self._real = _bootstrap_app.build_application(
+                    preference_connection_factory=lambda: server_mod._open_db(),
+                    preference_module_provider=lambda: server_mod.preference_learning,
+                )
+            return self._real
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._ensure_real(), name)
+
+    del real_application
+    app = _StubApp()
     monkeypatch.setattr(server_mod, "_application", lambda: app)
     monkeypatch.setattr(server_mod, "_APP_GRAPH", app)
     return gw

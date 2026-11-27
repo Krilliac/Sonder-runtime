@@ -67,10 +67,14 @@ def _context(timeout, cancel_check, cloud_allowed, remote_ollama_allowed, origin
     )
 
 
+def _is_cloud_tier_name(tier: object) -> bool:
+    return str(tier or "").strip().lower().startswith("cloud")
+
+
 @contextmanager
 def scope(tier, *, graph, consent, timeout=None, cancel_check=None):
     """Bind legacy paths that build their own payload instead of a generator."""
-    provider = legacy_chat_bridge.provider_for_tier(tier, False, graph)
+    provider = None if _is_cloud_tier_name(tier) else legacy_chat_bridge.provider_for_tier(tier, False, graph)
     context = _context(timeout, cancel_check, *consent())
     if provider_bridge.is_hosted(provider) and not context.cloud_allowed:
         raise ModelCallError("configuration", "hosted provider requires cloud consent for this operation", status=403, attempts=0)
@@ -148,8 +152,9 @@ def _thinking_advertised(graph, provider):
 
 
 def make_generate(factory, tier, args, options, *, graph, consent):
-    provider = legacy_chat_bridge.provider_for_tier(tier, False, graph)
     options = dict(options)
+    is_cloud = bool(options.get("cloud")) or _is_cloud_tier_name(tier)
+    provider = None if is_cloud else legacy_chat_bridge.provider_for_tier(tier, False, graph)
     queue = options.pop("queue", True)
     local = options.pop("local_only", False)
     kind = options.pop("generation_kind", None)
@@ -167,7 +172,9 @@ def make_generate(factory, tier, args, options, *, graph, consent):
                 apply_sampling_defaults(
                     tuning, str(args[0]), thinking=tuning.get("think", True), env=env, profile="decision",
                 )
-    if provider is not None:
+    if is_cloud:
+        options["cloud"] = True
+    elif provider is not None:
         options["cloud"] = False  # the binding, never the model's spelling, owns transport
     with provider_bridge.bind_rung(provider, tier):
         raw = factory(*args, **options)

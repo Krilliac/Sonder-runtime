@@ -55,30 +55,43 @@ def test_fanout_records_the_smaller_window_actually_dispatched(wire, monkeypatch
     assert server._fanout_synthesis_generate("qwen:27b", "{}") == "ok"
 
     assert len(sent) == 1
-    assert 512 <= sent[0]["options"]["num_ctx"] < 32768
-    assert recorded == [("qwen:27b", sent[0]["options"]["num_ctx"])]
+    sent_ctx = (
+        (sent[0].get("extra_body") or {}).get("num_ctx")
+        or (sent[0].get("options") or {}).get("num_ctx")
+        or sent[0].get("num_ctx")
+    )
+    assert 512 <= sent_ctx < 32768
+    assert recorded == [("qwen:27b", sent_ctx)]
 
 
 def test_dispatched_context_comes_from_serialized_bytes(wire, monkeypatch):
     sent, recorded = wire
-    payload = {"model": "qwen:27b", "options": {"num_ctx": 4096}}
+    payload = {"model": "qwen:27b", "messages": [{"role": "user", "content": "hi"}], "options": {"num_ctx": 4096}}
 
     def dispatch(_provider, _path, metadata, send):
-        metadata["options"]["num_ctx"] = 32768
+        if isinstance(metadata.get("extra_body"), dict):
+            metadata["extra_body"]["num_ctx"] = 32768
+        if "num_ctx" in metadata:
+            metadata["num_ctx"] = 32768
         payload["options"]["num_ctx"] = 16384
         return send()
 
     monkeypatch.setattr(server, "dispatch_provider", dispatch)
-    server._post("/api/chat", payload)
-    assert sent[0]["options"]["num_ctx"] == 4096
+    server._post("/v1/chat/completions", payload)
+    sent_ctx = (
+        (sent[0].get("extra_body") or {}).get("num_ctx")
+        or (sent[0].get("options") or {}).get("num_ctx")
+        or sent[0].get("num_ctx")
+    )
+    assert sent_ctx == 4096
     assert recorded == [("qwen:27b", 4096)]
 
 
 @pytest.mark.parametrize("path,payload", [
     ("/api/show", {"model": "qwen:27b", "options": {"num_ctx": 4096}}),
-    ("/api/generate", {"model": "qwen:27b", "keep_alive": "5m"}),
-    ("/api/chat", {"model": "qwen:cloud", "options": {"num_ctx": 4096}}),
-    ("/api/chat", {"model": "qwen:27b", "options": {"num_ctx": True}}),
+    ("/v1/completions", {"model": "qwen:27b", "keep_alive": "5m"}),
+    ("/v1/chat/completions", {"model": "qwen:cloud", "options": {"num_ctx": 4096}}),
+    ("/v1/chat/completions", {"model": "qwen:27b", "options": {"num_ctx": True}}),
 ])
 def test_non_context_or_cloud_requests_do_not_supply_observations(wire, path, payload):
     _sent, recorded = wire
@@ -94,7 +107,7 @@ def test_rejected_provider_dispatch_is_not_recorded(wire, monkeypatch):
 
     monkeypatch.setattr(server, "dispatch_provider", reject)
     with pytest.raises(PermissionError):
-        server._post("/api/chat", {"model": "qwen:27b", "options": {"num_ctx": 4096}})
+        server._post("/v1/chat/completions", {"model": "qwen:27b", "options": {"num_ctx": 4096}})
     assert sent == recorded == []
 
 
@@ -110,7 +123,7 @@ def test_dispatched_prewarm_invalidates_previous_window_attribution(wire, monkey
     assert feedback.verdict("qwen:27b") is not None
     monkeypatch.setattr(server, "_residency_feedback", lambda: feedback)
 
-    server._post("/api/generate", {"model": "qwen:27b", "keep_alive": "5m"})
+    server._post("/v1/completions", {"model": "qwen:27b", "keep_alive": "5m"})
 
     assert feedback.refresh("qwen:27b", geometry=None, kv_type="f16") is None
     assert feedback.ceiling("qwen:27b") is None

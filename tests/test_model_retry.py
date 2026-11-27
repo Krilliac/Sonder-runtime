@@ -66,7 +66,7 @@ def test_codegen_reserved_generation_has_one_physical_send_even_with_local_retri
     sends = []
 
     def fake_post(path, payload, **kwargs):
-        if path == "/api/chat":
+        if path in ("/api/chat", "/v1/chat/completions"):
             sends.append((payload, kwargs))
             raise urllib.error.URLError(ConnectionResetError("reset"))
         return {}
@@ -463,6 +463,8 @@ def test_invalid_or_empty_reply_is_not_captured(monkeypatch, reply):
 
 def test_public_offload_formats_http_failure_without_server_down_claim(monkeypatch):
     monkeypatch.setenv("SONDER_LOCAL_RETRIES", "0")
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._tier_generation, "scope", lambda *a, **k: server.contextlib.nullcontext())
     monkeypatch.setattr(
         server,
         "_post",
@@ -484,6 +486,8 @@ def test_structured_http_error_redacts_nested_secret_values(monkeypatch):
         b'"nested":{"api_key":"sk-private"}}}'
     )
     monkeypatch.setenv("SONDER_LOCAL_RETRIES", "0")
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._tier_generation, "scope", lambda *a, **k: server.contextlib.nullcontext())
     monkeypatch.setattr(
         server,
         "_post",
@@ -503,6 +507,8 @@ def test_structured_http_error_without_error_key_is_also_redacted(monkeypatch):
         b'"nested":{"api_key":"sk-private"}}'
     )
     monkeypatch.setenv("SONDER_LOCAL_RETRIES", "0")
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._tier_generation, "scope", lambda *a, **k: server.contextlib.nullcontext())
     monkeypatch.setattr(
         server,
         "_post",
@@ -517,6 +523,8 @@ def test_structured_http_error_without_error_key_is_also_redacted(monkeypatch):
 
 
 def test_malformed_optional_usage_counts_fall_back_to_estimates(monkeypatch):
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._tier_generation, "scope", lambda *a, **k: server.contextlib.nullcontext())
     monkeypatch.setattr(
         server,
         "_post",

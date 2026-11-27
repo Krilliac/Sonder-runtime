@@ -23,7 +23,7 @@ def _route_learning_through_ollama(monkeypatch, *, strict=False):
             pass
 
     def fake_post(path, payload, timeout=None, **_kwargs):
-        if path == "/api/chat":
+        if path in ("/api/chat", "/v1/chat/completions"):
             posted.append(payload)
             return {"message": {"content": "generated"}, "model": payload.get("model")}
         return {}
@@ -40,7 +40,9 @@ def _route_learning_through_ollama(monkeypatch, *, strict=False):
     monkeypatch.setattr(server, "_open_db", lambda: Conn())
     monkeypatch.setattr(server, "_should_learn", lambda tier, learn: True)
     monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
-    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda tier: None)
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._tier_generation, "scope", lambda *a, **k: server.contextlib.nullcontext())
     monkeypatch.setattr(server, "_STRICT_DEFAULT", strict)
     monkeypatch.setitem(server.TIERS, "code", CODE_MODEL)
     monkeypatch.setitem(server.TIERS, "fast", FAST_MODEL)

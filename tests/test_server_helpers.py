@@ -507,7 +507,7 @@ def test_make_generate_adds_local_runtime_options(monkeypatch):
     assert gen.last_usage["tokens_in"] > 0
     assert gen.last_usage["tokens_out"] == 1
     assert gen.last_usage["token_source"] == "estimated"
-    assert seen["path"] == "/api/chat"
+    assert seen["path"] == "/v1/chat/completions"
     assert seen["payload"]["keep_alive"] == server.KEEP_ALIVE
     assert seen["payload"]["options"] == {
         "temperature": 0.3,
@@ -526,15 +526,19 @@ def test_make_generate_auto_sizes_context_from_selected_model(monkeypatch):
     monkeypatch.delenv("SONDER_KV_CACHE_TYPE", raising=False)
     monkeypatch.setenv("OLLAMA_KV_CACHE_TYPE", "q4_0")
 
-    def fake_post(path, payload, **_kwargs):
-        if path == "/api/show":
+    def fake_get(path, **_kwargs):
+        if path == "/v1/models":
             return {
                 "details": {"parameter_size": "30.5B"},
                 "model_info": {"qwen3moe.context_length": 262144},
             }
+        return {}
+
+    def fake_post(path, payload, **_kwargs):
         seen["options"] = payload["options"]
         return {"message": {"content": "ok"}}
 
+    monkeypatch.setattr(server, "_get", fake_get)
     monkeypatch.setattr(server, "_post", fake_post)
     server._MODEL_CONTEXT_CACHE.clear()
 
@@ -550,16 +554,16 @@ def test_model_context_metadata_failure_is_cached_only_briefly(monkeypatch):
     last good metadata instead.)"""
     calls = []
 
-    def failing_post(path, payload, **_kwargs):
+    def failing_get(path, **_kwargs):
         calls.append(path)
-        raise RuntimeError("ollama briefly unavailable")
+        raise RuntimeError("sonder inference briefly unavailable")
 
-    monkeypatch.setattr(server, "_post", failing_post)
+    monkeypatch.setattr(server, "_get", failing_get)
     server._MODEL_CONTEXT_CACHE.clear()
 
     assert server._model_context_metadata("local-7b") == (None, None)
     assert server._model_context_metadata("local-7b") == (None, None)
-    assert calls == ["/api/show"]  # the fresh negative entry served the retry
+    assert calls == ["/v1/models"]  # the fresh negative entry served the retry
 
     # Age the negative entry past the negative TTL but far under the positive
     # TTL, then let the provider recover.
@@ -568,14 +572,14 @@ def test_model_context_metadata_failure_is_cached_only_briefly(monkeypatch):
         stamp - server._MODEL_CONTEXT_CACHE_NEGATIVE_TTL - 1, ctx, params,
     )
 
-    def good_post(path, payload, **_kwargs):
+    def good_get(path, **_kwargs):
         calls.append(path)
         return {
             "details": {"parameter_size": "30.5B"},
             "model_info": {"qwen3moe.context_length": 262144},
         }
 
-    monkeypatch.setattr(server, "_post", good_post)
+    monkeypatch.setattr(server, "_get", good_get)
     assert server._model_context_metadata("local-7b") == (262144, "30.5B")
     assert len(calls) == 2
 
@@ -2521,10 +2525,7 @@ def test_unload_deduplicates_verifies_and_cleans_discovery_probes(monkeypatch):
 
     output = server.unload("all")
 
-    assert [payload["model"] for _path, payload in posted] == [
-        "small:latest", "sonder:latest",
-    ]
-    assert all(payload["keep_alive"] == 0 for _path, payload in posted)
+    assert posted == []
     assert "residency confirmed clear" in output
     assert "41, 42" in output
 
@@ -2714,9 +2715,11 @@ def test_repo_master_uses_cancel_aware_worker_and_persists_host_failure(
 
 
 def test_non_learning_offload_records_model_usage(monkeypatch):
-    monkeypatch.setattr(
+    from tests.support.si_server_stub import bind_fake_si_post
+
+    bind_fake_si_post(
+        monkeypatch,
         server,
-        "_post",
         lambda *args, **kwargs: {
             "message": {"content": "plain output"},
             "prompt_eval_count": 9,
@@ -4105,7 +4108,7 @@ def test_identity_block_omits_the_claim_when_no_model_is_known(monkeypatch):
 def test_identity_block_does_not_place_a_cloud_model_on_this_machine():
     """Cloud tiers reach _build_system too; the block must not claim a hosted
     model is running locally."""
-    _LOCAL_CLAIM = "served by Ollama on this machine"
+    _LOCAL_CLAIM = "served through Sonder Inference"
     block = server._runtime_identity_block("kimi-k2.7-code:cloud", cloud=True)
     assert "kimi-k2.7-code:cloud" in block
     assert _LOCAL_CLAIM not in block

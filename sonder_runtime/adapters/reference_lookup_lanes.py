@@ -147,7 +147,7 @@ def answering_model(model: Any, tier: Any = None) -> str:
         served = _guard.served_model(tier)
     except Exception:  # noqa: BLE001  # an unknown served model gets no lookup
         return ""
-    return served[1] if served is not None else name
+    return served[1] if served is not None and served[1] and served[1] != "default" else name
 
 
 def _record(model: Any) -> TurnLookup:

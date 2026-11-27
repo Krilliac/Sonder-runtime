@@ -126,9 +126,22 @@ def _ollama_window(host: Any, tier: str, model: str, *, pinned: bool = False) ->
 def tier_window(
     host: Any, tier: str, model: str, provider: str | None, *, pinned: bool = False,
 ) -> _fit.TierWindow:
-    """The effective window of ``tier`` served by ``provider`` (None = Ollama)."""
+    """The effective window of ``tier`` served by ``provider`` (None = local)."""
     if provider == PROVIDER_INFERENCE:
-        return _inference_window(tier, allow_fetch=True)
+        configured = None if pinned else tier_model_options.tier_num_ctx(tier)
+        if configured is not None:
+            return _fit.TierWindow(
+                tier, model, PROVIDER_INFERENCE, configured, _fit.SOURCE_TIER_OPTION,
+            )
+        inferred = _inference_window(tier, allow_fetch=True)
+        if inferred.context_tokens is not None:
+            return inferred
+        fallback = _ollama_window(host, tier, model, pinned=pinned)
+        if fallback.context_tokens is not None:
+            return _fit.TierWindow(
+                tier, model, PROVIDER_INFERENCE, fallback.context_tokens, fallback.source,
+            )
+        return inferred
     if provider is None or provider == PROVIDER_OLLAMA:
         return _ollama_window(host, tier, model, pinned=pinned)
     # Other providers (OpenAI-compatible peers) publish no window here.

@@ -992,17 +992,19 @@ def resolve_sonder_inference_pin(
     candidates: list[str] = []
     if isinstance(status, Mapping):
         workers = status.get("workers")
+        has_non_ollama_healthy = False
         if isinstance(workers, list) and workers:
             for worker in workers:
                 if not isinstance(worker, Mapping):
                     continue
                 if worker.get("source") == "ollama_pool" or not worker.get("healthy"):
                     continue
+                has_non_ollama_healthy = True
                 for raw_model in worker.get("models") or ():
                     text = str(raw_model or "").strip()
                     if text:
                         candidates.append(text)
-        else:
+        if not candidates and (not isinstance(workers, list) or not workers or has_non_ollama_healthy):
             for raw_model in status.get("available_models") or ():
                 text = str(raw_model or "").strip()
                 if text:

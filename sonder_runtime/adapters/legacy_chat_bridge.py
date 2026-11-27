@@ -647,13 +647,20 @@ def _sonder_inference_advertises_model(graph: object, model_name: str) -> bool:
 
 def provider_for_tier(tier_label: object, cloud: bool, graph: object) -> str | None:
     """The provider serving a rung (Sonder Inference handles local, pins, and Ollama Cloud)."""
-    bindings = provider_bindings(graph)
     if cloud:
         return "sonder_inference"
+    bindings = provider_bindings(graph)
     provider = provider_bridge.provider_for_tier(tier_label, bindings)
     if provider_bridge.is_bridged(provider):
         return provider
-    return "sonder_inference"
+    raw_label = str(tier_label or "").strip()
+    if raw_label.lower().startswith("model:"):
+        model_name = raw_label[len("model:"):].strip()
+        tiers_map = getattr(bindings, "tier_providers", None) or {}
+        if model_name and "sonder_inference" in tiers_map.values():
+            if _sonder_inference_advertises_model(graph, model_name):
+                return "sonder_inference"
+    return None
 
 
 def endpoint_is_loopback(provider: str, graph: object) -> bool:

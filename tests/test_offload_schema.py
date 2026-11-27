@@ -28,6 +28,7 @@ import pytest
 import json_schema_verifier
 import server
 from sonder_runtime.domain.memory import rules as reward_rules
+from tests.support.si_server_stub import bind_fake_si_post
 
 
 SCHEMA = {
@@ -48,13 +49,13 @@ def _capture(monkeypatch, reply):
     seen = {"payloads": []}
 
     def fake_post(path, payload, timeout=None, **_kwargs):
-        if path == "/api/show":
+        if path in ("/api/show", "/v1/models"):
             return {}
         seen["payloads"].append(payload)
         seen["payload"] = payload
         return {"message": {"content": reply}}
 
-    monkeypatch.setattr(server, "_post", fake_post)
+    bind_fake_si_post(monkeypatch, server, fake_post)
     return seen
 
 
