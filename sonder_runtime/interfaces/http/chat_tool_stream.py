@@ -5,7 +5,7 @@ import math
 import threading
 import time
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, cast
 
 from sonder_runtime.application.chat.bidi import detect_bidi_chars
 
@@ -272,7 +272,7 @@ def handle_permission_mode_post(
 
 def _session_setter(permission_policy: Any) -> Callable[[str], str]:
     """The unattended HTTP session setter: it may only lower a mode, never raise it."""
-    return permission_policy.set_session_mode_lowering_only
+    return cast("Callable[[str], str]", permission_policy.set_session_mode_lowering_only)
 
 
 def turn_refusal_receipt(
