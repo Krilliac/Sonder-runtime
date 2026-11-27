@@ -7,6 +7,8 @@ in the WP1 Three-Hundred-Sixth Slice with its behaviour byte-for-byte intact.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 
 # Verifiers whose passing result is a citation a completion claim can rest on.
 #
@@ -19,7 +21,12 @@ VERIFICATION_TOOLS = frozenset({
 })
 
 
-def verifier_reachable(read_only, allowed_tools, *, read_only_tools):
+def verifier_reachable(
+    read_only: bool,
+    allowed_tools: Iterable[str] | None,
+    *,
+    read_only_tools: Iterable[str],
+) -> bool:
     """Whether any verifier could have been called in this lane at all.
 
     Read from the two gates the dispatcher actually enforces -- the read-only

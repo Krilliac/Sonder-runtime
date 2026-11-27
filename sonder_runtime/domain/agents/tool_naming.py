@@ -24,6 +24,6 @@ AGENT_TOOL_ALIASES = {
 }
 
 
-def canonical_agent_tool_name(tool_name):
+def canonical_agent_tool_name(tool_name: object) -> str:
     name = str(tool_name or "")
     return AGENT_TOOL_ALIASES.get(name, name)

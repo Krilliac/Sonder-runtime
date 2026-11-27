@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any, cast
 
 
 _DEFAULT_OFFSET = 1
@@ -16,7 +17,7 @@ def _integer(value: object, *, name: str, default: int) -> int:
     if value is None:
         return default
     try:
-        result = int(value)
+        result = int(cast(Any, value))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{name} must be an integer") from exc
     if result < 1:
@@ -89,16 +90,21 @@ def render_file_page(data: Mapping[str, object], *, path: str | None = None) -> 
         size = data.get("bytes", data.get("size", 0))
         return f"file {display} is binary; refusing to display ({size} bytes)"
 
-    total = int(data.get("total_lines", data.get("line_count", 0)) or 0)
+    total = int(cast(Any, data.get("total_lines", data.get("line_count", 0)) or 0))
     if total == 0:
         return f"file {display} is empty (0 lines)"
-    start = int(data.get("start_line", data.get("offset", 1)) or 1)
+    start = int(cast(Any, data.get("start_line", data.get("offset", 1)) or 1))
     if start > total:
         return f"file has {total} lines; offset {start} is past the end"
 
     raw_lines = data.get("lines", ()) or ()
+    lines_iter: Iterable[object] = (
+        raw_lines
+        if isinstance(raw_lines, Iterable) and not isinstance(raw_lines, (str, bytes))
+        else ()
+    )
     rendered_lines: list[tuple[int, str]] = []
-    for index, item in enumerate(raw_lines):
+    for index, item in enumerate(lines_iter):
         number, _ = _line_text(item)
         rendered_lines.append((number if number is not None else start + index, _bounded_text(item)))
     if not rendered_lines:
