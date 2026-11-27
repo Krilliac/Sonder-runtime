@@ -103,7 +103,7 @@ def bundle_https_context(cafile: str) -> ssl.SSLContext:
     return ssl.create_default_context(cafile=cafile)
 
 
-def https_handler():
+def https_handler() -> urllib.request.HTTPSHandler:
     """An ``HTTPSHandler`` over :func:`default_https_context`.
 
     Pass it to ``build_opener`` so the opener does not build its own default

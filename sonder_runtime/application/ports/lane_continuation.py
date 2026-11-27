@@ -1,16 +1,16 @@
 """Host-only continuation evidence ports; stored identities are not authority."""
+from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
-from typing import Protocol
-from dataclasses import field
 import math
+from typing import Any, Protocol
 
 MAX_PROJECTION_BYTES = 65536
 
 
-def _approval_identity(tool, call_digest, surface, expires_at):
+def _approval_identity(tool: str, call_digest: str, surface: str, expires_at: float) -> None:
     if (
         not isinstance(tool, str)
         or not 1 <= len(tool) <= 128
@@ -33,7 +33,7 @@ class PendingApprovalEvidence:
     call_id: str
     expires_at: float
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         _approval_identity(self.tool, self.call_digest, self.surface, self.expires_at)
         if self.call_id != self.call_digest[:16]:
             raise ValueError("pending display call identity mismatch")
@@ -44,7 +44,7 @@ class ApprovalOutcomeUnknown(PermissionError):
 
 
 class VerificationApprovalPending(Exception):
-    def __init__(self, evidence: PendingApprovalEvidence):
+    def __init__(self, evidence: PendingApprovalEvidence) -> None:
         if not isinstance(evidence, PendingApprovalEvidence):
             raise TypeError("typed pending ledger evidence required")
         self.evidence = evidence
@@ -61,7 +61,7 @@ class GrantedApprovalEvidence:
     expires_at: float
     source: str
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         _approval_identity(self.tool, self.call_digest, self.surface, self.expires_at)
         if (
             self.source not in {"approval", "policy"}
@@ -118,11 +118,12 @@ class PreparedReattachment:
     command_id: str
     issuer: object = field(repr=False, compare=False)
 
-    def approval_payload(self):
-        from dataclasses import asdict
-
+    def approval_payload(self) -> dict[str, Any]:
         value = {k: v for k, v in vars(self).items() if k != "issuer"}
-        return json.loads(json.dumps(value, sort_keys=True, separators=(",", ":")))
+        payload = json.loads(json.dumps(value, sort_keys=True, separators=(",", ":")))
+        if not isinstance(payload, dict):
+            raise ValueError("approval payload must serialize to a JSON object")
+        return payload
 
 
 @dataclass(frozen=True)
@@ -173,7 +174,7 @@ class ProjectionBinding:
     project_roots: tuple[str, ...]
     revision: int
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         for value in (
             self.continuation_id,
             self.principal_id,
@@ -242,7 +243,7 @@ class SealedProjection:
     payload: bytes
     sha256: str
 
-    def validate(self):
+    def validate(self) -> None:
         if not isinstance(self.binding, ProjectionBinding):
             raise ValueError("projection binding required")
         if (
