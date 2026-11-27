@@ -204,7 +204,7 @@ def test_normal_mutations_on_different_trees_run_concurrently(tmp_path, monkeypa
         thread.join(10)
 
     assert other["ok"] is True
-    assert fake.calls[1] == ["checkout", "x"]
+    assert fake.calls[1] == ["checkout", "x", "--"]
 
 
 def test_slot_is_released_when_the_guarded_mutation_raises(tmp_path, monkeypatch):
