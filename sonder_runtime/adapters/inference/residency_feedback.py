@@ -294,7 +294,7 @@ def record_dispatched_context(
     admission. Discovery, prewarm, invalid windows and cloud requests do not
     supply a local context observation. Advisory bookkeeping cannot fail a call.
     """
-    if path not in {"/api/chat", "/api/generate"} or not isinstance(payload, Mapping):
+    if path not in {"/v1/chat/completions", "/v1/completions"} or not isinstance(payload, Mapping):
         return
     model = payload.get("model")
     options = payload.get("options")

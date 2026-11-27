@@ -1297,7 +1297,7 @@ def _installed_models():
     ``/model <tag>`` relies on that distinction before creating a session pin.
     """
     try:
-        payload = server._get("/api/tags")
+        payload = server._get("/v1/models")
     except Exception:
         return None
     return [

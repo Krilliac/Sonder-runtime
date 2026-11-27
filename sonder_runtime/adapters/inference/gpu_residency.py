@@ -42,10 +42,6 @@ from ...domain.inference_profiles import (
     format_node_gpu_pool_summary,
     parse_inference_node_document,
 )
-from ...domain.model_routing import is_cloud_model_name
-from ..model_list_consumers import runtime_configuration
-from ..model_tool_policy import shipped_floor
-from ..provider_bindings import PROVIDER_TIERS
 from .exchange_transport import _bounded, trust_scope
 from .log_safe import redact_url, safe_origin
 
@@ -102,104 +98,31 @@ def keep_alive_for(
     model: object, default: object, *, primary: Callable[[], object],
     env: Mapping[str, str] | None = None,
 ) -> object:
-    """``keep_alive`` for one Ollama request naming ``model``.
-
-    ``default`` unless the flag is on and ``model`` is the primary chat model
-    (``primary()`` is only called when the flag is on; any failure keeps the
-    default).
-    """
-    if not keep_primary_resident(env) or not isinstance(model, str) or not model:
-        return default
-    try:
-        resolved = primary()
-    except Exception:  # noqa: BLE001 - residency is an optimisation, never a failure
-        return default
-    return RESIDENT_KEEP_ALIVE if resolved == model else default
+    """SI owns model residency via server flags; return ``default`` unchanged."""
+    return default
 
 
 def _local_ollama(env: Mapping[str, str]) -> bool:
-    try:
-        return ollama_policy.is_loopback(str(env.get("OLLAMA_HOST", "") or "") or None)
-    except Exception:  # noqa: BLE001 - an unparsable host is not provably local
-        return False
+    return False
 
 
 def local_ollama_tier_models(env: Mapping[str, str], bindings) -> dict[str, str]:
-    """``{tier: model}`` for tiers a local Ollama serves on this machine."""
-    if not _local_ollama(env):
-        return {}
-    tiers = dict(runtime_configuration(env, floor=shipped_floor()).tier_map())
-    found: dict[str, str] = {}
-    for tier in PROVIDER_TIERS:
-        model = str(tiers.get(tier, "") or "").strip()
-        if (bindings.tier_providers.get(tier) == "ollama" and model
-                and not is_cloud_model_name(model)):
-            found[tier] = model
-    return found
+    """Local Ollama is retired; no tier runs on a local Ollama daemon."""
+    return {}
 
 
 def gpu_sharing_findings(env: Mapping[str, str], bindings, *, inference_local: bool) -> list[str]:
-    """Plain statements of what would share the GPU with a local Inference.
-
-    Nothing local Ollama loads can share the card while it is pinned to the
-    CPU library (``OLLAMA_LLM_LIBRARY=cpu``); see :func:`gpu_sharing_report`
-    for the statement the doctor prints in that case.
-    """
-    if local_ollama_pinned_to_cpu(env):
-        return []
-    return _contenders(env, bindings, inference_local=inference_local)
+    """With Sonder Inference as the sole local engine, no local Ollama shares the GPU."""
+    return []
 
 
 def gpu_sharing_report(env: Mapping[str, str], bindings, *, inference_local: bool) -> dict:
-    """``{"findings": [...], "note": str}`` for the doctor.
-
-    ``findings`` is what :func:`gpu_sharing_findings` returns. ``note`` is a
-    single statement when OLLAMA_LLM_LIBRARY=cpu suppressed contenders: it
-    names them, so a daemon that was never restarted after the variable was
-    set is still visible to the operator.
-    """
-    contenders = _contenders(env, bindings, inference_local=inference_local)
-    if not local_ollama_pinned_to_cpu(env):
-        return {"findings": contenders, "note": ""}
-    note = "local Ollama is pinned to the CPU library (%s=cpu)" % ENV_OLLAMA_LLM_LIBRARY
-    if contenders:
-        note += (
-            ", so these cannot take the GPU (restart the daemon if it predates "
-            "the setting): %s" % "; ".join(contenders)
-        )
-    return {"findings": [], "note": note}
+    """``{"findings": [], "note": ""}`` — single-engine SI deployment has no Ollama contention."""
+    return {"findings": [], "note": ""}
 
 
 def _contenders(env: Mapping[str, str], bindings, *, inference_local: bool) -> list[str]:
-    findings: list[str] = []
-    inference_tiers = sorted(
-        tier for tier in PROVIDER_TIERS
-        if bindings.tier_providers.get(tier) == "sonder_inference"
-    )
-    ollama_models = local_ollama_tier_models(env, bindings)
-    if inference_tiers and inference_local:
-        if ollama_models:
-            findings.append(
-                "tier(s) %s run local Ollama model(s) %s that load on the GPU "
-                "beside the Sonder Inference server (tiers %s)"
-                % (", ".join(sorted(ollama_models)),
-                   ", ".join(sorted(set(ollama_models.values()))),
-                   ", ".join(inference_tiers))
-            )
-        if (bindings.embedding_provider == "ollama" and _local_ollama(env)
-                and _embedder_loads_locally(env)
-                and not _enabled(env, ENV_EMBED_ON_CPU)):
-            findings.append(
-                "the Ollama embedder loads on the GPU beside the Sonder "
-                "Inference server; set %s=1 to keep it on the CPU" % ENV_EMBED_ON_CPU
-            )
-    if keep_primary_resident(env) and len(set(ollama_models.values())) > 1:
-        findings.append(
-            "%s=1 pins the primary chat model while other local Ollama models "
-            "(%s) can also load; they will contend with it"
-            % (ENV_KEEP_PRIMARY_RESIDENT, ", ".join(sorted(set(ollama_models.values()))))
-        )
-    return findings
+    return []
 
 
 NODE_ENDPOINT_PATH = "/v1/sonder/node"

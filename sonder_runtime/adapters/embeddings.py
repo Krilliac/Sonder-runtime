@@ -6,7 +6,6 @@ import json
 import math
 import os
 from pathlib import Path
-import re
 import stat
 import threading
 import time
@@ -44,7 +43,12 @@ def dedicated_origin() -> str | None:
 
 
 def _primary_origin(url: str | None = None) -> str:
-    return ollama_endpoint.normalize(url) if url is not None else ollama_endpoint.normalize()
+    if url is not None:
+        return ollama_endpoint.normalize(url)
+    si_url = os.environ.get("SONDER_INFERENCE_BASE_URL", "").strip()
+    if si_url:
+        return ollama_endpoint.normalize(si_url)
+    return ollama_endpoint.normalize()
 
 
 def fallback_mode() -> str:
@@ -157,7 +161,7 @@ def canonical_model_name(model):
 
 
 EMBED_IDENTITY = canonical_model_name(EMBED_MODEL)
-_REVISION_PREFIX = "ollama-manifest-sha256:"
+_REVISION_PREFIX = "si-model-sha256:"
 _TAGS_RESPONSE_LIMIT = 1024 * 1024
 _EMBED_RESPONSE_LIMIT = 16 * 1024 * 1024
 
@@ -194,76 +198,54 @@ def _bounded_manifest_digest(path, limit=8 * 1024 * 1024):
 
 
 def local_manifest_revision(model=None, models_root=None):
-    """Hash the local Ollama manifest so retagged models cannot mix spaces."""
-    identity = canonical_model_name(model or EMBED_MODEL)
-    if not identity or ":" not in identity:
+    """Local Ollama manifest hashing is retired; SI /v1/sonder/identity owns digests."""
+    return ""
+
+
+def _extract_si_model_digest(payload: object) -> str:
+    if not isinstance(payload, dict):
         return ""
-    name, tag = identity.rsplit(":", 1)
-    parts = name.split("/")
-    if len(parts) == 1:
-        parts.insert(0, "library")
-    if (
-        not tag or tag in (".", "..") or "/" in tag or "\\" in tag
-        or any(not part or part in (".", "..") or "\\" in part for part in parts)
-    ):
-        return ""
-    roots = []
-    if models_root:
-        roots.append(Path(models_root))
-    else:
-        configured = os.environ.get("OLLAMA_MODELS", "").strip()
-        if configured:
-            roots.append(Path(configured))
-        try:
-            roots.append(Path.home() / ".ollama" / "models")
-        except (OSError, RuntimeError):
-            # A service or hermetic child may have no user profile. An
-            # unavailable optional manifest cannot prevent startup; an
-            # explicit OLLAMA_MODELS root still takes precedence.
-            pass
-    for root in roots:
-        manifest = root.joinpath(
-            "manifests", "registry.ollama.ai", *parts, tag,
-        )
-        try:
-            digest = _bounded_manifest_digest(manifest)
-        except OSError:
-            continue
-        if not digest:
-            continue
-        return _REVISION_PREFIX + digest
+    identity = payload.get("backend_identity")
+    candidates = []
+    if isinstance(identity, dict):
+        candidates.append(identity.get("model_digest"))
+    candidates.append(payload.get("model_digest"))
+    candidates.append(payload.get("digest"))
+    for raw in candidates:
+        digest = str(raw or "").strip().lower()
+        if digest.startswith("sha256:"):
+            digest = digest[7:]
+        if len(digest) == 64 and all(char in "0123456789abcdef" for char in digest):
+            return digest
     return ""
 
 
 def serving_model_revision(model=None, base=None, timeout=0.5):
-    """Read the digest advertised by the Ollama endpoint serving this model."""
+    """Read the digest advertised by Sonder Inference ``/v1/sonder/identity``."""
     with ollama_endpoint._default_embedding_operation() as allowed:
         if not allowed:
             return ""
-        identity = canonical_model_name(model or EMBED_MODEL)
+        raw_model = str(model or EMBED_MODEL or "").strip()
+        identity = canonical_model_name(raw_model)
         try:
             selected_base = ollama_endpoint.configured_origin(base or BASE)
         except ValueError:
             return ""
-        try:
-            with gpu_admission.process_service().admit(
-                "/api/tags", None, origin=selected_base, deadline=time.monotonic() + timeout,
-            ), ollama_endpoint.open_url(
-                "%s/api/tags" % selected_base, timeout=timeout,
-            ) as response:
-                raw = _read_bounded_response(response, _TAGS_RESPONSE_LIMIT)
-                payload = json.loads(raw.decode("utf-8"))
-        except (OSError, TimeoutError, ValueError, RecursionError, urllib.error.URLError):
-            return ""
-        for item in payload.get("models", []) if isinstance(payload, dict) else []:
-            if not isinstance(item, dict):
+        queries = []
+        for candidate in (raw_model, identity):
+            if candidate and candidate not in queries:
+                queries.append(candidate)
+        for query_model in queries:
+            encoded = urllib.parse.quote(query_model, safe="")
+            url = "%s/v1/sonder/identity?model=%s" % (selected_base.rstrip("/"), encoded)
+            try:
+                with ollama_endpoint.open_url(url, timeout=timeout) as response:
+                    raw = _read_bounded_response(response, _TAGS_RESPONSE_LIMIT)
+                    payload = json.loads(raw.decode("utf-8"))
+            except (OSError, TimeoutError, ValueError, RecursionError, urllib.error.URLError):
                 continue
-            if canonical_model_name(item.get("name") or item.get("model")) != identity:
-                continue
-            digest = str(item.get("digest") or "").strip().lower()
-            if digest.startswith("sha256:"):
-                digest = digest[7:]
-            if len(digest) == 64 and all(char in "0123456789abcdef" for char in digest):
+            digest = _extract_si_model_digest(payload)
+            if digest:
                 return _REVISION_PREFIX + digest
         return ""
 
@@ -494,84 +476,30 @@ def _npu_shadow_embed(prompt, identity, revision):
 def _record_npu_fallback_handler(handled):
     try:
         _npu_service().record_fallback_handler(
-            "embeddings", "ollama", handled is True,
+            "embeddings", "sonder_inference", handled is True,
         )
     except Exception:
         pass
 
 
-_KEEP_ALIVE_PATTERN = re.compile(r"^-?\d+(?:\.\d+)?(?:ms|s|m|h)?$")
-
-
-def _keep_alive():
-    """SONDER_EMBED_KEEP_ALIVE as an Ollama keep_alive value, or None.
-
-    Ollama unloads an idle model after its default five minutes. A remote
-    embedding host that is also busy with other work can then take tens of
-    seconds to reload it (measured 2026-09-30: 31 s for a 0.5 GB model on a
-    loaded a compute node), longer than recall callers wait. ``24h`` or ``-1`` keeps
-    the small embedder resident. Invalid values are ignored.
-    """
-    raw = os.environ.get("SONDER_EMBED_KEEP_ALIVE", "").strip()
-    if not raw or not _KEEP_ALIVE_PATTERN.match(raw):
-        return None
-    if raw.lstrip("-").replace(".", "", 1).isdigit():
-        return int(float(raw))
-    return raw
-
-
-EMBED_NUM_CTX_ENV = "SONDER_EMBED_NUM_CTX"
-_EMBED_NUM_CTX_MIN = 256
-
-
-def _num_ctx():
-    """SONDER_EMBED_NUM_CTX as an Ollama ``num_ctx`` option, or None.
-
-    Opt-in. Without it Ollama sizes the embedder's runner to the server's
-    default context: on a host with a large GPU budget that default is 32k,
-    which turned a 4 GB embedder into a 10.8 GB runner (measured 2026-09-30,
-    qwen3-embedding:4b-q8_0 on a compute node) and kept it from staying resident next
-    to the reasoning model. Embeddings never need more than EMBED_MAX_CHARS
-    worth of tokens, so 4096 is a safe bound for every embedder shipped here
-    (Ollama clamps it to a smaller model maximum, such as nomic's 2048).
-    Values below 256 or non-integers are ignored.
-    """
-    raw = os.environ.get(EMBED_NUM_CTX_ENV, "").strip()
-    if not raw.isdigit():
-        return None
-    value = int(raw)
-    return value if value >= _EMBED_NUM_CTX_MIN else None
-
-
-def _embed_on_cpu() -> bool:
-    """Whether SONDER_EMBED_ON_CPU asks Ollama to keep the embedder off the GPU.
-
-    Opt-in. On a GPU the chat model nearly fills, a GPU-loaded embedder evicts
-    it and every embedding costs a chat-model reload (measured 2026-09-28:
-    ~20 s for Qwen3.8 27B on 16 GB). On CPU (``num_gpu: 0``) the embedder stays
-    resident beside it at ~25 ms per embedding.
-    """
-    return os.environ.get("SONDER_EMBED_ON_CPU", "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 @contextmanager
 def _admitted_embeddings_response(body, base, timeout):
-    """Open one ``/api/embeddings`` response inside its GPU admission.
-
-    Embeddings queue on their own slot (a long chat does not stall recall) and
-    follow the model's pinned ``num_ctx`` like every other local request.
-    """
-    deadline = time.monotonic() + float(timeout)
-    with gpu_admission.process_service().admit(
-        "/api/embeddings", body, origin=base, deadline=deadline,
-    ) as ticket:
-        req = urllib.request.Request(
-            "%s/api/embeddings" % base,
-            data=ticket.body(json.dumps(body).encode("utf-8")),
-            headers={"Content-Type": "application/json"},
-        )
-        with ollama_endpoint.open_url(req, timeout=timeout) as resp:
-            yield resp
+    """Open one SI ``/v1/embeddings`` response (local-only, bounded)."""
+    headers = {
+        "Content-Type": "application/json",
+        "X-Sonder-Local-Only": "1",
+    }
+    api_key = os.environ.get("SONDER_INFERENCE_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    req = urllib.request.Request(
+        "%s/v1/embeddings" % base.rstrip("/"),
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    with ollama_endpoint.open_url(req, timeout=timeout) as resp:
+        yield resp
 
 
 def embed(text, timeout=30, base=None, model=None):
@@ -708,23 +636,18 @@ def _embed_at(text, timeout=30, base=None, model=None, force_cpu=False):
             if _npu_prefer_active():
                 _EMBED_STATE.fallback_reason = "npu_unavailable"
                 npu_fallback_pending = True
-        body = {"model": selected_model, "prompt": prompt}
-        options = {}
-        if force_cpu or _embed_on_cpu():
-            options["num_gpu"] = 0
-        num_ctx = _num_ctx()
-        if num_ctx is not None:
-            options["num_ctx"] = num_ctx
-        if options:
-            body["options"] = options
-        keep_alive = _keep_alive()
-        if keep_alive is not None:
-            body["keep_alive"] = keep_alive
+        body = {"model": selected_model, "input": prompt, "encoding_format": "float"}
         try:
             with _admitted_embeddings_response(body, selected_base, timeout) as resp:
                 raw = _read_bounded_response(resp, _EMBED_RESPONSE_LIMIT)
                 data = json.loads(raw.decode("utf-8"))
-                vector = data.get("embedding") if isinstance(data, dict) else None
+                vector = None
+                if isinstance(data, dict):
+                    rows = data.get("data")
+                    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                        vector = rows[0].get("embedding")
+                    elif "embedding" in data:
+                        vector = data.get("embedding")
                 revision_after = (
                     current_revision(model=selected_model, base=selected_base)
                     if explicit_runtime else refresh_runtime_revision()
@@ -733,18 +656,18 @@ def _embed_at(text, timeout=30, base=None, model=None, force_cpu=False):
                     if npu_fallback_pending:
                         _record_npu_fallback_handler(False)
                     return None
-                if not valid_vector(vector):
+                if not valid_vector(vector) or (dimension is not None and len(vector) != dimension):
                     if npu_fallback_pending:
                         _record_npu_fallback_handler(False)
                     return None
                 _EMBED_STATE.vector = vector
                 _EMBED_STATE.revision = revision_before
                 _EMBED_STATE.model = identity
-                _EMBED_STATE.provider = "ollama"
+                _EMBED_STATE.provider = "sonder_inference"
                 if isinstance(prompt, str) and prompt:
                     embed_cache.put(
                         prompt, identity, revision_before, vector,
-                        provider="ollama",
+                        provider="sonder_inference",
                     )
                     _npu_shadow_embed(prompt, identity, revision_before)
                 if npu_fallback_pending:

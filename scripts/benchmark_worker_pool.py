@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool  # noqa: E402
 
-_ORIGINS = tuple("http://127.0.0.%d:11434" % octet for octet in range(1, 5))
+_ORIGINS = tuple("http://127.0.0.%d:11437" % octet for octet in range(1, 5))
 
 
 def _run(pool: OllamaWorkerPool, requests: int, threads: int) -> float:

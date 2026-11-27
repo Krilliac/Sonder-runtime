@@ -46,15 +46,15 @@ def error_hint(text: str | None) -> str:
             return "/model <tier> selects a tier and clears the exact-model pin."
 
     # model_error_formatting.format_runtime_model_call_error() targets.
-    if "ERROR contacting local Ollama" in value:
+    if "ERROR contacting local Ollama" in value or "ERROR contacting local Sonder Inference" in value:
         return (
-            "local Ollama did not answer -- make sure it is running "
-            "(ollama serve, or the sonder headless launcher), then retry."
+            "Sonder Inference did not answer -- make sure `sonder-infer serve` "
+            "is running, then retry."
         )
-    if "ERROR contacting remote Ollama" in value:
+    if "ERROR contacting remote Ollama" in value or "ERROR contacting remote Sonder Inference" in value:
         return (
-            "check OLLAMA_HOST and that the remote endpoint is reachable; "
-            "remote Ollama also requires SONDER_ALLOW_REMOTE_OLLAMA=1."
+            "check SONDER_INFERENCE_BASE_URL and that the remote endpoint is reachable; "
+            "remote inference also requires SONDER_ALLOW_REMOTE_INFERENCE=1."
         )
     if "ERROR contacting hosted Ollama" in value:
         return "the hosted endpoint did not answer; check network and cloud configuration."
@@ -63,7 +63,7 @@ def error_hint(text: str | None) -> str:
     if "rejected the model request (HTTP 404" in value:
         return (
             "the endpoint answered but knows no such model -- /model lists "
-            "installed tags; `ollama pull <tag>` installs one."
+            "registered models in the Sonder Inference model store."
         )
     for status in ("408", "429", "502", "503", "504"):
         if "rejected the model request (HTTP %s" % status in value:

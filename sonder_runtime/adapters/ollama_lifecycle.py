@@ -43,7 +43,7 @@ def _is_windows() -> bool:
 
 
 def resident_models(payload: object) -> set[str]:
-    """Return case-folded model names from an Ollama ``/api/ps`` payload."""
+    """Return case-folded resident model ids from a Sonder Inference health payload."""
     if not isinstance(payload, dict):
         return set()
     rows = payload.get("models")
@@ -53,7 +53,10 @@ def resident_models(payload: object) -> set[str]:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        name = str(row.get("name") or row.get("model") or "").strip()
+        state = row.get("state")
+        if state is not None and str(state).strip().lower() != "resident":
+            continue
+        name = str(row.get("id") or row.get("name") or row.get("model") or "").strip()
         if name:
             names.add(name.casefold())
     return names
@@ -270,95 +273,10 @@ def cleanup_orphaned_discovery_probes(
     sleeper=time.sleep,
     allow_model_runners: bool = False,
 ) -> dict:
-    """Remove only orphaned, no-model Ollama GPU discovery probes on Windows.
-
-    The grace window covers Ollama's three-second refresh watchdog.  A candidate
-    must appear in two consecutive inspections with the same process creation
-    identity before termination.  Orphaned model runners are protected by
-    default and are eligible only when ``allow_model_runners`` is explicitly
-    true after the caller has independently confirmed no resident models.
-    """
-    result = {
+    """No-op under Sonder Inference: SI owns its in-process engine lifecycle."""
+    return {
         "terminated": [],
         "terminated_model_runners": [],
         "protected_model_runners": [],
         "errors": [],
     }
-    if not _is_windows():
-        return result
-    inspect = inspector or _windows_llama_processes
-    terminate = terminator or _terminate_windows_process
-    roots = _trusted_ollama_roots()
-    model_roots = _trusted_model_roots()
-    if not roots:
-        result["errors"].append("no trusted Ollama installation root")
-        return result
-
-    def classify(rows):
-        candidates: dict[int, str] = {}
-        model_candidates: dict[int, str] = {}
-        protected: set[int] = set()
-        for row in rows:
-            try:
-                pid = int(row.get("ProcessId") or 0)
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if pid <= 0 or bool(row.get("ParentAlive")):
-                continue
-            if not _is_trusted_llama_process(row, roots):
-                continue
-            command = str(row.get("CommandLine") or "")
-            if _MODEL_ARGUMENT.search(command):
-                if allow_model_runners and _is_orphaned_model_runner(
-                    row, roots, model_roots,
-                ):
-                    state, identity = process_liveness.probe_process(pid)
-                    if state == process_liveness.PROCESS_ALIVE and identity:
-                        model_candidates[pid] = identity
-                else:
-                    protected.add(pid)
-                continue
-            if not _is_orphaned_discovery_probe(row, roots):
-                continue
-            state, identity = process_liveness.probe_process(pid)
-            if state == process_liveness.PROCESS_ALIVE and identity:
-                candidates[pid] = identity
-        return candidates, model_candidates, protected
-
-    # One delayed probe is cheaper and less disruptive than repeatedly starting
-    # PowerShell/CIM while the machine is already under memory pressure.  A
-    # second observation protects against both natural exit and PID reuse.
-    grace = max(0.0, float(grace_seconds))
-    if grace:
-        sleeper(grace)
-    first, first_models, protected = classify(inspect())
-    result["protected_model_runners"] = sorted(protected)
-    if first or first_models:
-        sleeper(max(0.01, float(poll_seconds)))
-        second, second_models, protected = classify(inspect())
-        result["protected_model_runners"] = sorted(
-            set(result["protected_model_runners"]) | protected
-        )
-        for pid, identity in first.items():
-            if second.get(pid) != identity:
-                continue
-            if terminate(pid, identity):
-                result["terminated"].append(pid)
-            else:
-                result["errors"].append(
-                    "could not terminate verified discovery probe pid %d" % pid
-                )
-        for pid, identity in first_models.items():
-            if second_models.get(pid) != identity:
-                continue
-            if terminate(pid, identity):
-                result["terminated_model_runners"].append(pid)
-            else:
-                result["errors"].append(
-                    "could not terminate verified orphan model runner pid %d" % pid
-                )
-    result["terminated"] = sorted(set(result["terminated"]))
-    result["terminated_model_runners"] = sorted(
-        set(result["terminated_model_runners"])
-    )
-    return result

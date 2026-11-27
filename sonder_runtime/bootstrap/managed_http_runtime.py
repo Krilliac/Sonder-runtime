@@ -334,7 +334,7 @@ def _run(root, workspace, namespace, job_id, anchor):
         state=replace(
             config.state, home=str(root / "state"), workspace_roots=(str(workspace),)
         ),
-        ollama=replace(config.ollama, url=f"http://127.0.0.1:{descriptor['port']}"),
+        inference=replace(config.inference, url=f"http://127.0.0.1:{descriptor['port']}"),
         secrets=Secrets(api_key=secrets.token_hex(32)),
         private_source_paths=(str(root),)
         + (
@@ -345,19 +345,18 @@ def _run(root, workspace, namespace, job_id, anchor):
         child_storage=ChildStorageConfig(**descriptor["child_storage"]),
     )
     from ..platform import paths
-    from ..adapters.inference import ollama_endpoint
 
     paths.configure_home(config.state.home)
-    ollama_endpoint.configure_typed_endpoint(config.ollama.url)
     os.environ.update(
         {
             "SONDER_HOST": "127.0.0.1",
             "SONDER_PORT": str(descriptor["port"]),
             "SONDER_AUTH_MODE": "api-key",
             "SONDER_API_KEY": config.secrets.api_key,
-            "OLLAMA_HOST": config.ollama.url,
-            "SONDER_OLLAMA_WORKERS": "",
-            "SONDER_ALLOW_REMOTE_OLLAMA": "0",
+            "SONDER_INFERENCE_BASE_URL": config.inference.url,
+            "SONDER_INFERENCE_PRIVATE_WORKERS": "",
+            "SONDER_ALLOW_REMOTE_INFERENCE": "0",
+            "SONDER_ALLOW_CLOUD": "0",
         }
     )
     from ..application.runtime_resources import (

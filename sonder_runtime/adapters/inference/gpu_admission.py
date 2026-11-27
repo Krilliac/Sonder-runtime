@@ -317,8 +317,8 @@ class GpuAdmission:
         self._store_error = ""
         self._verified = False
         self._host_reader = host_reader or _default_host_reader
-        self._ps_reader = ps_reader or (lambda origin: _read_json(origin, "/api/ps"))
-        self._tags_reader = tags_reader or (lambda origin: _read_json(origin, "/api/tags"))
+        self._ps_reader = ps_reader or (lambda origin: _read_json(origin, "/v1/sonder/health"))
+        self._tags_reader = tags_reader or (lambda origin: _read_json(origin, "/v1/models"))
         self._show_reader = show_reader or (
             lambda origin, model: self._show_modelfile(origin, model))
         self._memory_reader = memory_reader
@@ -465,13 +465,12 @@ class GpuAdmission:
         ollama_endpoint = importlib.import_module("sonder_runtime.adapters.inference.ollama_endpoint")
         try:
             request = urllib.request.Request(
-                origin + "/api/show", data=json.dumps({"model": model, "name": model}).encode(),
-                headers={"Content-Type": "application/json"}, method="POST")
+                origin.rstrip("/") + "/v1/models",
+                headers={"Accept": "application/json"}, method="GET")
             with ollama_endpoint.open_url(request, timeout=5.0) as response:
                 value = json.loads(response.read(_READ_LIMIT).decode("utf-8"))
         except Exception as exc:
-            # No traceback: transport exception text can repeat the request URL.
-            logger.debug("gpu admission could not read /api/show for %s: %s", model,
+            logger.debug("gpu admission could not read /v1/models for %s: %s", model,
                          type(exc).__name__)
             return None
         return value if isinstance(value, Mapping) else None
@@ -1125,7 +1124,7 @@ class GpuAdmission:
                     self._counters["num_ctx_unverifiable"] += 1
             if first:
                 logger.info(
-                    "num_ctx unverifiable: model=%s origin=%s; /api/ps reports no context_length, "
+                    "num_ctx unverifiable: model=%s origin=%s; /v1/sonder/health reports no context_length, "
                     "so the sent window %s cannot be compared",
                     entry.model_key, redact_url(entry.origin), sent)
 

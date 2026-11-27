@@ -370,14 +370,14 @@ def fleet_model_bytes() -> int:
         wanted = "" if route else _dw.fleet_model_name()
         size = int(route[0].model_size_bytes(route[1]) or 0) if route else 0
         if wanted:
-            host = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").strip()
+            host = os.environ.get("SONDER_INFERENCE_BASE_URL", "http://127.0.0.1:11437").strip()
             host = host.replace("0.0.0.0", "127.0.0.1")
             if not host.startswith("http"):
                 host = "http://" + host
-            with urllib.request.urlopen(host + "/api/tags", timeout=5) as resp:
+            with urllib.request.urlopen(host.rstrip("/") + "/v1/models", timeout=5) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
-            for model in payload.get("models") or []:
-                if str(model.get("name") or "").strip() == wanted:
+            for model in (payload.get("data") or payload.get("models") or []):
+                if str(model.get("id") or model.get("name") or "").strip() == wanted:
                     size = int(model.get("size") or 0)
                     break
     except Exception:

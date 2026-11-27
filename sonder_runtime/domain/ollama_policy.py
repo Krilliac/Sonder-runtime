@@ -13,8 +13,8 @@ import urllib.parse
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_HOST = "127.0.0.1:11434"
-REMOTE_OPT_IN = "SONDER_ALLOW_REMOTE_OLLAMA"
+DEFAULT_HOST = "127.0.0.1:11437"
+REMOTE_OPT_IN = "SONDER_ALLOW_REMOTE_INFERENCE"
 _TRUE = {"1", "true", "yes", "on"}
 
 

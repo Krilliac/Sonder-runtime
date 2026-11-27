@@ -251,8 +251,8 @@ def prewarm_request(model: str, keep_alive: Any,
     except Exception:
         system, options = "", None
     if system and isinstance(options, Mapping):
-        return "/api/chat", prefill_payload(model, system, options=options, keep_alive=keep_alive)
-    return "/api/generate", {"model": model, "keep_alive": keep_alive}
+        return "/v1/chat/completions", prefill_payload(model, system, options=options, keep_alive=keep_alive)
+    return "/v1/chat/completions", {"model": model, "messages": [{"role": "user", "content": ""}], "max_tokens": 1, "stream": False}
 
 
 __all__ = [

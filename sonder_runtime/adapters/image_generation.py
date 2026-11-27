@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 import zlib
 from pathlib import Path
-from typing import Any, Callable, Sequence, cast
+from typing import Any, Sequence, cast
 
 from sonder_runtime.adapters.inference import ollama_endpoint
 from sonder_runtime.adapters.repl_services import assetgen
@@ -186,25 +186,8 @@ def _candidate_ollama_origins(ollama_endpoints: Sequence[str] | None = None) -> 
 
 
 def _probe_ollama_tags(origin: str, timeout: float = _TAGS_PROBE_TIMEOUT_SECONDS) -> list[str]:
-    url = f"{origin.rstrip('/')}/api/tags"
-    req = urllib.request.Request(url, headers={"Accept": "application/json"}, method="GET")
-    try:
-        open_url_fn: Callable[..., Any] = ollama_endpoint.open_url
-        with open_url_fn(req, timeout=timeout) as resp:
-            raw = resp.read(2 * 1024 * 1024)
-        payload = json.loads(raw.decode("utf-8", errors="replace"))
-    except Exception:
-        return []
-    models = payload.get("models") if isinstance(payload, dict) else None
-    if not isinstance(models, list):
-        return []
-    names: list[str] = []
-    for entry in models:
-        if isinstance(entry, dict):
-            name = str(entry.get("name") or entry.get("model") or "").strip()
-            if name:
-                names.append(name)
-    return names
+    """Local Ollama image-model discovery is retired; use SONDER_IMAGE_API_URL."""
+    return []
 
 
 def list_discovered_image_models(
@@ -377,38 +360,9 @@ def _fit_inline_budget(data: bytes, mime: str) -> tuple[bytes, str]:
 
 
 def _call_ollama_image(backend: ImageBackend, prompt: str, *, timeout: float) -> tuple[bytes, str]:
-    url = f"{backend.endpoint.rstrip('/')}/api/generate"
-    body = json.dumps({
-        "model": backend.model,
-        "prompt": prompt,
-        "stream": False,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        method="POST",
+    raise RuntimeError(
+        "local Ollama image generation is retired; configure SONDER_IMAGE_API_URL (openai_api)"
     )
-    open_url_fn: Callable[..., Any] = ollama_endpoint.open_url
-    with open_url_fn(req, timeout=timeout) as resp:
-        raw = resp.read(_MAX_HTTP_IMAGE_RESPONSE_BYTES + 1)
-    if len(raw) > _MAX_HTTP_IMAGE_RESPONSE_BYTES:
-        raise ValueError("image model response exceeded byte limit")
-    payload = json.loads(raw.decode("utf-8", errors="replace"))
-    if not isinstance(payload, dict):
-        raise ValueError("image model returned unexpected payload")
-    if payload.get("error"):
-        raise RuntimeError(str(payload["error"]))
-    b64 = payload.get("image")
-    if not b64:
-        images = payload.get("images")
-        if isinstance(images, list) and images:
-            b64 = images[0]
-    if not isinstance(b64, str) or not b64.strip():
-        raise ValueError(
-            f"model {backend.model!r} did not return image bytes (returned text only)"
-        )
-    return _decode_base64_image(b64)
 
 
 def _call_openai_image_api(backend: ImageBackend, prompt: str, *, timeout: float) -> tuple[bytes, str]:
@@ -582,10 +536,9 @@ def generate_chat_image(
     else:
         used_fallback = True
         fallback_note = (
-            "No local image-generation model was found on Ollama. "
-            "Pull one (for example `ollama pull x/z-image-turbo`) or set "
-            "`SONDER_IMAGE_MODEL` / `SONDER_IMAGE_API_URL` and image prompts "
-            "will automatically route to it."
+            "No image-generation backend is configured. "
+            "Set `SONDER_IMAGE_API_URL` and `SONDER_IMAGE_MODEL` to route "
+            "image prompts to an OpenAI-compatible image server."
         )
         raw_bytes, mime = _render_assetgen_png(effective_prompt, out_dir, f"{slug}-{stamp}-{nonce}.png")
 
@@ -1493,9 +1446,9 @@ def generate_chat_gif(
         active_kind = "assetgen"
         active_model = "sonder-gifgen"
         fallback_note = (
-            "No local image-generation model was found. "
-            "Set `SONDER_IMAGE_API_URL` or pull an Ollama image model "
-            "(for example `ollama pull x/z-image-turbo`) to animate diffusion keyframes."
+            "No image-generation backend is configured. "
+            "Set `SONDER_IMAGE_API_URL` and `SONDER_IMAGE_MODEL` "
+            "to animate diffusion keyframes."
         )
 
     if gif_bytes is None:

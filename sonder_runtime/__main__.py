@@ -1107,46 +1107,26 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     # OLLAMA_HOST remains a legacy compatibility override and is exported only
     # for compatibility subcommands; canonical typed serve uses its bound
     # endpoint directly.
-    if include_typed_runtime:
-        os.environ["OLLAMA_HOST"] = config.ollama.url
-        os.environ["SONDER_OLLAMA_POOL_MAX_WORKERS"] = str(
-            config.ollama.worker_pool_max_workers
-        )
-        os.environ["SONDER_OLLAMA_WORKER_MAX_INFLIGHT"] = str(
-            config.ollama.worker_max_inflight
-        )
-        os.environ["SONDER_OLLAMA_WORKER_QUEUE_DEPTH"] = str(
-            config.ollama.worker_queue_depth
-        )
-        os.environ["SONDER_OLLAMA_WORKER_PROBE_PARALLELISM"] = str(
-            config.ollama.worker_capability_probe_parallelism
-        )
-        os.environ["SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE"] = str(
-            config.ollama.worker_capability_probe_batch_size
-        )
-        os.environ["SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE"] = str(
-            config.ollama.worker_status_page_size
-        )
-        os.environ["SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS"] = str(
-            config.ollama.worker_admission_timeout_ms
-        )
-        os.environ["SONDER_OLLAMA_WORKER_FAILURE_THRESHOLD"] = str(
-            config.ollama.worker_failure_threshold
-        )
-        os.environ["SONDER_OLLAMA_WORKER_COOLDOWN_SECONDS"] = str(
-            config.ollama.worker_cooldown_seconds
-        )
-        os.environ["SONDER_OLLAMA_WORKER_CAPABILITY_TTL_SECONDS"] = str(
-            config.ollama.worker_capability_ttl_seconds
-        )
-        os.environ["SONDER_OLLAMA_WORKER_PROBE_TIMEOUT_MS"] = str(
-            config.ollama.worker_probe_timeout_ms
-        )
-    os.environ["SONDER_OLLAMA_WORKERS"] = ",".join(config.ollama.workers)
-    os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
-        "1" if config.ollama.allow_remote else "0"
+    os.environ["SONDER_INFERENCE_BASE_URL"] = config.inference.url
+    if config.inference.ready_file:
+        os.environ["SONDER_INFERENCE_READY_FILE"] = config.inference.ready_file
+    os.environ["SONDER_ALLOW_REMOTE_INFERENCE"] = (
+        "1" if config.inference.allow_remote else "0"
     )
-    os.environ["SONDER_TRUSTED_ORIGINS"] = ",".join(config.ollama.trusted_origins)
+    if config.inference.private_workers:
+        os.environ["SONDER_INFERENCE_PRIVATE_WORKERS"] = config.inference.private_workers
+    if config.inference.model:
+        os.environ["SONDER_INFERENCE_MODEL"] = config.inference.model
+    if config.inference.embed_model:
+        os.environ["SONDER_INFERENCE_EMBED_MODEL"] = config.inference.embed_model
+    if config.inference.rerank_model:
+        os.environ["SONDER_INFERENCE_RERANK_MODEL"] = config.inference.rerank_model
+    if config.inference.tier_models:
+        os.environ["SONDER_INFERENCE_TIER_MODELS"] = config.inference.tier_models
+    os.environ["SONDER_INFERENCE_MAX_INFLIGHT"] = str(config.inference.max_inflight)
+    os.environ["SONDER_INFERENCE_TIMEOUT_SECONDS"] = str(
+        config.inference.request_timeout_seconds
+    )
     os.environ["SONDER_ALLOW_CLOUD"] = "1" if config.features.cloud else "0"
     os.environ["SONDER_WEB_TOOLS"] = "1" if config.features.web else "0"
     os.environ["SONDER_LIVE_RELOAD"] = "1" if config.features.live_reload else "0"

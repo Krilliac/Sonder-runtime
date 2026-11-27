@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 
 from ..application.ports.model_gateway import ModelGateway
 from ..domain.common.errors import InvalidInput
-from .inference.ollama_gateway import OllamaGateway
 from .provider_bindings import ProviderBindings, provider_bindings_from_env
 from .provider_dispatch.gateway import ProviderDispatchGateway
 
@@ -72,11 +71,6 @@ def build_model_gateway(
         from .inference.sonder_inference_gateway import SonderInferenceGateway
 
         factories: dict[str, ProviderFactory] = {
-            "ollama": lambda: OllamaGateway(
-                target_resolver=target_resolver,
-                generate_factory=generate_factory,
-                embedding_provider=embedding_provider,
-            ),
             "openai_compatible": OpenAICompatibleGateway,
             "sonder_inference": SonderInferenceGateway,
             "openrouter": OpenRouterGateway,

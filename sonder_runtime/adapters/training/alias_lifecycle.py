@@ -57,13 +57,13 @@ _OPTIONAL_LOCAL_TIERS: Sequence[str] = cast(
 def shared_alias_paths(
     *, local_ollama_origin_fn: Callable[[], str]
 ) -> dict[str, Any]:
-    """Stable per-user namespace for one Ollama endpoint's global aliases."""
+    """Stable per-user namespace for one Sonder Inference endpoint's LoRA aliases."""
     transport_origin = local_ollama_origin_fn()
     parsed = urllib.parse.urlparse(transport_origin)
-    namespace_id = f"loopback:{parsed.port or 11434}"
+    namespace_id = f"loopback:{parsed.port or 11437}"
     namespace = hashlib.sha256(namespace_id.encode("utf-8")).hexdigest()[:24]
     root = (Path.home() / ".sonder" / "locks").resolve()
-    prefix = root / f"ollama-{namespace}"
+    prefix = root / f"si-{namespace}"
     return {
         "origin": namespace_id,
         "transport_origin": transport_origin,

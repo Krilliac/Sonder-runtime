@@ -155,7 +155,7 @@ import sqlite_mutate as sqlite_mutate_module
 import symbol_index
 import git_history
 import sonder_runtime.adapters.archive_create as archive_create_tool
-from sonder_runtime.platform import context_policy, declared_context, model_context_memory
+from sonder_runtime.platform import context_policy, model_context_memory
 import command_registry
 import adaptive_training
 import selfmod
@@ -760,8 +760,8 @@ def _valid_tier_names():
 
 
 def _discovery_tags(host_only=False):
-    """Known-model catalog: the pool's union, or this host's when ``host_only`` (pooled read if it is down)."""
-    return _pool_discovery_tags(OLLAMA_POOL, lambda: _get("/api/tags"), lambda o: _pool_member_tags(
+    """Known-model catalog from Sonder Inference /v1/models."""
+    return _pool_discovery_tags(OLLAMA_POOL, lambda: _get("/v1/models"), lambda o: _pool_member_tags(
         o, timeout=_PIN_CATALOG_TIMEOUT_SECONDS), host_origin=BASE if host_only else None)
 
 
@@ -1316,7 +1316,6 @@ from sonder_runtime.adapters.runtime_readiness_formatting import (
 )
 from sonder_runtime.adapters.goal_formatting import format_goal as _format_goal
 from sonder_runtime.adapters.inference.residency_feedback import ResidencyFeedback as _ResidencyFeedback, record_dispatched_context as _record_residency_dispatch
-from sonder_runtime.domain import kv_budget as _kv_budget
 from sonder_runtime.adapters.learning_tier_formatting import (
     format_learning_tiers,
 )
@@ -1699,15 +1698,15 @@ def _should_learn(tier, learn):
 
 def resolve_sonder_model(strict=False):
     try:
-        payload = _get("/api/tags")
+        payload = _get("/v1/models")
     except Exception:
         payload = {}
-    models = payload.get("models") if isinstance(payload, dict) else None
+    models = (payload.get("data") or payload.get("models")) if isinstance(payload, dict) else None
     if isinstance(models, list):
         for model in models:
             if not isinstance(model, dict):
                 continue
-            name = str(model.get("name") or model.get("model") or "").strip()
+            name = str(model.get("id") or model.get("name") or model.get("model") or "").strip()
             if name.casefold() == SONDER_STABLE_ALIAS:
                 return SONDER_STABLE_ALIAS
     return None if strict else LOCAL_CODE_MODEL
@@ -1740,31 +1739,15 @@ _MODEL_PROMPT_IDENTITY_CACHE_LOCK = threading.Lock()
 
 
 def _ollama_model_tag_metadata(model):
-    """Return the selected tag's digest/revision, or ``None`` if unproven."""
-    payload = _get("/api/tags")
-    rows = payload.get("models") if isinstance(payload, dict) else None
-    if not isinstance(rows, list):
+    """Return the selected SI model's digest/revision from /v1/sonder/identity, or None."""
+    payload = _get("/v1/sonder/identity?model=" + urllib.parse.quote(str(model or ""), safe=""))
+    ident = payload.get("backend_identity") if isinstance(payload, dict) else None
+    if not isinstance(ident, dict):
         return None
-    wanted = str(model or "").strip().casefold()
-    match = None
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("name") or row.get("model") or "").strip()
-        if name.casefold() != wanted:
-            continue
-        digest = row.get("digest")
-        modified_at = row.get("modified_at")
-        if (
-            match is not None
-            or not isinstance(digest, str)
-            or re.fullmatch(r"[0-9a-fA-F]{64}", digest.strip()) is None
-            or not isinstance(modified_at, str)
-            or not modified_at.strip()
-        ):
-            return None
-        match = digest.strip().lower(), modified_at.strip()
-    return match
+    digest = str(ident.get("model_digest") or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        return None
+    return digest, str(ident.get("template_digest") or digest)
 
 
 def _model_prompt_identity(model):
@@ -1802,24 +1785,19 @@ def _model_prompt_identity(model):
     try:
         before = _ollama_model_tag_metadata(model)
         if before is None:
-            raise ValueError("selected Ollama tag lacks a stable digest/revision")
-        details = _post("/api/show", {"model": model, "name": model}, timeout=30)
-        info = details.get("model_info") if isinstance(details, dict) else {}
-        info = info if isinstance(info, dict) else {}
-        tokenizer_value = info.get("tokenizer.ggml.model")
-        template_value = details.get("template") if isinstance(details, dict) else None
-        show_modified_at = details.get("modified_at") if isinstance(details, dict) else None
-        if not isinstance(show_modified_at, str) or show_modified_at.strip() != before[1]:
-            raise ValueError("Ollama tag/show revision mismatch")
+            raise ValueError("selected SI model lacks a stable digest/revision")
+        details = _get("/v1/sonder/identity?model=" + urllib.parse.quote(str(model or ""), safe=""))
+        ident = details.get("backend_identity") if isinstance(details, dict) else None
+        ident = ident if isinstance(ident, dict) else {}
+        tokenizer_value = ident.get("tokenizer_digest")
+        template_value = ident.get("template_digest")
         after = _ollama_model_tag_metadata(model)
         if after != before:
-            raise ValueError("Ollama tag changed during prompt identity probe")
+            raise ValueError("SI model identity changed during prompt identity probe")
         if isinstance(tokenizer_value, str) and tokenizer_value.strip():
             tokenizer = tokenizer_value.strip()
         if isinstance(template_value, str) and template_value.strip():
-            template_identity = "ollama-template-sha256:" + hashlib.sha256(
-                template_value.encode("utf-8")
-            ).hexdigest() + ";ollama-model-sha256:" + before[0]
+            template_identity = "si-template-sha256:" + template_value.strip() + ";si-model-sha256:" + before[0]
     except Exception:
         tokenizer = template_identity = None
     if not (tokenizer and template_identity):
@@ -1847,27 +1825,14 @@ def _model_context_metadata(model):
     context_length = parameter_size = None
     declared = False  # stays False unless the whole probe parses
     try:
-        details = _post("/api/show", {"model": model, "name": model}, timeout=30)
-        info = details.get("model_info") if isinstance(details, dict) else {}
-        info = info if isinstance(info, dict) else {}
-        for name, value in info.items():
-            if str(name).casefold().endswith("context_length"):
-                context_length = context_policy.parse_strict(value)
-                if context_length:
-                    break
-        detail_block = details.get("details") if isinstance(details, dict) else {}
-        detail_block = detail_block if isinstance(detail_block, dict) else {}
-        parameter_size = detail_block.get("parameter_size")
-        if parameter_size is None:
-            count = info.get("general.parameter_count")
-            if count:
-                parameter_size = float(count) / 1_000_000_000.0
-        with _MODEL_CONTEXT_CACHE_LOCK:
-            _MODEL_GEOMETRY_CACHE[key] = _kv_budget.geometry_from_model_info(info)
-        declared = declared_context.declared_from_show(details)
+        details = _get("/v1/models")
+        rows = (details.get("data") or details.get("models")) if isinstance(details, dict) else ()
+        matched = next((r for r in (rows or ()) if isinstance(r, dict) and str(r.get("id") or r.get("name") or "").strip().casefold() == key), {})
+        sonder_meta = matched.get("sonder") if isinstance(matched.get("sonder"), dict) else {}
+        context_length = context_policy.parse_strict(sonder_meta.get("context_length"))
+        parameter_size = sonder_meta.get("parameter_size")
+        declared = context_length is not None
     except Exception:
-        # Metadata is an optimization and cannot make an otherwise valid model
-        # unavailable. The deterministic context-policy fallback remains safe.
         pass
     with _MODEL_CONTEXT_CACHE_LOCK:
         _MODEL_CONTEXT_CACHE[key] = (now, None, None) if declared is False else (now, context_length, parameter_size)
@@ -1875,7 +1840,7 @@ def _model_context_metadata(model):
 
 
 _CHAT_FITNESS = _chat_model_fitness.ChatModelFitness(
-    lambda model: _post("/api/show", {"model": model, "name": model}, timeout=10),
+    lambda model: _get("/v1/models"),
     vision_only_model_families=lambda: _model_list_consumers.values()["vision_only_model_families"],
 )
 
@@ -1899,12 +1864,12 @@ def _residency_feedback():
     with _RESIDENCY_FEEDBACK_LOCK:
         if _RESIDENCY_FEEDBACK is None or _RESIDENCY_FEEDBACK.origin != primary.casefold():
             _RESIDENCY_FEEDBACK = _ResidencyFeedback(
-                lambda: _get("/api/ps"),
+                lambda: _get("/v1/sonder/health"),
                 minimum_context=context_policy.MIN_CONTEXT,
                 origin=primary,
                 fetch_ps_for_origin=lambda o: _pool_wiring.fetch_ps_for_origin(
                     OLLAMA_POOL, o, primary_origin=BASE,
-                    get_primary_ps=lambda: _get("/api/ps"),
+                    get_primary_ps=lambda: _get("/v1/sonder/health"),
                     admitted_get_fn=ollama_pool.admitted_get,
                     read_bytes_fn=_read_ollama_response_bytes,
                 ),
@@ -5101,7 +5066,7 @@ def _chat_request(
         ):
             payload["think"] = True
     out, attempts = _post_model(
-        "/api/chat",
+        "/v1/chat/completions",
         payload,
         model=model,
         cloud=cloud,
@@ -5375,7 +5340,7 @@ def _post(
                 headers={"Content-Type": "application/json"},
             )
             def transport():
-                if path in {"/api/chat", "/api/generate"}:
+                if path in {"/v1/chat/completions", "/v1/completions"}:
                     from sonder_runtime.application.agents.delegation_runtime import note_agent_execution as _note_exec; _note_exec(origin=origin)
                 with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
                     _record_residency_dispatch(
@@ -5385,8 +5350,8 @@ def _post(
                     raw = _read_ollama_response_bytes(resp)
                     return json.loads(raw.decode("utf-8"))
 
-            if path in {"/api/chat", "/api/generate"}:  # metadata probes are not inference
-                return dispatch_provider("ollama", path, json.loads(body), transport)
+            if path in {"/v1/chat/completions", "/v1/completions"}:  # metadata probes are not inference
+                return dispatch_provider("sonder-inference", path, json.loads(body), transport)
             return transport()
 
     if local_only and not ollama_endpoint.is_loopback(BASE):
@@ -5397,7 +5362,7 @@ def _post(
         return OLLAMA_POOL.request_primary(send, model=model_hint, payload=payload, origin=pinned_origin)
     if local_only or not OLLAMA_POOL.enabled:
         return OLLAMA_POOL.request_primary(send, model=model_hint, payload=payload, origin=BASE)
-    if path in {"/api/chat", "/api/generate"}:  # never fail behind our own prewarm
+    if path in {"/v1/chat/completions", "/v1/completions"}:  # never fail behind our own prewarm
         prewarm_gate.await_prewarm(model_hint, min(request_timeout, _PREWARM_LOAD_TIMEOUT))
     return OLLAMA_POOL.request(send, model=model_hint, idempotent=idempotent, payload=payload)
 
@@ -6698,9 +6663,11 @@ def _sonder_impl_serialized(
             error,
             **_ollama_error_endpoint(),
         )
-    except urllib.error.URLError as e:  # a pool refusal is not "Ollama is down"
-        return ollama_pool.pool_refusal_reply(e) or ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
-                "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
+    except urllib.error.URLError as e:  # a pool refusal is not "Sonder Inference is down"
+        return ollama_pool.pool_refusal_reply(e) or (
+            "ERROR contacting Sonder Inference at %s: %s. Is Sonder Inference "
+            "running? (`sonder-infer serve`)" % (_ollama_display(), e)
+        )
     finally:
         rung_scope.close()
         conn.close()
@@ -7179,9 +7146,11 @@ def _answer_with_history_impl(
             error,
             **_ollama_error_endpoint(),
         )
-    except urllib.error.URLError as e:  # a pool refusal is not "Ollama is down"
-        return ollama_pool.pool_refusal_reply(e) or ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
-                "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
+    except urllib.error.URLError as e:  # a pool refusal is not "Sonder Inference is down"
+        return ollama_pool.pool_refusal_reply(e) or (
+            "ERROR contacting Sonder Inference at %s: %s. Is Sonder Inference "
+            "running? (`sonder-infer serve`)" % (_ollama_display(), e)
+        )
     finally:
         rung_scope.close()
         conn.close()
@@ -20706,7 +20675,7 @@ def _route_work_request(
 
 
 def _pool_member_tags(origin: str, timeout: float = 15) -> dict:
-    with ollama_pool.admitted_get(OLLAMA_POOL, origin, "/api/tags", timeout=timeout) as resp:
+    with ollama_pool.admitted_get(OLLAMA_POOL, origin, "/v1/models", timeout=timeout) as resp:
         return json.loads(_read_ollama_response_bytes(resp).decode("utf-8"))
 
 
@@ -20717,7 +20686,7 @@ _POOL_PIN_CATALOG = PoolCatalogCache()
 def _pin_endpoint_record(selector):
     """Pin lookup tier one: the single pooled read (workers are the next tier)."""
     wanted = str(selector or "").strip().casefold()
-    return _resolve_catalog_record(wanted, _catalog_records(_get("/api/tags"))) if wanted else None
+    return _resolve_catalog_record(wanted, _catalog_records(_get("/v1/models"))) if wanted else None
 
 
 def _resolve_model_pin(selector):
@@ -20733,7 +20702,7 @@ def _runtime_installed_model_records() -> tuple[tuple[str, dict], ...]:
     """One catalog snapshot for policy validation: every pool member's models."""
     if OLLAMA_POOL.enabled:
         return _installed_catalog_records(OLLAMA_POOL.catalog_union(_pool_member_tags))
-    return _installed_catalog_records(_get("/api/tags"))
+    return _installed_catalog_records(_get("/v1/models"))
 
 
 def _runtime_installed_models() -> set[str]:
@@ -20763,7 +20732,7 @@ def _runtime_model_has_capability(model: str, capability: str, records) -> bool:
     if not selected or _is_cloud_model_name(selected):
         return False
     try:
-        details = _post("/api/show", {"model": selected, "name": selected}, timeout=30)
+        details = _get("/v1/models")
     except ModelCallError:
         return False
     return isinstance(details, dict) and wanted in _fanout_capabilities(details)
@@ -21125,9 +21094,9 @@ def self_heal_repair(apply: bool = False) -> str:
 
 def _diagnostics_ollama_model_lines() -> list[str]:
     return _ollama_reporting.model_inventory_lines(
-        OLLAMA_POOL, get_tags=lambda: _get("/api/tags"), member_tags=_pool_member_tags,
+        OLLAMA_POOL, get_tags=lambda: _get("/v1/models"), member_tags=_pool_member_tags,
         require_endpoint=_require_ollama_endpoint,
-        names=lambda payload: _inventory_model_names(_inventory_rows_policy(payload, "/api/tags")))
+        names=lambda payload: _inventory_model_names(_inventory_rows_policy(payload, "/v1/models")))
 
 
 @mcp.tool()
@@ -21561,13 +21530,11 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
         # snapshot.  Fail closed rather than degrading into an all-local
         # fanout that can unexpectedly load models into an active GPU.
         try:
-            rows = _get("/api/ps").get("models", [])
+            health = _get("/v1/sonder/health")
+            rows = health.get("models") if isinstance(health, dict) else None
             if not isinstance(rows, list):
-                raise ValueError("invalid Ollama /api/ps response")
-            resident = {
-                str(row.get("name") or "").strip().casefold()
-                for row in rows if isinstance(row, dict) and str(row.get("name") or "").strip()
-            }
+                raise ValueError("invalid Sonder Inference health response")
+            resident = ollama_lifecycle.resident_models(health)
         except Exception:
             return {"scope": scope, "selected": [], "skipped": []}, ModelCallError(
                 "configuration", "could not verify loaded local models for fanout"
@@ -21634,10 +21601,7 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers, profile
         raise _fanout_no_eligible_models_error(plan, scope)
     resident_snapshot_known = False
     try:
-        resident_before = [
-            str(row.get("name")) for row in _get("/api/ps").get("models", [])
-            if row.get("name")
-        ]
+        resident_before = sorted(ollama_lifecycle.resident_models(_get("/v1/sonder/health")))
         resident_snapshot_known = True
     except Exception:
         # An unavailable snapshot is not evidence that no model was resident.
@@ -21678,7 +21642,7 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers, profile
 def _fanout_dispatch_residency_reason(limits, model):
     """Return a no-load fence refusal for a selected resident-only target."""
     return _dispatch_residency_reason_policy(
-        limits, model, fetch_resident=lambda: _get("/api/ps"),
+        limits, model, fetch_resident=lambda: _get("/v1/sonder/health"),
     )
 
 
@@ -21763,7 +21727,7 @@ def _fanout_synthesis_model(selector):
         # the selected *local* model only, after the loopback guard, rather
         # than treating absent tag metadata as proof it cannot generate.
         try:
-            details = _post("/api/show", {"model": model, "name": model}, timeout=30)
+            details = _get("/v1/models")
         except ModelCallError as exc:
             raise ModelCallError(
                 "configuration", "could not verify synth_model generative capability"
@@ -21816,7 +21780,7 @@ def _fanout_synthesis_generate(model, source_bundle):
         "keep_alive": _keep_alive_for(model),
     }
     out, _attempts = _post_model(
-        "/api/chat", payload, model=model, cloud=False,
+        "/v1/chat/completions", payload, model=model, cloud=False,
         timeout=FANOUT_SYNTHESIS_TIMEOUT_SECONDS, idempotent=True,
         local_only=True,
     )
@@ -21869,8 +21833,6 @@ def _execute_fanout_run(run_id):
                                        failure_class="configuration")
         return _fanout_receipt(run_id)
 
-    resident_at_start = {name.casefold() for name in limits["resident_before"]}
-    resident_snapshot_known = limits["resident_snapshot_known"]
     cloud_usage = {"tokens_in": 0, "tokens_out": 0}
     # This execution can resume a durable run containing terminal rows from
     # earlier workers. Keep activity scoped to the rows this worker actually
@@ -21957,13 +21919,7 @@ def _execute_fanout_run(run_id):
                 )
             return row, "failed", "", _fanout_safe_error(caught, question), int((time.monotonic() - started) * 1000), exc, metadata or {}
         finally:
-            if (
-                resident_snapshot_known
-                and not _is_cloud_model_name(model)
-                and model.casefold() not in resident_at_start
-            ):
-                with contextlib.suppress(Exception):
-                    _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+            pass
 
     def persist(result):
         nonlocal cloud_attempts
@@ -23044,9 +23000,7 @@ def _codegen_critic_generation(prompt: str, *, tier: str, model: str,
     try:
         return gen(prompt)
     finally:
-        if not cloud and _bridge_provider_for_tier(tier) is None:
-            with contextlib.suppress(Exception):
-                _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+        pass
 
 
 def _codegen_pinned_generation(prompt: str, *, model: str,
@@ -23057,23 +23011,14 @@ def _codegen_pinned_generation(prompt: str, *, model: str,
         model, "", 0.2, max(64, num_predict), num_ctx,
         think=False, single_send=True, timeout=timeout,
     )
-    try:
-        return gen(prompt)
-    finally:
-        with contextlib.suppress(Exception):
-            _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+    return gen(prompt)
 
 
 def _codegen_observed_generation(prompt: str, *, model: str, tier: str,
                                  num_predict: int, num_ctx: int) -> str:
     """Keep a typed provider result when durable memory refs entered a prompt."""
     gen = _make_tier_generate(tier, model, "", 0.2, max(64, num_predict), num_ctx)
-    try:
-        return gen(prompt)
-    finally:
-        if _bridge_provider_for_tier(tier) is None:
-            with contextlib.suppress(Exception):
-                _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+    return gen(prompt)
 
 
 @mcp.tool()
@@ -23483,37 +23428,19 @@ def unload(tier: str = "all") -> str:
             "ERROR: unload deferred while %d fleet model call(s) are active; "
             "cancel/wait for master_status() to reach zero, then retry."
         ) % active
-    requested = []
+    requested = list(targets)
     errors = []
-    for model in targets:
-        try:
-            response = _post("/api/generate", {"model": model, "keep_alive": 0})
-            if isinstance(response, dict) and response.get("error"):
-                errors.append("%s: %s" % (
-                    model, _safe_model_error_detail(response.get("error"), limit=200),
-                ))
-            else:
-                requested.append(model)
-        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-            errors.append("%s: %s" % (model, _transport_error_detail(exc)))
 
     resident = set()
     residency_error = ""
     try:
-        deadline = time.monotonic() + 5.0
-        while True:
-            residency_payload = _get("/api/ps")
-            if (
-                not isinstance(residency_payload, dict)
-                or not isinstance(residency_payload.get("models"), list)
-            ):
-                raise ValueError("invalid Ollama /api/ps response")
-            resident = ollama_lifecycle.resident_models(residency_payload)
-            if not any(model.casefold() in resident for model in requested):
-                break
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(0.25)
+        residency_payload = _get("/v1/sonder/health")
+        if (
+            not isinstance(residency_payload, dict)
+            or not isinstance(residency_payload.get("models"), list)
+        ):
+            raise ValueError("invalid Sonder Inference health response")
+        resident = ollama_lifecycle.resident_models(residency_payload)
     except (ModelCallError, urllib.error.URLError, TimeoutError, ValueError) as exc:
         residency_error = _transport_error_detail(exc)
     remaining = [model for model in requested if model.casefold() in resident]

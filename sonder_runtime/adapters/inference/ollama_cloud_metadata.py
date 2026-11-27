@@ -1,22 +1,15 @@
-"""Metadata-only Ollama client for cloud model stubs: ``/api/tags``, ``/api/show``, ``/api/pull``.
+"""Metadata-only Sonder Inference client for Ollama Cloud models via ``/v1/models``.
 
-There is deliberately no chat, generate or embed path here: nothing this
-client sends is a prompt, so it needs no cloud opt-in.  Every request goes
-through :func:`ollama_endpoint.open_url` with ``allow_remote=None``, so the
-configured remote-Ollama policy applies unchanged (no proxies, no redirects).
-
-``show`` turns any HTTP-level answer into a :class:`ProbeResult` through the
-pure classifier; only socket/timeout failures, policy refusals and malformed
-200 bodies raise :class:`OllamaTransportError`.  A pull is refused before
-any I/O unless the name passes the strict cloud stub grammar.
-
-Instances hold only configuration and are safe to share between threads.
+Local Ollama ``/api/tags``, ``/api/show`` and ``/api/pull`` stub pulls are
+retired; Ollama Cloud models are served directly by Sonder Inference's
+``ollama_cloud`` backend (RET-02). Nothing this client sends is a prompt.
 """
 
 from __future__ import annotations
 
 import http.client
 import json
+import os
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -26,8 +19,6 @@ import sonder_runtime.adapters.inference.ollama_endpoint as ollama_endpoint
 from sonder_runtime.domain.cloud_model_refresh import (
     ProbeResult,
     ProbeStatus,
-    classify_show,
-    is_cloud_stub_name,
     is_pulled_cloud_row,
     valid_model_name,
 )
@@ -40,7 +31,7 @@ Opener = Callable[..., Any]
 
 
 class OllamaTransportError(RuntimeError):
-    """Ollama could not be reached or answered unusably; ``reason`` is a bounded code."""
+    """Sonder Inference could not be reached or answered unusably; ``reason`` is a bounded code."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -48,7 +39,7 @@ class OllamaTransportError(RuntimeError):
 
 
 class OllamaPullFailed(RuntimeError):
-    """Ollama answered a pull with an error; ``reason`` is a bounded code."""
+    """Cloud stub pull failed or is retired; ``reason`` is a bounded code."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -59,20 +50,8 @@ def _decode_json(raw: bytes) -> object:
     return json.loads(raw.decode("utf-8"))
 
 
-def _error_payload(exc: urllib.error.HTTPError) -> object:
-    try:
-        raw = exc.read(MAX_ERROR_BODY)
-    except (OSError, http.client.HTTPException):
-        return None
-    try:
-        return _decode_json(raw)
-    except (ValueError, UnicodeDecodeError):
-        text = raw.decode("utf-8", errors="replace").strip()
-        return {"error": text} if text else None
-
-
 class OllamaCloudMetadata:
-    """Bounded metadata requests to one Ollama origin; immutable after construction."""
+    """Bounded metadata requests to Sonder Inference ``/v1/models``; immutable after construction."""
 
     def __init__(
         self,
@@ -91,7 +70,10 @@ class OllamaCloudMetadata:
 
     def _request(self, path: str, body: dict[str, Any] | None) -> urllib.request.Request:
         data = None if body is None else json.dumps(body).encode("utf-8")
-        headers = {} if body is None else {"Content-Type": "application/json"}
+        headers: dict[str, str] = {} if body is None else {"Content-Type": "application/json"}
+        api_key = os.environ.get("SONDER_INFERENCE_API_KEY", "").strip()
+        if api_key:
+            headers["Authorization"] = "Bearer " + api_key
         return urllib.request.Request(
             self._origin + path, data=data, headers=headers,
             method="GET" if body is None else "POST",
@@ -105,57 +87,69 @@ class OllamaCloudMetadata:
                 status = int(getattr(response, "status", None) or response.getcode() or 200)
         except urllib.error.HTTPError:
             raise
-        except ValueError as exc:  # the configured remote policy refused the origin
-            raise OllamaTransportError("ollama_policy_refused") from exc
+        except ValueError as exc:
+            raise OllamaTransportError("inference_policy_refused") from exc
         except (OSError, http.client.HTTPException) as exc:
-            raise OllamaTransportError("ollama_unreachable") from exc
+            raise OllamaTransportError("inference_unreachable") from exc
         if len(raw) > MAX_BODY:
-            raise OllamaTransportError("ollama_body_too_large")
+            raise OllamaTransportError("inference_body_too_large")
         try:
             return status, _decode_json(raw)
         except (ValueError, UnicodeDecodeError) as exc:
-            raise OllamaTransportError("ollama_malformed_body") from exc
+            raise OllamaTransportError("inference_malformed_body") from exc
+
+    def _model_rows(self, timeout: float) -> list[dict[str, Any]]:
+        try:
+            _status, payload = self._open(self._request("/v1/models", None), timeout)
+        except urllib.error.HTTPError as exc:
+            raise OllamaTransportError("inference_models_http_%d" % exc.code) from exc
+        rows = (payload.get("data") if isinstance(payload, dict) else None)
+        if not isinstance(rows, list):
+            raise OllamaTransportError("inference_malformed_body")
+        return [row for row in rows[:MAX_TAG_ROWS] if isinstance(row, dict)]
 
     def tags(self) -> tuple[dict[str, Any], ...]:
-        """Pulled cloud stubs as ``{"name", "remote_host"}`` rows (by name or ``remote_host``)."""
-        try:
-            _status, payload = self._open(self._request("/api/tags", None), self._tags_timeout)
-        except urllib.error.HTTPError as exc:
-            raise OllamaTransportError("ollama_tags_http_%d" % exc.code) from exc
-        rows = payload.get("models") if isinstance(payload, dict) else None
-        if not isinstance(rows, list):
-            raise OllamaTransportError("ollama_malformed_body")
+        """Cloud models advertised by Sonder Inference ``/v1/models``."""
         stubs: list[dict[str, Any]] = []
-        for row in rows[:MAX_TAG_ROWS]:
-            if isinstance(row, dict) and is_pulled_cloud_row(row):
-                stubs.append({
-                    "name": str(row.get("name") or row.get("model")),
-                    "remote_host": bool(row.get("remote_host")),
-                })
+        for row in self._model_rows(self._tags_timeout):
+            if is_pulled_cloud_row(row):
+                name = str(row.get("id") or row.get("name") or row.get("model") or "")
+                raw_sonder = row.get("sonder")
+                sonder_meta: dict[str, Any] = raw_sonder if isinstance(raw_sonder, dict) else {}
+                remote = bool(
+                    row.get("remote_host")
+                    or row.get("remote")
+                    or sonder_meta.get("remote")
+                    or str(sonder_meta.get("provider") or "").strip().lower() == "ollama_cloud"
+                )
+                stubs.append({"name": name, "remote_host": remote})
         return tuple(stubs)
 
     def show(self, model: str) -> ProbeResult:
-        """Probe one model; HTTP errors become a classified result, transport errors raise."""
+        """Check whether ``model`` is currently served by Sonder Inference ``/v1/models``."""
         if not valid_model_name(model):
             return ProbeResult(str(model)[:120], ProbeStatus.ERROR, detail="invalid_name")
-        request = self._request("/api/show", {"model": model, "name": model})
-        try:
-            status, payload = self._open(request, self._show_timeout)
-        except urllib.error.HTTPError as exc:
-            return classify_show(model, exc.code, _error_payload(exc))
-        return classify_show(model, status, payload)
+        rows = self._model_rows(self._show_timeout)
+        for row in rows:
+            row_id = str(row.get("id") or row.get("name") or row.get("model") or "")
+            if row_id == model:
+                raw_sonder = row.get("sonder")
+                sonder_meta: dict[str, Any] = raw_sonder if isinstance(raw_sonder, dict) else {}
+                ctx = sonder_meta.get("context_length")
+                ctx_int = ctx if type(ctx) is int and ctx > 0 else None
+                raw_caps = sonder_meta.get("capabilities")
+                caps = tuple(str(c) for c in raw_caps) if isinstance(raw_caps, list) else ()
+                return ProbeResult(
+                    model, ProbeStatus.LIVE, None,
+                    None, ctx_int, caps,
+                    str(sonder_meta.get("family")) if sonder_meta.get("family") else None,
+                    "ok",
+                )
+        return ProbeResult(model, ProbeStatus.NOT_FOUND, detail="not_found")
 
     def pull_stub(self, model: str) -> None:
-        """Pull one cloud stub (``stream: false``); refuses any other name before I/O."""
-        if not isinstance(model, str) or not is_cloud_stub_name(model):
-            raise ValueError("only cloud stub names (<family>:cloud or :<tag>-cloud) are pulled")
-        request = self._request("/api/pull", {"model": model, "stream": False})
-        try:
-            _status, payload = self._open(request, self._pull_timeout)
-        except urllib.error.HTTPError as exc:
-            raise OllamaPullFailed("pull_http_%d" % exc.code) from exc
-        if not isinstance(payload, dict) or "error" in payload:
-            raise OllamaPullFailed("pull_error")
+        """Local Ollama ``:cloud`` stub pulls are retired; configure models in SI ``ollama_cloud``."""
+        raise OllamaPullFailed("cloud_stub_pull_retired_configure_in_si_ollama_cloud")
 
 
 __all__ = [

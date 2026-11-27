@@ -1337,7 +1337,7 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
         show_payload: dict | None = None
         try:
             show_payload = read(
-                origin, "/api/show", method="POST", body={"model": model_name},
+                origin, "/v1/models", method="GET",
                 request_timeout=show_timeout,
             )
         except Exception:
@@ -1437,29 +1437,23 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
 
     def probe(origin: str) -> dict:
         try:
-            version = read(origin, "/api/version")
+            version = read(origin, "/v1/sonder/health")
         except urllib.error.HTTPError as error:
-            # Older compatible Ollama builds may lack the informational
-            # version route. Model inventory is the load-bearing capability.
             if int(error.code or 0) != 404:
                 raise
             version = {"version": "unknown"}
-        tags = read(origin, "/api/tags")
+        tags = read(origin, "/v1/models")
         models = _model_names(tags)
         tag_entries: dict[str, Mapping[str, Any]] = {}
-        raw_tags = tags.get("models") if isinstance(tags, Mapping) else None
+        raw_tags = (tags.get("data") or tags.get("models")) if isinstance(tags, Mapping) else None
         if isinstance(raw_tags, list):
             for entry in raw_tags:
                 if isinstance(entry, Mapping):
-                    name = str(entry.get("name") or entry.get("model") or "").strip()
+                    name = str(entry.get("id") or entry.get("name") or entry.get("model") or "").strip()
                     if name and name not in tag_entries:
                         tag_entries[name] = entry
 
-        ps_payload: Mapping[str, Any] | None = None
-        try:
-            ps_payload = read(origin, "/api/ps")
-        except Exception:
-            ps_payload = None
+        ps_payload: Mapping[str, Any] | None = version if isinstance(version, Mapping) else None
 
         loaded_models: list[str] = []
         ps_contexts: dict[str, int] = {}
@@ -2063,17 +2057,17 @@ class OllamaWorkerPool:
         if acquire is None:
             return lambda: None
         try:
-            return acquire("/api/tags", origin=origin)
+            return acquire("/v1/models", origin=origin)
         except gpu_admission_module.GpuAdmissionRefused as refused:
             raise CapabilityProbeDeferred(
                 "capability probe deferred: %s" % refused.refusal.reason.value) from None
 
     def _show_probe_permit(self, origin: str) -> Callable[[], None]:
-        """Take the PROBE admission for one background /api/show metadata fetch."""
+        """Take the PROBE admission for one background SI metadata fetch."""
         acquire = getattr(self.gpu_admission, "acquire_probe", None)
         if acquire is None:
             return lambda: None
-        return acquire("/api/show", origin=origin)
+        return acquire("/v1/models", origin=origin)
 
     @staticmethod
     def _retryable(error: BaseException) -> bool:
@@ -2825,7 +2819,7 @@ class OllamaWorkerPool:
         for endpoint in endpoints:
             try:
                 rows = model_inventory.inventory_rows(
-                    fetch_tags(endpoint.origin), "/api/tags"
+                    fetch_tags(endpoint.origin), "/v1/models"
                 )
                 names = [row.get("name") or row.get("model") for row in rows]
                 self.note_models(endpoint.origin, names)
