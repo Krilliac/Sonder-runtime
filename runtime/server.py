@@ -1940,13 +1940,9 @@ def _make_generate(
             total_tokens=reasoning_total_tokens,
         )
     if not cloud and (num_ctx is None or int(num_ctx or 0) <= 0):
-        # External hosted/non-SI rungs use the provider's default window; local
-        # Sonder Inference rungs size context from cached model metadata.
-        active = _provider_bridge.active_rung()
-        num_ctx = (
-            _auto_model_context(model)
-            if active is None or active.provider == "sonder_inference" else None
-        )
+        # A bridged rung dispatches through its typed gateway and uses the
+        # provider's default window unless the caller explicitly sized num_ctx.
+        num_ctx = _auto_model_context(model) if _provider_bridge.active_rung() is None else None
 
     def gen(prompt, history=None):
         gen.last_usage = {}
@@ -5386,7 +5382,9 @@ def _post(
         return OLLAMA_POOL.request_primary(send, model=model_hint, payload=payload, origin=pinned_origin)
     if local_only or not OLLAMA_POOL.enabled:
         return OLLAMA_POOL.request_primary(send, model=model_hint, payload=payload, origin=BASE)
-    if path in {"/v1/chat/completions", "/v1/completions", "/api/chat", "/api/generate"}:  # never fail behind our own prewarm
+    if path in {"/v1/chat/completions", "/v1/completions"} or (
+        path.startswith("/api/") and path[5:] in {"chat", "generate"}
+    ):  # never fail behind our own prewarm
         prewarm_gate.await_prewarm(model_hint, min(request_timeout, _PREWARM_LOAD_TIMEOUT))
     return OLLAMA_POOL.request(send, model=model_hint, idempotent=idempotent, payload=payload)
 
@@ -22345,7 +22343,7 @@ def _ensemble_targets(tiers: str = ""):
         if model in seen_models:
             continue
         seen_models.add(model)
-        targets.append((label if _bridge_provider_for_tier(label) not in (None, "sonder_inference") else tier, model))
+        targets.append((label if _bridge_provider_for_tier(label) is not None else tier, model))
     return targets[:ENSEMBLE_MAX_MODELS], unknown
 
 

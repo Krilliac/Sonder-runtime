@@ -153,8 +153,8 @@ def _thinking_advertised(graph, provider):
 
 def make_generate(factory, tier, args, options, *, graph, consent):
     options = dict(options)
-    is_cloud = bool(options.get("cloud")) or _is_cloud_tier_name(tier)
-    provider = None if is_cloud else legacy_chat_bridge.provider_for_tier(tier, False, graph)
+    is_cloud_tier = _is_cloud_tier_name(tier)
+    provider = None if is_cloud_tier else legacy_chat_bridge.provider_for_tier(tier, False, graph)
     queue = options.pop("queue", True)
     local = options.pop("local_only", False)
     kind = options.pop("generation_kind", None)
@@ -172,7 +172,7 @@ def make_generate(factory, tier, args, options, *, graph, consent):
                 apply_sampling_defaults(
                     tuning, str(args[0]), thinking=tuning.get("think", True), env=env, profile="decision",
                 )
-    if is_cloud:
+    if is_cloud_tier:
         options["cloud"] = True
     elif provider is not None:
         options["cloud"] = False  # the binding, never the model's spelling, owns transport

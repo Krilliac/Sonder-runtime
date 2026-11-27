@@ -374,10 +374,10 @@ def test_http_chat_provider_outage_returns_503(monkeypatch, no_ollama):
 
 
 def test_strict_sonder_alias_stays_on_ollama_like_a2a(monkeypatch):
-    """Under RET-05 the ``sonder`` alias routes to ``sonder_inference``, not local Ollama."""
+    """A resolved ``sonder`` alias stays on the local default path rather than bridging to openai_compatible."""
     _install(monkeypatch, SimpleNamespace(provider_bindings=_bindings(),
                                           model_gateway=OllamaMustNotBeUsed()))
-    assert server._bridge_provider_for_tier("sonder") == "sonder_inference"
+    assert server._bridge_provider_for_tier("sonder") is None
     assert server._bridge_provider_for_tier("general") == "openai_compatible"
 
 
