@@ -486,6 +486,8 @@ def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
     config = config if config is not None else _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Sonder Inference endpoint")
+    if getattr(getattr(config, "membership", None), "mode", None) == "external":
+        return _skip("deferred: external membership requires explicit typed pool refresh")
     url = _si_url_from_config(config)
     try:
         import json
@@ -533,6 +535,9 @@ def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
 
 def _check_ollama_workers(*, timeout: float = 5.0, config=None) -> dict:
     """Report Sonder Inference private worker readiness."""
+    cfg = config if config is not None else _load_config_or_none()
+    if getattr(getattr(cfg, "membership", None), "mode", None) == "external":
+        return _skip("deferred: external membership requires explicit typed pool refresh")
     try:
         from sonder_runtime.adapters.inference.sonder_inference_gateway import (
             SonderInferenceGateway,
@@ -559,6 +564,8 @@ def _check_ollama_residency(*, timeout: float = 5.0, config=None) -> dict:
     config = config if config is not None else _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Sonder Inference residency check")
+    if getattr(getattr(config, "membership", None), "mode", None) == "external":
+        return _skip("deferred: external membership requires explicit typed pool refresh")
     url = _si_url_from_config(config)
     try:
         import json

@@ -21767,7 +21767,13 @@ def _fanout_synthesis_model(selector):
             raise ModelCallError(
                 "configuration", "could not verify synth_model generative capability"
             ) from exc
-        if not isinstance(details, dict) or not _fanout_declares_generative_capability(details):
+        resolved_details = details
+        if isinstance(details, dict) and not _fanout_declares_generative_capability(details):
+            for _row_name, _row in _installed_catalog_records(details):
+                if _runtime_model_is_installed(model, (_row_name,)):
+                    resolved_details = _row
+                    break
+        if not isinstance(resolved_details, dict) or not _fanout_declares_generative_capability(resolved_details):
             raise ModelCallError("configuration", "synth_model must declare a generative chat capability")
     return model
 
@@ -22337,7 +22343,7 @@ def _ensemble_targets(tiers: str = ""):
         if model in seen_models:
             continue
         seen_models.add(model)
-        targets.append((label if _bridge_provider_for_tier(label) else tier, model))
+        targets.append((label if _bridge_provider_for_tier(label) not in (None, "sonder_inference") else tier, model))
     return targets[:ENSEMBLE_MAX_MODELS], unknown
 
 
@@ -22451,7 +22457,7 @@ def ensemble_answer(
     except (TypeError, ValueError):
         requested_ctx = 0
     poll_num_ctx = max(1024, requested_ctx) if requested_ctx > 0 else 0
-    lookup = _reference_lookup_multi.ensemble(prompt, mode, targets, num_predict, functools.partial(_make_tier_generate, text_only=True), lambda tier, model: poll_num_ctx or (0 if _is_cloud_tier(tier, model) or _bridge_provider_for_tier(tier) else _auto_model_context(model)))
+    lookup = _reference_lookup_multi.ensemble(prompt, mode, targets, num_predict, functools.partial(_make_tier_generate, text_only=True), lambda tier, model: poll_num_ctx or (0 if _is_cloud_tier(tier, model) or _bridge_provider_for_tier(tier) not in (None, "sonder_inference") else _auto_model_context(model)))
     answers, failures = _pool_wiring.execute_ensemble_poll(
         targets=targets, pool=OLLAMA_POOL, default_origin=BASE, is_cloud_fn=_is_cloud_tier,
         bridge_provider_fn=_bridge_provider_for_tier, pin_origin_fn=_pinned_ollama_origin, lookup=lookup,
@@ -22502,7 +22508,7 @@ def ensemble_answer(
     )
     try:
         synth_num_ctx = poll_num_ctx or (
-            0 if _is_cloud_model_name(synth_model) or _bridge_provider_for_tier(synth_label)
+            0 if _is_cloud_model_name(synth_model) or _bridge_provider_for_tier(synth_label) not in (None, "sonder_inference")
             else _auto_model_context(synth_model)
         )
         gen = _make_tier_generate(
@@ -23030,7 +23036,7 @@ def _codegen_critic_generation(prompt: str, *, tier: str, model: str,
     cloud = _is_cloud_tier(tier, model)
     gen = _make_tier_generate(
         tier, model, "", 0.2, max(64, min(int(num_predict), 512)),
-        0 if cloud or _bridge_provider_for_tier(tier) else num_ctx if num_ctx is not None else _auto_model_context(model),
+        0 if cloud or _bridge_provider_for_tier(tier) not in (None, "sonder_inference") else num_ctx if num_ctx is not None else _auto_model_context(model),
         cloud=cloud, think=False if single_send else None,
         single_send=single_send, timeout=timeout,
     )

@@ -84,7 +84,7 @@ def test_configure_model_changes_future_embedding_provenance_without_network(
         state = e.configure_model("BGE-M3")
 
         assert state["model"] == "bge-m3:latest"
-        assert state["revision"].startswith("ollama-manifest-sha256:")
+        assert state["revision"] == ""  # local Ollama manifest hashing retired; SI identity owns digests
         assert state["expected_dimension"] is None
     finally:
         e.EMBED_MODEL, e.EMBED_IDENTITY, e.EMBED_REVISION, e.EXPECTED_DIMENSION = original
@@ -93,21 +93,8 @@ def test_configure_model_changes_future_embedding_provenance_without_network(
 
 
 def test_local_manifest_revision_is_stable_and_changes_with_model_bytes(tmp_path):
-    manifest = (
-        tmp_path / "manifests" / "registry.ollama.ai" / "library"
-        / "nomic-embed-text" / "latest"
-    )
-    manifest.parent.mkdir(parents=True)
-    manifest.write_bytes(b'{"config":"sha256:first"}')
-
-    first = e.local_manifest_revision("nomic-embed-text", tmp_path)
-    same = e.local_manifest_revision("nomic-embed-text:latest", tmp_path)
-    manifest.write_bytes(b'{"config":"sha256:second"}')
-    second = e.local_manifest_revision("nomic-embed-text", tmp_path)
-
-    assert first.startswith("ollama-manifest-sha256:")
-    assert same == first
-    assert second != first
+    # Under RET-05 local Ollama manifest hashing is retired; SI /v1/sonder/identity owns digests.
+    assert e.local_manifest_revision("nomic-embed-text", tmp_path) == ""
 
 
 def test_local_manifest_revision_rejects_unsafe_model_path(tmp_path):
@@ -117,86 +104,47 @@ def test_local_manifest_revision_rejects_unsafe_model_path(tmp_path):
 def test_runtime_revision_refresh_observes_local_manifest_retag(
     monkeypatch, tmp_path,
 ):
-    manifest = (
-        tmp_path / "manifests" / "registry.ollama.ai" / "library"
-        / "nomic-embed-text" / "latest"
-    )
-    manifest.parent.mkdir(parents=True)
     monkeypatch.delenv("SONDER_EMBED_REVISION", raising=False)
-    monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path))
     monkeypatch.setattr(e, "EMBED_MODEL", "nomic-embed-text")
-    manifest.write_bytes(b"first")
-    first = e.refresh_runtime_revision(models_root=tmp_path)
-    manifest.write_bytes(b"second")
-    second = e.refresh_runtime_revision(models_root=tmp_path)
-
-    assert second != first
+    assert e.refresh_runtime_revision(models_root=tmp_path) == ""
 
 
 def test_manifest_style_env_revision_does_not_hide_live_store_drift(
     monkeypatch, tmp_path,
 ):
-    manifest = (
-        tmp_path / "manifests" / "registry.ollama.ai" / "library"
-        / "nomic-embed-text" / "latest"
-    )
-    manifest.parent.mkdir(parents=True)
-    manifest.write_bytes(b"first")
-    first = e.local_manifest_revision("nomic-embed-text", tmp_path)
-    monkeypatch.setenv("SONDER_EMBED_REVISION", first)
-    manifest.write_bytes(b"second")
-
-    assert e.current_revision(models_root=tmp_path) != first
+    monkeypatch.setenv("SONDER_EMBED_REVISION", "ollama-manifest-sha256:" + "a" * 64)
+    assert e.current_revision(models_root=tmp_path) == "ollama-manifest-sha256:" + "a" * 64
 
 
 def test_serving_digest_is_authoritative_over_loopback_filesystem(
     monkeypatch, tmp_path,
 ):
-    manifest = (
-        tmp_path / "manifests" / "registry.ollama.ai" / "library"
-        / "nomic-embed-text" / "latest"
-    )
-    manifest.parent.mkdir(parents=True)
-    manifest.write_bytes(b"filesystem-a")
     served_digest = "b" * 64
 
     def fake_urlopen(_request, timeout=0.5):
         return FakeResponse(json.dumps({
-            "models": [{
-                "name": e.EMBED_IDENTITY,
-                "digest": served_digest,
-            }],
+            "backend_identity": {"model_digest": served_digest},
         }).encode("utf-8"))
 
     import json
     monkeypatch.delenv("SONDER_EMBED_REVISION", raising=False)
-    monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path))
     monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_urlopen)
 
-    assert e.current_revision(base="http://127.0.0.1:11434") == (
-        "ollama-manifest-sha256:" + served_digest
+    assert e.current_revision(base="http://127.0.0.1:11437") == (
+        "si-model-sha256:" + served_digest
     )
 
 
-_REMOTE_EMBED_BASE = "https://example.test:11434"
+_REMOTE_EMBED_BASE = "https://example.test:11437"
 # One fenced embed: read the serving digest, request the vector, read it again.
 _FENCED_EMBED = [
-    _REMOTE_EMBED_BASE + "/api/tags",
-    _REMOTE_EMBED_BASE + "/api/embeddings",
-    _REMOTE_EMBED_BASE + "/api/tags",
+    _REMOTE_EMBED_BASE + "/v1/sonder/identity?model=nomic-embed-text%3Alatest",
+    _REMOTE_EMBED_BASE + "/v1/embeddings",
+    _REMOTE_EMBED_BASE + "/v1/sonder/identity?model=nomic-embed-text%3Alatest",
 ]
 
 
 def _remote_embedder(monkeypatch, state):
-    """Serve the embedder's digest from ``state``; return the URLs requested.
-
-    The origin has to be one the endpoint policy accepts. A plain-HTTP remote
-    origin is refused before any request is made, so a test built on one gets
-    ``None`` from ``embed`` without reaching the revision check it is meant to
-    exercise. These tests used ``http://example.test`` and passed that way,
-    with or without the check, from the HTTPS requirement (#344) until this
-    was found; asserting the requested URLs keeps them from going quiet again.
-    """
     import json
 
     calls = []
@@ -204,18 +152,15 @@ def _remote_embedder(monkeypatch, state):
     def fake_urlopen(request, timeout=30):
         url = request if isinstance(request, str) else request.full_url
         calls.append(url)
-        if url.endswith("/api/tags"):
+        if "/v1/sonder/identity" in url:
             return FakeResponse(json.dumps({
-                "models": [{
-                    "name": e.EMBED_IDENTITY,
-                    "digest": state["digest"],
-                }],
+                "backend_identity": {"model_digest": state["digest"]},
             }).encode("utf-8"))
         state["digest"] = state.get("digest_after_embed", state["digest"])
-        return FakeResponse(b'{"embedding": [1.0, 0.0]}')
+        return FakeResponse(b'{"data": [{"index": 0, "embedding": [1.0, 0.0]}]}')
 
     monkeypatch.delenv("SONDER_EMBED_REVISION", raising=False)
-    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_INFERENCE", "1")
     monkeypatch.setattr(e, "BASE", _REMOTE_EMBED_BASE)
     monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_urlopen)
     return calls
@@ -227,7 +172,7 @@ def test_embed_returns_the_vector_when_the_serving_digest_holds(monkeypatch):
     vector = e.embed("task")
 
     assert vector == [1.0, 0.0]
-    assert e.provenance(vector)["revision"] == "ollama-manifest-sha256:" + "a" * 64
+    assert e.provenance(vector)["revision"] == "si-model-sha256:" + "a" * 64
     assert calls == _FENCED_EMBED
 
 
@@ -246,12 +191,12 @@ def test_provenance_stays_bound_after_another_revision_refresh(monkeypatch):
     _remote_embedder(monkeypatch, state)
     vector = e.embed("task")
     bound = e.provenance(vector)["revision"]
-    assert bound == "ollama-manifest-sha256:" + "a" * 64
+    assert bound == "si-model-sha256:" + "a" * 64
     state["digest"] = "b" * 64
     e.refresh_runtime_revision()
 
     assert e.provenance(vector)["revision"] == bound
-    assert e.EMBED_REVISION == "ollama-manifest-sha256:" + "b" * 64
+    assert e.EMBED_REVISION == "si-model-sha256:" + "b" * 64
 
 
 def test_valid_vector_soft_rejects_values_outside_float32():
@@ -289,21 +234,21 @@ def test_explicit_bind_all_embedding_base_is_dialed_as_loopback(monkeypatch):
 
     def fake_open(request, timeout=30):
         requested.append(request.full_url if hasattr(request, "full_url") else request)
-        if requested[-1].endswith("/api/tags"):
-            return FakeResponse(b'{"models": []}')
-        return FakeResponse(b'{"embedding": [0.1, 0.2]}')
+        if "/v1/sonder/identity" in requested[-1]:
+            return FakeResponse(b'{}')
+        return FakeResponse(b'{"data": [{"index": 0, "embedding": [0.1, 0.2]}]}')
 
     monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_open)
-    vector = e.embed("task", base="http://0.0.0.0:11434")
+    vector = e.embed("task", base="http://0.0.0.0:11437")
 
     assert vector is not None
     assert requested
-    assert all(url.startswith("http://127.0.0.1:11434/") for url in requested)
+    assert all(url.startswith("http://127.0.0.1:11437/") for url in requested)
 
 
 def test_embed_success_path(monkeypatch):
     def mock_urlopen(*a, **k):
-        return FakeResponse(b'{"embedding": [0.1, 0.2, 0.3]}')
+        return FakeResponse(b'{"data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}]}')
 
     monkeypatch.setattr(e.ollama_endpoint, "open_url", mock_urlopen)
     result = e.embed("hi")
@@ -324,11 +269,6 @@ def test_embed_non_dict_json_returns_none(monkeypatch):
 
 
 def test_embed_truncates_overlength_prompt_to_context_budget(monkeypatch):
-    # Regression (2026-07-13): nomic-embed-text has a 2048-token context and
-    # Ollama returns HTTP 500 "input length exceeds the context length" (which
-    # embed() soft-fails to None) rather than truncating. That made any long
-    # task permanently un-embeddable -- 24 interactions could never be backfilled
-    # and were re-selected as stale forever. embed() must cap the prompt itself.
     import json
 
     sent = {}
@@ -336,19 +276,19 @@ def test_embed_truncates_overlength_prompt_to_context_budget(monkeypatch):
     def fake_open_url(request, timeout=30, **kwargs):
         sent["body"] = json.loads(request.data.decode("utf-8"))
         dim = e.expected_dimension()
-        return FakeResponse(json.dumps({"embedding": [0.1] * dim}).encode("utf-8"))
+        return FakeResponse(json.dumps({"data": [{"index": 0, "embedding": [0.1] * dim}]}).encode("utf-8"))
 
     monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_open_url)
-    monkeypatch.setattr(e.ollama_endpoint, "configured_origin", lambda *a, **k: "http://127.0.0.1:11434")
+    monkeypatch.setattr(e.ollama_endpoint, "configured_origin", lambda *a, **k: "http://127.0.0.1:11437")
     monkeypatch.setattr(e, "current_revision", lambda **k: "rev-test")
     monkeypatch.setattr(e, "refresh_runtime_revision", lambda **k: "rev-test")
     monkeypatch.setattr(e, "EMBED_MAX_CHARS", 4000)
 
     huge = "A" * 9000
-    vec = e.embed(huge, base="http://127.0.0.1:11434", model="nomic-embed-text")
+    vec = e.embed(huge, base="http://127.0.0.1:11437", model="nomic-embed-text")
 
     assert vec is not None  # would have been None (HTTP 500) without truncation
-    assert len(sent["body"]["prompt"]) == 4000  # capped, not the full 9000
+    assert len(sent["body"]["input"]) == 4000  # capped, not the full 9000
 
 
 def test_embed_leaves_short_prompt_untouched(monkeypatch):
@@ -359,17 +299,17 @@ def test_embed_leaves_short_prompt_untouched(monkeypatch):
     def fake_open_url(request, timeout=30, **kwargs):
         sent["body"] = json.loads(request.data.decode("utf-8"))
         dim = e.expected_dimension()
-        return FakeResponse(json.dumps({"embedding": [0.1] * dim}).encode("utf-8"))
+        return FakeResponse(json.dumps({"data": [{"index": 0, "embedding": [0.1] * dim}]}).encode("utf-8"))
 
     monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_open_url)
-    monkeypatch.setattr(e.ollama_endpoint, "configured_origin", lambda *a, **k: "http://127.0.0.1:11434")
+    monkeypatch.setattr(e.ollama_endpoint, "configured_origin", lambda *a, **k: "http://127.0.0.1:11437")
     monkeypatch.setattr(e, "current_revision", lambda **k: "rev-test")
     monkeypatch.setattr(e, "refresh_runtime_revision", lambda **k: "rev-test")
     monkeypatch.setattr(e, "EMBED_MAX_CHARS", 4000)
 
-    e.embed("short prompt", base="http://127.0.0.1:11434", model="nomic-embed-text")
+    e.embed("short prompt", base="http://127.0.0.1:11437", model="nomic-embed-text")
 
-    assert sent["body"]["prompt"] == "short prompt"
+    assert sent["body"]["input"] == "short prompt"
 
 
 def test_local_manifest_revision_without_user_home_uses_only_configured_models(monkeypatch, tmp_path):
@@ -381,11 +321,4 @@ def test_local_manifest_revision_without_user_home_uses_only_configured_models(m
     monkeypatch.setattr(Path, "home", no_home)
     monkeypatch.delenv("OLLAMA_MODELS", raising=False)
     assert e.local_manifest_revision("nomic-embed-text") == ""
-
-    manifest = tmp_path / "manifests" / "registry.ollama.ai" / "library" / "nomic-embed-text" / "latest"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_bytes(b'{"config":"sha256:configured"}')
-    monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path))
-    expected = e.local_manifest_revision("nomic-embed-text", tmp_path)
-    assert expected.startswith("ollama-manifest-sha256:")
-    assert e.local_manifest_revision("nomic-embed-text") == expected
+    assert e.local_manifest_revision("nomic-embed-text", tmp_path) == ""

@@ -19,13 +19,13 @@ from sonder_runtime.adapters.inference.ollama_pool import OllamaWorkerPool, Work
 from sonder_runtime.adapters.model_transport import ModelCallError
 from sonder_runtime.application.ports.inference_membership import MembershipSourceLimits
 from sonder_runtime.domain.inference_membership import MembershipSnapshot
-from sonder_runtime.platform.config import OllamaConfig
+from sonder_runtime.platform.config import InferenceConfig, OllamaConfig
 from sonder_runtime.platform.gpu_admission_config import GpuAdmissionConfig
 
 NOW = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
 REMOTE = "https://worker.example:11434"
 REPLACEMENT = "https://replacement.example:11434"
-LOCAL = "http://127.0.0.1:11434"
+LOCAL = "http://127.0.0.1:11437"
 
 
 def test_application_composition_reexports_the_exact_independent_graph_type():
@@ -590,7 +590,9 @@ def test_entrypoint_legacy_requests_share_typed_membership_admission(
     from sonder_runtime.interfaces.repl import repl
     from sonder_runtime.platform.config import SonderConfig, StateConfig
 
-    config = SonderConfig(state=StateConfig(home=str(tmp_path)), ollama=OllamaConfig(
+    config = SonderConfig(state=StateConfig(home=str(tmp_path)),
+        inference=InferenceConfig(url=REMOTE if primary_remote else LOCAL, allow_remote=True),
+        ollama=OllamaConfig(
         url=REMOTE if primary_remote else LOCAL, workers=() if primary_remote else (REMOTE,),
         allow_remote=True, worker_capability_ttl_seconds=60),
         gpu_admission=GpuAdmissionConfig(mode="off"))
@@ -704,9 +706,9 @@ def test_executable_root_refuses_unbound_remote_membership_in_isolated_process(t
                        SONDER_FLEET_DB=str(tmp_path / "fleet.db"), SONDER_FLEET_HEARTBEAT="0",
                        SONDER_ALLOW_CLOUD="0", SONDER_WEB_TOOLS="0", SONDER_LIVE_RELOAD="0",
                        SONDER_GPU_ADMISSION="off", SONDER_EMBED_CACHE="0", SONDER_FALLBACK_LOCAL="0", SONDER_HOST="127.0.0.1",
-                       OLLAMA_HOST=REMOTE if transport_configuration == "remote_primary" else LOCAL,
+                       SONDER_INFERENCE_BASE_URL=REMOTE if transport_configuration == "remote_primary" else LOCAL,
                        SONDER_OLLAMA_WORKERS=REMOTE if transport_configuration == "remote_worker" else "",
-                       SONDER_ALLOW_REMOTE_OLLAMA="1" if transport_configuration.startswith("remote_") or configuration.startswith("typed_") else "0")
+                       SONDER_ALLOW_REMOTE_INFERENCE="1" if transport_configuration.startswith("remote_") or configuration.startswith("typed_") else "0")
     # Run the executable branch in a fresh interpreter: no already-imported
     # server module, typed pool cache, or lab acknowledgement can hide its path.
     script = r'''
@@ -742,23 +744,27 @@ def finish_with_impostor(self, module_name, source_path, namespace=None):
                                                   inference_membership=SimpleNamespace(_pool=pool))
     elif mode.startswith("typed_"):
         from sonder_runtime.bootstrap.app import build_application
-        from sonder_runtime.platform.config import SonderConfig, OllamaConfig, StateConfig
+        from sonder_runtime.platform.config import InferenceConfig, SonderConfig, OllamaConfig, StateConfig
         from sonder_runtime.platform.gpu_admission_config import GpuAdmissionConfig
-        config = SonderConfig(state=StateConfig(home=os.environ["SONDER_HOME"]), ollama=OllamaConfig(
-            url=os.environ["OLLAMA_HOST"],
+        config = SonderConfig(state=StateConfig(home=os.environ["SONDER_HOME"]),
+            inference=InferenceConfig(url=os.environ["SONDER_INFERENCE_BASE_URL"], allow_remote=True),
+            ollama=OllamaConfig(
+            url=os.environ["SONDER_INFERENCE_BASE_URL"],
             workers=tuple(filter(None, os.environ["SONDER_OLLAMA_WORKERS"].split(","))),
             allow_remote=True, worker_capability_ttl_seconds=60),
             gpu_admission=GpuAdmissionConfig(mode="off"))
         application = build_application(config=config)
         if mode in ("typed_local_config_remote_pool", "typed_remote_config_local_pool"):
-            other = "http://127.0.0.1:11434" if mode == "typed_local_config_remote_pool" else "https://worker.example:11434"
-            application = replace(application, config=replace(config, ollama=replace(config.ollama, url=other)))
+            other = "http://127.0.0.1:11437" if mode == "typed_local_config_remote_pool" else "https://worker.example:11434"
+            application = replace(application, config=replace(config,
+                inference=replace(config.inference, url=other),
+                ollama=replace(config.ollama, url=other)))
         elif mode == "typed_source_impostor":
             source = application.inference_membership._source
             application.inference_membership._source = SimpleNamespace(**source.__dict__)
         namespace["_APP_GRAPH"] = application
         namespace["OLLAMA_POOL"] = application.inference_pool
-        namespace["BASE"] = application.config.ollama.url
+        namespace["BASE"] = application.config.inference.url
         assert application.inference_membership._thread is None
         assert "server" not in sys.modules
     return value
@@ -842,7 +848,9 @@ def test_legacy_membership_binding_rejects_impostors_before_adapter_or_pool_call
 
     origin = LOCAL if local_configuration else REMOTE
     application = bootstrap.build_application(config=SonderConfig(
-        state=StateConfig(home=str(tmp_path)), ollama=OllamaConfig(url=origin, allow_remote=True)))
+        state=StateConfig(home=str(tmp_path)),
+        inference=InferenceConfig(url=origin, allow_remote=True),
+        ollama=OllamaConfig(url=origin, allow_remote=True)))
     pool, control = application.inference_pool, application.inference_membership
     proposed = application
 
@@ -964,7 +972,9 @@ def test_owned_default_binding_rejects_structural_inference_before_install(monke
     from sonder_runtime.platform.config import SonderConfig, StateConfig
 
     application = bootstrap.build_application(config=SonderConfig(
-        state=StateConfig(home=str(tmp_path)), ollama=OllamaConfig(url=REMOTE, allow_remote=True)))
+        state=StateConfig(home=str(tmp_path)),
+        inference=InferenceConfig(url=REMOTE, allow_remote=True),
+        ollama=OllamaConfig(url=REMOTE, allow_remote=True)))
     pool, control = application.inference_pool, application.inference_membership
     if impostor == "controller_duck":
         proposed = replace(application, inference_membership=SimpleNamespace(_pool=pool))
@@ -1000,12 +1010,16 @@ def test_binding_requires_configured_origins_and_exact_static_source(monkeypatch
 
     origin = LOCAL if mismatch == "remote_config_local_pool" else REMOTE
     application = bootstrap.build_application(config=SonderConfig(
-        state=StateConfig(home=str(tmp_path)), ollama=OllamaConfig(url=origin, allow_remote=True)))
+        state=StateConfig(home=str(tmp_path)),
+        inference=InferenceConfig(url=origin, allow_remote=True),
+        ollama=OllamaConfig(url=origin, allow_remote=True)))
     pool, control = application.inference_pool, application.inference_membership
     proposed = application
     if mismatch.endswith("_pool"):
-        proposed = replace(application, config=replace(application.config, ollama=OllamaConfig(
-            url=REMOTE if origin == LOCAL else LOCAL, allow_remote=True)))
+        other = REMOTE if origin == LOCAL else LOCAL
+        proposed = replace(application, config=replace(application.config,
+            inference=InferenceConfig(url=other, allow_remote=True),
+            ollama=OllamaConfig(url=other, allow_remote=True)))
     elif mismatch == "worker_config":
         proposed = replace(application, config=replace(application.config,
             ollama=replace(application.config.ollama, workers=(LOCAL,))))
@@ -1068,6 +1082,7 @@ def test_configured_origin_binding_survives_expired_empty_live_roster(monkeypatc
     from sonder_runtime.platform.config import SonderConfig, StateConfig
 
     application = bootstrap.build_application(config=SonderConfig(state=StateConfig(home=str(tmp_path)),
+        inference=InferenceConfig(url="https://WORKER.example:11434/", allow_remote=True),
         ollama=OllamaConfig(url="https://WORKER.example:11434/", allow_remote=True,
                             worker_capability_ttl_seconds=60)))
     pool, control = application.inference_pool, application.inference_membership

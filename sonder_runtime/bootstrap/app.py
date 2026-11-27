@@ -568,7 +568,7 @@ def build_application(
         logger.debug(f"configuring ollama pool: workers={len(config.ollama.workers)}, allow_remote={config.ollama.allow_remote}")
         ollama_pool.configure_typed_workers(
             config.ollama.workers,
-            allow_remote=config.ollama.allow_remote,
+            allow_remote=bool(config.inference.allow_remote or config.ollama.allow_remote),
             trusted_origins=config.ollama.trusted_origins,
             failure_threshold=config.ollama.worker_failure_threshold,
             cooldown_seconds=config.ollama.worker_cooldown_seconds,

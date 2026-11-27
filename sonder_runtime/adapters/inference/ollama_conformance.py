@@ -115,7 +115,7 @@ class OllamaConformanceProbe:
             raise ValueError("Sonder Inference identity is unavailable for model %r" % self.model)
         return BackendIdentity(
             backend=str(raw.get("backend") or "llamacpp"),
-            model=str(raw.get("model") or self.model),
+            model=self.model,
             model_digest=str(raw.get("model_digest") or "").lower(),
             quantization=str(raw.get("quantization") or ""),
             backend_version=str(raw.get("backend_version") or ""),
@@ -239,7 +239,7 @@ class OllamaConformanceProbe:
                                         cases=PROTOCOL_CASES,
                                         propagate=(gpu_admission.GpuAdmissionRefused,))
         self._check_identity()
-        return BackendConformanceRecord("ollama", self.model, protocol.checked_at,
+        return BackendConformanceRecord(self._identity.backend, self.model, protocol.checked_at,
                                         (chat, *protocol.results), probe_version=3,
                                         synthetic=False, identity=self._identity)
 

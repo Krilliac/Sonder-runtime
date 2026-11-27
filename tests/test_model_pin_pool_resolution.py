@@ -445,7 +445,7 @@ def test_real_pool_member_tags_forwards_its_timeout_to_open_url(monkeypatch):
     monkeypatch.setattr(server, "OLLAMA_POOL", pool)
     monkeypatch.setattr(server, "_read_ollama_response_bytes", lambda _r: b'{"models": []}')
     assert server._pool_member_tags(LOCAL) == {"models": []}
-    assert seen == {"url": LOCAL + "/api/tags", "timeout": 15}
+    assert seen == {"url": LOCAL + "/v1/models", "timeout": 15}
     server._pool_member_tags(LOCAL, timeout=3)
     assert seen["timeout"] == 3
 

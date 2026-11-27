@@ -605,7 +605,7 @@ def test_loaded_local_chat_profile_selects_only_resident_chat_models(monkeypatch
     ])
     monkeypatch.setattr(server, "_get", lambda path: (
         {"models": [{"name": "resident-chat"}, {"name": "resident-embed"}]}
-        if path == "/api/ps" else (_ for _ in ()).throw(AssertionError(path))
+        if path == "/v1/sonder/health" else (_ for _ in ()).throw(AssertionError(path))
     ))
     monkeypatch.setattr(server.fanout_store, "get_model_health", lambda _name: None)
 
@@ -644,9 +644,9 @@ def test_loaded_local_chat_profile_rechecks_residency_before_provider_call(
 
     def fake_get(path):
         nonlocal ps_calls
-        if path == "/api/tags":
+        if path == "/v1/models":
             return {"models": [{"name": "resident-chat", "capabilities": ["chat"]}]}
-        assert path == "/api/ps"
+        assert path == "/v1/sonder/health"
         ps_calls += 1
         # Planning and receipt creation both observe residency.  The execution
         # fence sees a later absent/unavailable state before it can load.
@@ -677,9 +677,9 @@ def test_loaded_local_chat_profile_rechecks_residency_before_provider_call(
 
 def test_model_fanout_reports_answer_failure_and_elapsed_metrics(monkeypatch):
     def fake_get(path):
-        if path == "/api/tags":
+        if path == "/v1/models":
             return {"models": [{"name": "local-a"}, {"name": "remote:cloud"}]}
-        assert path == "/api/ps"
+        assert path == "/v1/sonder/health"
         return {"models": [{"name": "local-a"}]}
 
     def fake_make(model, *_args, **_kwargs):
@@ -777,7 +777,7 @@ def test_fanout_activity_counts_cloud_worker_calls_once(monkeypatch, tmp_path):
     monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     monkeypatch.setattr(server, "_get", lambda path: (
         {"models": [{"name": "local-a"}, {"name": "remote:cloud"}]}
-        if path == "/api/tags" else {"models": []}
+        if path == "/v1/models" else {"models": []}
     ))
     monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
 
@@ -823,7 +823,7 @@ def test_fanout_activity_resume_counts_only_current_cloud_attempts(monkeypatch, 
     monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     monkeypatch.setattr(server, "_get", lambda path: (
         {"models": [{"name": "cloud-a:cloud"}, {"name": "cloud-b:cloud"}]}
-        if path == "/api/tags" else {"models": []}
+        if path == "/v1/models" else {"models": []}
     ))
     monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
     attempts = {"cloud-a:cloud": 0, "cloud-b:cloud": 0}
@@ -855,7 +855,7 @@ def test_fanout_activity_resume_counts_only_current_cloud_attempts(monkeypatch, 
 def test_model_fanout_persists_private_usage_counts_without_reasoning_text(monkeypatch, tmp_path):
     database = _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "local-a"}]} if path == "/v1/models" else {"models": []}
     ))
 
     def fake_make(*_args, **_kwargs):
@@ -900,7 +900,7 @@ def test_model_fanout_persists_private_usage_counts_without_reasoning_text(monke
 def test_model_fanout_usage_metadata_defaults_when_generator_has_none(monkeypatch, tmp_path):
     _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "local-a"}]} if path == "/v1/models" else {"models": []}
     ))
     monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: "answer")
     monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
@@ -926,11 +926,11 @@ def test_model_fanout_persists_thinking_only_failure_metadata(monkeypatch, tmp_p
     database = _isolated_durable_fanout(monkeypatch, tmp_path)
     secret_thinking = "private provider reasoning must not persist"
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "local-a"}]} if path == "/v1/models" else {"models": []}
     ))
     monkeypatch.setattr(server, "_post", lambda path, payload, **_kwargs: (
         {"message": {"content": "", "thinking": secret_thinking}, "done_reason": "length"}
-        if path == "/api/chat" else {}
+        if path == "/v1/chat/completions" else {}
     ))
 
     receipt = json.loads(server.model_fanout("private prompt", scope="local"))
@@ -948,7 +948,7 @@ def test_model_fanout_persists_thinking_only_failure_metadata(monkeypatch, tmp_p
 def test_model_fanout_retains_bounded_prefix_but_reports_raw_provider_size(monkeypatch, tmp_path):
     database = _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "local-a"}]} if path == "/v1/models" else {"models": []}
     ))
     raw_answer = " " + ("x" * 100_000) + " "
     monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: raw_answer)
@@ -993,7 +993,7 @@ def test_fanout_receipt_marks_legacy_answer_size_and_truncation_as_unknown(monke
 def test_model_fanout_unloads_a_local_model_it_loaded(monkeypatch):
     unloads = []
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "local-a"}]} if path == "/v1/models" else {"models": []}
     ))
     monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: "answer")
     monkeypatch.setattr(server, "_post", lambda path, payload, **_kwargs: unloads.append((path, payload)))
@@ -1009,7 +1009,7 @@ def test_model_fanout_unloads_a_local_model_it_loaded(monkeypatch):
         "prompt_leaves_machine": False,
         "notice": "no selected cloud target receives the prompt",
     }
-    assert unloads == [("/api/generate", {"model": "local-a", "keep_alive": 0})]
+    assert unloads == []  # SI manages local model residency; retired Ollama keep_alive=0 unload is not sent
 
 
 def test_model_fanout_preserves_models_when_residency_snapshot_is_unavailable(monkeypatch):
@@ -1017,9 +1017,9 @@ def test_model_fanout_preserves_models_when_residency_snapshot_is_unavailable(mo
     unloads = []
 
     def fake_get(path):
-        if path == "/api/tags":
+        if path == "/v1/models":
             return {"models": [{"name": "local-a"}]}
-        assert path == "/api/ps"
+        assert path == "/v1/sonder/health"
         raise RuntimeError("Ollama residency unavailable")
 
     monkeypatch.setattr(server, "_get", fake_get)
@@ -1098,7 +1098,7 @@ def test_model_fanout_persists_a_sealed_prompt_and_durable_receipt(monkeypatch, 
     database = _isolated_durable_fanout(monkeypatch, tmp_path)
     secret_prompt = "private fanout prompt: do-not-store-me"
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "local-a"}]} if path == "/v1/models" else {"models": []}
     ))
     monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: "answer")
     monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
@@ -1121,7 +1121,7 @@ def test_model_fanout_never_persists_a_model_echo_of_the_prompt(monkeypatch, tmp
     database = _isolated_durable_fanout(monkeypatch, tmp_path)
     secret_prompt = "private fanout prompt: echo-must-not-persist"
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "local-a"}]} if path == "/v1/models" else {"models": []}
     ))
     monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda prompt: "echo: " + prompt)
     monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
@@ -1193,7 +1193,7 @@ def test_model_fanout_rejects_oversized_prompt_before_vault(monkeypatch):
 def test_model_fanout_lifecycle_tools_work_in_local_open_mode(monkeypatch, tmp_path):
     _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "local-a"}]} if path == "/v1/models" else {"models": []}
     ))
     monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: "answer")
     monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
@@ -1213,7 +1213,7 @@ def test_model_fanout_synthesize_uses_exact_complete_previews_without_persistenc
             {"name": "candidate-a", "capabilities": ["chat"]},
             {"name": "candidate-b", "capabilities": ["completion"]},
             {"name": "synth-local", "capabilities": ["generate"]},
-        ]} if path == "/api/tags" else {"models": []}
+        ]} if path == "/v1/models" else {"models": []}
     ))
     monkeypatch.setattr(
         server, "_make_generate",
@@ -1238,7 +1238,7 @@ def test_model_fanout_synthesize_uses_exact_complete_previews_without_persistenc
     assert {item["model"] for item in result["provenance"]["source_previews"]} == {
         "candidate-a", "candidate-b", "synth-local",
     }
-    assert captured["path"] == "/api/chat"
+    assert captured["path"] == "/v1/chat/completions"
     assert captured["kwargs"]["cloud"] is False
     assert captured["kwargs"]["local_only"] is True
     assert captured["payload"]["messages"] and len(captured["payload"]["messages"]) == 1
@@ -1347,7 +1347,7 @@ def test_fanout_synthesis_requires_a_declared_generative_capability(monkeypatch)
     monkeypatch.setattr(server, "discovered_model_records", lambda: [
         ("unknown-local", {"name": "unknown-local"}),
     ])
-    monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(server, "_get", lambda *_args, **_kwargs: {})
 
     with pytest.raises(server.ModelCallError, match="declare a generative"):
         server._fanout_synthesis_model("unknown-local")
@@ -1359,12 +1359,15 @@ def test_fanout_synthesis_uses_local_model_show_metadata_when_tags_omit_capabili
     ])
     seen = []
     monkeypatch.setattr(
-        server, "_post",
-        lambda path, payload, **_kwargs: seen.append((path, payload)) or {"capabilities": ["completion"]},
+        server, "_get",
+        lambda path, **_kwargs: seen.append(path) or {
+            "object": "list",
+            "data": [{"id": "ordinary-ollama", "capabilities": ["completion"]}],
+        },
     )
 
     assert server._fanout_synthesis_model("ordinary-ollama") == "ordinary-ollama"
-    assert seen == [("/api/show", {"name": "ordinary-ollama", "model": "ordinary-ollama"})]
+    assert seen == ["/v1/models"]
 
 
 def test_fanout_synthesis_uses_nested_tag_capability_without_show(monkeypatch):
@@ -1375,8 +1378,8 @@ def test_fanout_synthesis_uses_nested_tag_capability_without_show(monkeypatch):
         }),
     ])
     monkeypatch.setattr(
-        server, "_post",
-        lambda *_args, **_kwargs: pytest.fail("positively declared nested capability must avoid /api/show"),
+        server, "_get",
+        lambda *_args, **_kwargs: pytest.fail("positively declared nested capability must avoid extra /v1/models fetch"),
     )
 
     plan, error = server._fanout_plan("local")
@@ -1708,7 +1711,7 @@ def test_failed_result_exposes_only_closed_class_and_live_provider_retry_hint(mo
     raw_provider_detail = "provider body: private prompt should never persist"
     calls = []
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "remote:cloud"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "remote:cloud"}]} if path == "/v1/models" else {"models": []}
     ))
 
     def fail(_prompt):
@@ -1774,7 +1777,7 @@ def test_fanout_failure_class_is_closed_and_content_free(error, expected):
 def test_vault_unavailable_fanout_result_is_configuration_failure(monkeypatch, tmp_path):
     _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "local-a"}]} if path == "/v1/models" else {"models": []}
     ))
     run = server._fanout_start("private prompt", "local", cap=32, request_timeout=5, cloud_workers=1)
     monkeypatch.setattr(
@@ -2027,7 +2030,7 @@ def test_fanout_answer_receipt_scrubs_prompt_echo_and_secret_markers(monkeypatch
     )
 
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "local-a"}]} if path == "/v1/models" else {"models": []}
     ))
     monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: answer)
     monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})
@@ -2046,7 +2049,7 @@ def test_fanout_answer_receipt_scrubs_prompt_echo_and_secret_markers(monkeypatch
 def test_fanout_execution_rejects_a_model_outside_its_snapshot(monkeypatch, tmp_path):
     _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "local-a"}]} if path == "/v1/models" else {"models": []}
     ))
     calls = []
     monkeypatch.setattr(server, "_make_generate", lambda model, *_args, **_kwargs: (
@@ -2067,7 +2070,7 @@ def test_fanout_cancel_between_claim_and_send_does_not_start_provider_call(monke
     _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "remote:cloud"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "remote:cloud"}]} if path == "/v1/models" else {"models": []}
     ))
     run = server._fanout_start("private prompt", "cloud", cap=32, request_timeout=5, cloud_workers=1)
     original_claim = server.fanout_store.claim_next_result
@@ -2120,7 +2123,7 @@ def test_fanout_cancel_after_dispatch_fence_stops_transport_and_keeps_truthful_r
     _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "remote:cloud"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "remote:cloud"}]} if path == "/v1/models" else {"models": []}
     ))
     run = server._fanout_start("private prompt", "cloud", cap=32, request_timeout=5, cloud_workers=1)
     original_mark = server.fanout_store.mark_result_dispatched
@@ -2153,7 +2156,7 @@ def test_fanout_revoked_cloud_opt_in_cancels_before_provider_send(monkeypatch, t
     _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "remote:cloud"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "remote:cloud"}]} if path == "/v1/models" else {"models": []}
     ))
     run = server._fanout_start("private prompt", "cloud", cap=32, request_timeout=5, cloud_workers=1)
     provider_calls = []
@@ -2206,7 +2209,7 @@ def test_model_wrapper_cannot_turn_a_prompt_into_a_slash_command():
 def test_receipt_rows_report_requested_and_served_model_with_separate_token_totals(monkeypatch, tmp_path):
     _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "m:1"}, {"name": "m:3"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "m:1"}, {"name": "m:3"}]} if path == "/v1/models" else {"models": []}
     ))
 
     def fake_make(model, *_args, **_kwargs):
@@ -2240,7 +2243,7 @@ def test_receipt_rows_report_requested_and_served_model_with_separate_token_tota
 def test_receipt_reports_legacy_rows_tokens_as_null_not_zero(monkeypatch, tmp_path):
     _isolated_durable_fanout(monkeypatch, tmp_path)
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": "local-a"}]} if path == "/api/tags" else {"models": []}
+        {"models": [{"name": "local-a"}]} if path == "/v1/models" else {"models": []}
     ))
     monkeypatch.setattr(server, "_make_generate", lambda *_args, **_kwargs: lambda _prompt: "answer")
     monkeypatch.setattr(server, "_post", lambda *_args, **_kwargs: {})

@@ -489,22 +489,26 @@ def _record_npu_fallback_handler(handled):
 
 @contextmanager
 def _admitted_embeddings_response(body, base, timeout):
-    """Open one SI ``/v1/embeddings`` response (local-only, bounded)."""
-    headers = {
-        "Content-Type": "application/json",
-        "X-Sonder-Local-Only": "1",
-    }
-    api_key = os.environ.get("SONDER_INFERENCE_API_KEY", "").strip()
-    if api_key:
-        headers["Authorization"] = "Bearer " + api_key
-    req = urllib.request.Request(
-        "%s/v1/embeddings" % base.rstrip("/"),
-        data=json.dumps(body).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
-    with ollama_endpoint.open_url(req, timeout=timeout) as resp:
-        yield resp
+    """Open one SI ``/v1/embeddings`` response inside its GPU admission."""
+    deadline = time.monotonic() + float(timeout)
+    with gpu_admission.process_service().admit(
+        "/v1/embeddings", body, origin=base, deadline=deadline,
+    ) as ticket:
+        headers = {
+            "Content-Type": "application/json",
+            "X-Sonder-Local-Only": "1",
+        }
+        api_key = os.environ.get("SONDER_INFERENCE_API_KEY", "").strip()
+        if api_key:
+            headers["Authorization"] = "Bearer " + api_key
+        req = urllib.request.Request(
+            "%s/v1/embeddings" % base.rstrip("/"),
+            data=ticket.body(json.dumps(body).encode("utf-8")),
+            headers=headers,
+            method="POST",
+        )
+        with ollama_endpoint.open_url(req, timeout=timeout) as resp:
+            yield resp
 
 
 def embed(text, timeout=30, base=None, model=None):
@@ -661,7 +665,7 @@ def _embed_at(text, timeout=30, base=None, model=None, force_cpu=False):
                     if npu_fallback_pending:
                         _record_npu_fallback_handler(False)
                     return None
-                if not valid_vector(vector) or (dimension is not None and len(vector) != dimension):
+                if not valid_vector(vector):
                     if npu_fallback_pending:
                         _record_npu_fallback_handler(False)
                     return None

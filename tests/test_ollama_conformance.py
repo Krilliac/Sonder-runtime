@@ -26,28 +26,48 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_GET(self):
-        if self.path == "/api/version":
-            return self._send({"version": self.state["version"]})
-        return self._send({"models": [{"name": self.state["name"], "digest": self.state["digest"]}]})
+        if self.path.startswith("/v1/sonder/identity"):
+            digest = self.state["digest"]
+            if digest.startswith("sha256:"):
+                digest = digest[7:]
+            return self._send({
+                "backend_identity": {
+                    "backend": "sonder_inference",
+                    "model": self.state["name"],
+                    "model_digest": digest,
+                    "backend_version": self.state["version"],
+                    "quantization": "Q4_K_M",
+                    "tokenizer_digest": "c" * 64,
+                    "template_digest": "d" * 64,
+                    "context_tokens": 8192,
+                },
+            })
+        return self._send({"object": "list", "data": [{"id": self.state["name"], "digest": self.state["digest"]}]})
 
     def do_POST(self):
         size = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(size))
-        if self.path == "/api/show":
-            return self._send({"details": {"quantization_level": "Q4_K_M"}, "template": "{{ .Prompt }}",
-                               "model_info": {"llama.context_length": 8192}})
         if self.state["rotate"]:
             self.state["digest"] = "b" * 64
-        if payload.get("tools") and payload.get("format") and self.state["masked"]:
-            return self._send({"model": self.state["label"], "message": {"content": '{"value":"alpha"}'}})
-        if payload.get("format") and not payload.get("tools"):
-            return self._send({"model": self.state["label"], "message": {"content": '{"value":"alpha"}'}})
+        has_schema = bool(payload.get("response_format") or payload.get("format"))
+        if payload.get("tools") and has_schema and self.state["masked"]:
+            return self._send({"model": self.state["label"], "choices": [{"message": {"role": "assistant", "content": '{"value":"alpha"}'}}]})
+        if has_schema and not payload.get("tools"):
+            return self._send({"model": self.state["label"], "choices": [{"message": {"role": "assistant", "content": '{"value":"alpha"}'}}]})
         if payload.get("tools"):
-            message = {"role": "assistant", "tool_calls": [{"function": {"name": "echo", "arguments": {"value": "alpha"}}}]}
+            message = {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": '{"value":"alpha"}'},
+                }],
+            }
             if any(m.get("role") == "tool" for m in payload.get("messages", [])):
                 message = {"role": "assistant", "content": "done"}
-            return self._send({"model": self.state["label"], "message": message})
-        return self._send({"model": self.state["label"], "message": {"content": "hello"}})
+            return self._send({"model": self.state["label"], "choices": [{"message": message}]})
+        return self._send({"model": self.state["label"], "choices": [{"message": {"role": "assistant", "content": "hello"}}]})
 
 
 @pytest.fixture
@@ -67,7 +87,7 @@ def server():
 def test_identity_is_bound_to_version_digest_and_show(server):
     base, _state = server
     identity = OllamaConformanceProbe(base, "qwen").read_identity()
-    assert identity.backend == "ollama"
+    assert identity.backend == "sonder_inference"
     assert identity.model_digest == "a" * 64
     assert identity.backend_version == "0.12.0"
     assert identity.context_tokens == 8192

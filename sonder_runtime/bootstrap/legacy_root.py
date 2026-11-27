@@ -130,7 +130,7 @@ def require_mcp_inference_binding(application, pool, *, primary_origin):
                 and application.inference_pool is None and application.inference_membership is None):
             return
     require_inference_application(application, expected_pool=pool)
-    if primary_origin != ollama_endpoint.normalize(application.config.ollama.url):
+    if primary_origin != ollama_endpoint.normalize(application.config.inference.url):
         raise ValueError("invalid legacy membership binding: primary differs from typed configuration")
 
 
@@ -163,7 +163,7 @@ def configure_application(application) -> None:
             # path. Existing work finishes against its original pool.
             previous_pool.drain(timeout_seconds=0)
         legacy.OLLAMA_POOL = pool
-        legacy.BASE = ollama_endpoint.normalize(application.config.ollama.url)
+        legacy.BASE = ollama_endpoint.normalize(application.config.inference.url)
         if current is application:
             return
         legacy._APP_GRAPH = application

@@ -30,9 +30,9 @@ def legacy_http(monkeypatch):
     def fake_open_url(request, timeout=30, **kwargs):
         url = request if isinstance(request, str) else request.full_url
         sent.append(url)
-        if url.endswith("/api/tags"):
-            return FakeResponse(b'{"models": []}')
-        return FakeResponse(b'{"embedding": [0.25, 0.5, 0.25]}')
+        if url.endswith("/v1/models") or "/v1/sonder/identity" in url:
+            return FakeResponse(b'{"object": "list", "data": []}')
+        return FakeResponse(b'{"data": [{"index": 0, "embedding": [0.25, 0.5, 0.25]}]}')
 
     monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_open_url)
     monkeypatch.setattr(e, "current_revision", lambda **k: "rev-current")
@@ -58,9 +58,9 @@ def test_embed_off_policy_uses_legacy_path_with_ollama_provenance(legacy_http):
     assert vector == pytest.approx([0.25, 0.5, 0.25])
     meta = e.provenance(vector)
     assert meta["model"] == e.EMBED_IDENTITY
-    assert meta["provider"] == "ollama"
+    assert meta["provider"] == "sonder_inference"
     assert meta["accelerated"] is False
-    assert any(url.endswith("/api/embeddings") for url in legacy_http)
+    assert any(url.endswith("/v1/embeddings") for url in legacy_http)
 
 
 def test_embed_prefer_uses_accelerator_and_binds_provenance(
@@ -93,7 +93,7 @@ def test_embed_prefer_uses_accelerator_and_binds_provenance(
     assert calls[0][1] == e.EMBED_IDENTITY
     assert calls[0][2] == "rev-current"
     # The accelerator satisfied the request: no legacy embedding HTTP call.
-    assert not any(url.endswith("/api/embeddings") for url in legacy_http)
+    assert not any(url.endswith("/v1/embeddings") for url in legacy_http)
 
 
 def test_embed_cpu_reference_is_truthful_and_not_npu_accelerated(
@@ -120,7 +120,7 @@ def test_embed_cpu_reference_is_truthful_and_not_npu_accelerated(
     assert meta["provider"] == "cpu-reference"
     assert meta["accelerated"] is False
     assert meta["simulated"] is False
-    assert not any(url.endswith("/api/embeddings") for url in legacy_http)
+    assert not any(url.endswith("/v1/embeddings") for url in legacy_http)
 
 
 def test_embed_rechecks_live_revision_after_accelerator_inference(
@@ -141,7 +141,7 @@ def test_embed_rechecks_live_revision_after_accelerator_inference(
         },
     )
     assert e.embed("retag during inference") is None
-    assert not any(url.endswith("/api/embeddings") for url in legacy_http)
+    assert not any(url.endswith("/v1/embeddings") for url in legacy_http)
 
 
 @pytest.mark.parametrize(
@@ -174,8 +174,8 @@ def test_embed_rejects_untrusted_accelerator_provenance(
     monkeypatch.setattr(npu_service, "embed_for_space", fake)
     vector = e.embed("fail closed")
     assert vector == pytest.approx([0.25, 0.5, 0.25])
-    assert e.provenance(vector)["provider"] == "ollama"
-    assert any(url.endswith("/api/embeddings") for url in legacy_http)
+    assert e.provenance(vector)["provider"] == "sonder_inference"
+    assert any(url.endswith("/v1/embeddings") for url in legacy_http)
 
 
 def test_embed_prefer_miss_falls_back_to_legacy_and_is_explicit(
@@ -193,15 +193,15 @@ def test_embed_prefer_miss_falls_back_to_legacy_and_is_explicit(
     result = e.embed_result("fall back please")
     assert result is not None
     assert result["vector"] == pytest.approx([0.25, 0.5, 0.25])
-    assert result["provider"] == "ollama"
+    assert result["provider"] == "sonder_inference"
     assert result["accelerated"] is False
     assert result["fallback_reason"] == "npu_unavailable"
-    assert handled == [("embeddings", "ollama", True)]
+    assert handled == [("embeddings", "sonder_inference", True)]
 
 
 def test_embed_result_off_policy_has_no_fallback_reason(legacy_http):
     result = e.embed_result("plain")
-    assert result["provider"] == "ollama"
+    assert result["provider"] == "sonder_inference"
     assert result["fallback_reason"] == ""
     assert result["dimension"] == 3
     assert result["revision"] == "rev-current"
@@ -214,7 +214,7 @@ def test_embed_accelerator_exception_is_contained(legacy_http, monkeypatch):
     monkeypatch.setattr(npu_service, "embed_for_space", boom)
     vector = e.embed("still works")
     assert vector == pytest.approx([0.25, 0.5, 0.25])
-    assert e.provenance(vector)["provider"] == "ollama"
+    assert e.provenance(vector)["provider"] == "sonder_inference"
 
 
 def test_embed_shadow_exercises_accelerator_without_substitution(
@@ -228,7 +228,7 @@ def test_embed_shadow_exercises_accelerator_without_substitution(
     )
     vector = e.embed("shadow me")
     assert vector == pytest.approx([0.25, 0.5, 0.25])
-    assert e.provenance(vector)["provider"] == "ollama"
+    assert e.provenance(vector)["provider"] == "sonder_inference"
     assert shadows == [("shadow me", e.EMBED_IDENTITY, "rev-current")]
 
 
@@ -249,8 +249,8 @@ def test_embed_total_failure_still_soft_fails_to_none(monkeypatch):
     assert e.embed("anything") is None
     assert e.embed_result("anything") is None
     assert handled == [
-        ("embeddings", "ollama", False),
-        ("embeddings", "ollama", False),
+        ("embeddings", "sonder_inference", False),
+        ("embeddings", "sonder_inference", False),
     ]
 
 
@@ -279,4 +279,4 @@ def test_space_gating_end_to_end_prevents_mixing(legacy_http, monkeypatch):
     )
     vector = e.embed("do not mix spaces")
     assert vector == pytest.approx([0.25, 0.5, 0.25])
-    assert e.provenance(vector)["provider"] == "ollama"
+    assert e.provenance(vector)["provider"] == "sonder_inference"

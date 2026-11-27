@@ -7,7 +7,6 @@ import json
 import threading
 import time
 from types import SimpleNamespace
-import urllib.error
 
 from sonder_runtime.adapters.inference import gpu_admission, ollama_pool
 from sonder_runtime.adapters.inference.ollama_pool import (
@@ -42,34 +41,43 @@ def _make_pool_transport(
     models_by_origin: dict[str, list[dict]],
     show_by_model: dict[str, dict | Exception | object],
 ):
-    """Build a fake ``open_url`` recording ``/api/tags`` and ``/api/show`` calls."""
+    """Build a fake ``open_url`` recording SI ``/v1/models`` listing & detail calls."""
     calls: dict[str, list[tuple[str, str]]] = {"tags": [], "show": []}
     lock = threading.Lock()
 
-    def fake_open_url(request, **_kwargs):
+    def fake_open_url(request, **kwargs):
         url = request.full_url
-        origin = url.rsplit("/api/", 1)[0]
-        if url.endswith("/api/version"):
+        origin = url.rsplit("/v1/", 1)[0]
+        if url.endswith("/v1/sonder/health"):
             return _JsonResponse({"version": "0.12.6"})
-        if url.endswith("/api/tags"):
-            with lock:
-                calls["tags"].append((origin, ""))
-            return _JsonResponse({"models": list(models_by_origin.get(origin, ()))})
-        if url.endswith("/api/ps"):
-            return _JsonResponse({"models": []})
-        if url.endswith("/api/show"):
-            body = json.loads(request.data.decode("utf-8"))
-            model = body["model"]
-            with lock:
-                calls["show"].append((origin, model))
-            outcome = show_by_model.get(model)
-            if callable(outcome):
-                outcome = outcome(origin, model)
-            if isinstance(outcome, BaseException):
-                raise outcome
-            if isinstance(outcome, dict):
-                return _JsonResponse(outcome)
-            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        if url.endswith("/v1/models"):
+            rows_raw = list(models_by_origin.get(origin, ()))
+            is_show = float(kwargs.get("timeout", 0.0) or 0.0) >= 5.0
+            if not is_show:
+                with lock:
+                    calls["tags"].append((origin, ""))
+                return _JsonResponse({
+                    "object": "list",
+                    "data": [
+                        {**row, "id": row.get("id") or row.get("name", "")}
+                        for row in rows_raw
+                    ],
+                })
+            enriched = []
+            for row in rows_raw:
+                model = str(row.get("name") or row.get("id") or "")
+                with lock:
+                    calls["show"].append((origin, model))
+                outcome = show_by_model.get(model)
+                if callable(outcome):
+                    outcome = outcome(origin, model)
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                merged = {**row, "id": row.get("id") or model}
+                if isinstance(outcome, dict):
+                    merged.update(outcome)
+                enriched.append(merged)
+            return _JsonResponse({"object": "list", "data": enriched})
         raise AssertionError(f"unexpected URL {url}")
 
     return fake_open_url, calls
