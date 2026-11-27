@@ -62,6 +62,15 @@ def test_offset_past_end_has_explicit_notice():
     assert rendered == "file has 1000 lines; offset 1001 is past the end"
 
 
+@pytest.mark.parametrize("bad_lines", [123, "not-a-list", b"bytes"])
+def test_non_sequence_lines_payload_fails_closed_without_crashing(bad_lines):
+    rendered = render_file_page(
+        {"path": "weird.py", "total_lines": 5, "start_line": 1, "lines": bad_lines}
+    )
+
+    assert rendered == "file has 5 lines; offset 1 is past the end"
+
+
 def test_empty_file_has_exact_notice():
     assert render_file_page({"path": "empty.py", "total_lines": 0, "lines": []}) == (
         "file empty.py is empty (0 lines)"
