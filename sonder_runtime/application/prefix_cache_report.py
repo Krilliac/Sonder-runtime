@@ -78,6 +78,7 @@ DEFAULT_SECTIONS = SystemSectionRegistry()
 
 def compose_local_system(identity, profile, emotions, goal, request, *,
                          playbook="",
+                         scratchpad="",
                          registry: SystemSectionRegistry | None = None) -> str:
     """Join the local system-prompt sections in cache-friendly order.
 
@@ -85,7 +86,7 @@ def compose_local_system(identity, profile, emotions, goal, request, *,
     """
     sections = (
         ("identity", identity), ("profile", profile), ("playbook", playbook), ("request", request),
-        ("emotions", emotions), ("goal", goal),
+        ("emotions", emotions), ("goal", goal), ("scratchpad", scratchpad),
     )
     text = join_system_parts(*(part for _name, part in sections))
     (registry or DEFAULT_SECTIONS).remember(text, sections)

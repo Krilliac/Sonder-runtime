@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from ..context import OperationContext
 
@@ -33,7 +34,7 @@ class ChatCommand:
     lane: str = "chat"
     routing_reason: str = "ordinary conversation"
     system: str = ""
-    history: tuple = ()
+    history: tuple[Any, ...] = ()
     temperature: float | None = None
     num_predict: int | None = None
     num_ctx: int | None = None
@@ -77,7 +78,7 @@ class ChatService:
         self, command: ChatCommand, context: OperationContext
     ) -> ChatResult:
         logger.debug(f"ChatService.complete: tier={command.tier!r}, system_len={len(command.system)}, history_len={len(command.history)}, session_id={command.session_id!r}")
-        options = {}
+        options: dict[str, Any] = {}
         # Refused before any capture or gateway call so a bad value is never
         # mistaken for a model failure.
         validate_request_temperature(command.temperature)
@@ -139,7 +140,7 @@ class ChatService:
         except Exception as model_error:
             if isinstance(model_error, ProviderCaptureFailure):
                 raise
-            if pending is not None:
+            if capture_service is not None and pending is not None:
                 code = (
                     model_error.code
                     if isinstance(model_error, SonderError)
@@ -152,7 +153,7 @@ class ChatService:
             raise
 
         capture = None
-        if pending is not None:
+        if capture_service is not None and pending is not None:
             capture = capture_service.complete_request(pending, model_response=response.text)
         if response.duration_ms and response.duration_ms > 30_000:
             logger.warning(f"slow inference response: model={response.model!r}, duration_ms={response.duration_ms}, tier={command.tier!r}")

@@ -228,3 +228,17 @@ def test_scope_accepts_attenuation_but_original_cancellation_remains_live(setup)
         token.cancelled = True
         with pytest.raises(PermissionError):
             adapter.authorize(narrowed, selection.host_conversation_id)
+
+
+@pytest.mark.parametrize("flag", [None, True])
+def test_authorize_refuses_a_context_not_narrowed_under_a_false_scope(setup, flag):
+    adapter, context, state, conn = setup
+    scoped = replace(context, private_node_allowed=False)
+    selection = adapter.create("a" * 16, scoped)
+    with adapter.scope(selection, scoped):
+        with pytest.raises(PermissionError):
+            adapter.authorize(
+                replace(scoped, private_node_allowed=flag),
+                selection.host_conversation_id,
+            )
+        assert adapter.authorize(scoped, selection.host_conversation_id)

@@ -1274,6 +1274,10 @@ _ENTRIES = [
      TEXT, "reads Application.model_gateway only to wrap it in ServedTierGateway (the text consumers' handle, as "
      "ChatService gets it): the tool is text-only, and the checked ToolLaneGateway would refuse the "
      "security adviser models this eval exists to measure; reviewer sign-off requested"),
+    ("sonder_runtime/bootstrap/thinking_ensemble.py", "deliberate_for_turn", "_chat_request", 1, TEXT,
+     "pre-turn advisory thinking brief passes text_only=True; output is only used as advisory context"),
+    ("sonder_runtime/bootstrap/thinking_ensemble.py", "maybe_auto_ensemble_offload", "ensemble_answer", 1, TEXT,
+     "non-learning offload answer paired with bound thinking tier; EXEC callers of offload refuse first"),
     ("sonder_runtime/interfaces/http/facades/model_request.py", "<module>", "/v1/chat/completions", 1, TEXT,
      _OWN_CHAT),
     ("sonder_runtime/interfaces/http/facades/model_request.py", "ModelRequestFacade.invoke.complete",

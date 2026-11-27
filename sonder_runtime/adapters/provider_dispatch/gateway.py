@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from types import MappingProxyType
+from typing import Any
 
 from ...application.context import OperationContext
 from ...application.ports.model_gateway import (
@@ -69,7 +70,9 @@ class ProviderDispatchGateway:
             raise InvalidInput("strict alias route cannot accept a supplied model route")
         return self._providers["ollama"].generate(request, context)
 
-    def resolve_route(self, request: ModelRequest, context: OperationContext):
+    def resolve_route(
+        self, request: ModelRequest, context: OperationContext
+    ) -> ResolvedModelRoute | None:
         """Delegate route identity to the same provider used for generation."""
         provider_name = self._provider_for_request(request)
         resolver = getattr(self._providers[provider_name], "resolve_route", None)
@@ -149,7 +152,7 @@ class ProviderDispatchGateway:
                 served.update({str(k): dict(v) for k, v in reported.items() if isinstance(v, Mapping)})
         return served
 
-    def capability_health(self, provider: str | None = None):
+    def capability_health(self, provider: str | None = None) -> Any:
         """Delegate to one provider (the default generation provider if unset)."""
         name = provider or self._default_generation_provider
         if name not in self._providers:
