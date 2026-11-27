@@ -20,7 +20,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from ..context import OperationContext, LOCAL_OWNER
+from ..context import OperationContext, LOCAL_OWNER, narrow_private_node
 from ..errors import CapacityExceeded
 from ..loop import LoopSessionLifecycleFacade
 from ..loop_contract import StepState
@@ -186,6 +186,7 @@ _HIDDEN = frozenset(
         "owner",
         "cloud_allowed",
         "remote_ollama_allowed",
+        "private_node_allowed",
         "grant_expires",
         "allowed_tools",
         "max_steps",
@@ -1050,6 +1051,8 @@ class AgentLaneService:
                 raise PermissionError("cloud authority was revoked")
             if lane["remote_ollama_allowed"] and not context.remote_ollama_allowed:
                 raise PermissionError("remote model authority was revoked")
+            if lane.get("private_node_allowed") is False and context.private_node_allowed is True:
+                raise PermissionError("private node consent cannot be widened")
 
     def _public(self, lane, tx):
         result = {k: v for k, v in lane.items() if k not in _HIDDEN}
@@ -1390,6 +1393,7 @@ class AgentLaneService:
                 owner="",
                 cloud_allowed=context.cloud_allowed,
                 remote_ollama_allowed=context.remote_ollama_allowed,
+                private_node_allowed=context.private_node_allowed,
                 grant_expires=expiry,
                 grant_id="grant-" + uuid.uuid4().hex,
                 grant_revision=1,
@@ -2581,6 +2585,9 @@ class AgentLaneService:
                 auth_level=lane["auth_level"],
                 cloud_allowed=lane["cloud_allowed"],
                 remote_ollama_allowed=lane["remote_ollama_allowed"],
+                private_node_allowed=narrow_private_node(
+                    context.private_node_allowed, lane.get("private_node_allowed"),
+                ),
                 session_id=lane["session_id"],
                 cancellation=control,
                 deadline_monotonic=started

@@ -431,6 +431,21 @@
     {
       "effects": [],
       "execution_class": "pure",
+      "name": "scratchpad_delete"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "scratchpad_read"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
+      "name": "scratchpad_write"
+    },
+    {
+      "effects": [],
+      "execution_class": "pure",
       "name": "script_search"
     },
     {

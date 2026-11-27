@@ -50,7 +50,10 @@ class GatewayVerdictModel:
     def _context(self) -> OperationContext:
         return local_owner_context(
             correlation_id="security-eval-%d" % next(_COUNTER), source="mcp", cloud_allowed=False,
-            remote_ollama_allowed=self._allow_remote, timeout_seconds=self._timeout)
+            remote_ollama_allowed=self._allow_remote,
+            # Tri-state: None keeps the legacy behaviour (approved private workers stay
+            # eligible). It is deliberately not mirrored from the remote-Ollama opt-in.
+            private_node_allowed=None, timeout_seconds=self._timeout)
 
     def _resolver(self) -> Callable[..., Any] | None:
         for candidate in (self._gateway, getattr(self._gateway, "gateway", None)):

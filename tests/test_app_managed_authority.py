@@ -694,3 +694,78 @@ def test_key_rotation_after_reference_read_refuses_before_fleet_mutation(
         ).fetchone()[0]
     assert after == before
     assert not host._minted_parents
+
+
+def _run_lane_with_lane_flag(managed, monkeypatch, selection_flag, lane_flag):
+    authority, selection, lanes, model, context, binding, token, credential = managed
+    scoped = binding.issue_selection(
+        account_token=token,
+        control_token=credential,
+        context=replace(context, private_node_allowed=selection_flag),
+    )
+    assert scoped.context.private_node_allowed is selection_flag
+    host = authority.continuation_service(scoped)
+    parent = host.open_parent(scoped.context)
+    bound = host.register_parent(
+        parent["parent_session_id"],
+        parent["parent_token"],
+        scoped.host_conversation_id,
+        context=scoped.context,
+        command_id="consent",
+    )
+    original = authority.authorize_lane
+    authorized = []
+
+    def patched(admission, lane, ctx, *, connection):
+        result = original(
+            admission,
+            {**lane, "private_node_allowed": lane_flag},
+            ctx,
+            connection=connection,
+        )
+        authorized.append(True)
+        return result
+
+    try:
+        with bound._scope() as current:
+            receipt = lanes.spawn(
+                command_id="spawn-consent",
+                parent_session_id=parent["parent_session_id"],
+                task="Inspect this disposable project.",
+                workspace_root=str(current.workspace_roots[0]),
+                context=current,
+            )
+            monkeypatch.setattr(authority, "authorize_lane", patched)
+            lanes.run_pending(receipt["lane"]["id"], current)
+            return bool(authorized)
+    finally:
+        bound.close()
+
+
+@pytest.mark.parametrize("lane_flag", [None, True])
+def test_lane_not_narrowed_to_false_is_refused_under_a_false_selection(
+    managed, monkeypatch, lane_flag
+):
+    with pytest.raises(PermissionError):
+        _run_lane_with_lane_flag(managed, monkeypatch, False, lane_flag)
+    assert managed[3].calls == 0
+
+
+def test_false_lane_is_accepted_under_a_true_selection(managed, monkeypatch):
+    assert _run_lane_with_lane_flag(managed, monkeypatch, True, False) is True
+
+
+def test_context_within_refuses_an_unspecified_context_under_a_false_ceiling(managed):
+    from sonder_runtime.bootstrap.app_managed_authority import _context_within
+
+    *_, context, _binding, _token, _credential = managed
+    ceiling = replace(context, private_node_allowed=False)
+    for flag in (None, True):
+        with pytest.raises(PermissionError):
+            _context_within(
+                replace(context, private_node_allowed=flag), ceiling,
+                check_cancel=False,
+            )
+    _context_within(
+        replace(context, private_node_allowed=False), ceiling, check_cancel=False
+    )
