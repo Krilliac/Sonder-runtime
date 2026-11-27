@@ -98,7 +98,7 @@ class OllamaCloudMetadata:
         except (ValueError, UnicodeDecodeError) as exc:
             raise OllamaTransportError("inference_malformed_body") from exc
 
-    def _model_rows(self, timeout: float) -> list[dict[str, Any]]:
+    def _models_envelope(self, timeout: float) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         try:
             _status, payload = self._open(self._request("/v1/models", None), timeout)
         except urllib.error.HTTPError as exc:
@@ -106,22 +106,21 @@ class OllamaCloudMetadata:
         rows = (payload.get("data") if isinstance(payload, dict) else None)
         if not isinstance(rows, list):
             raise OllamaTransportError("inference_malformed_body")
-        return [row for row in rows[:MAX_TAG_ROWS] if isinstance(row, dict)]
+        outer_sonder = payload.get("sonder") if isinstance(payload, dict) else None
+        meta = outer_sonder if isinstance(outer_sonder, dict) else {}
+        return [row for row in rows[:MAX_TAG_ROWS] if isinstance(row, dict)], meta
 
     def tags(self) -> tuple[dict[str, Any], ...]:
         """Cloud models advertised by Sonder Inference ``/v1/models``."""
         stubs: list[dict[str, Any]] = []
-        for row in self._model_rows(self._tags_timeout):
+        rows, _outer = self._models_envelope(self._tags_timeout)
+        for row in rows:
             if is_pulled_cloud_row(row):
                 name = str(row.get("id") or row.get("name") or row.get("model") or "")
                 raw_sonder = row.get("sonder")
                 sonder_meta: dict[str, Any] = raw_sonder if isinstance(raw_sonder, dict) else {}
-                remote = bool(
-                    row.get("remote_host")
-                    or row.get("remote")
-                    or sonder_meta.get("remote")
-                    or str(sonder_meta.get("provider") or "").strip().lower() == "ollama_cloud"
-                )
+                backend = str(sonder_meta.get("backend") or "").strip().lower()
+                remote = bool(backend == "ollama_cloud" or row.get("remote_host"))
                 stubs.append({"name": name, "remote_host": remote})
         return tuple(stubs)
 
@@ -129,20 +128,34 @@ class OllamaCloudMetadata:
         """Check whether ``model`` is currently served by Sonder Inference ``/v1/models``."""
         if not valid_model_name(model):
             return ProbeResult(str(model)[:120], ProbeStatus.ERROR, detail="invalid_name")
-        rows = self._model_rows(self._show_timeout)
+        rows, outer_sonder = self._models_envelope(self._show_timeout)
+        backends_list = outer_sonder.get("backends")
+        backend_caps: dict[str, tuple[str, ...]] = {}
+        if isinstance(backends_list, list):
+            for b in backends_list:
+                if isinstance(b, dict) and isinstance(b.get("name"), str):
+                    raw_bc = b.get("capabilities")
+                    if isinstance(raw_bc, list):
+                        backend_caps[b["name"].strip().lower()] = tuple(str(c) for c in raw_bc)
         for row in rows:
             row_id = str(row.get("id") or row.get("name") or row.get("model") or "")
             if row_id == model:
                 raw_sonder = row.get("sonder")
                 sonder_meta: dict[str, Any] = raw_sonder if isinstance(raw_sonder, dict) else {}
-                ctx = sonder_meta.get("context_length")
+                runtime_meta = sonder_meta.get("runtime")
+                profile_meta = sonder_meta.get("profile")
+                ctx: object = None
+                if isinstance(runtime_meta, dict):
+                    ctx = runtime_meta.get("context_tokens") or runtime_meta.get("context_length")
+                if ctx is None and isinstance(profile_meta, dict):
+                    ctx = profile_meta.get("context_length") or profile_meta.get("context_tokens")
                 ctx_int = ctx if type(ctx) is int and ctx > 0 else None
-                raw_caps = sonder_meta.get("capabilities")
-                caps = tuple(str(c) for c in raw_caps) if isinstance(raw_caps, list) else ()
+                backend = str(sonder_meta.get("backend") or "").strip().lower()
+                caps = backend_caps.get(backend, ())
                 return ProbeResult(
                     model, ProbeStatus.LIVE, None,
                     None, ctx_int, caps,
-                    str(sonder_meta.get("family")) if sonder_meta.get("family") else None,
+                    None,
                     "ok",
                 )
         return ProbeResult(model, ProbeStatus.NOT_FOUND, detail="not_found")

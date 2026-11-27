@@ -11,12 +11,34 @@ selector was added later.
 from __future__ import annotations
 
 
+def _raw_catalog_rows(payload) -> list[dict]:
+    if not isinstance(payload, dict):
+        return []
+    raw = payload.get("data")
+    if not isinstance(raw, list):
+        raw = payload.get("models")
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _normalize_catalog_row(item: dict) -> tuple[str, dict]:
+    name = str(item.get("name") or item.get("model") or item.get("id") or "").strip()
+    if not name:
+        return "", item
+    if item.get("name") == name and item.get("model") == name:
+        return name, item
+    normalized = dict(item)
+    normalized.setdefault("name", name)
+    normalized.setdefault("model", name)
+    return name, normalized
+
+
 def catalog_names(payload):
     """Return the catalog as canonical, deduplicated model names."""
-    raw = payload.get("models", []) if isinstance(payload, dict) else []
     names, seen = [], set()
-    for item in raw if isinstance(raw, list) else []:
-        name = str(item.get("name") or item.get("model") or "").strip() if isinstance(item, dict) else ""
+    for item in _raw_catalog_rows(payload):
+        name, _ = _normalize_catalog_row(item)
         key = name.casefold()
         if name and key not in seen:
             names.append(name)
@@ -26,32 +48,26 @@ def catalog_names(payload):
 
 def catalog_records(payload):
     """Return canonical catalog records, sorted, without probing or selecting."""
-    raw = payload.get("models", []) if isinstance(payload, dict) else []
     records, seen = [], set()
-    for item in raw if isinstance(raw, list) else []:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or item.get("model") or "").strip()
+    for item in _raw_catalog_rows(payload):
+        name, normalized = _normalize_catalog_row(item)
         key = name.casefold()
         if not name or key in seen:
             continue
         seen.add(key)
-        records.append((name, item))
+        records.append((name, normalized))
     return sorted(records, key=lambda row: row[0].casefold())
 
 
 def installed_records(payload) -> tuple[tuple[str, dict], ...]:
     """Return one coherent catalog snapshot, in catalog order, for policy validation."""
-    rows = payload.get("models", []) if isinstance(payload, dict) else []
     records, seen = [], set()
-    for item in rows if isinstance(rows, list) else []:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or item.get("model") or "").strip()
+    for item in _raw_catalog_rows(payload):
+        name, normalized = _normalize_catalog_row(item)
         key = name.casefold()
         if name and key not in seen:
             seen.add(key)
-            records.append((name, item))
+            records.append((name, normalized))
     return tuple(records)
 
 

@@ -115,9 +115,25 @@ def test_ollama_cloud_metadata_uses_si_models_and_retires_stub_pulls():
             return _FakeResp({
                 "object": "list",
                 "data": [
-                    {"id": "gpt-oss:120b", "sonder": {"remote": True, "provider": "ollama_cloud"}},
-                    {"id": "qwen3.6:35b", "sonder": {"remote": False, "provider": "llamacpp"}},
+                    {
+                        "id": "gpt-oss:120b",
+                        "object": "model",
+                        "owned_by": "sonder-inference",
+                        "sonder": {"backend": "ollama_cloud", "default": False, "synthetic": False},
+                    },
+                    {
+                        "id": "qwen3.6:35b",
+                        "object": "model",
+                        "owned_by": "sonder-inference",
+                        "sonder": {
+                            "backend": "llamacpp",
+                            "default": True,
+                            "synthetic": False,
+                            "runtime": {"context_tokens": 32768},
+                        },
+                    },
                 ],
+                "sonder": {"api_version": 1},
             })
         raise AssertionError(f"unexpected URL: {req.full_url}")
 
@@ -138,7 +154,18 @@ def test_ollama_cloud_metadata_uses_si_models_and_retires_stub_pulls():
         client.pull_stub("qwen3-coder:480b-cloud")
     assert not any("/api/pull" in u for u in seen_urls)
 
-    assert is_pulled_cloud_row({"id": "gpt-oss:120b", "sonder": {"remote": True, "provider": "ollama_cloud"}}) is True
+    assert is_pulled_cloud_row({
+        "id": "gpt-oss:120b",
+        "object": "model",
+        "owned_by": "sonder-inference",
+        "sonder": {"backend": "ollama_cloud", "default": False, "synthetic": False},
+    }) is True
+    assert is_pulled_cloud_row({
+        "id": "qwen3.6:35b",
+        "object": "model",
+        "owned_by": "sonder-inference",
+        "sonder": {"backend": "llamacpp", "default": True, "synthetic": False},
+    }) is False
 
 
 def test_fanout_and_lifecycle_residency_use_si_health_shape():
@@ -170,3 +197,74 @@ def test_gpu_residency_and_pool_wiring_have_no_local_ollama_contention_or_api_ca
     src = inspect.getsource(pool_wiring)
     assert "/api/ps" not in src
     assert "/api/generate" not in src
+
+
+def test_si_v1_models_envelope_parsed_by_catalog_inventory_and_pool():
+    """BLOCKING (2): real SI /v1/models envelope {'object':'list','data':[...],'sonder':{...}} works everywhere."""
+    from sonder_runtime.domain.model_catalog import catalog_names, catalog_records, installed_records
+    from sonder_runtime.adapters.model_inventory import inventory_rows
+    from sonder_runtime.adapters.inference import ollama_pool
+
+    si_models = {
+        "object": "list",
+        "data": [
+            {
+                "id": "qwen3.6:35b",
+                "object": "model",
+                "owned_by": "sonder-inference",
+                "sonder": {
+                    "backend": "llamacpp",
+                    "default": True,
+                    "synthetic": False,
+                    "runtime": {"context_tokens": 32768},
+                },
+            },
+            {
+                "id": "nomic-embed-text:latest",
+                "object": "model",
+                "owned_by": "sonder-inference",
+                "sonder": {"backend": "llamacpp", "default": False, "synthetic": False},
+            },
+        ],
+        "sonder": {"api_version": 1},
+    }
+    assert catalog_names(si_models) == ["nomic-embed-text:latest", "qwen3.6:35b"]
+    recs = catalog_records(si_models)
+    assert [name for name, _ in recs] == ["nomic-embed-text:latest", "qwen3.6:35b"]
+    assert recs[1][1]["name"] == "qwen3.6:35b"
+    inst = installed_records(si_models)
+    assert [name for name, _ in inst] == ["qwen3.6:35b", "nomic-embed-text:latest"]
+
+    inv = inventory_rows(si_models, "/v1/models")
+    assert len(inv) == 2
+    assert inv[0]["name"] == "qwen3.6:35b"
+
+    assert ollama_pool._model_names(si_models) == ("nomic-embed-text:latest", "qwen3.6:35b")
+
+    # Prober parses SI /v1/models data[] and extracts per-model runtime context cleanly.
+    si_health = {
+        "status": "ready",
+        "api_version": 1,
+        "version": "1.0.0",
+        "models": [{"id": "qwen3.6:35b", "state": "resident", "context_length": 32768}],
+    }
+
+    class _Resp:
+        def __init__(self, body):
+            self._body = json.dumps(body).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1): return self._body
+
+    def fake_open(req, timeout=2.0, allow_remote=False):
+        if req.full_url.endswith("/v1/sonder/health"):
+            return _Resp(si_health)
+        if req.full_url.endswith("/v1/models"):
+            return _Resp(si_models)
+        raise AssertionError(f"unexpected URL: {req.full_url}")
+
+    prober = ollama_pool._default_capability_prober(allow_remote=False, open_url=fake_open)
+    result = prober("http://127.0.0.1:11437")
+    assert "qwen3.6:35b" in result["models"]
+    assert "qwen3.6:35b" in result["loaded_models"]
+    assert result["model_contexts"]["qwen3.6:35b"] == 32768

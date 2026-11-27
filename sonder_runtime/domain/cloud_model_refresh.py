@@ -224,18 +224,17 @@ def classify_show(model: str, http_status: int, payload: object) -> ProbeResult:
 
 
 def is_pulled_cloud_row(row: Mapping[str, Any]) -> bool:
-    """An SI ``/v1/models`` row is a cloud model by remote marker, provider, or name."""
+    """An SI ``/v1/models`` row is a cloud model by ``sonder.backend == 'ollama_cloud'`` or name."""
     name = row.get("id") or row.get("name") or row.get("model")
     if not valid_model_name(name):
         return False
     raw_sonder = row.get("sonder")
     sonder_meta: Mapping[str, Any] = raw_sonder if isinstance(raw_sonder, Mapping) else {}
+    backend = str(sonder_meta.get("backend") or "").strip().lower()
     return (
-        is_cloud_name(str(name))
+        backend == "ollama_cloud"
+        or is_cloud_name(str(name))
         or bool(row.get("remote_host"))
-        or bool(row.get("remote"))
-        or bool(sonder_meta.get("remote"))
-        or str(sonder_meta.get("provider") or row.get("backend") or "").strip().lower() == "ollama_cloud"
     )
 
 

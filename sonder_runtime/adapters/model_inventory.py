@@ -8,16 +8,29 @@ from sonder_runtime.adapters.model_transport import ModelCallError
 def inventory_rows(payload: object, endpoint: str) -> list[dict[str, object]]:
     """Return valid inventory rows or raise for a malformed provider envelope.
 
-    A provider response must be an object whose ``models`` member is a list.
-    Individual malformed rows are skipped so a partially useful inventory is
-    preserved, while a malformed envelope becomes an explicit protocol error
-    instead of being mistaken for an empty catalog.
+    Accepts Sonder Inference OpenAI-list envelopes (``{"object": "list",
+    "data": [...]}``) as well as legacy ``{"models": [...]}`` shapes, and
+    normalizes each row so ``name`` and ``model`` are populated from ``id``.
     """
     if isinstance(payload, dict):
-        rows = payload.get("models")
+        rows = payload.get("data")
+        if not isinstance(rows, list):
+            rows = payload.get("models")
         if isinstance(rows, list):
-            return [row for row in rows if isinstance(row, dict)]
-    raise ModelCallError("protocol", "invalid Ollama %s response" % endpoint)
+            normalized: list[dict[str, object]] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                entry = dict(row)
+                model_id = str(
+                    entry.get("name") or entry.get("model") or entry.get("id") or ""
+                ).strip()
+                if model_id:
+                    entry.setdefault("name", model_id)
+                    entry.setdefault("model", model_id)
+                normalized.append(entry)
+            return normalized
+    raise ModelCallError("protocol", "invalid Sonder Inference %s response" % endpoint)
 
 
 __all__ = ["inventory_rows"]

@@ -1109,10 +1109,15 @@ def _worker_id(origin: str) -> str:
 
 def _model_names(payload) -> tuple[str, ...]:
     names = []
-    for row in (payload or {}).get("models") or ():
+    rows = (
+        payload.get("data")
+        if isinstance(payload, Mapping) and isinstance(payload.get("data"), list)
+        else (payload.get("models") if isinstance(payload, Mapping) else None)
+    )
+    for row in rows or ():
         if not isinstance(row, dict):
             continue
-        name = str(row.get("name") or row.get("model") or "").strip()
+        name = str(row.get("id") or row.get("name") or row.get("model") or "").strip()
         if name and len(name) <= 256:
             names.append(name)
         if len(names) >= _MAX_MODELS_PER_WORKER:
@@ -1221,23 +1226,71 @@ def _parse_show_context_length(show_payload: Mapping[str, Any]) -> int | None:
     return None
 
 
+def _unwrap_model_list_entry(
+    model_name: str, payload: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    """When ``payload`` is a ``/v1/models`` list envelope, select the matching row."""
+    if not isinstance(payload, Mapping):
+        return None
+    rows = payload.get("data")
+    if not isinstance(rows, list):
+        return payload
+    target = str(model_name or "").strip().casefold()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        row_id = str(row.get("id") or row.get("name") or row.get("model") or "").strip().casefold()
+        if row_id == target:
+            return row
+    return {}
+
+
+def _parse_si_sonder_context_length(entry: Mapping[str, Any] | None) -> int | None:
+    if not isinstance(entry, Mapping):
+        return None
+    sonder_meta = entry.get("sonder")
+    if not isinstance(sonder_meta, Mapping):
+        return None
+    for nested_key, field_name in (
+        ("runtime", "context_tokens"),
+        ("runtime", "context_length"),
+        ("profile", "context_length"),
+        ("profile", "context_tokens"),
+    ):
+        nested = sonder_meta.get(nested_key)
+        if isinstance(nested, Mapping):
+            parsed = _positive_int_value(nested.get(field_name))
+            if parsed is not None:
+                return parsed
+    return _positive_int_value(sonder_meta.get("context_length"))
+
+
 def _extract_show_metadata(
     model_name: str,
     tag_entry: Mapping[str, Any] | None,
     show_payload: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
+    resolved_show = _unwrap_model_list_entry(model_name, show_payload)
     details = {}
     if isinstance(tag_entry, Mapping) and isinstance(tag_entry.get("details"), Mapping):
         details.update(tag_entry["details"])
-    if isinstance(show_payload, Mapping) and isinstance(show_payload.get("details"), Mapping):
-        details.update(show_payload["details"])
-    model_info = show_payload.get("model_info") if isinstance(show_payload, Mapping) else None
-    capabilities_raw = show_payload.get("capabilities") if isinstance(show_payload, Mapping) else None
+    if isinstance(resolved_show, Mapping) and isinstance(resolved_show.get("details"), Mapping):
+        details.update(resolved_show["details"])
+    model_info = resolved_show.get("model_info") if isinstance(resolved_show, Mapping) else None
+    capabilities_raw = resolved_show.get("capabilities") if isinstance(resolved_show, Mapping) else None
+    if capabilities_raw is None and isinstance(tag_entry, Mapping):
+        capabilities_raw = tag_entry.get("capabilities")
     capabilities = tuple(
         sorted({str(item).strip().casefold() for item in capabilities_raw if str(item).strip()})
     ) if isinstance(capabilities_raw, (list, tuple, set, frozenset)) else ()
-    supports_tools: bool | None = ("tools" in capabilities) if capabilities else None
-    context_length = _parse_show_context_length(show_payload) if isinstance(show_payload, Mapping) else None
+    supports_tools: bool | None = (
+        ("tools" in capabilities or "tool_calling" in capabilities) if capabilities else None
+    )
+    context_length = (
+        _parse_show_context_length(resolved_show) if isinstance(resolved_show, Mapping) else None
+    )
+    if context_length is None:
+        context_length = _parse_si_sonder_context_length(resolved_show) or _parse_si_sonder_context_length(tag_entry)
     parameter_billions = _parse_billions(details.get("parameter_size"))
     active_billions = _parse_moe_active_billions(model_name, details, model_info)
     meta: dict[str, Any] = {}
@@ -1463,7 +1516,7 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
                 for row in ps_rows:
                     if not isinstance(row, Mapping):
                         continue
-                    name = str(row.get("name") or row.get("model") or "").strip()[:256]
+                    name = str(row.get("id") or row.get("name") or row.get("model") or "").strip()[:256]
                     if name:
                         loaded_models.append(name)
                         ctx = _positive_int_value(row.get("context_length"))
