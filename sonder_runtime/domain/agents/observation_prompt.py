@@ -10,14 +10,16 @@ Three-Hundredth Slice; append-only compaction keeps stable cache prefixes.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 import re
+from typing import Any, cast
 import unicodedata
 
 
-def parse_observation_budget(value, default=20000):
+def parse_observation_budget(value: object, default: int = 20000) -> int:
     """Parse a caller-supplied observation budget without reading process env."""
     try:
-        return max(512, int(value))
+        return max(512, int(cast(Any, value)))
     except (TypeError, ValueError):
         return max(512, int(default))
 
@@ -331,13 +333,13 @@ _ASCII_DROPPED_RE = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
 _SKELETON_CACHE_LIMIT = 65536
 
 
-def _is_dropped(char):
+def _is_dropped(char: str) -> bool:
     if char in _KEPT_CONTROLS:
         return False
     return char in _INVISIBLE or unicodedata.category(char) in _DROPPED_CATEGORIES
 
 
-class _Skeleton(dict):
+class _Skeleton(dict[int, str]):
     """Code point -> the text the marker match sees for that character.
 
     A character the confusables table lists becomes the marker letters it
@@ -360,10 +362,10 @@ class _Skeleton(dict):
     splits a word nor ends a match.
     """
 
-    def __missing__(self, codepoint):
+    def __missing__(self, codepoint: int) -> str:
         folded = _CONFUSABLE_FOLD.get(codepoint)
         if folded is None:
-            pieces = []
+            pieces: list[str] = []
             for char in unicodedata.normalize("NFKD", chr(codepoint)):
                 mapped = _CONFUSABLE_FOLD.get(ord(char))
                 if mapped is None:
@@ -390,12 +392,12 @@ class _Skeleton(dict):
 _SKELETON = _Skeleton()
 
 
-def _marker_spans(text):
+def _marker_spans(text: str) -> list[tuple[int, int]]:
     """``(start, end)`` spans of *text* whose skeleton is a marker, in order."""
     if not _ENVELOPE_MARKER_RE.search(text.translate(_SKELETON)):
         return []
-    pieces = []
-    origin = []
+    pieces: list[str] = []
+    origin: list[int] = []
     for index, char in enumerate(text):
         folded = _SKELETON[ord(char)]
         pieces.append(folded)
@@ -406,7 +408,7 @@ def _marker_spans(text):
     ]
 
 
-def neutralize_envelope_markers(text):
+def neutralize_envelope_markers(text: object) -> str:
     """Defuse the envelope marker and its covered look-alike spellings.
 
     Covered: any case, any run of separators between the words and up to three
@@ -421,16 +423,16 @@ def neutralize_envelope_markers(text):
     append-only. Only the matched spans change: every other character of the
     original text is kept as it was.
     """
-    text = str(text or "")
-    if text.isascii() and not _ASCII_DROPPED_RE.search(text):
+    source = str(text or "")
+    if source.isascii() and not _ASCII_DROPPED_RE.search(source):
         # The skeleton of such text differs from it only in case, which the
         # pattern ignores, and in separators read as one space each, which
         # the pattern accepts wherever it accepts the separator.
-        return _ENVELOPE_MARKER_RE.sub(_NEUTRALIZED_MARKER, text)
-    spans = _marker_spans(text)
+        return _ENVELOPE_MARKER_RE.sub(_NEUTRALIZED_MARKER, source)
+    spans = _marker_spans(source)
     if not spans:
-        return text
-    rewritten = []
+        return source
+    rewritten: list[str] = []
     cursor = 0
     for start, end in spans:
         if start < cursor:
@@ -438,29 +440,29 @@ def neutralize_envelope_markers(text):
             # several characters: widen the rewrite just made instead.
             cursor = max(cursor, end)
             continue
-        rewritten.append(text[cursor:start])
+        rewritten.append(source[cursor:start])
         rewritten.append(_NEUTRALIZED_MARKER)
         cursor = end
-    rewritten.append(text[cursor:])
+    rewritten.append(source[cursor:])
     return "".join(rewritten)
 
 
-def clip_prompt_text(text, limit):
+def clip_prompt_text(text: object, limit: int) -> str:
     """Keep useful context from both ends of a long tool observation."""
-    text = str(text or "")
+    source = str(text or "")
     limit = max(0, int(limit))
-    if len(text) <= limit:
-        return text
+    if len(source) <= limit:
+        return source
     if limit <= 48:
-        return text[:limit]
+        return source[:limit]
     marker = "\n...[observation compacted by host]...\n"
     remaining = limit - len(marker)
     head = max(1, (remaining * 2) // 3)
     tail = max(1, remaining - head)
-    return text[:head] + marker + text[-tail:]
+    return source[:head] + marker + source[-tail:]
 
 
-def frame_observations(text, limit):
+def frame_observations(text: object, limit: int) -> str:
     """Put model-facing tool output in a host-owned untrusted-data envelope."""
     limit = max(0, int(limit))
     header = UNTRUSTED_OBSERVATION_HEADER
@@ -473,7 +475,7 @@ def frame_observations(text, limit):
 _STEP_TOOL_RE = re.compile(r"\bstep\s+(\d+)\b.*?\btool=([^\s:]+)", re.I)
 
 
-def _summary_line(item, index):
+def _summary_line(item: str, index: int) -> str:
     """Summarize the first output line without losing the host step/tool identity."""
     lines = [line.strip() for line in item.splitlines() if line.strip()]
     first_line = lines[0] if lines else ""
@@ -485,7 +487,7 @@ def _summary_line(item, index):
     return "step %s tool=%s -> %s" % (step, tool, clip_prompt_text(first_line, 180))
 
 
-def _compact_snapshot(values, target, content_budget):
+def _compact_snapshot(values: Sequence[str], target: int, content_budget: int) -> str:
     """Freeze an overflow generation; recent verbatim evidence outranks the target.
 
     Six recent entries are retained verbatim when they fit the hard ceiling.
@@ -527,8 +529,8 @@ def _compact_snapshot(values, target, content_budget):
 
 
 def observation_prompt(
-    observations, max_chars=OBSERVATION_PROMPT_CHARS,
-):
+    observations: Iterable[object], max_chars: int = OBSERVATION_PROMPT_CHARS,
+) -> str:
     """Build a bounded model-facing window while the host retains full evidence."""
     values = [
         neutralize_envelope_markers(item)
@@ -565,7 +567,9 @@ def observation_prompt(
     return frame_observations(result, max_chars)
 
 
-def fit_sectioned_text(text, limit, section_prefix, *, clip_hint=""):
+def fit_sectioned_text(
+    text: object, limit: int, section_prefix: object, *, clip_hint: object = "",
+) -> str:
     """Fit a multi-section tool result into ``limit`` characters fairly.
 
     A batch result (for example one ``context_pack`` holding several files)
@@ -579,45 +583,45 @@ def fit_sectioned_text(text, limit, section_prefix, *, clip_hint=""):
     for one header per section, falls back to :func:`clip_prompt_text`.  The
     result never exceeds ``limit`` characters; the caller keeps the full text.
     """
-    text = str(text or "")
+    source = str(text or "")
     limit = max(0, int(limit))
-    if len(text) <= limit:
-        return text
+    if len(source) <= limit:
+        return source
     prefix = str(section_prefix or "")
-    starts = []
+    starts: list[int] = []
     if prefix:
         position = 0
         while True:
-            found = text.find(prefix, position)
+            found = source.find(prefix, position)
             if found < 0:
                 break
-            if found == 0 or text[found - 1] == "\n":
+            if found == 0 or source[found - 1] == "\n":
                 starts.append(found)
             position = found + len(prefix)
     if not starts:
-        return clip_prompt_text(text, limit)
-    preamble = text[:starts[0]]
-    bounds = starts[1:] + [len(text)]
-    sections = [text[begin:end] for begin, end in zip(starts, bounds)]
+        return clip_prompt_text(source, limit)
+    preamble = source[:starts[0]]
+    bounds = starts[1:] + [len(source)]
+    sections = [source[begin:end] for begin, end in zip(starts, bounds)]
 
     hint = (" " + str(clip_hint).strip()) if str(clip_hint or "").strip() else ""
     notice = (
         "[HOST VIEW: this result has %d characters, over the %d-character "
         "observation budget; each of its %d sections keeps an equal share and "
         "clipped sections are marked. The host retains the full result.%s]\n"
-        % (len(text), limit, len(sections), hint)
+        % (len(source), limit, len(sections), hint)
     )
     marker_template = "\n...[host clipped this section: showed %d of %d characters]\n"
-    marker_reserve = len(marker_template % (len(text), len(text)))
+    marker_reserve = len(marker_template % (len(source), len(source)))
     preamble_budget = min(len(preamble), max(0, limit // 8))
     shown_preamble = clip_prompt_text(preamble, preamble_budget)
     budget = limit - len(notice) - len(shown_preamble)
     headers = [section.split("\n", 1)[0] for section in sections]
     if budget < sum(len(header) + marker_reserve + 1 for header in headers):
-        return clip_prompt_text(text, limit)
+        return clip_prompt_text(source, limit)
 
     # Equal shares; sections shorter than their share return the remainder.
-    allotment = {}
+    allotment: dict[int, int] = {}
     pending = sorted(range(len(sections)), key=lambda index: len(sections[index]))
     remaining = budget
     while pending:
@@ -632,7 +636,7 @@ def fit_sectioned_text(text, limit, section_prefix, *, clip_hint=""):
             allotment[index] = share
         break
 
-    shown = []
+    shown: list[str] = []
     for index, section in enumerate(sections):
         allowed = allotment[index]
         if len(section) <= allowed:

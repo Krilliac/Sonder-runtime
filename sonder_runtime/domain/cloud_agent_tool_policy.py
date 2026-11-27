@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 
 def cloud_agent_tool_policy_error(
-    tool_name, *, unsafe=False, local_only_tools=(), nested_model_tools=(),
-):
+    tool_name: str,
+    *,
+    unsafe: bool = False,
+    local_only_tools: Collection[str] = (),
+    nested_model_tools: Collection[str] = (),
+) -> str:
     """Return a policy error string, or empty string when allowed."""
     if tool_name in local_only_tools:
         return (
