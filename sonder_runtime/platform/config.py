@@ -254,6 +254,7 @@ class InferenceConfig:
     health_ttl_seconds: float = 5.0
     health_timeout_seconds: float = 5.0
     health_stale_seconds: float = 120.0
+    ca_bundle: str = ""
 
 
 @dataclass(frozen=True)
@@ -1769,9 +1770,25 @@ def _apply_environment(
                 if value.strip()
             ),
         )
-    if "SONDER_ALLOW_REMOTE_OLLAMA" in env:
-        ollama = replace(
-            ollama, allow_remote=_env_bool(env["SONDER_ALLOW_REMOTE_OLLAMA"])
+    if "SONDER_ALLOW_REMOTE_INFERENCE" in env:
+        allow_remote_val = _env_bool(env["SONDER_ALLOW_REMOTE_INFERENCE"])
+        inference = replace(inference, allow_remote=allow_remote_val)
+        ollama = replace(ollama, allow_remote=allow_remote_val)
+    elif "SONDER_ALLOW_REMOTE_OLLAMA" in env:
+        import logging
+        logging.getLogger(__name__).warning(
+            "SONDER_ALLOW_REMOTE_OLLAMA is deprecated; use SONDER_ALLOW_REMOTE_INFERENCE instead"
+        )
+        allow_remote_val = _env_bool(env["SONDER_ALLOW_REMOTE_OLLAMA"])
+        inference = replace(inference, allow_remote=allow_remote_val)
+        ollama = replace(ollama, allow_remote=allow_remote_val)
+    if env.get("SONDER_INFERENCE_API_KEY_FILE", "").strip():
+        inference = replace(
+            inference, api_key_file=env["SONDER_INFERENCE_API_KEY_FILE"].strip()
+        )
+    if env.get("SONDER_INFERENCE_CA_BUNDLE", "").strip():
+        inference = replace(
+            inference, ca_bundle=env["SONDER_INFERENCE_CA_BUNDLE"].strip()
         )
     if env.get("SONDER_TRUSTED_ORIGINS", "").strip():
         ollama = replace(

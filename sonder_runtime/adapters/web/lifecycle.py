@@ -671,8 +671,11 @@ class RuntimeLifecycle:
             if "://" not in si_origin:
                 si_origin = "http://" + si_origin
             url = si_origin + "/v1/sonder/health"
+            from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+                resolve_api_key,
+            )
             headers: dict[str, str] = {}
-            api_key = os.environ.get("SONDER_INFERENCE_API_KEY", "").strip()
+            api_key = resolve_api_key()
             if api_key:
                 headers["Authorization"] = "Bearer " + api_key
             with ollama_endpoint.open_url(

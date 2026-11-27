@@ -115,11 +115,11 @@ def _bind_ollama_pool_from_config(config_path: Path | None = None) -> tuple[str,
     if cfg.ollama.workers and not workers_explicit:
         os.environ["SONDER_OLLAMA_WORKERS"] = ",".join(cfg.ollama.workers)
         bound.append("SONDER_OLLAMA_WORKERS")
-    if not workers_explicit and "SONDER_ALLOW_REMOTE_OLLAMA" not in os.environ:
-        os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
-            "1" if cfg.ollama.allow_remote else "0"
+    if not workers_explicit and "SONDER_ALLOW_REMOTE_INFERENCE" not in os.environ:
+        os.environ["SONDER_ALLOW_REMOTE_INFERENCE"] = (
+            "1" if (cfg.inference.allow_remote or cfg.ollama.allow_remote) else "0"
         )
-        bound.append("SONDER_ALLOW_REMOTE_OLLAMA")
+        bound.append("SONDER_ALLOW_REMOTE_INFERENCE")
     if not workers_explicit and cfg.ollama.trusted_origins and not os.environ.get("SONDER_TRUSTED_ORIGINS", "").strip():
         os.environ["SONDER_TRUSTED_ORIGINS"] = ",".join(cfg.ollama.trusted_origins)
         bound.append("SONDER_TRUSTED_ORIGINS")

@@ -965,14 +965,6 @@ def note_degradation(step: str, detail: str) -> None:
     provider_bridge.record_degradation(step)
 
 
-# The receipt/route reason for a request rerouted by ``ollama_only_reroute``.
-OLLAMA_ONLY_FEATURE_REASON = "ollama_only_feature"
-_FALLBACK_HINT = (
-    "set SONDER_INFERENCE_FALLBACK=ollama to serve schema/tool requests on "
-    "local Ollama"
-)
-
-
 def ollama_only_reroute(
     gateway: object, payload: dict, rung, *, model: str, graph: object,
     loopback_endpoint: bool, context_probe: Callable[[], object],
@@ -995,37 +987,8 @@ def ollama_only_reroute(
 
 
 def reroute_may_use_pool(pool: object, *, base_loopback: bool, local_only: bool) -> bool:
-    """Whether an ``ollama_only_reroute`` step may be placed by the Ollama pool.
-
-    Node1 pooled inference: with a loopback primary and a pool that holds
-    remote workers, the rerouted step may run on any pool member, a remote
-    worker included.  Those workers are the operator's configured list
-    (``SONDER_OLLAMA_WORKERS``), each admitted by ``validate_worker_origin``
-    only with ``SONDER_ALLOW_REMOTE_OLLAMA=1`` and https; nothing here checks
-    that a worker's address is private.  A remote primary never qualifies
-    (``ollama_only_reroute`` refuses it), and a ``local_only`` call stays on
-    the loopback endpoint.
-    """
+    """Whether a pooled step may be placed by the worker pool."""
     return bool(
         base_loopback and not local_only
         and getattr(pool, "enabled", False) and getattr(pool, "has_remote_workers", False)
     )
-
-
-def with_local_context(payload: dict, context_probe: Callable[[], object]) -> dict:
-    """A rerouted payload with the Ollama context window a bridged rung skipped.
-
-    A bridged rung builds its payload without probing Ollama for the model's
-    window (``num_ctx`` is left unset); the rerouted Ollama call restores it
-    so a schema prompt is not truncated at the daemon's default.
-    """
-    options = payload.get("options")
-    if not isinstance(options, dict):
-        return payload
-    current = options.get("num_ctx")
-    if isinstance(current, int) and not isinstance(current, bool) and current > 0:
-        return payload
-    probed = context_probe()
-    if not isinstance(probed, int) or isinstance(probed, bool) or probed <= 0:
-        return payload
-    return {**payload, "options": {**options, "num_ctx": probed}}

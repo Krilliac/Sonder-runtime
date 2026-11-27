@@ -1110,8 +1110,10 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     os.environ["SONDER_INFERENCE_BASE_URL"] = config.inference.url
     if config.inference.ready_file:
         os.environ["SONDER_INFERENCE_READY_FILE"] = config.inference.ready_file
+    if config.inference.api_key_file:
+        os.environ["SONDER_INFERENCE_API_KEY_FILE"] = config.inference.api_key_file
     os.environ["SONDER_ALLOW_REMOTE_INFERENCE"] = (
-        "1" if config.inference.allow_remote else "0"
+        "1" if (config.inference.allow_remote or config.ollama.allow_remote) else "0"
     )
     if config.inference.private_workers:
         os.environ["SONDER_INFERENCE_PRIVATE_WORKERS"] = config.inference.private_workers
@@ -1126,6 +1128,18 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     os.environ["SONDER_INFERENCE_MAX_INFLIGHT"] = str(config.inference.max_inflight)
     os.environ["SONDER_INFERENCE_TIMEOUT_SECONDS"] = str(
         config.inference.request_timeout_seconds
+    )
+    os.environ["SONDER_INFERENCE_HEALTH_TTL_SECONDS"] = str(
+        config.inference.health_ttl_seconds
+    )
+    os.environ["SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS"] = str(
+        config.inference.health_timeout_seconds
+    )
+    os.environ["SONDER_INFERENCE_HEALTH_STALE_SECONDS"] = str(
+        config.inference.health_stale_seconds
+    )
+    os.environ["SONDER_INFERENCE_STARTUP_TIMEOUT_SECONDS"] = str(
+        config.inference.startup_timeout_seconds
     )
     os.environ["SONDER_ALLOW_CLOUD"] = "1" if config.features.cloud else "0"
     os.environ["SONDER_WEB_TOOLS"] = "1" if config.features.web else "0"
@@ -1206,8 +1220,8 @@ def cmd_serve(args) -> int:
     # Export worker config to env early so the pool sees it even if
     # server.py is imported before configure_typed_workers runs.
     os.environ["SONDER_OLLAMA_WORKERS"] = ",".join(config.ollama.workers)
-    os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
-        "1" if config.ollama.allow_remote else "0"
+    os.environ["SONDER_ALLOW_REMOTE_INFERENCE"] = (
+        "1" if (config.inference.allow_remote or config.ollama.allow_remote) else "0"
     )
     os.environ["SONDER_TRUSTED_ORIGINS"] = ",".join(config.ollama.trusted_origins)
     from sonder_runtime.platform.logging import configure_logging

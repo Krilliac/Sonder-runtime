@@ -177,6 +177,7 @@ ENV_EMBED_MODEL = "SONDER_INFERENCE_EMBED_MODEL"
 ENV_RERANK_MODEL = "SONDER_INFERENCE_RERANK_MODEL"
 ENV_TIER_MODELS = "SONDER_INFERENCE_TIER_MODELS"
 ENV_API_KEY = "SONDER_INFERENCE_API_KEY"
+ENV_API_KEY_FILE = "SONDER_INFERENCE_API_KEY_FILE"
 ENV_ALLOW_REMOTE = "SONDER_ALLOW_REMOTE_INFERENCE"
 ENV_READY_FILE = "SONDER_INFERENCE_READY_FILE"
 ENV_TIMEOUT = "SONDER_INFERENCE_TIMEOUT_SECONDS"
@@ -1300,6 +1301,47 @@ def _parse_max_inflight(source: Mapping[str, str]) -> int:
     return value
 
 
+_API_KEY_FILE_LIMIT = 4096
+
+
+def _read_api_key_file(raw_path: str) -> str:
+    cleaned = str(raw_path or "").strip()
+    if not cleaned:
+        return ""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+        raise InvalidInput("%s must not contain control characters" % ENV_API_KEY_FILE)
+    path = Path(cleaned).expanduser()
+    if path.is_symlink():
+        raise InvalidInput("%s must not be a symlink" % ENV_API_KEY_FILE)
+    if not path.is_file():
+        raise InvalidInput("%s does not point to a readable file" % ENV_API_KEY_FILE)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise InvalidInput("%s could not be read: %s" % (ENV_API_KEY_FILE, exc)) from None
+    if len(raw) > _API_KEY_FILE_LIMIT:
+        raise InvalidInput("%s exceeds %d bytes" % (ENV_API_KEY_FILE, _API_KEY_FILE_LIMIT))
+    try:
+        text = raw.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise InvalidInput("%s is not valid UTF-8" % ENV_API_KEY_FILE) from exc
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise InvalidInput("%s contains control characters" % ENV_API_KEY_FILE)
+    return text
+
+
+def resolve_api_key(env: Mapping[str, str] | None = None) -> str:
+    """Resolve the Sonder Inference bearer key from ``ENV_API_KEY`` or ``ENV_API_KEY_FILE``."""
+    source = os.environ if env is None else env
+    direct = str(source.get(ENV_API_KEY, "") or "").strip()
+    if direct:
+        return direct
+    key_file = str(source.get(ENV_API_KEY_FILE, "") or "").strip()
+    if key_file:
+        return _read_api_key_file(key_file)
+    return ""
+
+
 def config_from_env(env: Mapping[str, str] | None = None) -> SonderInferenceConfig:
     """Resolve settings lazily from the environment (never at import)."""
     source = os.environ if env is None else env
@@ -1325,7 +1367,7 @@ def config_from_env(env: Mapping[str, str] | None = None) -> SonderInferenceConf
         embed_model=str(source.get(ENV_EMBED_MODEL, "") or "").strip(),
         rerank_model=str(source.get(ENV_RERANK_MODEL, "") or "").strip(),
         tier_models=_parse_tier_models(str(source.get(ENV_TIER_MODELS, "") or "")),
-        api_key=str(source.get(ENV_API_KEY, "") or "").strip(),
+        api_key=resolve_api_key(source),
         allow_remote=allow_remote_raw == "1",
         timeout_seconds=_parse_float(source, ENV_TIMEOUT, DEFAULT_TIMEOUT_SECONDS),
         stream_idle_seconds=_parse_float(source, ENV_STREAM_IDLE, DEFAULT_STREAM_IDLE_SECONDS),

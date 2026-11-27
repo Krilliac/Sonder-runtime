@@ -111,8 +111,11 @@ def _check_inference_origin(
     url = origin.rstrip("/") + "/v1/sonder/health"
     host = urlsplit(origin).hostname or ""
     try:
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+            resolve_api_key,
+        )
         headers: dict[str, str] = {}
-        api_key = os.environ.get("SONDER_INFERENCE_API_KEY", "").strip()
+        api_key = resolve_api_key()
         if api_key:
             headers["Authorization"] = "Bearer " + api_key
         request = urllib.request.Request(url, headers=headers, method="GET")
@@ -138,6 +141,11 @@ def _check_inference_origin(
 
 
 def _check_inference(config: SonderConfig, *, timeout: float = 5.0) -> CheckResult:
+    if getattr(getattr(config, "membership", None), "mode", None) == "external":
+        return CheckResult(
+            "inference", False, False,
+            "deferred: external membership requires explicit typed pool refresh",
+        )
     inf = getattr(config, "inference", None)
     url = (
         getattr(inf, "url", "")
@@ -162,24 +170,12 @@ def _check_ollama_workers(
     config: SonderConfig, *, timeout: float = 5.0,
 ) -> list[CheckResult]:
     """SI private workers are probed via SonderInferenceGateway; no legacy Ollama pool."""
+    if getattr(getattr(config, "membership", None), "mode", None) == "external":
+        return [CheckResult(
+            "inference_workers", False, False,
+            "deferred: external membership requires explicit typed pool refresh",
+        )]
     return []
-
-
-def _check_sonder_inference() -> CheckResult | None:
-    """Non-required readiness note for a bound Sonder Inference provider.
-
-    Startup never blocks on Inference: the server may legitimately start
-    after the runtime, and a request that finds it down fails closed (or
-    falls back) at call time.  This only makes the state visible, and it
-    never raises: any failure of the check itself is reported, not thrown.
-    """
-    try:
-        return _sonder_inference_result()
-    except Exception as exc:  # noqa: BLE001 - preflight never blocks on Inference
-        return CheckResult(
-            "sonder_inference", False, False,
-            f"check failed: {type(exc).__name__}: {exc}"[:240],
-        )
 
 
 def _sonder_inference_result() -> CheckResult | None:
@@ -289,7 +285,15 @@ def run_preflight(
     checks.extend(_check_schema_versions(config))
     checks.append(_check_runtime_policy())
     if check_ollama:
+        ca_bundle = getattr(getattr(config, "inference", None), "ca_bundle", "") or getattr(
+            getattr(config, "ollama", None), "ca_bundle", "",
+        )
+        try:
+            ollama_endpoint.configure_typed_ca_bundle(ca_bundle)
+        except ValueError as exc:
+            checks.append(CheckResult("inference_ca_bundle", False, False, str(exc)))
         checks.append(_check_inference(config, timeout=ollama_timeout))
+        checks.extend(_check_ollama_workers(config, timeout=ollama_timeout))
     router = _check_openrouter()
     if router is not None:
         checks.append(router)

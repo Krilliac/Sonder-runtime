@@ -775,7 +775,7 @@ def validate_worker_origin(
         logger.debug(f"origin {normalized!r} is remote, checking policy")
         if not allow_remote:
             raise ValueError(
-                "remote worker endpoints require SONDER_ALLOW_REMOTE_OLLAMA=1"
+                "remote worker endpoints require SONDER_ALLOW_REMOTE_INFERENCE=1"
             )
         if parsed.scheme.casefold() != "https":
             raise ValueError("remote worker endpoints must use https")
@@ -5202,9 +5202,8 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         worker_origins = parse_worker_origins(
             env.get("SONDER_OLLAMA_WORKERS"), max_workers=max_workers,
         )
-        allow_remote = str(env.get("SONDER_ALLOW_REMOTE_OLLAMA", "")).strip().lower() in {
-            "1", "true", "yes", "on",
-        }
+        from sonder_runtime.domain import ollama_policy as _ollama_policy
+        allow_remote = _ollama_policy.remote_allowed(env)
         raw_trusted = env.get("SONDER_TRUSTED_ORIGINS", "")
         trusted_origins = tuple(
             v.strip() for v in raw_trusted.replace(";", ",").split(",") if v.strip()

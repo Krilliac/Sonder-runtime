@@ -1,22 +1,21 @@
-# Ollama outage
+# Inference outage (Sonder Inference)
 
 ## Symptoms
 
-- `/ready` returns 503 with `required dependency ollama is unavailable`.
+- `/ready` returns 503 with `required dependency inference is unavailable`.
 - `/live` still returns 200 (the runtime process itself is healthy).
 - Chat requests fail with 502/503/504 model errors.
 - `sonder_model_calls_total{result="error"}` climbing.
 
 The runtime is designed to report *unready without false success* during
-an Ollama outage — do not restart Sonder to "fix" a red readiness check.
+an inference outage — do not restart Sonder to "fix" a red readiness check.
 
-## Diagnosis (local Ollama)
+## Diagnosis (local Sonder Inference)
 
 ```bash
-systemctl status ollama
-curl -s http://127.0.0.1:11434/api/tags | head -c 200
-journalctl -u ollama --since -15min
-df -h /            # model pulls fill disks
+curl -s http://127.0.0.1:11437/v1/sonder/health | head -c 400
+curl -s http://127.0.0.1:11437/v1/models | head -c 400
+df -h /            # model files fill disks
 free -h            # OOM-killed model runners
 ```
 
@@ -67,13 +66,15 @@ workers are configured (`[ollama].workers`, see
    end the `ollama.exe` process: the task's loop restarts it after its delay,
    or restart the scheduled task itself.
 
-`/ready` probes the primary through the same transport as chat calls
-(`ollama_endpoint.open_url` on `<[ollama].url>/api/tags`,
-`sonder_runtime/adapters/web/lifecycle.py` `probe_ollama_once`), so it uses
-`[ollama].ca_bundle` (`SONDER_OLLAMA_CA_BUNDLE`) and ignores environment
-proxies like chat does; a private-CA proxy that chat reaches does not by itself
-make `/ready` report `required dependency ollama is unavailable`.
-Workers in `[ollama].workers` are not probed by `/ready`.
+`/ready` probes the primary Sonder Inference endpoint through the same
+transport as chat calls (`ollama_endpoint.open_url` on
+`<[inference].url>/v1/sonder/health`, `sonder_runtime/adapters/web/lifecycle.py`
+`probe_inference_once`), so it uses `[inference].ca_bundle` (or `[ollama].ca_bundle`)
+and ignores environment proxies like chat does; a private-CA proxy that chat
+reaches does not by itself make `/ready` report
+`required dependency inference is unavailable`. Remote endpoints require
+`SONDER_ALLOW_REMOTE_INFERENCE=1` (`SONDER_ALLOW_REMOTE_OLLAMA` is accepted
+as a deprecated alias with a warning).
 
 ## Recovery
 

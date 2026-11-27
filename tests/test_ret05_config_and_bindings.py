@@ -196,3 +196,85 @@ def test_ollama_host_never_receives_traffic_or_si_bearer_key(monkeypatch, tmp_pa
         assert "configure_typed_endpoint(config.inference.url)" in app_src
     finally:
         ollama_endpoint.reset_typed_endpoint()
+
+
+def test_inference_api_key_file_and_health_timings_reach_gateway_authorization(tmp_path, monkeypatch):
+    """BLOCKING (6): [inference].api_key_file and health timing settings reach SonderInferenceGateway."""
+    import json
+    from sonder_runtime import __main__ as main_mod
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+        SonderInferenceGateway,
+        config_from_env,
+    )
+    from sonder_runtime.application.context import local_owner_context
+    from sonder_runtime.application.ports.model_gateway import ModelRequest
+
+    key_file = tmp_path / "si_api.key"
+    key_file.write_text("file-bearer-secret-123\n", encoding="utf-8")
+    cfg_file = tmp_path / "sonder.toml"
+    cfg_file.write_text(
+        "[inference]\n"
+        f'api_key_file = "{key_file.as_posix()}"\n'
+        "health_ttl_seconds = 12.5\n"
+        "health_timeout_seconds = 3.5\n"
+        "health_stale_seconds = 90.0\n"
+        "startup_timeout_seconds = 45\n",
+        encoding="utf-8",
+    )
+    loaded = sonder_config.load_config(cfg_file, env={})
+    monkeypatch.delenv("SONDER_INFERENCE_API_KEY", raising=False)
+    monkeypatch.delenv("SONDER_INFERENCE_API_KEY_FILE", raising=False)
+    main_mod._export_runtime_environment(loaded)
+
+    gw_cfg = config_from_env()
+    assert gw_cfg.api_key == "file-bearer-secret-123"
+    assert gw_cfg.health_ttl_seconds == 12.5
+    assert gw_cfg.health_timeout_seconds == 3.5
+    assert gw_cfg.health_stale_seconds == 90.0
+
+    seen_headers = []
+
+    def fake_get(url, headers, timeout):
+        seen_headers.append(dict(headers))
+        return (
+            200,
+            json.dumps({
+                "status": "ready",
+                "api_version": 1,
+                "backends": [{"name": "llamacpp", "available": True, "capabilities": ["chat"]}],
+                "models": [{"id": "qwen3.6:35b", "backend": "llamacpp"}],
+            }).encode("utf-8"),
+        )
+
+    def fake_post(url, body, headers, timeout):
+        seen_headers.append(dict(headers))
+        return {
+            "id": "chatcmpl-keyfile",
+            "model": "qwen3.6:35b",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        }
+
+    gw = SonderInferenceGateway(gw_cfg, transport=fake_post, get_transport=fake_get)
+    ctx = local_owner_context(correlation_id="keyfile-1", cloud_allowed=False)
+    resp = gw.generate(ModelRequest(prompt="ping", tier="code"), ctx)
+    assert resp.text == "ok"
+    assert len(seen_headers) == 2
+    assert all(h.get("Authorization") == "Bearer file-bearer-secret-123" for h in seen_headers)
+
+
+def test_remote_opt_in_unified_and_legacy_aliases_restored(caplog):
+    """BLOCKING (7) & provider_bindings note: unified SONDER_ALLOW_REMOTE_INFERENCE + deprecated alias + llamacpp aliases."""
+    from sonder_runtime.domain import ollama_policy
+    from sonder_runtime.adapters.provider_bindings import normalize_provider
+
+    # Unified variable wins; legacy SONDER_ALLOW_REMOTE_OLLAMA still works with deprecation warning.
+    assert ollama_policy.remote_allowed({"SONDER_ALLOW_REMOTE_INFERENCE": "1"}) is True
+    assert ollama_policy.remote_allowed({"SONDER_ALLOW_REMOTE_INFERENCE": "0", "SONDER_ALLOW_REMOTE_OLLAMA": "1"}) is False
+    with caplog.at_level("WARNING"):
+        assert ollama_policy.remote_allowed({"SONDER_ALLOW_REMOTE_OLLAMA": "1"}) is True
+    assert any("SONDER_ALLOW_REMOTE_OLLAMA" in rec.message for rec in caplog.records)
+
+    # Restored openai_compatible aliases outside RET-05 scope.
+    assert normalize_provider("llamacpp") == "openai_compatible"
+    assert normalize_provider("distributed-rpc") == "openai_compatible"
+    assert normalize_provider("rpc-sharded") == "openai_compatible"
