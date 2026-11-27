@@ -61,11 +61,11 @@ def test_rename_symbol_failure_midway_rolls_every_file_back(tmp_path, monkeypatc
     real_replace = harness_tools.os.replace
     calls = {"n": 0}
 
-    def failing_replace(src, dst):
+    def failing_replace(src, dst, **kwargs):
         calls["n"] += 1
         if calls["n"] == 2:
             raise OSError("disk full")
-        return real_replace(src, dst)
+        return real_replace(src, dst, **kwargs)
 
     monkeypatch.setattr(harness_tools.os, "replace", failing_replace)
     result = harness_tools.rename_symbol(
