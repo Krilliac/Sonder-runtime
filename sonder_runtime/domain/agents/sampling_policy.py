@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import math
+from typing import Any
 
 from ..common.errors import InvalidInput
 
@@ -29,8 +30,8 @@ class SamplingPolicy:
     thinking_mode: str
     generation_kind: str
 
-    def options(self, *, thinking_advertised: bool) -> dict:
-        options = dict(self.sampling)
+    def options(self, *, thinking_advertised: bool) -> dict[str, Any]:
+        options: dict[str, Any] = dict(self.sampling)
         if thinking_advertised:
             if self.thinking_mode == "on":
                 options["think"] = True
@@ -48,7 +49,7 @@ def sampling_policy(env: Mapping[str, str], *, generation_kind: str,
     mode = env.get(name, "on" if generation_kind == "decision" else "auto").strip().lower()
     if mode not in ("on", "off", "auto"):
         raise InvalidInput("%s must be on, off or auto" % name)
-    sampling = ()
+    sampling: tuple[tuple[str, float | int], ...] = ()
     if generation_kind == "decision":
         temperature = decision_temperature(env)
         raw = env.get("SONDER_AGENT_SAMPLING", "").strip()
