@@ -774,6 +774,7 @@ sonder_runtime/domain/routing/capability_profiles.py
 sonder_runtime/domain/routing/execution_mode_router.py
 sonder_runtime/domain/routing/fleet_router.py
 sonder_runtime/domain/routing/model_names.py
+sonder_runtime/domain/routing/node_health_gate.py
 sonder_runtime/domain/routing/prefix_locality.py
 sonder_runtime/domain/routing/semantic_tier.py
 sonder_runtime/domain/routing/thinking_ensemble.py

@@ -560,9 +560,104 @@ class NodeHostMemory:
         }
 
 
+_NODE_MAX_VULKAN_HEAPS = 32
+_NODE_MAX_SHARED_MEM_BYTES = 64 * 1024 * 1024  # 64 MiB workgroup shared-mem defensive ceiling
+_NODE_MAX_PCIE_GEN = 8
+_NODE_MAX_PCIE_WIDTH = 32
+_NODE_MAX_WARP_SIZE = 1024
+
+
+def _node_opt_bool(value: object) -> bool | None:
+    return value if type(value) is bool else None
+
+
+@dataclass(frozen=True)
+class NodePcieTelemetry:
+    """Additive PCIe link & ASPM telemetry from NAT-08 ``gpus[].pcie``."""
+
+    current_gen: int | None = None
+    current_width: int | None = None
+    max_gen: int | None = None
+    max_width: int | None = None
+    aspm_state: str | None = None
+    aspm_source: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "current_gen": self.current_gen,
+            "current_width": self.current_width,
+            "max_gen": self.max_gen,
+            "max_width": self.max_width,
+            "aspm_state": self.aspm_state,
+            "aspm_source": self.aspm_source,
+        }
+
+
+@dataclass(frozen=True)
+class NodeVulkanMemoryHeap:
+    """One per-heap Vulkan memory snapshot from NAT-08 ``gpus[].vulkan_heaps[]``."""
+
+    heap_index: int
+    size_bytes: int
+    budget_bytes: int | None = None
+    usage_bytes: int | None = None
+    device_local: bool = False
+    multi_instance: bool = False
+    host_visible: bool = False
+    host_coherent: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "heap_index": self.heap_index,
+            "size_bytes": self.size_bytes,
+            "budget_bytes": self.budget_bytes,
+            "usage_bytes": self.usage_bytes,
+            "device_local": self.device_local,
+            "multi_instance": self.multi_instance,
+            "host_visible": self.host_visible,
+            "host_coherent": self.host_coherent,
+        }
+
+
+@dataclass(frozen=True)
+class NodeGgmlDeviceTelemetry:
+    """Parsed ggml backend device capability record from NAT-08 ``gpus[].ggml_device``."""
+
+    backend: str
+    device_name: str
+    index: int | None = None
+    driver_name: str | None = None
+    uma: bool | None = None
+    rebar: bool | None = None
+    fp16: str | None = None
+    bf16: bool | None = None
+    fp4: bool | None = None
+    warp_size: int | None = None
+    shared_memory_bytes: int | None = None
+    int_dot: bool | None = None
+    matrix_cores: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "backend": self.backend,
+            "index": self.index,
+            "device_name": self.device_name,
+            "driver_name": self.driver_name,
+            "uma": self.uma,
+            "rebar": self.rebar,
+            "fp16": self.fp16,
+            "bf16": self.bf16,
+            "fp4": self.fp4,
+            "warp_size": self.warp_size,
+            "shared_memory_bytes": self.shared_memory_bytes,
+            "int_dot": self.int_dot,
+            "matrix_cores": self.matrix_cores,
+        }
+
+
 @dataclass(frozen=True)
 class NodeGpuDevice:
-    """One GPU entry from ``/v1/sonder/node`` ``gpus[]`` (discrete or integrated UMA)."""
+    """One GPU entry from ``/v1/sonder/node`` or ``/v1/sonder/health`` ``gpus[]``."""
 
     gpu_id: str
     name: str
@@ -575,9 +670,20 @@ class NodeGpuDevice:
     effective_free_vram_mib: int | None = None
     backend_hint: str | None = None
     source: str | None = None
+    # Additive NAT-08 device telemetry fields (omitted from to_dict when absent).
+    pci_bus_id: str | None = None
+    driver_name: str | None = None
+    driver_build: str | None = None
+    rebar: bool | None = None
+    shared_memory_bytes: int | None = None
+    warp_size: int | None = None
+    matrix_cores: str | None = None
+    pcie: NodePcieTelemetry | None = None
+    vulkan_heaps: tuple[NodeVulkanMemoryHeap, ...] = ()
+    ggml_device: NodeGgmlDeviceTelemetry | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "id": self.gpu_id,
             "name": self.name,
             "vendor": self.vendor,
@@ -590,6 +696,27 @@ class NodeGpuDevice:
             "backend_hint": self.backend_hint,
             "source": self.source,
         }
+        if self.pci_bus_id is not None:
+            result["pci_bus_id"] = self.pci_bus_id
+        if self.driver_name is not None:
+            result["driver_name"] = self.driver_name
+        if self.driver_build is not None:
+            result["driver_build"] = self.driver_build
+        if self.rebar is not None:
+            result["rebar"] = self.rebar
+        if self.shared_memory_bytes is not None:
+            result["shared_memory_bytes"] = self.shared_memory_bytes
+        if self.warp_size is not None:
+            result["warp_size"] = self.warp_size
+        if self.matrix_cores is not None:
+            result["matrix_cores"] = self.matrix_cores
+        if self.pcie is not None:
+            result["pcie"] = self.pcie.to_dict()
+        if self.vulkan_heaps:
+            result["vulkan_heaps"] = [heap.to_dict() for heap in self.vulkan_heaps]
+        if self.ggml_device is not None:
+            result["ggml_device"] = self.ggml_device.to_dict()
+        return result
 
 
 @dataclass(frozen=True)
@@ -696,8 +823,88 @@ def parse_node_host_memory(raw: object) -> NodeHostMemory | None:
     )
 
 
+def _parse_node_pcie(raw: object) -> NodePcieTelemetry | None:
+    if not isinstance(raw, Mapping):
+        return None
+    current_gen = _node_nonneg_int(raw.get("current_gen"), maximum=_NODE_MAX_PCIE_GEN)
+    current_width = _node_nonneg_int(raw.get("current_width"), maximum=_NODE_MAX_PCIE_WIDTH)
+    max_gen = _node_nonneg_int(raw.get("max_gen"), maximum=_NODE_MAX_PCIE_GEN)
+    max_width = _node_nonneg_int(raw.get("max_width"), maximum=_NODE_MAX_PCIE_WIDTH)
+    aspm_state = _node_text(raw.get("aspm_state"), limit=32)
+    aspm_source = _node_text(raw.get("aspm_source"), limit=64)
+    if (
+        current_gen is None
+        and current_width is None
+        and max_gen is None
+        and max_width is None
+        and aspm_state is None
+        and aspm_source is None
+    ):
+        return None
+    return NodePcieTelemetry(
+        current_gen=current_gen if current_gen and current_gen > 0 else None,
+        current_width=current_width if current_width and current_width > 0 else None,
+        max_gen=max_gen if max_gen and max_gen > 0 else None,
+        max_width=max_width if max_width and max_width > 0 else None,
+        aspm_state=aspm_state.lower() if aspm_state else None,
+        aspm_source=aspm_source.lower() if aspm_source else None,
+    )
+
+
+def _parse_node_vulkan_heaps(raw: object) -> tuple[NodeVulkanMemoryHeap, ...]:
+    if not isinstance(raw, list):
+        return ()
+    heaps: list[NodeVulkanMemoryHeap] = []
+    for entry in raw[:_NODE_MAX_VULKAN_HEAPS]:
+        if not isinstance(entry, Mapping):
+            continue
+        heap_index = _node_nonneg_int(entry.get("heap_index"), maximum=64)
+        size_bytes = _node_nonneg_int(entry.get("size_bytes"), maximum=_NODE_MAX_BYTES)
+        if heap_index is None or size_bytes is None:
+            continue
+        heaps.append(
+            NodeVulkanMemoryHeap(
+                heap_index=heap_index,
+                size_bytes=size_bytes,
+                budget_bytes=_node_nonneg_int(entry.get("budget_bytes"), maximum=_NODE_MAX_BYTES),
+                usage_bytes=_node_nonneg_int(entry.get("usage_bytes"), maximum=_NODE_MAX_BYTES),
+                device_local=entry.get("device_local") is True,
+                multi_instance=entry.get("multi_instance") is True,
+                host_visible=entry.get("host_visible") is True,
+                host_coherent=entry.get("host_coherent") is True,
+            )
+        )
+    return tuple(heaps)
+
+
+def _parse_node_ggml_device(raw: object) -> NodeGgmlDeviceTelemetry | None:
+    if not isinstance(raw, Mapping):
+        return None
+    backend = _node_text(raw.get("backend"), limit=32)
+    device_name = _node_text(raw.get("device_name"), limit=_NODE_MAX_TEXT)
+    if backend is None or device_name is None:
+        return None
+    return NodeGgmlDeviceTelemetry(
+        backend=backend.lower(),
+        index=_node_nonneg_int(raw.get("index"), maximum=1024),
+        device_name=device_name,
+        driver_name=_node_text(raw.get("driver_name"), limit=_NODE_MAX_TEXT),
+        uma=_node_opt_bool(raw.get("uma")),
+        rebar=_node_opt_bool(raw.get("rebar")),
+        fp16=_node_text(raw.get("fp16"), limit=16),
+        bf16=_node_opt_bool(raw.get("bf16")),
+        fp4=_node_opt_bool(raw.get("fp4")),
+        warp_size=_node_nonneg_int(raw.get("warp_size"), maximum=_NODE_MAX_WARP_SIZE),
+        shared_memory_bytes=_node_nonneg_int(
+            raw.get("shared_memory_bytes"), maximum=_NODE_MAX_SHARED_MEM_BYTES
+        ),
+        int_dot=_node_opt_bool(raw.get("int_dot")),
+        matrix_cores=_node_text(raw.get("matrix_cores"), limit=64),
+    )
+
+
 def parse_node_gpu_device(entry: object) -> NodeGpuDevice | None:
-    """Parse one ``gpus[]`` object from ``/v1/sonder/node``; ``None`` if unusable."""
+    """Parse one ``gpus[]`` object from ``/v1/sonder/node`` or ``/v1/sonder/health``; ``None`` if unusable."""
     if not isinstance(entry, Mapping):
         return None
     gpu_id = _node_text(entry.get("id"), limit=64)
@@ -731,7 +938,34 @@ def parse_node_gpu_device(entry: object) -> NodeGpuDevice | None:
         effective_free_vram_mib=effective_free,
         backend_hint=backend_hint.lower() if backend_hint else None,
         source=source,
+        pci_bus_id=_node_text(entry.get("pci_bus_id"), limit=64),
+        driver_name=_node_text(entry.get("driver_name"), limit=_NODE_MAX_TEXT),
+        driver_build=_node_text(entry.get("driver_build"), limit=_NODE_MAX_TEXT),
+        rebar=_node_opt_bool(entry.get("rebar")),
+        shared_memory_bytes=_node_nonneg_int(
+            entry.get("shared_memory_bytes"), maximum=_NODE_MAX_SHARED_MEM_BYTES
+        ),
+        warp_size=_node_nonneg_int(entry.get("warp_size"), maximum=_NODE_MAX_WARP_SIZE),
+        matrix_cores=_node_text(entry.get("matrix_cores"), limit=64),
+        pcie=_parse_node_pcie(entry.get("pcie")),
+        vulkan_heaps=_parse_node_vulkan_heaps(entry.get("vulkan_heaps")),
+        ggml_device=_parse_node_ggml_device(entry.get("ggml_device")),
     )
+
+
+def parse_health_gpus(document: object) -> tuple[NodeGpuDevice, ...]:
+    """Parse additive top-level ``gpus[]`` from ``/v1/sonder/health`` or ``/v1/sonder/node``."""
+    if not isinstance(document, Mapping):
+        return ()
+    raw_gpus = document.get("gpus")
+    if not isinstance(raw_gpus, list):
+        return ()
+    gpus: list[NodeGpuDevice] = []
+    for entry in raw_gpus[:_NODE_MAX_GPUS]:
+        parsed = parse_node_gpu_device(entry)
+        if parsed is not None:
+            gpus.append(parsed)
+    return tuple(gpus)
 
 
 def _gpu_total_mib_for_pool(gpu: NodeGpuDevice) -> int | None:
@@ -1064,14 +1298,18 @@ __all__ = [
     "NODE_ERROR",
     "NODE_OK",
     "NODE_SCHEMA",
+    "NodeGgmlDeviceTelemetry",
     "NodeGpuDevice",
     "NodeGpuPoolSummary",
     "NodeHostMemory",
+    "NodePcieTelemetry",
+    "NodeVulkanMemoryHeap",
     "QuantizedModelProfile",
     "build_hardware_capabilities",
     "default_30b_profile",
     "format_node_gpu_pool_summary",
     "kv_gb_per_8k",
+    "parse_health_gpus",
     "parse_inference_node_document",
     "parse_launch_profile_entry",
     "parse_launch_profile_models",
