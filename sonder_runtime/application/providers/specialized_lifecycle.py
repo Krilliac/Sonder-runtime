@@ -168,6 +168,7 @@ class _LifecycleAdapter:
             workspace_roots=context.workspace_roots,
             cloud_allowed=context.cloud_allowed,
             remote_ollama_allowed=context.remote_ollama_allowed,
+            private_node_allowed=context.private_node_allowed,
             session_id=context.session_id,
         )
 

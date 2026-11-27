@@ -43,6 +43,19 @@ CALLABLE_ONLY_LINE = (
     "- Call nothing else. Say you ran, tested or verified something only when "
     "a tool result in this turn shows it."
 )
+PROACTIVE_TOOL_LINE = (
+    "- Reach for callable tools proactively whenever inspecting files, running "
+    "or verifying code/math/logic, searching memory/web, keeping working notes "
+    "in scratchpad_write/scratchpad_read, or delegating helps finish the task "
+    "accurately rather than guessing."
+)
+DYNAMIC_DISCOVERY_LINE = (
+    "- Need another Sonder capability (git/repo, builds/linters/formatters, "
+    "file_find/patches/archives, tasks/checklists, playbooks, documents/media, "
+    "data/sqlite, web, artifacts)? Call tool_search(query=...) to discover and "
+    "load it into this turn, then call it directly. Say you ran, tested or "
+    "verified something only when a tool result in this turn shows it."
+)
 USER_RUN_LINE = (
     "- The user can run a fenced code block from your answer themselves by "
     "sending /run (outside auto mode it first needs their approval)."
@@ -92,6 +105,7 @@ class TurnToolManifest:
 
     tools: tuple[CallableTool, ...] = ()
     user_run_command: bool = False
+    dynamic_discovery: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.tools, tuple) or not all(
@@ -103,13 +117,19 @@ class TurnToolManifest:
             raise ValueError("a tool is listed twice")
         if not isinstance(self.user_run_command, bool):
             raise TypeError("user_run_command must be a bool")
+        if not isinstance(self.dynamic_discovery, bool):
+            raise TypeError("dynamic_discovery must be a bool")
 
     def render(self) -> str:
         """The block: the header, then one line per statement, no blank line."""
         lines = [HEADER]
         if self.tools:
             lines.append(CALLABLE_PREFIX + "; ".join(t.label() for t in self.tools) + ".")
-            lines.append(CALLABLE_ONLY_LINE)
+            if self.dynamic_discovery:
+                lines.append(PROACTIVE_TOOL_LINE)
+                lines.append(DYNAMIC_DISCOVERY_LINE)
+            else:
+                lines.append(CALLABLE_ONLY_LINE)
         else:
             lines.append(NO_TOOLS_LINE)
         if self.user_run_command:
@@ -188,9 +208,12 @@ def manifest_block(system: object) -> str:
 
 
 __all__ = [
+    "CALLABLE_ONLY_LINE",
     "CallableTool",
+    "DYNAMIC_DISCOVERY_LINE",
     "HEADER",
     "NO_TOOLS_LINE",
+    "PROACTIVE_TOOL_LINE",
     "TurnToolManifest",
     "USER_RUN_LINE",
     "keep_last",

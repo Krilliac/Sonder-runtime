@@ -104,12 +104,23 @@ class SessionEventRecord:
         missing = required - set(value)
         if missing:
             raise QueryExportError(f"missing export fields: {', '.join(sorted(missing))}")
-        if not isinstance(value["payload"], Mapping):
+        payload = value["payload"]
+        if not isinstance(payload, Mapping):
             raise QueryExportError("export payload must be an object")
+        raw_sequence = value["sequence"]
+        if isinstance(raw_sequence, bool) or not isinstance(raw_sequence, (int, str)):
+            raise QueryExportError("export sequence must be an integer")
+        try:
+            sequence = int(raw_sequence)
+        except ValueError as exc:
+            raise QueryExportError("export sequence must be an integer") from exc
+        raw_previous_hash = value.get("previous_hash")
+        if raw_previous_hash is not None and not isinstance(raw_previous_hash, str):
+            raise QueryExportError("export previous_hash must be text or null")
         return cls(
-            str(value["session_id"]), int(value["sequence"]), str(value["event_id"]),
+            str(value["session_id"]), sequence, str(value["event_id"]),
             str(value["event_type"]), str(value["occurred_at_utc"]),
-            dict(value["payload"]), value.get("previous_hash"), str(value["event_hash"]),
+            dict(payload), raw_previous_hash, str(value["event_hash"]),
             bool(value.get("redacted", False)),
         )
 

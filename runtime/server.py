@@ -55,8 +55,9 @@ import sonder_runtime.application.tasks.use_cases as task_use_cases
 import sonder_runtime.adapters.eval_history_reader as eval_history_adapter
 import sonder_runtime.application.evaluation_history.use_cases as eval_history_use_cases
 import sonder_runtime.adapters.memory_store as memory_store
-from sonder_runtime.bootstrap import playbook_context
+from sonder_runtime.bootstrap import playbook_context, thinking_ensemble as _thinking_ensemble
 from sonder_runtime.bootstrap.playbooks import register_tools as _register_playbook_tools
+from sonder_runtime.bootstrap import scratchpad as _scratchpad_bootstrap
 import sonder_runtime.application.session.transcript_export as session_transcript_export
 from sonder_runtime.application.server_core import (
     agent_guards as _agent_guards_core,
@@ -2562,7 +2563,7 @@ def _read_system_context():
         goal_block = goal_store.context_block()
     except Exception:
         goal_block = ""
-    return profile, emotions, goal_block, playbook_context.stable_index()
+    return profile, emotions, goal_block, playbook_context.stable_index(), _scratchpad_bootstrap.scratchpad_index_block(config=getattr(_APP_GRAPH, "config", None))
 
 
 @contextlib.contextmanager
@@ -2622,10 +2623,11 @@ def _build_system(system, trace, persona, model="", cloud=False, provider=None):
     values = parts or _read_system_context()
     profile, emotions, goal_block = values[:3]
     playbook_index = values[3] if len(values) > 3 else ""
+    scratchpad_block = values[4] if len(values) > 4 else ""
     return _prefix_cache.compose_local_system(  # stable first, volatile last
         _runtime_identity_block(model, cloud, provider), profile, emotions, goal_block,
         effective_system,
-        playbook=playbook_context.frame_owner_notes(playbook_index),
+        playbook=playbook_context.frame_owner_notes(playbook_index), scratchpad=scratchpad_block,
     )
 
 
@@ -2645,7 +2647,7 @@ def _serve_target(tier, strict, *, chat_only=False):
     single server can drive many models — pick per request.
     """
     _refresh_live_cloud_tiers()
-    t = (tier or "").strip().lower()
+    t = _thinking_ensemble.normalize_tier_alias(tier, TIERS)
     if t in ("", "sonder", "local"):
         # A strict selection is an explicit compatibility-alias contract. Only
         # the unpinned default route resolves through the chat policy lane.
@@ -3626,6 +3628,12 @@ def control_command(prompt: str, history=None, session="", project="",
     if cmd in ("/reason", "/reasoning_board"):
         kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
         return usage or reasoning_board(**kw)
+    if cmd in ("/scratchpad", "/scratch"):
+        kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
+        if usage:
+            return usage
+        sp_action = str(kw.pop("_action", "read"))
+        return scratchpad_write(**kw) if sp_action == "write" else (scratchpad_delete(**kw) if sp_action == "delete" else scratchpad_read(**kw))
     if cmd in ("/symcheck", "/symbol_verify"):
         kw, usage = _control_commands_core.parse_control_kwargs(cmd, arg)
         return usage or symbol_verify(**kw)
@@ -4569,6 +4577,7 @@ else:
     )
 _PERSISTENT_MCP = mcp
 playbook_note, playbook_read = _register_playbook_tools(mcp, config_getter=lambda: getattr(_APP_GRAPH, "config", None))
+scratchpad_read, scratchpad_write, scratchpad_delete = _scratchpad_bootstrap.register_tools(mcp, config_getter=lambda: getattr(_APP_GRAPH, "config", None))
 
 
 def _bounded_timeout(value) -> int:
@@ -5673,6 +5682,7 @@ def _offload_tier_impl(
     # until after live tier refresh, so defer selection to the generation
     # boundary where Ollama metadata can be consulted.
     _refresh_live_cloud_tiers()
+    tier = _thinking_ensemble.normalize_tier_alias(tier, TIERS)
     request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     model = TIERS.get(tier)
     if model is None:
@@ -5694,6 +5704,8 @@ def _offload_tier_impl(
         num_ctx = _auto_model_context(model)
 
     if not _should_learn(tier, learn):
+        if (_auto_ens := _thinking_ensemble.maybe_auto_ensemble_offload(sys.modules[__name__], prompt, tier=tier, system=system, num_predict=num_predict, num_ctx=num_ctx, schema=schema, cloud=cloud or (provider is not None and _provider_bridge.is_hosted(provider)), fleet_synthesis=fleet_synthesis)) is not None:
+            return _auto_ens
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -5828,6 +5840,8 @@ def _offload_tier_impl(
         )
         retrieve_kwargs["retrieve_fn"] = _no_retrieve_policy
     else:
+        if tier in ("code", "security") and schema is None and not fleet_synthesis:
+            system, _ = _thinking_ensemble.augment_system_with_thinking(sys.modules[__name__], system, prompt, tier=tier, model=model, cloud=False, timeout=min(int(request_timeout), 45), cancel_check=cancel_check)
         # Learned calls use the tier's own binding, as learn=False does; the strict
         # sonder:latest alias belongs to the default chat route (_serve_target).
         gen = _make_tier_generate(
@@ -6152,7 +6166,7 @@ def offload(
     'code' tier is also memory-augmented; cloud tiers answer without augmentation
     but are still captured — so a paid frontier model's grounded wins become lessons and
     fine-tuning data for the local model. 'fast'/'general' (mechanical work) and
-    learn=False run the plain path: no capture, no footer, just text.
+    learn=False run the plain path: no capture, no footer, just text (unless the operator opts in to SONDER_AUTO_ENSEMBLE_OFFLOAD=1, which ensembles code/security with the bound thinking tier).
 
     Tiers: fast (default), code, general, optional reasoning/vision, and
     cloud-code / cloud-general (METERED, prompt leaves this machine). Each tier
@@ -6976,6 +6990,7 @@ def _answer_with_history_impl(
         attempt = 0
         code_repaired = False
         repair_usage = {}
+        thinking_turn = _thinking_ensemble.TurnDeliberation(sys.modules[__name__], prompt, history)
         while True:
             rung = escalation_plan.rungs[attempt]
             model, cloud, model_augment, tier_label = (
@@ -6993,18 +7008,22 @@ def _answer_with_history_impl(
             # which is not the route the request resolved to.
             _observe_target(model, tier_label, cloud)
             from sonder_runtime.application.chat import tool_loop as _chat_tool_loop
-            from sonder_runtime.application.chat.honesty import no_verification_claims_system
             _active_tool_turn = _chat_tool_loop.current_turn()
             _has_chat_tools = _active_tool_turn is not None and bool(_active_tool_turn.manifest.tools)
             _persona_choice = persona if (persona and str(persona).strip()) else personas.active_scope_persona()
             _resolved_persona = personas.resolve(_persona_choice, prompt=prompt, tier=tier_label)
             effective_system = _build_system("", trace, _resolved_persona, cloud=cloud, provider=bridged_provider, model=(
                 _legacy_chat_bridge.prompt_identity_model(model, tier_label, bridged_provider, _APP_GRAPH)))
-            if not _has_chat_tools:
-                effective_system = no_verification_claims_system(effective_system)
-            effective_system = _reference_lookup_lanes.system_for(model, _chat_tool_manifest.chat_system(  # one tools block, last, every route
-                effective_system, prompt, file_guidance=not cloud and not _explicit_serve_selection(tier, "")))
             learn = _should_learn(_canonical_learn_tier(tier_label), True)
+            # One deliberation per turn, on the first local, non-hosted rung.  A pure
+            # non-learning route defers it past the request-cache lookup.
+            # An explicit serve selection is answered by the named target alone: no deliberation.
+            off_box = cloud or (bridged_provider is not None and _provider_bridge.is_hosted(bridged_provider)) or active_task_account_scope() is not None or _explicit_serve_selection(tier, "")
+            defer_thinking = not learn and not _has_chat_tools and not off_box
+            effective_system = thinking_turn.system(
+                effective_system, tier_label, model, _has_chat_tools, off_box, defer_thinking,
+                lambda composed, model=model, cloud=cloud: _reference_lookup_lanes.system_for(model, _chat_tool_manifest.chat_system(  # one tools block, last, every route
+                    composed, prompt, file_guidance=not cloud and not _explicit_serve_selection(tier, ""))))
             req_ctx = (
                 pinned_ctx if pinned_ctx is not None
                 else 0 if cloud
@@ -7084,10 +7103,13 @@ def _answer_with_history_impl(
                                 environ=os.environ,
                             ),
                             cloud_allowed=_cloud_allowed_policy(os.environ),
+                            extra="" if off_box else _thinking_ensemble.thinking_identity_token(sys.modules[__name__], tier_label, model),
                         )
                         response = request_cache.get(request_cache_key)
                         request_cache_status = "hit" if response is not None else "miss"
                     if response is None:
+                        if defer_thinking:  # cache miss: deliberate now; the brief stays out of the cached identity
+                            effective_system = thinking_turn.resolve_deferred()
                         gen = _reference_lookup_lanes.chat_generate(
                             _make_generate, prompt, model, effective_system, temperature, reply_num_predict, req_ctx,
                             cloud=cloud, text_only=True,
@@ -13507,23 +13529,11 @@ def reasoning_board(
         import sonder_runtime.adapters.inspection.reasoning_board as _reasoning_board
         from sonder_runtime.adapters.security import approval_ledger as _al
 
-        owner = str(_al.current_owner() or "local")
-        fact_refs = json.loads(fact_refs_json) if isinstance(fact_refs_json, str) and fact_refs_json.strip() else (fact_refs_json if isinstance(fact_refs_json, list) else None)
-        alternatives = json.loads(alternatives_json) if isinstance(alternatives_json, str) and alternatives_json.strip() else (alternatives_json if isinstance(alternatives_json, list) else None)
-        data = _reasoning_board.reasoning_board(
-            action=action,
-            board_id=board_id,
-            owner=owner,
-            goal=goal,
-            text=text,
-            source=source,
-            hypothesis_id=hypothesis_id,
-            status=status,
-            confidence=confidence,
-            evidence_for=evidence_for,
-            evidence_against=evidence_against,
-            fact_refs=fact_refs,
-            alternatives=alternatives,
+        data = _reasoning_board.run_reasoning_board_from_json(
+            owner=str(_al.current_owner() or "local"), action=action, board_id=board_id,
+            goal=goal, text=text, source=source, hypothesis_id=hypothesis_id, status=status,
+            confidence=confidence, evidence_for=evidence_for, evidence_against=evidence_against,
+            fact_refs_json=fact_refs_json, alternatives_json=alternatives_json,
         )
     except Exception as exc:
         _record_direct_tool("reasoning_board", args, ok=False, started=started, summary=str(exc))
@@ -18665,7 +18675,9 @@ def _agent_turn(
         )
         state.pre_model_context_rendered = bool(context_text)
         transcript += context_text
-    transcript, _ = playbook_context.augment(transcript, prompt, cloud=cloud or restricted is not None or account_scoped or _provider_bridge.hosted_rung_active())
+    _no_local_ctx = cloud or restricted is not None or account_scoped or _provider_bridge.hosted_rung_active()
+    transcript, _ = playbook_context.augment(transcript, prompt, cloud=_no_local_ctx)
+    transcript = _scratchpad_bootstrap.augment_with_scratchpad_index(transcript, cloud=_no_local_ctx, config=getattr(_APP_GRAPH, "config", None))
 
     def ensure_not_cancelled():
         if _cancel_requested(cancel_check) or _foreground_turns.cancel_requested():
@@ -19557,7 +19569,7 @@ _AUTOPILOT_OBSERVE_TOOLS = frozenset({
     "repository_symbol_index", "log_inspect", "file_read", "file_digest", "file_read_range", "data_inspect", "data_query", "text_search", "script_search",
     "project_detect",
     "repo_status", "repo_diff", "repo_log", "repo_show", "repo_blame", "archive_list", "artifact_risk_inspect",
-    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "memory_search", "web_search", "toolchain_status",
+    "program_search", "image_inspect", "document_extract", "media_inspect", "code_metrics", "schema_validate", "language_matrix", "math_eval", "logic_verify", "regex_lab", "code_graph", "diff_semantic", "reasoning_board", "scratchpad_read", "symbol_verify", "citation_audit", "fact_cross_check", "consistency_check", "plan_fallback", "runtime_resilience_check", "prompt_shield", "error_diagnose", "code_audit", "data_transform", "memory_search", "web_search", "toolchain_status",
     "tool_inventory", "output_digest",
     "web_fetch", "weather_lookup", "status", "diagnostics",
     "context_health", "learning_health_status", "memory_quality_report", "system_improvement_report", "artifact_ground",
@@ -19583,7 +19595,7 @@ _AUTOPILOT_WORKSPACE_TOOLS = _AUTOPILOT_OBSERVE_TOOLS | frozenset({
     "ensemble_codegen_build_loop",
     "ensemble_answer", "consult", "delegate_task", "spawn_agents",
     "process_list", "process_memory_risk_inspect", "learn_tool", "task_progress", "task_ledger",
-    "task_delete", "task_plan", "task_depend",
+    "task_delete", "task_plan", "task_depend", "scratchpad_write", "scratchpad_delete",
     # Other developer-workflow tools remain absent until their agent dispatch
     # and project-root guards are admitted to this autonomous lane.
 })
@@ -20766,6 +20778,7 @@ def runtime_policy_data() -> dict:
         "embedding_model": policy["embedding_model"],
         "missing_models": [],
         "capability_errors": {},
+        "thinking_ensemble": _thinking_ensemble.status_dict(policy["local_models"], is_cloud_fn=_is_cloud_tier),
     }
     try:
         records = _runtime_installed_model_records()
@@ -20864,6 +20877,7 @@ def _runtime_policy_cached_data() -> dict:
         "embedding_model": policy["embedding_model"],
         "missing_models": [],
         "capability_errors": {},
+        "thinking_ensemble": _thinking_ensemble.status_dict(policy["local_models"], is_cloud_fn=_is_cloud_tier),
     }
     cached = dict(_RUNTIME_READINESS_CACHE)
     if not cached:
@@ -22308,19 +22322,8 @@ def _fanout_synthesize_run(run, synth_model=""):
 
 
 def _ensemble_targets(tiers: str = ""):
-    """Resolve the tiers to poll into a deduped [(tier, model)] list.
-
-    Deduplicated by *resolved model*, not by tier name: several tiers routinely
-    point at the same Ollama model (out of the box `code` and `general` are both
-    `sonder:latest`), and asking one model the same question twice costs a full
-    generation to learn nothing.
-    """
-    requested = [t.strip().lower() for t in (tiers or "").split(",") if t.strip()]
-    explicit = bool(requested)
-    if not requested:
-        requested = [
-            t for t in _configured_local_tiers() if t not in ENSEMBLE_SKIP_TIERS
-        ]
+    """Resolve the tiers to poll into a deduped [(tier, model)] list (an explicit list is never expanded)."""
+    requested, explicit = _thinking_ensemble.resolve_ensemble_requested_tiers(tiers, TIERS, _configured_local_tiers(), ENSEMBLE_SKIP_TIERS)
     targets, seen_models, unknown = [], set(), []
     for tier in requested:
         if _is_cloud_tier(tier) or _provider_bridge.is_hosted(_bridge_provider_for_tier(tier)):
@@ -22569,11 +22572,7 @@ def consult(
     # still unset.  Status would truthfully say cloud is enabled while the
     # consult leg rejected the same tier as disabled.
     result = consult_flow.consult(
-        prompt,
-        chosen,
-        ask_fn=lambda question, tier: ensemble_answer(
-            question, tiers=tier, mode="general"
-        ),
+        prompt, chosen, ask_fn=lambda question, tier: ensemble_answer(question, tiers=tier, mode="general"),
         cloud_ok=cloud_allowed(), lookup=_reference_lookup_multi.consult_scope(_ensemble_targets),  # members share one lookup; the judge runs without
     )
     return consult_flow.format_result(result)

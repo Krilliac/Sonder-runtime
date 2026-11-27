@@ -1,0 +1,192 @@
+name: self-hosted
+
+# The ci.yml "tests" gate (all checks, full suite, TUF suites) and its
+# windows-focused lifecycle tests, run on the owner's self-hosted runners
+# (labels sonder-linux and sonder-win). These are much faster than the shared
+# hosted queue. A green run here is what the merge train requires before it
+# merges with the admin bypass. The hosted ci.yml checks keep running as before.
+#
+# Security: these runners are persistent and run as the owner's account on the
+# owner's own machines, and this repository is public, so they must only ever run
+# code the owner put there. Every job's `if:` admits a run only when the owner
+# triggered it (github.actor and github.triggering_actor, so a re-run by anyone
+# else is refused too) and it is either a manual dispatch or a same-repository
+# pull request that the owner opened. Bot PRs (Dependabot), bot pushes and PRs
+# from other accounts in this repository get only the hosted ci.yml checks.
+#
+# This `if:` is NOT a boundary against code that can edit .github/workflows/. A
+# run uses the workflow files at the event's commit, so a fork PR (or any app
+# with workflows write) can drop this condition or add its own `runs-on:
+# self-hosted` job. The only barrier against forks is the repository Actions
+# setting that requires approval for every outside contributor's run. Never
+# approve a fork's workflow run without reading every .github/workflows/ change
+# in it. Accepted residual risks: a compromised owner account; an owner-approved
+# fork run; and an owner action (push, update-branch, reopen, dispatch) on a
+# branch someone else has pushed to, which runs that branch's current code.
+# Every run installs into a fresh venv under RUNNER_TEMP and points
+# SONDER_HOME there, so no run touches the host's own Sonder state.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: self-hosted-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: self-hosted linux
+    if: >-
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.user.login == github.repository_owner))
+    runs-on: [self-hosted, sonder-linux]
+    timeout-minutes: 45
+    env:
+      SONDER_HOME: ${{ github.workspace }}/../sonder-home-linux
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          filter: blob:none
+      # No setup-python on these runners: uv (pinned) provides CPython 3.14 from its
+      # own cache, bootstrapped from the host's python3. A fresh venv per run.
+      - name: Install deps into a fresh venv
+        id: install-core-deps
+        run: |
+          rm -rf "$RUNNER_TEMP/boot" "$RUNNER_TEMP/venv" "$SONDER_HOME"
+          python3 -m venv "$RUNNER_TEMP/boot"
+          "$RUNNER_TEMP/boot/bin/python" -m pip install -q uv==0.12.19
+          "$RUNNER_TEMP/boot/bin/uv" venv --python 3.14 "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/boot/bin/uv" pip install -r requirements-dev.txt --python "$RUNNER_TEMP/venv/bin/python"
+          echo "$RUNNER_TEMP/boot/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+      - name: Verify MCP compatibility API
+        run: >-
+          python -c "from mcp.server.mcpserver import MCPServer;
+          from mcp.server.mcpserver.tools import ToolManager"
+      - name: Enforce architecture boundaries (SPEC-3)
+        run: python scripts/check_architecture.py
+      - name: Validate master-spec evidence ledger
+        run: python scripts/check_requirement_evidence.py
+      - name: Validate evidence changes against pull request base
+        if: github.event_name == 'pull_request'
+        env:
+          REQUIREMENT_EVIDENCE_BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: python scripts/check_requirement_evidence.py --base-ref "$REQUIREMENT_EVIDENCE_BASE_REF"
+      - name: Enforce legacy error-signal ratchet
+        run: python scripts/check_error_signals.py
+      - name: Enforce lint gate and shrink-only ratchets
+        run: python scripts/check_lint_ratchet.py
+      - name: Enforce typing ratchet
+        env:
+          TYPING_RATCHET_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+        run: python scripts/check_typing_ratchet.py ${TYPING_RATCHET_BASE:+--against "$TYPING_RATCHET_BASE"}
+      - name: Prevent new Git-history privacy debt
+        run: python scripts/check_history_privacy.py --json
+      - name: Check operator/developer doc links
+        run: python scripts/check_doc_links.py
+      - name: Freshness-gate generated runtime references
+        run: python scripts/check_documentation_authority.py
+      - name: Run the golden evaluation lane
+        run: >-
+          python scripts/eval_harness.py run --suite smoke_python --check-baseline
+          --no-record-history --out "$RUNNER_TEMP/eval_runs/smoke_python"
+      - name: Run the tool-policy evaluation lane
+        run: >-
+          python scripts/eval_harness.py run --suite tool_policy_gates --check-baseline
+          --no-record-history --out "$RUNNER_TEMP/eval_runs/tool_policy_gates"
+      - name: Run test suite
+        # Capped: the WSL VM shares the workstation's memory with a concurrent
+        # Sonder-Inference build (it thrashed at higher parallelism on 2026-11-27).
+        run: python -m pytest -q -n 4 --dist load -p no:cacheprovider
+      - name: Run the TUF update-trust suites (no skips allowed)
+        if: ${{ !cancelled() && steps.install-core-deps.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv pip install -r requirements-dev.txt -r requirements-update.txt --python "$RUNNER_TEMP/venv/bin/python"
+          python -m pytest -q -rs -p no:cacheprovider \
+            tests/production/test_tuf_publisher.py tests/test_update_manifest_trust.py \
+            tests/test_update_trusted_root.py \
+            --junitxml="$RUNNER_TEMP/update-trust.xml"
+          python - "$RUNNER_TEMP/update-trust.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          suites = list(ET.parse(sys.argv[1]).getroot().iter("testsuite"))
+          assert suites, "no junit test suites were written"
+          totals = {key: sum(int(suite.get(key, "0")) for suite in suites)
+                    for key in ("tests", "skipped", "errors", "failures")}
+          assert totals["tests"] > 0, totals
+          assert totals["skipped"] == totals["errors"] == totals["failures"] == 0, totals
+          PY
+
+  windows:
+    name: self-hosted windows
+    if: >-
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.user.login == github.repository_owner))
+    runs-on: [self-hosted, sonder-win]
+    timeout-minutes: 45
+    env:
+      SONDER_HOME: ${{ github.workspace }}\..\sonder-home-windows
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      # No setup-python: it cannot unpack Python on this host (the Store pwsh is not
+      # readable by the runner and Windows PowerShell 5.1 Expand-Archive fails). Use the
+      # host's Python 3.14 through the py launcher, with a fresh venv per run.
+      - name: Install dependencies in a fresh Windows venv
+        id: venv
+        run: |
+          if (Test-Path "$env:RUNNER_TEMP\sonder-ci-venv") { Remove-Item -Recurse -Force "$env:RUNNER_TEMP\sonder-ci-venv" }
+          py -3.14 -m venv "$env:RUNNER_TEMP\sonder-ci-venv"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pip install -q uv==0.12.19
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\uv.exe" pip install -r requirements-dev.txt --python "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe"
+      - name: Managed owner, artifact verifier and lifecycle regressions
+        run: >-
+          & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pytest -q -p no:cacheprovider
+          tests/test_managed_runtime_payload.py
+          tests/test_verified_bytecode.py
+          tests/test_managed_runtime_owner.py
+          tests/test_artifact_fetch.py
+          tests/test_artifact_authenticode_native_windows.py
+          tests/test_legacy_tool_executor.py
+          tests/test_selfmod_isolation_scope.py
+          tests/test_selfmod_verification_lifecycle.py
+          tests/test_runtime_lifecycle_graceful_drain_bridge.py
+          tests/test_application_lifecycle_adapter.py
+          tests/test_repl_turn_interrupt.py
+          tests/repl/test_repl_contracts.py
+          tests/test_private_files_windows_owner.py
+          tests/test_process_wait_hardening.py
+          tests/test_job004_process_provider.py
+          tests/test_process_output_batching.py
+          tests/test_process_cancellation_reaping.py
+          tests/test_process_completion_race.py
+          tests/test_process_group_absence.py
+          tests/test_process_tree_supervisor.py
+          tests/test_api003_subprocess_provider.py
+          tests/test_runtime_owner_windows_containment.py
+          tests/test_command_recovery.py
+          tests/test_fleet_store.py
+          tests/test_master_orchestrator.py
+          tests/test_launcher.py
+          tests/test_build_environment_windows_fakes.py
+          tests/test_debug_windows_fakes.py
+          tests/test_host_tool_discovery_windows.py
+          tests/test_build_executor.py

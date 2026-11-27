@@ -23,7 +23,7 @@ jobs:
     needs: [windows-focused, container-qualification, linux-selfmod-isolation]
     if: ${{ always() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - name: Require native Windows gate
         if: ${{ needs.windows-focused.result != 'success' || needs.container-qualification.result != 'success' || needs.linux-selfmod-isolation.result != 'success' }}

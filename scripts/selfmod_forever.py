@@ -57,7 +57,7 @@ def main() -> int:
         "--model", default="",
         help=(
             "optional explicit local model override; empty uses the configured "
-            "code tier (auto-ensembled with a bound local thinking tier)"
+            "code tier"
         ),
     )
     args = parser.parse_args()

@@ -133,6 +133,8 @@ def seed_model(env, tier: str, *, floor: ToolLaneFloor, lists) -> str:
     expresses that; base tiers ignore the token and keep their default.
     """
     configured = str(env.get("SONDER_%s" % tier.upper(), "") or "").strip()
+    if not configured and tier == "reasoning":
+        configured = str(env.get("SONDER_THINKING", "") or "").strip()
     if tier == "code" and is_cloud_name(configured):
         configured = str(env.get("SONDER_CODE_LOCAL", "") or "").strip()
     if tier in OPTIONAL_LOCAL_TIERS and configured.lower() in UNSET_TOKENS:

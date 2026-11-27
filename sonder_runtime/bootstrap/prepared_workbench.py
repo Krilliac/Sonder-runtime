@@ -207,6 +207,7 @@ class PreparedWorkbenchAdapter:
             auth=context.auth_level,
             cloud=context.cloud_allowed,
             remote=context.remote_ollama_allowed,
+            private_node=context.private_node_allowed,
         )
         return plan, canonical_digest(snapshot), allowed_tools
 
@@ -297,6 +298,10 @@ class PreparedWorkbenchAdapter:
                     or context.cloud_allowed != admitted_context.cloud_allowed
                     or context.remote_ollama_allowed
                     != admitted_context.remote_ollama_allowed
+                    or (
+                        context.private_node_allowed is not False
+                        and admitted_context.private_node_allowed is False
+                    )
                 ):
                     raise PermissionError(
                         "managed factory context exceeds prepared admission"

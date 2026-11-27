@@ -4965,7 +4965,7 @@ def main(*, machine_output=False):
                         "/schema", "/schema_validate", "/languages", "/language_matrix",
                         "/calc", "/math_eval", "/logic", "/logic_verify",
                         "/regex", "/regex_lab", "/graph", "/code_graph",
-                        "/sdiff", "/diff_semantic", "/reason", "/reasoning_board",
+                        "/sdiff", "/diff_semantic", "/reason", "/reasoning_board", "/scratchpad", "/scratch",
                         "/symcheck", "/symbol_verify", "/citecheck", "/citation_audit",
                         "/crosscheck", "/fact_cross_check", "/consensus", "/consistency_check",
                         "/fallback", "/plan_fallback", "/resilience", "/runtime_resilience_check",

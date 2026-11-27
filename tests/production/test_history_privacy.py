@@ -5,6 +5,8 @@ import importlib.util
 import json
 import subprocess
 import sys
+import time
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -469,5 +471,200 @@ def test_workflows_enforce_growth_and_release_cleanliness():
     assert "655b75ec9950e03c0a0c4701a18f8e04b0dea51c" in evidence
     assert "passed=false" in evidence
     assert "clean=false" in evidence
-    assert "16 MiB" in evidence
+    assert "256 MiB" in evidence
+    assert "streamed" in evidence
     assert "30-second" in evidence
+
+
+def _build_large_synthetic_repo(
+    tmp_path: Path,
+    *,
+    commits: int,
+    files_per_commit: int,
+    plant_at_commit: int | None = None,
+    planted_path: str = ".env",
+) -> Path:
+    """Create a large synthetic Git history quickly via ``git fast-import``.
+
+    Alternates ``files_per_commit`` realistic paths between two tiny blobs so
+    ``git log --all --raw -m`` produces a multi-megabyte inventory with minimal
+    disk usage.  When ``plant_at_commit`` is set, adds ``planted_path`` with a
+    synthetic non-secret marker in that commit and removes it in the next.
+    """
+    repo = tmp_path / "synthetic-large"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.name", "Sonder Test")
+    _git(repo, "config", "user.email", "sonder-test@example.invalid")
+
+    paths = [
+        f"pkg/module_{i // 10:02d}/component_{i:03d}_synthetic_history_entry.py"
+        for i in range(files_per_commit)
+    ]
+    blob_a = b"alpha\n"
+    blob_b = b"beta\n"
+    planted_blob = b"SYNTHETIC_PRIVATE_MARKER=not-a-real-secret\n"
+
+    lines: list[bytes] = [
+        b"blob\nmark :1\ndata %d\n%s\n" % (len(blob_a), blob_a),
+        b"blob\nmark :2\ndata %d\n%s\n" % (len(blob_b), blob_b),
+        b"blob\nmark :3\ndata %d\n%s\n" % (len(planted_blob), planted_blob),
+    ]
+    base_ts = 1700000000
+    for step in range(commits):
+        mark = b":1" if step % 2 == 0 else b":2"
+        msg = f"synthetic commit {step}\n".encode("ascii")
+        lines.append(b"commit refs/heads/main\n")
+        lines.append(
+            f"committer Sonder Test <sonder-test@example.invalid> {base_ts + step} +0000\n".encode("ascii")
+        )
+        lines.append(b"data %d\n%s\n" % (len(msg), msg))
+        for rel_path in paths:
+            lines.append(b"M 100644 %s %s\n" % (mark, rel_path.encode("ascii")))
+        if plant_at_commit is not None and step == plant_at_commit:
+            lines.append(b"M 100644 :3 %s\n" % planted_path.encode("utf-8"))
+        elif plant_at_commit is not None and step == plant_at_commit + 1:
+            lines.append(b"D %s\n" % planted_path.encode("utf-8"))
+    lines.append(b"done\n")
+
+    proc = subprocess.run(
+        ["git", "fast-import", "--quiet"],
+        cwd=repo,
+        input=b"".join(lines),
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    return repo
+
+
+def test_large_synthetic_history_streams_in_bounded_memory(tmp_path):
+    """A >16 MiB raw inventory must succeed cleanly in O(1) Python memory."""
+    module = _module()
+    repo = _build_large_synthetic_repo(tmp_path, commits=1100, files_per_commit=100)
+
+    raw_len = len(
+        subprocess.check_output(
+            [
+                "git", "-c", "core.quotePath=false", "log", "--all", "--raw",
+                "-m", "--format=format:", "--no-renames", "--no-abbrev", "-z",
+            ],
+            cwd=repo,
+        )
+    )
+    assert raw_len > 16 * 1024 * 1024, f"expected >16 MiB raw inventory, got {raw_len}"
+
+    tracemalloc.start()
+    try:
+        report = module.inspect(repo)
+        _current, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert report["ok"] is True
+    assert report["clean"] is True
+    assert report["unexpected_count"] == 0
+    assert peak_bytes < 4 * 1024 * 1024, (
+        f"streaming inventory should stay under 4 MiB peak heap, used {peak_bytes:,} B"
+    )
+
+    cli = _run(repo, "--require-clean")
+    assert cli.returncode == 0, cli.stdout + cli.stderr
+    cli_report = json.loads(cli.stdout)
+    assert cli_report["passed"] is True
+    assert cli_report["clean"] is True
+
+
+def test_large_synthetic_history_still_fails_on_planted_sensitive_file(tmp_path):
+    """A sensitive file buried and deleted in a large history must still fail."""
+    repo = _build_large_synthetic_repo(
+        tmp_path,
+        commits=600,
+        files_per_commit=100,
+        plant_at_commit=300,
+        planted_path=".env",
+    )
+
+    result = _run(repo)
+    assert result.returncode == 1
+    report = json.loads(result.stdout)
+    assert report["ok"] is False
+    assert report["passed"] is False
+    assert report["unexpected_count"] == 1
+    assert report["unexpected"][0]["path"] == ".env"
+
+
+def test_streaming_parser_handles_chunk_boundaries_and_rejects_bad_records():
+    module = _module()
+    oid_a = "1" * 40
+    oid_b = "2" * 40
+    utf8_path = "docs/caf\u00e9/.env"
+    raw = (
+        b"\n:000000 100644 " + b"0" * 40 + b" " + oid_a.encode("ascii") + b" A\0"
+        + utf8_path.encode("utf-8") + b"\0"
+        + b":100644 100644 " + oid_a.encode("ascii") + b" " + oid_b.encode("ascii") + b" M\0"
+        + b"safe.txt\0"
+    )
+
+    # Split at 3-byte chunks so headers, NULs, and multibyte UTF-8 cross chunks.
+    tiny_chunks = [raw[i:i + 3] for i in range(0, len(raw), 3)]
+    parsed = list(module._iter_raw_changes(tiny_chunks))
+    assert parsed == [
+        (oid_a, utf8_path),
+        (oid_a, "safe.txt"),
+        (oid_b, "safe.txt"),
+    ]
+
+    # Truncated stream missing final NUL must fail closed rather than silently parse.
+    truncated = (
+        b":000000 100644 " + b"0" * 40 + b" " + oid_a.encode("ascii") + b" A\0.env"
+    )
+    with pytest.raises(module.HistoryPrivacyError, match="malformed"):
+        module._parse_raw_changes(truncated)
+
+    # Unterminated oversized record without NUL must hit per-record safety limit.
+    oversized = [b"x" * (module.MAX_RECORD_BYTES + 1)]
+    with pytest.raises(module.HistoryPrivacyError, match="safety limit"):
+        list(module._iter_raw_changes(oversized))
+
+
+def test_streaming_log_output_bound_enforced_mid_stream(tmp_path, monkeypatch):
+    """Total output cap must trigger on the git log stream even when probes pass."""
+    module = _module()
+    repo = _build_large_synthetic_repo(tmp_path, commits=25, files_per_commit=20)
+    monkeypatch.setattr(module, "MAX_OUTPUT_BYTES", 4096)
+
+    with pytest.raises(module.HistoryPrivacyError, match="safety limit"):
+        module.inspect(repo)
+
+
+def test_streaming_log_timeout_kills_hung_git_process(tmp_path, monkeypatch):
+    """A hung streaming git log process must be killed and fail closed on timeout."""
+    module = _module()
+    repo = _repo(tmp_path)
+    real_popen = module.subprocess.Popen
+    hung_procs = []
+
+    def intercept_popen(cmd, *args, **kwargs):
+        if "log" in cmd:
+            proc = real_popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdin=subprocess.DEVNULL,
+                stdout=kwargs.get("stdout", subprocess.PIPE),
+                stderr=kwargs.get("stderr", subprocess.DEVNULL),
+            )
+            hung_procs.append(proc)
+            return proc
+        return real_popen(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(module.subprocess, "Popen", intercept_popen)
+    monkeypatch.setattr(module, "GIT_TIMEOUT_SECONDS", 0.3)
+
+    t0 = time.monotonic()
+    with pytest.raises(module.HistoryPrivacyError, match="timed out"):
+        module.inspect(repo)
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 5.0, f"hung git log was not killed promptly ({elapsed:.2f}s)"
+    assert len(hung_procs) == 1
+    assert hung_procs[0].poll() is not None
