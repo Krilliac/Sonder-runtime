@@ -19,6 +19,8 @@ def test_argv_normalization_keeps_secret_bearing_items_separate():
     assert activity_command.activity_argv(["already", "list"]) == ["already", "list"]
     assert activity_command.agent_argv({"args_json": '["-v", 3]'}) == ["-v", "3"]
     assert activity_command.agent_argv({"args_json": "plain"}) == ["plain"]
+    assert activity_command.agent_argv({"args_json": "123"}) == ["123"]
+    assert activity_command.agent_argv({"args_json": '"hello"'}) == ["hello"]
     assert activity_command.agent_argv({"args": None}) == []
     assert activity_command.agent_argv({}) == []
 

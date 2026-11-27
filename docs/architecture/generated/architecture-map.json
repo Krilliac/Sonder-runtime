@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 530,
+      "file_count": 534,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -115,6 +115,7 @@
         "sonder_runtime/adapters/compute_fabric/http_client.py",
         "sonder_runtime/adapters/compute_fabric/local_snapshot.py",
         "sonder_runtime/adapters/config_validation.py",
+        "sonder_runtime/adapters/confined_read.py",
         "sonder_runtime/adapters/content_services.py",
         "sonder_runtime/adapters/context_formatting.py",
         "sonder_runtime/adapters/context_planning.py",
@@ -192,6 +193,7 @@
         "sonder_runtime/adapters/fleet_creations.py",
         "sonder_runtime/adapters/fleet_synthesis.py",
         "sonder_runtime/adapters/fleet_workers.py",
+        "sonder_runtime/adapters/formatter_config_guard.py",
         "sonder_runtime/adapters/gateway_generation.py",
         "sonder_runtime/adapters/generation_permit.py",
         "sonder_runtime/adapters/git/__init__.py",
@@ -462,6 +464,7 @@
         "sonder_runtime/adapters/process_risk.py",
         "sonder_runtime/adapters/process_termination.py",
         "sonder_runtime/adapters/process_tree.py",
+        "sonder_runtime/adapters/project_venv.py",
         "sonder_runtime/adapters/prompt_store.py",
         "sonder_runtime/adapters/protected_write_scope.py",
         "sonder_runtime/adapters/provider_bindings.py",
@@ -480,6 +483,7 @@
         "sonder_runtime/adapters/repository_errors.py",
         "sonder_runtime/adapters/reproducible_evaluation.py",
         "sonder_runtime/adapters/request_temperature_guard.py",
+        "sonder_runtime/adapters/requirements_guard.py",
         "sonder_runtime/adapters/resource_leases.py",
         "sonder_runtime/adapters/restricted_tool_lane.py",
         "sonder_runtime/adapters/runtime_capabilities.py",

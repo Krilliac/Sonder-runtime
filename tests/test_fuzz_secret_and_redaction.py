@@ -219,13 +219,22 @@ class Timer:
     def __init__(self) -> None:
         self.samples: list[tuple[float, str]] = []
 
-    def run(self, fn, *args, label: str = "", **kwargs):
+    def run(self, fn, *args, label: str = "", repeats: int = 1, **kwargs):
         # CPU time, not wall clock: sibling xdist workers on shared CI runners must not fail budgets.
-        t0 = time.process_time()
+        # With repeats > 1 the sample is the fastest run: a pathological input is slow on every
+        # run, while a one-off stall (cache thrash or interrupt accounting on a shared runner)
+        # is not. The 50 ms p99 budget flaked at 54.7 ms on CI with single samples.
+        best = float("inf")
         try:
-            return fn(*args, **kwargs)
+            for _ in range(max(1, repeats)):
+                t0 = time.process_time()
+                try:
+                    result = fn(*args, **kwargs)
+                finally:
+                    best = min(best, time.process_time() - t0)
+            return result
         finally:
-            self.samples.append((time.process_time() - t0, label))
+            self.samples.append((best, label))
 
     def check(self, *, p99: bool = True, p99_units: float | None = None) -> None:
         durations = sorted(d for d, _ in self.samples)
@@ -567,7 +576,7 @@ def test_scan_random_binary_and_size_bound() -> None:
     for _ in range(300):
         n = rng.choice((0, 1, 7, 100, 4096, 30_000))
         blob = bytes(rng.getrandbits(8) for _ in range(n))
-        findings = timer.run(scanner.scan, blob, label=repr(blob[:80]))
+        findings = timer.run(scanner.scan, blob, label=repr(blob[:80]), repeats=3)
         assert isinstance(findings, tuple)
     timer.check(p99_units=20)
     # Boundary: exactly max_bytes passes, one more raises (str input, ASCII and multibyte).
@@ -616,7 +625,7 @@ def test_redact_text_hostile_16kb_inputs_stay_in_budget() -> None:
     for _ in range(40):
         unit = "".join(rng.choice(_HOSTILE_UNITS) for _ in range(rng.randint(1, 4)))
         text = (unit * (16_384 // len(unit) + 1))[:16_384]
-        timer.run(redact_text, text, label=f"redact {unit!r}")
+        timer.run(redact_text, text, label=f"redact {unit!r}", repeats=3)
     timer.check(p99_units=20)
 
 
