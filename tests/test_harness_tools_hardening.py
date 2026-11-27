@@ -20,6 +20,7 @@ import harness_tools
 import pytest
 
 from sonder_runtime.adapters import confined_read
+from sonder_runtime.adapters import formatter_config_guard
 from sonder_runtime.adapters import secret_scan as secret_scan_adapter
 from sonder_runtime.adapters.filesystem import file_ops
 
@@ -57,6 +58,12 @@ def not_live(monkeypatch):
     monkeypatch.setattr(harness_tools, "_live_refusal", lambda operation, root: None)
 
 
+@pytest.fixture
+def bare_tools(monkeypatch):
+    """Check-mode bare-name tools resolve to themselves; trust is covered in test_harness_tools_isolation.py."""
+    monkeypatch.setattr(formatter_config_guard, "trusted_which", lambda name, roots, environ=None: name)
+
+
 # ---- option-shaped path ----------------------------------------------------
 
 _PATH_TOOLS = ("test_run", "lint_run", "format_code", "typecheck_run")
@@ -87,7 +94,7 @@ def test_ordinary_path_still_reaches_argv(tmp_path, captured):
     ("gofmt", ["gofmt", "-l"], "-w"),
     ("clang-format", ["clang-format", "--dry-run", "--Werror"], "-i"),
 ])
-def test_format_check_only_never_runs_a_writing_formatter(tmp_path, captured, tool, check, write):
+def test_format_check_only_never_runs_a_writing_formatter(tmp_path, captured, bare_tools, tool, check, write):
     (tmp_path / "a.c").write_text("int main(){}\n", encoding="utf-8")
     result = harness_tools.format_code(root=str(tmp_path), tool=tool, path="a.c", check_only=True)
     assert result["mode"] == "check"
@@ -100,7 +107,7 @@ def test_format_check_only_never_runs_a_writing_formatter(tmp_path, captured, to
 @pytest.mark.parametrize("tool, check", [
     ("dart", ["dart", "format", "--output=none", "--set-exit-if-changed", "."]),
 ])
-def test_format_check_only_keeps_the_existing_check_forms(tmp_path, captured, tool, check):
+def test_format_check_only_keeps_the_existing_check_forms(tmp_path, captured, bare_tools, tool, check):
     result = harness_tools.format_code(root=str(tmp_path), tool=tool, check_only=True)
     assert result["ok"] is True
     assert captured == [check]
@@ -121,7 +128,7 @@ def test_format_check_only_refuses_formatters_without_check_form(tmp_path, no_ch
     assert "check-only" in result["error"]
 
 
-def test_gofmt_check_fails_when_files_need_formatting(tmp_path, monkeypatch):
+def test_gofmt_check_fails_when_files_need_formatting(tmp_path, bare_tools, monkeypatch):
     calls = []
 
     def run(cmd, **k):
@@ -134,7 +141,7 @@ def test_gofmt_check_fails_when_files_need_formatting(tmp_path, monkeypatch):
     assert calls == [["gofmt", "-l", "."]]
 
 
-def test_gofmt_check_without_path_walks_the_root_not_stdin(tmp_path, captured):
+def test_gofmt_check_without_path_walks_the_root_not_stdin(tmp_path, captured, bare_tools):
     # ``gofmt -l`` with no argument reads the empty stdin and passes vacuously.
     harness_tools.format_code(root=str(tmp_path), tool="gofmt", check_only=True)
     assert captured == [["gofmt", "-l", "."]]
@@ -329,7 +336,7 @@ def test_dependency_audit_runs_pip_audit_without_pip(tmp_path, captured, monkeyp
     # Without --no-deps --disable-pip, pip-audit pip-installs the requirements
     # into a temporary environment (sdist build code runs) from a read-only tool.
     fake = str(tmp_path / "bin" / "pip-audit")
-    monkeypatch.setattr(harness_tools.shutil, "which", lambda name, *a, **k: fake if name == "pip-audit" else None)
+    monkeypatch.setattr(formatter_config_guard, "pip_audit_command", lambda roots: ([fake], None))
     (tmp_path / "requirements.txt").write_text("\n", encoding="utf-8")
     result = harness_tools.dependency_audit(root=str(tmp_path))
     assert len(captured) == 1
@@ -343,7 +350,7 @@ def test_dependency_audit_runs_pip_audit_without_pip(tmp_path, captured, monkeyp
 def test_dependency_audit_refuses_a_pyproject_only_project(tmp_path, no_child, monkeypatch):
     # ``pip-audit <project dir>`` always pip-installs the project's dependencies.
     fake = str(tmp_path / "bin" / "pip-audit")
-    monkeypatch.setattr(harness_tools.shutil, "which", lambda name, *a, **k: fake if name == "pip-audit" else None)
+    monkeypatch.setattr(formatter_config_guard, "pip_audit_command", lambda roots: ([fake], None))
     (tmp_path / "pyproject.toml").write_text("\n", encoding="utf-8")
     result = harness_tools.dependency_audit(root=str(tmp_path))
     assert result["ok"] is False
@@ -351,11 +358,12 @@ def test_dependency_audit_refuses_a_pyproject_only_project(tmp_path, no_child, m
 
 
 def test_dependency_audit_reports_a_missing_pip_audit(tmp_path, no_child, monkeypatch):
-    monkeypatch.setattr(harness_tools.shutil, "which", lambda name, *a, **k: None)
+    monkeypatch.setattr(formatter_config_guard, "pip_audit_command",
+                        lambda roots: (None, "no trusted pip-audit: install it"))
     (tmp_path / "requirements.txt").write_text("\n", encoding="utf-8")
     result = harness_tools.dependency_audit(root=str(tmp_path))
     assert result["ok"] is False
-    assert "pip-audit not installed" in result["error"]
+    assert "no trusted pip-audit" in result["error"]
 
 
 def test_dependency_audit_refuses_symlink_escaping_requirements(tmp_path, no_child, monkeypatch):
@@ -368,7 +376,7 @@ def test_dependency_audit_refuses_symlink_escaping_requirements(tmp_path, no_chi
     except (OSError, NotImplementedError):
         pytest.skip("symlinks need privilege on this host")
     fake = str(tmp_path / "bin" / "pip-audit")
-    monkeypatch.setattr(harness_tools.shutil, "which", lambda name, *a, **k: fake if name == "pip-audit" else None)
+    monkeypatch.setattr(formatter_config_guard, "pip_audit_command", lambda roots: ([fake], None))
     result = harness_tools.dependency_audit(root=str(proj))
     assert result["ok"] is False
     assert "link" in result["error"] or "outside" in result["error"]
@@ -589,7 +597,7 @@ def test_harness_secret_scan_counts_nested_env_files(tmp_path):
 
 def _pip_audit(monkeypatch, tmp_path):
     fake = str(tmp_path / "bin" / "pip-audit")
-    monkeypatch.setattr(harness_tools.shutil, "which", lambda name, *a, **k: fake if name == "pip-audit" else None)
+    monkeypatch.setattr(formatter_config_guard, "pip_audit_command", lambda roots: ([fake], None))
     return fake
 
 

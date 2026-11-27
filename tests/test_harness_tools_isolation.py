@@ -209,7 +209,7 @@ def test_prettier_with_an_unreadable_version_is_refused(tmp_path, recorder, not_
 
 
 def test_prettier_check_without_a_trusted_prettier_is_refused(tmp_path, no_child, not_live, monkeypatch):
-    monkeypatch.setattr(formatter_config_guard.shutil, "which", lambda *a, **k: None)
+    monkeypatch.setattr(formatter_config_guard, "trusted_which", lambda *a, **k: None)
     result = harness_tools.format_code(root=str(tmp_path), tool="prettier", check_only=True)
     assert result["ok"] is False
     assert "SONDER_PRETTIER_EXE" in result["error"]
@@ -226,7 +226,7 @@ def test_a_prettier_inside_the_project_or_an_authorized_root_is_not_trusted(
     assert result["ok"] is False
     # Found on PATH: same refusal.
     monkeypatch.delenv("SONDER_PRETTIER_EXE")
-    monkeypatch.setattr(formatter_config_guard.shutil, "which", lambda *a, **k: str(planted))
+    monkeypatch.setenv("PATH", str(planted.parent))
     result = harness_tools.format_code(root=str(web), tool="prettier", check_only=True)
     assert result["ok"] is False
     assert not (repo / "PWNED").exists()
@@ -291,7 +291,7 @@ def test_black_check_runs_from_the_runtime_interpreter_with_an_empty_config(
 def test_python_formatter_on_path_inside_the_root_is_refused(tmp_path, no_child, not_live, monkeypatch, tool):
     monkeypatch.setattr(formatter_config_guard, "runtime_module_available", lambda name: False)
     planted = tmp_path / ".venv" / "Scripts" / (tool + ".exe")
-    monkeypatch.setattr(formatter_config_guard.shutil, "which", lambda *a, **k: str(planted))
+    monkeypatch.setenv("PATH", str(planted.parent))
     result = harness_tools.format_code(root=str(tmp_path), tool=tool, check_only=True)
     assert result["ok"] is False
 
@@ -390,7 +390,7 @@ def test_dependency_audit_hands_pip_audit_a_sanitized_copy_outside_the_root(tmp_
     proj = tmp_path / "proj"
     _tree(proj)
     fake = str(tmp_path / "bin" / "pip-audit")
-    monkeypatch.setattr(harness_tools.shutil, "which", lambda name, *a, **k: fake if name == "pip-audit" else None)
+    monkeypatch.setattr(formatter_config_guard, "pip_audit_command", lambda roots: ([fake], None))
     result = harness_tools.dependency_audit(root=str(proj))
     assert result["manager"] == "pip"
     argv = recorder.calls[0]["argv"]
@@ -411,7 +411,7 @@ def test_dependency_update_hands_pip_a_sanitized_copy_outside_the_root(tmp_path,
 def test_the_sanitized_copy_is_removed_after_the_run(tmp_path, recorder, monkeypatch):
     (tmp_path / "requirements.txt").write_text("requests==2.32.0\n", encoding="utf-8")
     fake = str(tmp_path / "bin" / "pip-audit")
-    monkeypatch.setattr(harness_tools.shutil, "which", lambda name, *a, **k: fake if name == "pip-audit" else None)
+    monkeypatch.setattr(formatter_config_guard, "pip_audit_command", lambda roots: ([fake], None))
     harness_tools.dependency_audit(root=str(tmp_path))
     argv = recorder.calls[0]["argv"]
     assert not Path(argv[argv.index("-r") + 1]).exists()
@@ -427,8 +427,240 @@ def test_refused_requirement_errors_never_echo_the_line(tmp_path):
 def test_requirements_are_refused_when_no_pep508_parser_is_available(tmp_path, no_child, monkeypatch):
     (tmp_path / "requirements.txt").write_text("requests==2.32.0\n", encoding="utf-8")
     fake = str(tmp_path / "bin" / "pip-audit")
-    monkeypatch.setattr(harness_tools.shutil, "which", lambda name, *a, **k: fake if name == "pip-audit" else None)
+    monkeypatch.setattr(formatter_config_guard, "pip_audit_command", lambda roots: ([fake], None))
     monkeypatch.setattr(harness_tools, "_PEP508Requirement", None)
     result = harness_tools.dependency_audit(root=str(tmp_path))
     assert result["ok"] is False
     assert "parsed strictly" in result["error"]
+
+
+# ---- Bare-name tools never resolve to a project file (cwd, project venv on PATH) ---------------
+
+_IS_NT = os.name == "nt"
+
+
+def _plant(folder: Path, name: str) -> list[Path]:
+    """Planted lookalikes of ``name`` in ``folder``: ``.exe``/``.cmd`` on Windows, an executable elsewhere."""
+    folder.mkdir(parents=True, exist_ok=True)
+    planted = []
+    for filename in ((name + ".exe", name + ".cmd") if _IS_NT else (name,)):
+        target = folder / filename
+        target.write_text("@echo off\r\necho pwned> pwned.marker\r\n" if _IS_NT else "#!/bin/sh\n", encoding="utf-8")
+        if not _IS_NT:
+            target.chmod(0o755)
+        planted.append(target)
+    return planted
+
+
+class _LaunchRecorder:
+    """Stands in for ``subprocess.Popen``: records every launch and starts nothing."""
+
+    def __init__(self) -> None:
+        self.argvs: list[list[str]] = []
+        self.envs: list[object] = []
+
+    def __call__(self, argv, **kwargs):
+        self.argvs.append([str(part) for part in argv])
+        self.envs.append(kwargs.get("env"))
+        raise FileNotFoundError(argv[0])
+
+
+@pytest.fixture
+def launches(monkeypatch):
+    recorder = _LaunchRecorder()
+    monkeypatch.setattr(harness_tools.subprocess, "Popen", recorder)
+    return recorder
+
+
+def _hostile_environment(repo: Path, trusted: Path | None, monkeypatch) -> None:
+    """cwd is the repo, the cwd-first search is on, and the repo plus its venv Scripts lead PATH."""
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    entries = [str(repo), str(repo / "venv" / "Scripts"), str(repo / "venv" / "bin")]
+    if trusted is not None:
+        entries.append(str(trusted))
+    monkeypatch.setenv("PATH", os.pathsep.join(entries))
+
+
+def _launched_inside(launches: _LaunchRecorder, repo: Path) -> list[str]:
+    """First argv parts that are relative or point inside the repo."""
+    bad = []
+    for argv in launches.argvs:
+        program = argv[0]
+        if not os.path.isabs(program) or _inside(program, repo):
+            bad.append(program)
+    return bad
+
+
+@pytest.fixture
+def audit_repo(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "requirements.txt").write_text("requests==2.31.0\n", encoding="utf-8")
+    for folder in (repo, repo / "venv" / "Scripts", repo / "venv" / "bin"):
+        _plant(folder, "pip-audit")
+    # Force the executable route: pretend the runtime itself has no pip_audit module.
+    monkeypatch.setattr(formatter_config_guard, "_runtime_module_outside", lambda name, roots: False, raising=False)
+    return repo
+
+
+def test_dependency_audit_never_launches_a_pip_audit_planted_in_the_project(audit_repo, launches, monkeypatch):
+    _hostile_environment(audit_repo, None, monkeypatch)
+    result = harness_tools.dependency_audit(root=str(audit_repo))
+    assert _launched_inside(launches, audit_repo) == []
+    assert result["ok"] is False
+
+
+def test_dependency_audit_runs_a_trusted_pip_audit_found_after_the_planted_ones(
+        audit_repo, launches, trusted_dir, monkeypatch):
+    trusted = _plant(trusted_dir, "pip-audit")
+    _hostile_environment(audit_repo, trusted_dir, monkeypatch)
+    harness_tools.dependency_audit(root=str(audit_repo))
+    assert len(launches.argvs) == 1
+    assert Path(launches.argvs[0][0]).parent == trusted_dir
+    assert _launched_inside(launches, audit_repo) == []
+    assert trusted
+
+
+def test_dependency_audit_prefers_the_runtime_pip_audit_module(audit_repo, launches, monkeypatch):
+    monkeypatch.setattr(formatter_config_guard, "_runtime_module_outside", lambda name, roots: name == "pip_audit")
+    _hostile_environment(audit_repo, None, monkeypatch)
+    harness_tools.dependency_audit(root=str(audit_repo))
+    assert launches.argvs[0][:4] == [sys.executable, "-I", "-m", "pip_audit"]
+
+
+def test_runtime_module_outside_ignores_a_module_in_the_forbidden_root(tmp_path, monkeypatch):
+    (tmp_path / "pip_audit").mkdir()
+    (tmp_path / "pip_audit" / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "path", ["", str(tmp_path)])
+    monkeypatch.chdir(tmp_path)
+    assert formatter_config_guard._runtime_module_outside("pip_audit", [tmp_path]) is False
+
+
+@pytest.mark.parametrize("tool, path", [("gofmt", ""), ("clang-format", "a.cpp"), ("dart", "")])
+def test_check_mode_formatters_never_launch_a_binary_planted_in_the_project(
+        tmp_path, launches, not_live, monkeypatch, tool, path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.cpp").write_text("int a;\n", encoding="utf-8")
+    for folder in (repo, repo / "venv" / "Scripts", repo / "venv" / "bin"):
+        _plant(folder, tool)
+    _hostile_environment(repo, None, monkeypatch)
+    result = harness_tools.format_code(root=str(repo), tool=tool, path=path, check_only=True)
+    assert _launched_inside(launches, repo) == []
+    assert result["ok"] is False
+
+
+def test_check_mode_gofmt_runs_a_trusted_gofmt_found_after_the_planted_ones(
+        tmp_path, launches, not_live, trusted_dir, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for folder in (repo, repo / "venv" / "Scripts"):
+        _plant(folder, "gofmt")
+    _plant(trusted_dir, "gofmt")
+    _hostile_environment(repo, trusted_dir, monkeypatch)
+    harness_tools.format_code(root=str(repo), tool="gofmt", check_only=True)
+    assert len(launches.argvs) == 1
+    assert Path(launches.argvs[0][0]).parent == trusted_dir
+    assert _launched_inside(launches, repo) == []
+
+
+@pytest.mark.skipif(not _IS_NT, reason="the cwd-first search is Windows behaviour")
+def test_windows_executable_refuses_a_relative_lookup_result(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _plant(repo, "gofmt")
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    with pytest.raises(ValueError, match="relative"):
+        harness_tools._windows_executable(["gofmt", "-l"])
+
+
+def test_run_keeps_an_explicit_empty_environment(tmp_path, launches):
+    harness_tools._run([sys.executable, "-c", "pass"], cwd=tmp_path, env={})
+    assert launches.envs == [{}]
+
+
+# ---- Requirements: an archive suffix hidden in a version -----------------------------------------
+
+@pytest.mark.parametrize("line", [
+    "foo==1.0+abc.zip",
+    "foo==1.0+evil.tar.gz",
+    "foo==1.0+EVIL.TGZ ; python_version >= '3'",
+    "foo[x]==1.0+evil.whl",
+])
+def test_an_archive_suffix_in_the_version_is_refused(tmp_path, line):
+    (tmp_path / "requirements.txt").write_text(line + "\n", encoding="utf-8")
+    assert _content_error(tmp_path) is not None, line
+
+
+def test_a_plain_local_version_is_still_accepted(tmp_path):
+    (tmp_path / "requirements.txt").write_text("foo==1.0+abc\n", encoding="utf-8")
+    assert _content_error(tmp_path) is None
+
+
+# ---- Scratch folder outside every authorized root -------------------------------------------------
+
+def test_the_scratch_folder_is_refused_inside_an_authorized_root_other_than_the_project(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    other = tmp_path / "other-authorized"
+    other.mkdir()
+    monkeypatch.setenv("SONDER_FILE_ROOTS", str(other))
+    monkeypatch.setattr(tempfile, "tempdir", str(other))
+    with harness_tools._outside_temp_dir(project, "sonder-test-") as work:
+        assert work is None
+
+
+def test_the_scratch_folder_is_allowed_outside_every_root(tmp_path, trusted_dir, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(trusted_dir))
+    with harness_tools._outside_temp_dir(project, "sonder-test-") as work:
+        assert work is not None and not _inside(work, project)
+
+
+# ---- Extended, device and UNC spellings -----------------------------------------------------------
+
+def _spellings(path: Path) -> list[str]:
+    text = str(path)
+    drive, rest = os.path.splitdrive(text)
+    return ["\\\\?\\" + text, "\\\\.\\" + text, "\\\\localhost\\" + drive[:1] + "$" + rest]
+
+
+@pytest.mark.skipif(not _IS_NT, reason="drive-letter spellings")
+def test_extended_device_and_unc_spellings_of_a_path_in_the_root_are_forbidden(tmp_path):
+    inside = tmp_path / "bin" / "tool.exe"
+    inside.parent.mkdir()
+    inside.write_text("x", encoding="utf-8")
+    for spelling in _spellings(inside):
+        assert formatter_config_guard._forbidden(spelling, [tmp_path]) is True, spelling
+        assert formatter_config_guard._trusted_file(spelling, [tmp_path]) is False, spelling
+
+
+@pytest.mark.skipif(not _IS_NT, reason="drive-letter spellings")
+def test_extended_prefixes_are_refused_even_outside_the_roots(tmp_path, trusted_dir):
+    outside = trusted_dir / "tool.exe"
+    outside.write_text("x", encoding="utf-8")
+    assert formatter_config_guard._forbidden("\\\\?\\" + str(outside), [tmp_path]) is True
+    assert formatter_config_guard._forbidden(str(outside), [tmp_path]) is False
+
+
+@pytest.mark.skipif(not _IS_NT, reason="drive-letter spellings")
+def test_path_entries_in_extended_or_unc_spelling_are_dropped_from_the_node_environment(tmp_path, trusted_dir):
+    inside = tmp_path / "bin"
+    inside.mkdir()
+    entries = _spellings(inside) + [str(trusted_dir)]
+    env = formatter_config_guard.sanitized_node_environment({"PATH": os.pathsep.join(entries)}, [tmp_path])
+    assert env["PATH"] == str(trusted_dir)
+
+
+def test_path_entries_are_compared_after_resolving_links(tmp_path, trusted_dir):
+    inside = tmp_path / "bin"
+    inside.mkdir()
+    link = trusted_dir / "innocent"
+    try:
+        os.symlink(inside, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("cannot create a symlink here")
+    env = formatter_config_guard.sanitized_node_environment({"PATH": str(link)}, [tmp_path])
+    assert env["PATH"] == ""

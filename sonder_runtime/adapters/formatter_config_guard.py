@@ -28,15 +28,16 @@ Stateless; safe from any thread. Nothing here starts a process.
 """
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import os
 import re
-import shutil
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from .filesystem import file_ops
+from .host_tools.probes import which_in_directory
 
 PRETTIER_SETTING = "SONDER_PRETTIER_EXE"
 MIN_PRETTIER_MAJOR = 3
@@ -59,8 +60,25 @@ def _inside_any(path: Path, roots: Sequence[Path]) -> bool:
     return any(path == root or file_ops._is_inside(path, root) for root in roots)
 
 
+def _unsafe_spelling(path: str) -> bool:
+    r"""True for a device (``\\.\``), extended-length (``\\?\``) or UNC (``\\host``) spelling.
+
+    These name a location through a second route (a share on this machine, a
+    device namespace) that the root comparison does not see, so they are refused
+    outright instead of normalised.
+    """
+    if path.startswith("\\\\"):
+        return True
+    return os.name == "nt" and path.startswith("//")
+
+
 def _forbidden(path: str, roots: Sequence[Path]) -> bool:
-    """True when ``path`` (as spelled, or after resolving links) lies in one of ``roots``."""
+    """True when ``path`` (as spelled, or after resolving links) lies in one of ``roots``.
+
+    Device, extended-length and UNC spellings are forbidden whatever they name.
+    """
+    if _unsafe_spelling(path):
+        return True
     lexical = Path(os.path.normpath(path))
     try:
         resolved = lexical.resolve(strict=True)
@@ -69,8 +87,84 @@ def _forbidden(path: str, roots: Sequence[Path]) -> bool:
     return _inside_any(lexical, roots) or _inside_any(resolved, roots)
 
 
+def _entry_forbidden(entry: str, roots: Sequence[Path]) -> bool:
+    """True when the PATH ``entry`` is relative, oddly spelled, or (lexically or resolved) in ``roots``."""
+    if not entry or not os.path.isabs(entry) or _unsafe_spelling(entry):
+        return True
+    lexical = Path(os.path.normpath(entry))
+    try:
+        resolved = lexical.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return _inside_any(lexical, roots) or _inside_any(resolved, roots)
+
+
 def _trusted_file(path: str, roots: Sequence[Path]) -> bool:
     return os.path.isabs(path) and os.path.isfile(path) and not _forbidden(path, roots)
+
+
+def trusted_which(
+    name: str,
+    forbidden_roots: Sequence[Path],
+    environ: Mapping[str, str] | None = None,
+) -> str | None:
+    """Absolute path of ``name`` found only in PATH folders outside every forbidden root, or None.
+
+    Never ``shutil.which``: on Windows that searches the current directory first
+    (unless ``NoDefaultCurrentDirectoryInExePath`` is set) and returns a relative
+    result that CreateProcess then resolves against the parent's folder. Here a
+    relative, device, extended-length, UNC or project-resident PATH entry is
+    skipped, each remaining folder is searched on its own, and the hit must pass
+    :func:`_trusted_file`.
+    """
+    source = os.environ if environ is None else environ
+    path_value = next((value for key, value in source.items() if key.upper() == "PATH"), "")
+    for entry in path_value.split(os.pathsep):
+        if _entry_forbidden(entry, forbidden_roots):
+            continue
+        found = which_in_directory(name, entry)
+        if found and _trusted_file(found, forbidden_roots):
+            return found
+    return None
+
+
+def _runtime_module_outside(name: str, forbidden_roots: Sequence[Path]) -> bool:
+    """True when the runtime interpreter's own absolute ``sys.path`` provides ``name`` outside every forbidden root.
+
+    Looked up, not imported. Relative entries (``''`` is the current folder) are
+    skipped: the child runs ``python -I``, which has none. The first absolute
+    provider decides, so a copy inside a forbidden root that shadows a trusted
+    one refuses the module route.
+    """
+    entries = [entry for entry in sys.path if isinstance(entry, str) and os.path.isabs(entry)]
+    try:
+        spec = importlib.machinery.PathFinder.find_spec(name, entries)
+    except (ImportError, ValueError, OSError):
+        return False
+    if spec is None:
+        return False
+    locations = [spec.origin] if spec.origin and spec.origin not in ("built-in", "frozen") else []
+    locations += list(spec.submodule_search_locations or [])
+    if not locations:
+        return False
+    return not any(_forbidden(location, forbidden_roots) for location in locations)
+
+
+def pip_audit_command(forbidden_roots: Sequence[Path]) -> tuple[list[str] | None, str | None]:
+    """``(argv prefix, None)`` that runs pip-audit without project code, or ``(None, error)``.
+
+    The runtime interpreter with ``-I -m pip_audit`` when it provides the module
+    outside every forbidden root; else an absolute PATH executable found by
+    :func:`trusted_which`.
+    """
+    if _runtime_module_outside("pip_audit", forbidden_roots):
+        return [sys.executable, "-I", "-m", "pip_audit"], None
+    found = trusted_which("pip-audit", forbidden_roots)
+    if found:
+        return [found], None
+    return None, (
+        "no trusted pip-audit: install it in the Sonder runtime (pip install pip-audit) or outside the "
+        "project and every authorized root; one on the current folder or inside the project is never run")
 
 
 def executable_config_error(tool: str, root: Path | str, target: str = "") -> str | None:
@@ -111,16 +205,13 @@ def resolve_trusted_prettier(
         return None, (
             "%s must be the absolute path of a Prettier executable outside the project and every "
             "authorized root" % PRETTIER_SETTING)
-    found = shutil.which("prettier")
-    if found and _trusted_file(found, forbidden_roots):
-        return found, None
+    found = trusted_which("prettier", forbidden_roots, source)
     if found:
-        return None, (
-            "the prettier on PATH is inside the project or an authorized root, so it is repository "
-            "code; install Prettier 3 elsewhere and set %s to it" % PRETTIER_SETTING)
+        return found, None
     return None, (
-        "no trusted Prettier: install Prettier 3 outside the project and set %s to its absolute "
-        "path (Sonder never runs npx or a project's node_modules in check mode)" % PRETTIER_SETTING)
+        "no trusted Prettier: install Prettier 3 outside the project and every authorized root and set "
+        "%s to its absolute path (Sonder never runs npx, a project's node_modules, or a prettier found "
+        "in the current folder or inside the project in check mode)" % PRETTIER_SETTING)
 
 
 def prettier_major_version(stdout: str) -> int | None:
@@ -154,8 +245,7 @@ def sanitized_node_environment(
         if key.upper() == "PATH":
             kept = [
                 entry for entry in value.split(os.pathsep)
-                if entry and os.path.isabs(entry)
-                and not _inside_any(Path(os.path.normpath(entry)), forbidden_roots)
+                if not _entry_forbidden(entry, forbidden_roots)
             ]
             value = os.pathsep.join(kept)
         env[key] = value
@@ -179,8 +269,8 @@ def python_formatter_command(tool: str, forbidden_roots: Sequence[Path]) -> tupl
     """
     if runtime_module_available(tool):
         return [sys.executable, "-I", "-m", tool], None
-    found = shutil.which(tool)
-    if found and _trusted_file(found, forbidden_roots):
+    found = trusted_which(tool, forbidden_roots)
+    if found:
         return [found], None
     return None, (
         "refusing to run %s in check mode: it is not installed in the Sonder runtime and the one on "

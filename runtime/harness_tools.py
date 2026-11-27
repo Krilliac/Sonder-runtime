@@ -292,7 +292,14 @@ def _windows_executable(cmd):
     if not cmd:
         raise ValueError("command must not be empty")
     first = str(cmd[0])
-    found = shutil.which(first) or first
+    found = shutil.which(first)
+    if found and not os.path.isabs(found):
+        # Python's lookup searches the current folder first on Windows and CreateProcess
+        # resolves a relative program against the parent's folder, so a project file wins.
+        raise ValueError(
+            "refusing to run %s: the lookup gave the relative path %r (the current folder or a "
+            "relative PATH entry)" % (first, found))
+    found = found or first
     if found.rstrip(" .").lower().endswith((".cmd", ".bat")):
         for argument in cmd[1:]:
             if _BATCH_UNSAFE_ARGUMENT.search(str(argument)):
@@ -326,7 +333,7 @@ def _run(cmd, *, cwd, timeout=DEFAULT_TIMEOUT, stdin_bytes=b"", env=None):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             shell=False,
-            env=env or _child_env(),
+            env=env if env is not None else _child_env(),
             **process_tree.group_popen_kwargs(creationflags),
         )
     except FileNotFoundError:
@@ -1013,8 +1020,8 @@ _TEMP_INSIDE_ROOT = (
 
 
 @contextlib.contextmanager
-def _outside_temp_dir(root, prefix):
-    """Yield a fresh private temp folder outside ``root`` (None when temp is inside it); remove it after.
+def _outside_temp_dir(root, prefix, extra_roots=""):
+    """Yield a fresh private temp folder outside ``root`` and every authorized root (None otherwise); remove it after.
 
     The folder is created by ``mkdtemp`` (owner-only on POSIX) and holds only
     files Sonder writes: an empty ignore or config file, or a sanitized
@@ -1023,8 +1030,8 @@ def _outside_temp_dir(root, prefix):
     folder = Path(tempfile.mkdtemp(prefix=prefix))
     try:
         resolved = folder.resolve()
-        root_path = Path(root).resolve()
-        if resolved == root_path or file_ops._is_inside(resolved, root_path):
+        if any(resolved == forbidden or file_ops._is_inside(resolved, forbidden)
+               for forbidden in _formatter_forbidden_roots(root, extra_roots)):
             yield None
         else:
             yield resolved
@@ -1063,7 +1070,7 @@ def _prettier_check(root, path, timeout, extra_roots=""):
         return refusal(error)
     env = formatter_config_guard.sanitized_node_environment(_child_env(), forbidden)
     target = root / path if path else root
-    with _outside_temp_dir(root, "sonder-prettier-") as work:
+    with _outside_temp_dir(root, "sonder-prettier-", extra_roots) as work:
         if work is None:
             return refusal(_TEMP_INSIDE_ROOT)
         probe = _run([executable, "--version"], cwd=work, timeout=min(timeout, 30), env=env)
@@ -1125,6 +1132,21 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
             if prefix_err:
                 return {"ok": False, "error": prefix_err, "tool": tool, "mode": "check"}
             cmd = prefix + cmd[1:]
+        else:
+            # A bare name (gofmt, clang-format, dart) is resolved here, never by the child
+            # launch: only an absolute file in a PATH folder outside the project and every
+            # authorized root runs.
+            trusted = formatter_config_guard.trusted_which(
+                cmd[0], _formatter_forbidden_roots(root, extra_roots))
+            if not trusted:
+                return {
+                    "ok": False,
+                    "error": "refusing to run %s in check mode: no %s on PATH outside the project and "
+                             "every authorized root (the current folder is never searched)" % (tool, cmd[0]),
+                    "tool": tool,
+                    "mode": "check",
+                }
+            cmd[0] = trusted
     else:
         cmd = list(cmd_template)
     if path:
@@ -1145,7 +1167,7 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
     with contextlib.ExitStack() as scratch:
         if check_only and tool == "black":
             # An explicit, empty config: Black reads no pyproject.toml from the project.
-            work = scratch.enter_context(_outside_temp_dir(root, "sonder-black-"))
+            work = scratch.enter_context(_outside_temp_dir(root, "sonder-black-", extra_roots))
             if work is None:
                 return {"ok": False, "error": _TEMP_INSIDE_ROOT, "tool": tool, "mode": "check"}
             config = work / "black-empty.toml"
@@ -1349,7 +1371,7 @@ def _requirements_link_error(root):
 
 
 @contextlib.contextmanager
-def _sanitized_requirements_file(root):
+def _sanitized_requirements_file(root, extra_roots=""):
     """Yield ``(path, None)`` for a sanitized flat copy of ``root/requirements.txt``, or ``(None, error)``.
 
     pip and pip-audit never see the repository's pathname: the file and every
@@ -1373,7 +1395,7 @@ def _sanitized_requirements_file(root):
     if sanitized is None:
         yield None, "refusing requirements.txt: %s" % error
         return
-    with _outside_temp_dir(root, "sonder-requirements-") as work:
+    with _outside_temp_dir(root, "sonder-requirements-", extra_roots) as work:
         if work is None:
             yield None, _TEMP_INSIDE_ROOT
         else:
@@ -1502,7 +1524,7 @@ def dependency_update(root=".", packages_json="[]", timeout=120, extra_roots="")
             if not os.path.lexists(root / "requirements.txt"):
                 return {"ok": False, "error": "no requirements.txt to update; name the packages to upgrade",
                         "manager": "pip"}
-            with _sanitized_requirements_file(root) as (sanitized, req_err):
+            with _sanitized_requirements_file(root, extra_roots) as (sanitized, req_err):
                 if req_err:
                     return {"ok": False, "error": req_err, "manager": "pip"}
                 result = _run(pip + ["--upgrade", "-r", str(sanitized)], cwd=sanitized.parent, timeout=timeout)
@@ -1549,20 +1571,24 @@ def dependency_audit(root=".", timeout=60, extra_roots=""):
         # own runtime environment. Use ``pip-audit --no-deps --disable-pip`` on
         # a sanitized copy of ``requirements.txt`` (see ``_sanitized_requirements_file``)
         # so sdist build hooks never run and pip-audit never reopens a repository file.
-        pip_audit = shutil.which("pip-audit")
+        # The runtime's own ``python -I -m pip_audit`` or an absolute PATH executable outside the
+        # project and every authorized root; never a bare-name lookup (the current folder and a
+        # project venv on PATH would win it).
+        pip_audit, pip_audit_error = formatter_config_guard.pip_audit_command(
+            _formatter_forbidden_roots(root, extra_roots))
         if os.path.lexists(root / "requirements.txt"):
-            with _sanitized_requirements_file(root) as (sanitized, req_err):
+            with _sanitized_requirements_file(root, extra_roots) as (sanitized, req_err):
                 if req_err:
                     result = {"ok": False, "error": req_err}
                 elif not pip_audit:
-                    result = {"ok": False, "error": "pip-audit not installed; run: pip install pip-audit"}
+                    result = {"ok": False, "error": pip_audit_error}
                 else:
                     result = _run(
-                        [pip_audit, "-r", str(sanitized), "--no-deps", "--disable-pip"],
+                        pip_audit + ["-r", str(sanitized), "--no-deps", "--disable-pip"],
                         cwd=sanitized.parent, timeout=timeout,
                     )
         elif not pip_audit:
-            result = {"ok": False, "error": "pip-audit not installed; run: pip install pip-audit"}
+            result = {"ok": False, "error": pip_audit_error}
         elif (root / "pyproject.toml").is_file():
             result = {
                 "ok": False,

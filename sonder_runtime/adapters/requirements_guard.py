@@ -192,6 +192,9 @@ def _canonical_requirement(spec: str, parse: RequirementParser) -> str | None:
     canonical = str(requirement)
     if _UNSAFE_CANONICAL.search(canonical):
         return None
+    # ``foo==1.0+evil.zip``: pip reads a requirement that ends in an archive suffix as a path.
+    if canonical.partition(";")[0].strip().lower().endswith(_ARCHIVE_SUFFIXES):
+        return None
     try:
         if str(parse(canonical)) != canonical:
             return None
