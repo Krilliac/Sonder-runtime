@@ -42,7 +42,7 @@ class ModelRequestRateConfig:
     burst: int
     requests_per_minute: int
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if (type(self.burst) is not int or not 1 <= self.burst <= 256 or
                 type(self.requests_per_minute) is not int or
                 not 1 <= self.requests_per_minute <= 1200):
@@ -58,7 +58,7 @@ class HostModelRequestAdmission:
         *,
         clock: Callable[[], float] = time.time,
         db_path: str | Path | None = None,
-    ):
+    ) -> None:
         self.config = config
         self._clock = clock
         self._lock = threading.Lock()
@@ -100,7 +100,10 @@ class HostModelRequestAdmission:
 
     def _claim_store_creation(self) -> bool:
         """Remember first use under the already-held, persistent OS lock."""
-        lock_path = self._path.with_name(self._path.name + ".lock")
+        path = self._path
+        if path is None:
+            raise ValueError("admission database path is not initialized")
+        lock_path = path.with_name(path.name + ".lock")
         with lock_path.open("r+b") as marker:
             # The shared file-lock helper may append NUL padding while two
             # cold openers initialize its lock byte. Only byte 1 is our marker;

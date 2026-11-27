@@ -55,7 +55,7 @@ def _json_safe(value: Any) -> Any:
         return value
     if isinstance(value, Path):
         return str(value)
-    if is_dataclass(value):
+    if is_dataclass(value) and not isinstance(value, type):
         return _json_safe(asdict(value))
     if isinstance(value, Mapping):
         return {str(key): _json_safe(item) for key, item in value.items()}

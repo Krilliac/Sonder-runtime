@@ -1316,7 +1316,9 @@ class OpenAICompatibleGateway:
       OperationContext.  They can never replace ``Content-Type`` or
       ``Authorization``.
     * ``http_error_classifier(status, body)`` -- sees the bounded error body
-      and may return the domain error to raise instead of the default mapping.
+      (and the response headers as ``headers=`` when the callable sets
+      ``accepts_headers = True``) and may return the domain error to raise
+      instead of the default mapping.
     * ``connect_error_classifier(reason)`` -- same for transport failures that
       happened before any HTTP response (refused, unresolvable, ...).
     * ``get_transport(url, headers, timeout) -> (status, body)`` -- the GET
@@ -2474,9 +2476,15 @@ class OpenAICompatibleGateway:
                                     if str(key).lower() == "retry-after"), None)
                 http_cause = self._safe_http_cause(int(code or 0), retry_after)
                 if self._http_error_classifier is not None:
-                    failure = self._http_error_classifier(
-                        int(code or 0), self._bounded_error_body(exc),
-                    )
+                    if getattr(self._http_error_classifier, "accepts_headers", False):
+                        failure = self._http_error_classifier(
+                            int(code or 0), self._bounded_error_body(exc),
+                            headers=exc.headers,
+                        )
+                    else:
+                        failure = self._http_error_classifier(
+                            int(code or 0), self._bounded_error_body(exc),
+                        )
                 if failure is None:
                     if code in (401, 403):
                         logger.error(

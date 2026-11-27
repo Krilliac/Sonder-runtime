@@ -12,6 +12,7 @@ import math
 from pathlib import Path
 
 from sonder_runtime.adapters.host_terminal_result import TerminalResultCodec
+from sonder_runtime.application.context import narrow_private_node
 from sonder_runtime.application.ports.lane_continuation import TerminalProjectionReceipt
 from sonder_runtime.application.ports.delegated_verification import VerificationVerdict
 
@@ -49,6 +50,8 @@ transactional effect admission and anchored persistence adapters.
             cloud_allowed=context.cloud_allowed and ceiling.cloud_allowed,
             remote_ollama_allowed=(context.remote_ollama_allowed
                                    and ceiling.remote_ollama_allowed),
+            private_node_allowed=narrow_private_node(
+                context.private_node_allowed, ceiling.private_node_allowed),
             deadline_monotonic=min(context.deadline_monotonic,
                                    ceiling.deadline_monotonic)
                 if context.deadline_monotonic is not None else ceiling.deadline_monotonic)

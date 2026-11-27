@@ -448,6 +448,15 @@ def validate_endpoint_policy(
             )
     if config.loopback and not config.private_worker:
         return
+    if (
+        config.private_worker
+        and context is not None
+        and context.private_node_allowed is False
+    ):
+        raise Forbidden(
+            "sonder-inference private worker %s skipped: consent (this operation "
+            "context does not allow private nodes)" % config.display_base_url
+        )
     missing: list[str] = []
     if not config.allow_remote:
         missing.append("SONDER_ALLOW_REMOTE_INFERENCE=1 (allow_remote=True)")

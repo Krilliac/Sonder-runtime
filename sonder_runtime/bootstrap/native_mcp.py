@@ -388,6 +388,34 @@ _NATIVE_TOOLS = (
         }, "additionalProperties": False},
     ),
     ToolDescriptor(
+        "scratchpad_read",
+        "Read, list, or search owner-scoped restart-persistent Markdown scratchpad notes",
+        {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "query": {"type": "string"},
+            "tag": {"type": "string"},
+            "start_line": _INT,
+            "max_lines": _INT,
+        }, "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "scratchpad_write",
+        "Create, replace, or append to an owner-scoped restart-persistent Markdown scratchpad note",
+        {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "content": {"type": "string"},
+            "mode": {"type": "string", "enum": ["replace", "append"]},
+            "tags": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["name", "content"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
+        "scratchpad_delete",
+        "Delete one named note from the owner's persistent Markdown scratchpad",
+        {"type": "object", "properties": {
+            "name": {"type": "string"},
+        }, "required": ["name"], "additionalProperties": False},
+    ),
+    ToolDescriptor(
         "symbol_verify",
         "Guarded static verifier for Python stdlib, installed package, and repository modules/attributes/kwargs plus full code-snippet API auditing",
         {"type": "object", "properties": {

@@ -43,7 +43,6 @@ sonder_runtime/adapters/code_repair_persistence.py
 sonder_runtime/adapters/command_catalog.py
 sonder_runtime/adapters/compute_fabric/artifact_mobility.py
 sonder_runtime/adapters/compute_fabric/artifact_transfer.py
-sonder_runtime/adapters/compute_fabric/http_client.py
 sonder_runtime/adapters/conversational_subagents.py
 sonder_runtime/adapters/creation_workspace.py
 sonder_runtime/adapters/debug_tools_executor.py
@@ -99,7 +98,6 @@ sonder_runtime/adapters/host_terminal_result.py
 sonder_runtime/adapters/host_tools/bounded_process.py
 sonder_runtime/adapters/host_tools/darwin.py
 sonder_runtime/adapters/host_tools/discovery.py
-sonder_runtime/adapters/host_tools/guards.py
 sonder_runtime/adapters/host_tools/probes.py
 sonder_runtime/adapters/host_tools/snapshot_store.py
 sonder_runtime/adapters/host_tools/windows.py
@@ -108,7 +106,6 @@ sonder_runtime/adapters/inference/external_membership.py
 sonder_runtime/adapters/inference/gpu_residency.py
 sonder_runtime/adapters/inference/membership_high_water.py
 sonder_runtime/adapters/inference/ollama_conformance.py
-sonder_runtime/adapters/inference/ollama_endpoint.py
 sonder_runtime/adapters/inference/ollama_gateway.py
 sonder_runtime/adapters/inference/ollama_pool.py
 sonder_runtime/adapters/inference/ollama_reporting.py
@@ -154,9 +151,7 @@ sonder_runtime/adapters/model_error_details.py
 sonder_runtime/adapters/model_error_formatting.py
 sonder_runtime/adapters/model_inventory_formatting.py
 sonder_runtime/adapters/model_pace.py
-sonder_runtime/adapters/model_request_admission.py
 sonder_runtime/adapters/model_response_metadata.py
-sonder_runtime/adapters/model_transport.py
 sonder_runtime/adapters/observability/activity_formatting.py
 sonder_runtime/adapters/observability/activity_tracker.py
 sonder_runtime/adapters/observability/event_bridge.py
@@ -224,12 +219,8 @@ sonder_runtime/adapters/playbook_telemetry.py
 sonder_runtime/adapters/preference_adapters.py
 sonder_runtime/adapters/preference_codec.py
 sonder_runtime/adapters/preflight.py
-sonder_runtime/adapters/process_liveness.py
 sonder_runtime/adapters/process_risk.py
-sonder_runtime/adapters/process_termination.py
 sonder_runtime/adapters/prompt_store.py
-sonder_runtime/adapters/provider_dispatch/fallback.py
-sonder_runtime/adapters/provider_dispatch/gateway.py
 sonder_runtime/adapters/recall.py
 sonder_runtime/adapters/reference_index.py
 sonder_runtime/adapters/reference_lookup_lanes.py
@@ -264,7 +255,6 @@ sonder_runtime/adapters/testing/artifacts.py
 sonder_runtime/adapters/testing/detection.py
 sonder_runtime/adapters/testing/launcher.py
 sonder_runtime/adapters/tier_generation.py
-sonder_runtime/adapters/tls_contexts.py
 sonder_runtime/adapters/tool_executor.py
 sonder_runtime/adapters/tool_lane_gateway.py
 sonder_runtime/adapters/tool_lane_guard.py
@@ -302,7 +292,6 @@ sonder_runtime/application/build/grants.py
 sonder_runtime/application/build/model_service.py
 sonder_runtime/application/build/ports.py
 sonder_runtime/application/capabilities/jobs.py
-sonder_runtime/application/chat/handle_chat.py
 sonder_runtime/application/chat/lanes.py
 sonder_runtime/application/chat/provider_bridge.py
 sonder_runtime/application/compaction/__init__.py
@@ -328,12 +317,10 @@ sonder_runtime/application/evaluation/reproducible.py
 sonder_runtime/application/evaluation/service.py
 sonder_runtime/application/execution/process_jobs.py
 sonder_runtime/application/execution/resume_reality.py
-sonder_runtime/application/execution/worker_bindings.py
 sonder_runtime/application/extensions/facade.py
 sonder_runtime/application/extensions/registry.py
 sonder_runtime/application/inference_membership/controller.py
 sonder_runtime/application/instruction_discovery/registry.py
-sonder_runtime/application/jobs/durable_registry.py
 sonder_runtime/application/lifecycle.py
 sonder_runtime/application/live_context.py
 sonder_runtime/application/loop/facade.py
@@ -368,14 +355,10 @@ sonder_runtime/application/ports/delegated_verification.py
 sonder_runtime/application/ports/event_sink.py
 sonder_runtime/application/ports/host_final.py
 sonder_runtime/application/ports/host_turn_links.py
-sonder_runtime/application/ports/lane_continuation.py
 sonder_runtime/application/ports/managed_authority.py
 sonder_runtime/application/ports/managed_runtime_owner.py
-sonder_runtime/application/ports/model_gateway.py
 sonder_runtime/application/ports/model_target.py
 sonder_runtime/application/ports/repositories.py
-sonder_runtime/application/ports/runtime_owner.py
-sonder_runtime/application/ports/runtime_threads.py
 sonder_runtime/application/ports/task_state.py
 sonder_runtime/application/ports/terminal_eligibility.py
 sonder_runtime/application/ports/terminal_output.py
@@ -417,7 +400,6 @@ sonder_runtime/application/session/fork.py
 sonder_runtime/application/session/http_facade.py
 sonder_runtime/application/session/model_steps.py
 sonder_runtime/application/session/provider_attempts.py
-sonder_runtime/application/session/query_export.py
 sonder_runtime/application/session/repair.py
 sonder_runtime/application/session/replay.py
 sonder_runtime/application/session/trajectory.py
@@ -436,9 +418,7 @@ sonder_runtime/application/testing/ports.py
 sonder_runtime/application/testing/service.py
 sonder_runtime/application/tools/discovery.py
 sonder_runtime/application/tools/facade.py
-sonder_runtime/application/tools/gateway_contract.py
 sonder_runtime/application/tools/generated_catalogs.py
-sonder_runtime/application/tools/typed_gateway.py
 sonder_runtime/application/training/hardware_planning.py
 sonder_runtime/application/training/route_activation.py
 sonder_runtime/application/updates/application_service.py

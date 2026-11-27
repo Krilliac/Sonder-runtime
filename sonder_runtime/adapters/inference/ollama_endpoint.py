@@ -1,12 +1,15 @@
 """Fail-closed Ollama endpoint parsing and transport policy."""
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from http.client import HTTPMessage
 import logging
 import os
 from pathlib import Path
 import ssl  # noqa: F401 - tests patch ollama_endpoint.ssl.create_default_context
 import threading
+from typing import Any, IO
 import weakref
 import urllib.parse
 import urllib.request
@@ -34,7 +37,7 @@ _configuration_lock = threading.RLock()
 if "_embedding_policy_lock" not in globals():
     _embedding_policy_lock = threading.RLock()
 if "_external_membership_owners" not in globals():
-    _external_membership_owners = weakref.WeakSet()
+    _external_membership_owners: weakref.WeakSet[object] = weakref.WeakSet()
 if "_embedding_policy_condition" not in globals():
     _embedding_policy_condition = threading.Condition(_embedding_policy_lock)
 if "_embedding_operations" not in globals():
@@ -44,7 +47,7 @@ if "_embedding_operation_local" not in globals():
 
 
 @contextmanager
-def _default_embedding_operation():
+def _default_embedding_operation() -> Iterator[bool]:
     """One read lease spans all default side effects; never lock across I/O.
 
     Nested provenance calls inherit the outer lease, even while registration
@@ -75,7 +78,7 @@ def _default_embedding_operation():
             _embedding_policy_condition.notify_all()
 
 
-def _restrict_for_external_membership(owner):
+def _restrict_for_external_membership(owner: object) -> None:
     """Deny the process-default adapter while an external source is owned.
 
     Sources retain this fence when closed, expired or revoked. Weak ownership
@@ -96,7 +99,7 @@ def _restrict_for_external_membership(owner):
             _embedding_policy_condition.notify_all()
 
 
-def _default_embeddings_disabled():
+def _default_embeddings_disabled() -> bool:
     with _embedding_policy_lock:
         return bool(_external_membership_owners)
 
@@ -162,11 +165,11 @@ def remote_allowed() -> bool:
     return ollama_policy.remote_allowed(os.environ)
 
 
-def _remote_allowed_in(environment) -> bool:
+def _remote_allowed_in(environment: Mapping[str, str]) -> bool:
     return ollama_policy.remote_allowed(environment)
 
 
-def _candidate(value=None) -> str:
+def _candidate(value: object = None) -> str:
     with _configuration_lock:
         configured = _configured_endpoint
     if value is None and configured is not None:
@@ -176,20 +179,20 @@ def _candidate(value=None) -> str:
     )
 
 
-def normalize(value=None) -> str:
+def normalize(value: object = None) -> str:
     return ollama_policy.normalize(_candidate(value))
 
 
-def is_loopback(value=None) -> bool:
+def is_loopback(value: object = None) -> bool:
     return ollama_policy.is_loopback(value)
 
 
-def policy_error(value=None, *, allow_remote=None) -> str:
+def policy_error(value: object = None, *, allow_remote: bool | None = None) -> str:
     consent = remote_allowed() if allow_remote is None else allow_remote is True
     return ollama_policy.policy_error(value, allow_remote=consent)
 
 
-def configured_origin(value=None, *, allow_remote=None) -> str:
+def configured_origin(value: object = None, *, allow_remote: bool | None = None) -> str:
     # The policy decides on the configured text itself, not on what
     # normalisation made of it.
     raw = _candidate(value)
@@ -203,7 +206,9 @@ def configured_origin(value=None, *, allow_remote=None) -> str:
     return origin
 
 
-def client_environment(environment=None, *, allow_remote=None) -> dict:
+def client_environment(
+    environment: Mapping[str, str] | None = None, *, allow_remote: bool | None = None,
+) -> dict[str, str]:
     """Copy an environment and pin Ollama client traffic to canonical origin."""
     source = dict(os.environ if environment is None else environment)
     consent = (
@@ -216,7 +221,7 @@ def client_environment(environment=None, *, allow_remote=None) -> dict:
     return source
 
 
-def locality(value=None) -> str:
+def locality(value: object = None) -> str:
     origin = normalize(value)
     try:
         parsed = urllib.parse.urlparse(origin)
@@ -249,7 +254,7 @@ def locality(value=None) -> str:
     return "remote-opt-in" if remote_allowed() else "remote-blocked"
 
 
-def safe_display(value=None) -> str:
+def safe_display(value: object = None) -> str:
     origin = normalize(value)
     try:
         parsed = urllib.parse.urlparse(origin)
@@ -299,7 +304,15 @@ def _origin_from_url(url: str) -> str:
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
         return None
 
 
@@ -307,7 +320,7 @@ _PROXY_HANDLER = urllib.request.ProxyHandler({})
 _OPENER = urllib.request.build_opener(_PROXY_HANDLER, _NoRedirect())
 
 
-def open_url(request, timeout=30, *, allow_remote=None):
+def open_url(request: Any, timeout: float = 30, *, allow_remote: bool | None = None) -> Any:
     """Open one Ollama request without environment proxies or redirects."""
     url = request.full_url if hasattr(request, "full_url") else str(request)
     logger.debug(f"open_url: url={redact_url(url)!r}, timeout={timeout}")
@@ -326,6 +339,7 @@ def open_url(request, timeout=30, *, allow_remote=None):
     ))
     if _UNSENDABLE_URL_CHARS.search(canonical_url):
         raise ValueError(_MALFORMED_REQUEST_URL)
+    canonical_request: urllib.request.Request | str
     if hasattr(request, "full_url"):
         headers = dict(request.header_items())
         canonical_request = urllib.request.Request(
