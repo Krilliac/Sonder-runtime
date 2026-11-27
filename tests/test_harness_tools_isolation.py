@@ -500,7 +500,7 @@ def audit_repo(tmp_path, monkeypatch):
     for folder in (repo, repo / "venv" / "Scripts", repo / "venv" / "bin"):
         _plant(folder, "pip-audit")
     # Force the executable route: pretend the runtime itself has no pip_audit module.
-    monkeypatch.setattr(formatter_config_guard, "_runtime_module_outside", lambda name, roots: False, raising=False)
+    monkeypatch.setattr(formatter_config_guard, "runtime_module_available", lambda name: False)
     return repo
 
 
@@ -523,18 +523,10 @@ def test_dependency_audit_runs_a_trusted_pip_audit_found_after_the_planted_ones(
 
 
 def test_dependency_audit_prefers_the_runtime_pip_audit_module(audit_repo, launches, monkeypatch):
-    monkeypatch.setattr(formatter_config_guard, "_runtime_module_outside", lambda name, roots: name == "pip_audit")
+    monkeypatch.setattr(formatter_config_guard, "runtime_module_available", lambda name: name == "pip_audit")
     _hostile_environment(audit_repo, None, monkeypatch)
     harness_tools.dependency_audit(root=str(audit_repo))
     assert launches.argvs[0][:4] == [sys.executable, "-I", "-m", "pip_audit"]
-
-
-def test_runtime_module_outside_ignores_a_module_in_the_forbidden_root(tmp_path, monkeypatch):
-    (tmp_path / "pip_audit").mkdir()
-    (tmp_path / "pip_audit" / "__init__.py").write_text("", encoding="utf-8")
-    monkeypatch.setattr(sys, "path", ["", str(tmp_path)])
-    monkeypatch.chdir(tmp_path)
-    assert formatter_config_guard._runtime_module_outside("pip_audit", [tmp_path]) is False
 
 
 @pytest.mark.parametrize("tool, path", [("gofmt", ""), ("clang-format", "a.cpp"), ("dart", "")])
@@ -664,3 +656,125 @@ def test_path_entries_are_compared_after_resolving_links(tmp_path, trusted_dir):
         pytest.skip("cannot create a symlink here")
     env = formatter_config_guard.sanitized_node_environment({"PATH": str(link)}, [tmp_path])
     assert env["PATH"] == ""
+
+
+# ---- Check-mode child environment, batch shims, real launches (no faked Popen) -----------------
+
+def _path_entries(env) -> list[str]:
+    return [value for key, value in env.items() if key.upper() == "PATH"][0].split(os.pathsep)
+
+
+def _ndcd(env):
+    return [value for key, value in env.items() if key.upper() == "NODEFAULTCURRENTDIRECTORYINEXEPATH"]
+
+
+def test_check_mode_environment_filters_path_and_pins_the_cwd_search_off(tmp_path, trusted_dir):
+    repo = tmp_path / "repo"
+    (repo / "bin").mkdir(parents=True)
+    base = {
+        "Path": os.pathsep.join(["", ".", "relative", str(repo), str(repo / "bin"), str(trusted_dir)]),
+        "Keep": "1",
+        "NoDefaultCurrentDirectoryInExePath": "",
+    }
+    env = formatter_config_guard.check_mode_environment(base, [repo])
+    assert _path_entries(env) == [str(trusted_dir)]
+    assert _ndcd(env) == ["1"]
+    assert env["Keep"] == "1"
+
+
+def test_check_mode_launches_get_the_filtered_environment(
+        tmp_path, launches, not_live, trusted_dir, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "requirements.txt").write_text("requests==2.31.0\n", encoding="utf-8")
+    _plant(trusted_dir, "gofmt")
+    _plant(trusted_dir, "pip-audit")
+    monkeypatch.setattr(formatter_config_guard, "runtime_module_available", lambda name: False)
+    _hostile_environment(repo, trusted_dir, monkeypatch)
+    harness_tools.format_code(root=str(repo), tool="gofmt", check_only=True)
+    harness_tools.dependency_audit(root=str(repo))
+    assert len(launches.envs) == 2
+    for env in launches.envs:
+        assert _ndcd(env) == ["1"]
+        assert all(not _inside(entry, repo) and os.path.isabs(entry) for entry in _path_entries(env))
+
+
+def _batch_environment(tmp_path: Path, trusted_dir: Path, monkeypatch) -> tuple[Path, Path]:
+    """A repo whose cwd and PATH entry both hold a ``foo.cmd`` that writes a marker."""
+    repo = tmp_path / "repo"
+    marker = tmp_path / "hit.marker"
+    for folder in (repo, repo / "bin"):
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "foo.cmd").write_text('@echo off\r\necho hit> "%s"\r\n' % marker, encoding="utf-8")
+        (folder / "where.cmd").write_text('@echo off\r\necho hit> "%s"\r\n' % marker, encoding="utf-8")
+    (repo / "a.go").write_text("package a\n", encoding="utf-8")
+    (repo / "requirements.txt").write_text("requests==2.31.0\n", encoding="utf-8")
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", os.pathsep.join(
+        [str(repo / "bin"), str(trusted_dir), os.environ.get("PATH", "")]))
+    return repo, marker
+
+
+@pytest.mark.skipif(not _IS_NT, reason="cmd.exe resolves bare commands from the current folder")
+@pytest.mark.parametrize("tool, path", [("gofmt", "a.go"), ("dart", "")])
+def test_a_trusted_batch_shim_is_refused_in_check_mode(
+        tmp_path, trusted_dir, not_live, monkeypatch, tool, path):
+    (trusted_dir / (tool + ".cmd")).write_text("@echo off\r\nfoo\r\n", encoding="utf-8")
+    repo, marker = _batch_environment(tmp_path, trusted_dir, monkeypatch)
+    result = harness_tools.format_code(root=str(repo), tool=tool, path=path, check_only=True)
+    assert not marker.exists()
+    assert result["ok"] is False
+    assert "batch" in result["error"].lower()
+
+
+@pytest.mark.skipif(not _IS_NT, reason="cmd.exe resolves bare commands from the current folder")
+def test_a_trusted_batch_pip_audit_is_refused(tmp_path, trusted_dir, monkeypatch):
+    (trusted_dir / "pip-audit.cmd").write_text("@echo off\r\nfoo\r\n", encoding="utf-8")
+    monkeypatch.setattr(formatter_config_guard, "runtime_module_available", lambda name: False)
+    repo, marker = _batch_environment(tmp_path, trusted_dir, monkeypatch)
+    result = harness_tools.dependency_audit(root=str(repo))
+    assert not marker.exists()
+    assert result["ok"] is False
+    assert "batch" in result["error"].lower()
+
+
+@pytest.mark.skipif(not _IS_NT, reason="cmd.exe resolves bare commands from the current folder")
+def test_a_trusted_prettier_shim_runs_from_a_temp_folder_with_a_filtered_path(
+        tmp_path, trusted_dir, not_live, monkeypatch):
+    shim = trusted_dir / "prettier.cmd"
+    shim.write_text('@echo off\r\nif "%1"=="--version" (echo 3.3.3) else (foo)\r\n', encoding="utf-8")
+    repo, marker = _batch_environment(tmp_path, trusted_dir, monkeypatch)
+    monkeypatch.setenv("SONDER_PRETTIER_EXE", str(shim))
+    harness_tools.format_code(root=str(repo), tool="prettier", path="a.go", check_only=True)
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(not _IS_NT, reason="the cwd-first search is Windows behaviour")
+def test_node_environment_pins_the_cwd_search_off(tmp_path):
+    env = formatter_config_guard.sanitized_node_environment({"PATH": str(tmp_path)}, [tmp_path / "x"])
+    assert _ndcd(env) == ["1"]
+
+
+# ---- Project wrappers and runtime module policy ---------------------------------------------------
+
+@pytest.mark.skipif(not _IS_NT, reason="gradlew.bat is the Windows wrapper")
+def test_gradle_wrapper_is_launched_by_absolute_path(tmp_path, launches, monkeypatch):
+    (tmp_path / "build.gradle").write_text("\n", encoding="utf-8")
+    (tmp_path / "gradlew.bat").write_text("@echo off\r\n", encoding="utf-8")
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    monkeypatch.chdir(tmp_path)
+    harness_tools.build_run(root=str(tmp_path))
+    harness_tools.test_run(root=str(tmp_path), framework="gradle")
+    assert len(launches.argvs) == 2
+    for argv in launches.argvs:
+        assert os.path.normcase(argv[0]) == os.path.normcase(str(tmp_path / "gradlew.bat")), argv
+
+
+def test_a_runtime_module_must_come_from_the_interpreters_own_install(tmp_path, monkeypatch):
+    (tmp_path / "zz_fake_tool_mod").mkdir()
+    (tmp_path / "zz_fake_tool_mod" / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "path", ["", str(tmp_path)] + sys.path)
+    monkeypatch.chdir(tmp_path)
+    assert formatter_config_guard.runtime_module_available("zz_fake_tool_mod") is False
+    assert formatter_config_guard.runtime_module_available("json") is True

@@ -33,6 +33,7 @@ import importlib.util
 import os
 import re
 import sys
+import sysconfig
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -128,39 +129,20 @@ def trusted_which(
     return None
 
 
-def _runtime_module_outside(name: str, forbidden_roots: Sequence[Path]) -> bool:
-    """True when the runtime interpreter's own absolute ``sys.path`` provides ``name`` outside every forbidden root.
-
-    Looked up, not imported. Relative entries (``''`` is the current folder) are
-    skipped: the child runs ``python -I``, which has none. The first absolute
-    provider decides, so a copy inside a forbidden root that shadows a trusted
-    one refuses the module route.
-    """
-    entries = [entry for entry in sys.path if isinstance(entry, str) and os.path.isabs(entry)]
-    try:
-        spec = importlib.machinery.PathFinder.find_spec(name, entries)
-    except (ImportError, ValueError, OSError):
-        return False
-    if spec is None:
-        return False
-    locations = [spec.origin] if spec.origin and spec.origin not in ("built-in", "frozen") else []
-    locations += list(spec.submodule_search_locations or [])
-    if not locations:
-        return False
-    return not any(_forbidden(location, forbidden_roots) for location in locations)
-
-
 def pip_audit_command(forbidden_roots: Sequence[Path]) -> tuple[list[str] | None, str | None]:
     """``(argv prefix, None)`` that runs pip-audit without project code, or ``(None, error)``.
 
-    The runtime interpreter with ``-I -m pip_audit`` when it provides the module
-    outside every forbidden root; else an absolute PATH executable found by
-    :func:`trusted_which`.
+    The runtime interpreter with ``-I -m pip_audit`` when its own install provides
+    the module (:func:`runtime_module_available`); else an absolute, non-batch PATH
+    executable found by :func:`trusted_which`.
     """
-    if _runtime_module_outside("pip_audit", forbidden_roots):
+    if runtime_module_available("pip_audit"):
         return [sys.executable, "-I", "-m", "pip_audit"], None
     found = trusted_which("pip-audit", forbidden_roots)
     if found:
+        refusal = batch_shim_error(found, "pip-audit")
+        if refusal:
+            return None, refusal
         return [found], None
     return None, (
         "no trusted pip-audit: install it in the Sonder runtime (pip install pip-audit) or outside the "
@@ -233,31 +215,80 @@ def sanitized_node_environment(
     base: Mapping[str, str],
     forbidden_roots: Sequence[Path],
 ) -> dict[str, str]:
-    """``base`` without ``NODE_*``/``npm_config_*``/``PRETTIER_*`` keys and PATH entries in a forbidden root.
+    """``base`` without ``NODE_*``/``npm_config_*``/``PRETTIER_*`` keys and PATH entries in a forbidden root, with the current-folder program search off (:func:`check_mode_environment`).
 
     Keys compare case-insensitively (Windows environment names are). A relative
     PATH entry is dropped too: it resolves against the child's working folder.
     """
-    env: dict[str, str] = {}
-    for key, value in base.items():
-        if key.upper().startswith(_NODE_ENV_PREFIXES):
-            continue
-        if key.upper() == "PATH":
-            kept = [
-                entry for entry in value.split(os.pathsep)
-                if not _entry_forbidden(entry, forbidden_roots)
-            ]
-            value = os.pathsep.join(kept)
-        env[key] = value
-    return env
+    kept = {key: value for key, value in base.items() if not key.upper().startswith(_NODE_ENV_PREFIXES)}
+    return check_mode_environment(kept, forbidden_roots)
+
+
+def _runtime_install_dirs() -> list[str]:
+    """The folders ``python -I`` searches for the running interpreter: stdlib, purelib and platlib."""
+    paths = sysconfig.get_paths()
+    seen: list[str] = []
+    for key in ("purelib", "platlib", "stdlib", "platstdlib"):
+        folder = paths.get(key)
+        if folder and os.path.isabs(folder) and os.path.isdir(folder) and folder not in seen:
+            seen.append(folder)
+    return seen
 
 
 def runtime_module_available(name: str) -> bool:
-    """True when the runtime interpreter can import ``name`` (looked up, not imported)."""
+    """True when the running interpreter's own install provides ``name`` (looked up, not imported).
+
+    The search path is the one ``python -I`` has: the interpreter's stdlib and
+    site-packages from ``sysconfig``. ``PYTHONPATH``, ``''``, the script folder
+    and every other ``sys.path`` entry are left out, so parent and child agree
+    and a same-named module in the project (or any folder the process happens to
+    have on ``sys.path``) never counts. The runtime's own install is trusted even
+    when it lies under an authorized root (the runtime is not project code).
+    """
+    folders = _runtime_install_dirs()
     try:
-        return importlib.util.find_spec(name) is not None
-    except (ImportError, ValueError):
+        return bool(folders) and importlib.machinery.PathFinder.find_spec(name, folders) is not None
+    except (ImportError, ValueError, OSError):
         return False
+
+
+_BATCH_SUFFIXES = (".bat", ".cmd")
+
+
+def batch_shim_error(executable: str, tool: str) -> str | None:
+    """Why a protected check must not run the batch file ``executable``, or None.
+
+    cmd.exe runs a ``.bat``/``.cmd`` and resolves every bare command inside it
+    (``where``, ``pwsh``, ``node``...) from the current folder and the inherited
+    PATH, so a shim outside the project still runs project files. A check-mode
+    run starts from the project folder, so batch shims are refused outright.
+    """
+    if executable.rstrip(" .").lower().endswith(_BATCH_SUFFIXES):
+        return (
+            "refusing to run %s in check mode: the trusted one is a batch shim (%s), and cmd.exe would "
+            "resolve the commands it calls from the project folder; install %s as a real executable"
+            % (tool, os.path.basename(executable), tool))
+    return None
+
+
+def check_mode_environment(base: Mapping[str, str], forbidden_roots: Sequence[Path]) -> dict[str, str]:
+    """``base`` for a protected check-mode child: PATH limited to trusted folders, cwd search off.
+
+    PATH keeps only absolute entries outside every forbidden root (relative and
+    empty entries resolve against the child's folder), and
+    ``NoDefaultCurrentDirectoryInExePath=1`` stops cmd.exe and the Windows
+    loader's program search from consulting the current folder.
+    """
+    env: dict[str, str] = {}
+    for key, value in base.items():
+        if key.upper() == "NODEFAULTCURRENTDIRECTORYINEXEPATH":
+            continue
+        if key.upper() == "PATH":
+            value = os.pathsep.join(
+                entry for entry in value.split(os.pathsep) if not _entry_forbidden(entry, forbidden_roots))
+        env[key] = value
+    env["NoDefaultCurrentDirectoryInExePath"] = "1"
+    return env
 
 
 def python_formatter_command(tool: str, forbidden_roots: Sequence[Path]) -> tuple[list[str] | None, str | None]:
@@ -271,6 +302,9 @@ def python_formatter_command(tool: str, forbidden_roots: Sequence[Path]) -> tupl
         return [sys.executable, "-I", "-m", tool], None
     found = trusted_which(tool, forbidden_roots)
     if found:
+        refusal = batch_shim_error(found, tool)
+        if refusal:
+            return None, refusal
         return [found], None
     return None, (
         "refusing to run %s in check mode: it is not installed in the Sonder runtime and the one on "

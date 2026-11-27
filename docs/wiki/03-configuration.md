@@ -965,6 +965,19 @@ names (with or without extras and markers), paths, editables, index and
 find-links overrides and every option other than `--hash`, `--require-hashes`,
 `--pre`, `--prefer-binary` and `--only-binary` are refused.
 
+Check-mode bare tool names (gofmt, clang-format, dart, pip-audit, and Ruff or
+Black when not in Sonder's interpreter) are never looked up through the current
+folder: Sonder searches only absolute PATH folders outside the project and every
+authorized root, and starts the tool with a PATH limited to those folders and
+`NoDefaultCurrentDirectoryInExePath=1`. A `.bat` or `.cmd` shim is refused
+(cmd.exe would resolve the commands it calls from the project folder; install
+the tool as a real executable). Prettier's shim is the exception because it runs
+from a temp folder with that same filtered environment. Known limit: a real
+executable started in the project folder (gofmt, clang-format, dart) can still
+load a DLL placed there by the Windows loader's own search order; Sonder does
+not yet run those from a temp folder, because that would rewrite their output
+paths.
+
 The shipped file also holds `restricted_tool_ceiling` (the only tools any
 profile may ever grant: `text_search`, `repository_symbol_index`,
 `file_read_range`, `directory_tree`, `context_pack`) and

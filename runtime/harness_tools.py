@@ -756,6 +756,9 @@ def test_run(
     base = list(_TEST_FRAMEWORKS.get(framework, {}).get("cmd", []))
     if framework == "pytest":
         base = [_pytest_cmd(), "-m", "pytest"]
+    if framework == "gradle" and os.name == "nt":
+        # The project's own wrapper, by absolute path: a bare name is a PATH/cwd lookup.
+        base[0] = str(root / "gradlew.bat")
     if not base:
         return {"ok": False, "error": "unknown framework: %s" % framework, "framework": framework}
 
@@ -1068,6 +1071,11 @@ def _prettier_check(root, path, timeout, extra_roots=""):
     executable, error = formatter_config_guard.resolve_trusted_prettier(forbidden)
     if error:
         return refusal(error)
+    # Unlike gofmt/clang-format/dart/pip-audit, a batch shim is allowed here (the npm-global
+    # ``prettier.cmd`` is the usual Windows install): it only ever runs from a temp folder outside
+    # the root with ``env`` below, whose PATH holds no project, relative or empty entry and which
+    # turns the current-folder program search off, so the commands the shim calls cannot resolve
+    # to project files.
     env = formatter_config_guard.sanitized_node_environment(_child_env(), forbidden)
     target = root / path if path else root
     with _outside_temp_dir(root, "sonder-prettier-", extra_roots) as work:
@@ -1146,6 +1154,9 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
                     "tool": tool,
                     "mode": "check",
                 }
+            batch = formatter_config_guard.batch_shim_error(trusted, tool)
+            if batch:
+                return {"ok": False, "error": batch, "tool": tool, "mode": "check"}
             cmd[0] = trusted
     else:
         cmd = list(cmd_template)
@@ -1173,7 +1184,14 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
             config = work / "black-empty.toml"
             config.write_bytes(b"")
             cmd += ["--config", str(config)]
-        result = _run(cmd + target_args, cwd=root, timeout=timeout)
+        # Known limit: a real executable started with cwd=root can still load a DLL that sits in
+        # the project folder (the loader's own search order); the program, PATH and cmd.exe
+        # lookups are closed above. See docs/wiki/03-configuration.md.
+        check_env = (
+            formatter_config_guard.check_mode_environment(
+                _child_env(), _formatter_forbidden_roots(root, extra_roots))
+            if check_only else None)
+        result = _run(cmd + target_args, cwd=root, timeout=timeout, env=check_env)
     if check_only and tool == "gofmt" and result.get("ok") and result.get("stdout", "").strip():
         # ``gofmt -l`` lists files needing formatting and still exits 0.
         result["ok"] = False
@@ -1586,6 +1604,8 @@ def dependency_audit(root=".", timeout=60, extra_roots=""):
                     result = _run(
                         pip_audit + ["-r", str(sanitized), "--no-deps", "--disable-pip"],
                         cwd=sanitized.parent, timeout=timeout,
+                        env=formatter_config_guard.check_mode_environment(
+                            _child_env(), _formatter_forbidden_roots(root, extra_roots)),
                     )
         elif not pip_audit:
             result = {"ok": False, "error": pip_audit_error}
@@ -1963,7 +1983,8 @@ def build_run(root=".", command="", timeout=120, extra_roots=""):
     if (root / "package.json").exists():
         return _run(["npm", "run", "build"], cwd=root, timeout=timeout)
     if (root / "build.gradle").exists() or (root / "build.gradle.kts").exists():
-        return _run(["./gradlew" if os.name != "nt" else "gradlew.bat", "build"], cwd=root, timeout=timeout)
+        return _run([str(root / "gradlew.bat") if os.name == "nt" else "./gradlew", "build"],
+                    cwd=root, timeout=timeout)
     if (root / "pom.xml").exists():
         return _run(["mvn", "package", "-q"], cwd=root, timeout=timeout)
     if (root / "pyproject.toml").exists():
