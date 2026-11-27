@@ -123,18 +123,20 @@ def test_verify_split_load_log_checks_real_llama_cpp_v1_lines() -> None:
     assert verdict.output_is_local is True
     assert verdict.errors == ()
 
-    # Bad log: output layer (highest layer index) assigned to RPC0!
+    # Bad log: output layer (highest layer index) assigned to RPC0[10.77.0.2:50052]!
+    # Also verifies bracketed v1.0.0 RPC device names are preserved intact.
     bad_output_log = "\n".join([
         "llama_prepare_model_devices: using device CUDA0 (NVIDIA GeForce RTX 5070 Ti) - 14800 MiB free",
-        "llama_prepare_model_devices: using device RPC0 (10.77.0.2:50052) - 15400 MiB free",
+        "llama_prepare_model_devices: using device RPC0[10.77.0.2:50052] (AMD Radeon RX 9060 XT) - 15400 MiB free",
         "load_tensors: layer   0 assigned to device CUDA0, is_swa = 0",
-        "load_tensors: layer  48 assigned to device RPC0, is_swa = 0",
+        "load_tensors: layer  48 assigned to device RPC0[10.77.0.2:50052], is_swa = 0",
     ])
     bad_verdict = verify_split_load_log(bad_output_log)
     assert bad_verdict.ok is False
-    assert bad_verdict.output_device == "RPC0"
+    assert bad_verdict.device_order == ("CUDA0", "RPC0[10.77.0.2:50052]")
+    assert bad_verdict.output_device == "RPC0[10.77.0.2:50052]"
     assert bad_verdict.output_is_local is False
-    assert any("RPC0" in err for err in bad_verdict.errors)
+    assert any("RPC0[10.77.0.2:50052]" in err for err in bad_verdict.errors)
 
     # Empty / uninformative log fails closed (never claims ok without evidence).
     empty_verdict = verify_split_load_log("server started\n")
@@ -200,13 +202,19 @@ def test_sharded_llama_server_config_enforces_layer_split_spec_and_local_output(
     with pytest.raises(RpcClusterConfigError):
         ShardedLlamaServerConfig(model_path="model.gguf", rpc_peers=peers, devices=("CUDA0", "RPC0"))
 
-    # extra_args cannot sneak forbidden split-mode, spec-type, or device overrides.
+    # extra_args cannot sneak forbidden split-mode, spec-type, device, tensor-split,
+    # override-tensor, or draft-cap overrides.
     for extra in (
         ("--split-mode", "tensor"),
         ("-sm", "row"),
         ("--spec-type", "none"),
         ("--device", "CUDA0,RPC0"),
         ("-dev", "RPC0"),
+        ("--tensor-split", "1,0"),
+        ("-ts", "1,0"),
+        ("--override-tensor", "output.weight=RPC0"),
+        ("-ot", "output.weight=RPC0"),
+        ("--spec-draft-n-max", "0"),
     ):
         with pytest.raises(RpcClusterConfigError, match="extra_args"):
             ShardedLlamaServerConfig(model_path="model.gguf", rpc_peers=peers, extra_args=extra)
@@ -240,6 +248,8 @@ def test_measure_rpc_peer_rtt_and_require_split_policy() -> None:
         parse_max_rtt_ms("0")
     with pytest.raises(RpcShardingConfigError):
         parse_max_rtt_ms("nan")
+    with pytest.raises(RpcShardingConfigError, match="warn_rtt_ms"):
+        CrossHostSplitPolicy(max_rtt_ms=0.2, warn_rtt_ms=0.5)
 
     connect_fast, clock_fast = _fake_clock_connector([0.14, 0.16, 0.18, 0.20, 0.22])
     rtt = measure_rpc_peer_rtt(
@@ -332,7 +342,7 @@ def test_powershell_rpc_split_policy_helpers(shell: str, tmp_path: Path) -> None
     assert res.returncode == 0, res.stderr
     assert "OK:10.77.0.0/30:layer:ngram-mod" in res.stdout
 
-    # Refuses -sm tensor, -SpecType none, trailing 0 weight, and broad /8 CIDR.
+    # Refuses -sm tensor, -SpecType none, trailing 0 weight, broad /8 CIDR, bad MaxRttMs.
     for bad_line in (
         "Assert-RpcSplitPolicy -SplitMode 'tensor' -SpecType 'ngram-mod' -TensorSplit '1,1' -PeerCount 1",
         "Assert-RpcSplitPolicy -SplitMode 'row' -SpecType 'ngram-mod' -TensorSplit '1,1' -PeerCount 1",
@@ -340,6 +350,10 @@ def test_powershell_rpc_split_policy_helpers(shell: str, tmp_path: Path) -> None
         "Assert-RpcSplitPolicy -SplitMode 'layer' -SpecType 'ngram-mod' -TensorSplit '1,0' -PeerCount 1",
         "Assert-RpcDedicatedLink -LinkCidr '10.0.0.0/8' -PeerHosts @('10.77.0.2')",
         "Assert-RpcDedicatedLink -LinkCidr '10.77.0.0/30' -PeerHosts @('192.168.50.20')",
+        "ConvertTo-RpcMaxRttMs '0'",
+        "ConvertTo-RpcMaxRttMs '101'",
+        "ConvertTo-RpcMaxRttMs 'nan'",
+        "Measure-RpcPeerRtt -TargetHost '127.0.0.1' -TargetPort 1 -Samples 1 -MaxRttMs 101",
     ):
         bad_script = tmp_path / "bad.ps1"
         bad_script.write_text(
@@ -352,6 +366,107 @@ def test_powershell_rpc_split_policy_helpers(shell: str, tmp_path: Path) -> None
         )
         assert bad_res.returncode != 0, f"expected refusal for: {bad_line}"
 
+    # ConvertTo-RpcMaxRttMs defaults to 2.0 when blank and accepts valid (0, 100].
+    rtt_cfg = tmp_path / "rtt_cfg.ps1"
+    rtt_cfg.write_text(
+        f". '{POLICY_PS1}'\n$ErrorActionPreference = 'Stop'\n"
+        "$a = ConvertTo-RpcMaxRttMs ''\n"
+        "$b = ConvertTo-RpcMaxRttMs '1.5'\n"
+        "Write-Output \"RTT:$($a):$($b)\"\n",
+        encoding="utf-8-sig",
+    )
+    rtt_res = subprocess.run([shell, "-NoProfile", "-File", str(rtt_cfg)], capture_output=True, text=True, timeout=60)
+    assert rtt_res.returncode == 0, rtt_res.stderr
+    assert "RTT:2:1.5" in rtt_res.stdout
+
+
+@pytest.mark.skipif(not _SHELLS, reason="PowerShell is not available")
+@pytest.mark.parametrize("shell", _SHELLS)
+def test_powershell_measure_rpc_peer_rtt_and_sharded_start_requires_link_cidr(
+    shell: str, tmp_path: Path
+) -> None:
+    import socket
+    import threading
+
+    # 1. Measure-RpcPeerRtt against a real ephemeral loopback listener.
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    port = srv.getsockname()[1]
+    stop = threading.Event()
+
+    def _accept() -> None:
+        srv.settimeout(0.2)
+        while not stop.is_set():
+            try:
+                conn, _ = srv.accept()
+                conn.close()
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+
+    thread = threading.Thread(target=_accept, daemon=True)
+    thread.start()
+    try:
+        probe = tmp_path / "rtt_live.ps1"
+        probe.write_text(
+            f". '{POLICY_PS1}'\n$ErrorActionPreference = 'Stop'\n"
+            f"$r = Measure-RpcPeerRtt -TargetHost '127.0.0.1' -TargetPort {port} -Samples 3 -MaxRttMs 50.0\n"
+            "Write-Output \"MEASURED:$($r.samplesMs.Count):$($r.medianMs -ge 0)\"\n",
+            encoding="utf-8-sig",
+        )
+        res = subprocess.run([shell, "-NoProfile", "-File", str(probe)], capture_output=True, text=True, timeout=60)
+        assert res.returncode == 0, res.stderr
+        assert "MEASURED:3:True" in res.stdout
+    finally:
+        stop.set()
+        srv.close()
+        thread.join(timeout=2)
+
+    # 2. start-rpc-sharded.ps1 -Action Start fails closed when SONDER_RPC_LINK_CIDR / -RpcLinkCidr is unset!
+    fake_install = tmp_path / "llama-rpc"
+    fake_install.mkdir()
+    (fake_install / "llama-server.exe").write_bytes(b"")
+    fake_model = tmp_path / "model.gguf"
+    fake_model.write_bytes(b"GGUF")
+    env = {"SONDER_RPC_PEERS": WORKER_ON_LINK, "SONDER_RPC_LINK_CIDR": "", "SONDER_RPC_MAX_RTT_MS": ""}
+    import os
+    merged_env = dict(os.environ)
+    merged_env.update(env)
+    start_res = subprocess.run(
+        [
+            shell, "-NoProfile", "-File", str(SHARDED_PS1),
+            "-Action", "Start",
+            "-RpcPeers", WORKER_ON_LINK,
+            "-ModelPath", str(fake_model),
+            "-InstallDir", str(fake_install),
+        ],
+        capture_output=True, text=True, timeout=60, env=merged_env,
+    )
+    assert start_res.returncode != 0
+    assert "SONDER_RPC_LINK_CIDR" in (start_res.stderr + start_res.stdout)
+
+    # 3. start-rpc-sharded.ps1 -Action Start reads SONDER_RPC_MAX_RTT_MS and fails closed on invalid values!
+    bad_rtt_env = dict(os.environ)
+    bad_rtt_env.update({
+        "SONDER_RPC_PEERS": WORKER_ON_LINK,
+        "SONDER_RPC_LINK_CIDR": LINK_CIDR,
+        "SONDER_RPC_MAX_RTT_MS": "250",
+    })
+    bad_rtt_res = subprocess.run(
+        [
+            shell, "-NoProfile", "-File", str(SHARDED_PS1),
+            "-Action", "Start",
+            "-RpcPeers", WORKER_ON_LINK,
+            "-ModelPath", str(fake_model),
+            "-InstallDir", str(fake_install),
+        ],
+        capture_output=True, text=True, timeout=60, env=bad_rtt_env,
+    )
+    assert bad_rtt_res.returncode != 0
+    assert "SONDER_RPC_MAX_RTT_MS" in (bad_rtt_res.stderr + bad_rtt_res.stdout)
+
 
 def test_start_rpc_sharded_script_wires_fed05_split_policy() -> None:
     text = SHARDED_PS1.read_text(encoding="utf-8")
@@ -359,3 +474,5 @@ def test_start_rpc_sharded_script_wires_fed05_split_policy() -> None:
     assert "'--spec-type'" in text
     assert "Assert-RpcSplitPolicy" in text
     assert "Measure-RpcPeerRtt" in text
+    assert "SONDER_RPC_MAX_RTT_MS" in text
+    assert "ConvertTo-RpcMaxRttMs" in text

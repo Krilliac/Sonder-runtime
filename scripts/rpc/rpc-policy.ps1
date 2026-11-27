@@ -403,6 +403,29 @@ function Assert-RpcSplitPolicy(
     }
 }
 
+$script:RpcDefaultMaxRttMs = 2.0
+$script:RpcMaxConfiguredRttMs = 100.0
+
+function ConvertTo-RpcMaxRttMs([string]$Value) {
+    $text = ([string]$Value).Trim()
+    if (-not $text) {
+        return [double]$script:RpcDefaultMaxRttMs
+    }
+    $parsed = 0.0
+    if (-not [double]::TryParse(
+            $text,
+            [System.Globalization.NumberStyles]::Float,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [ref]$parsed
+        ) -or [double]::IsNaN($parsed) -or [double]::IsInfinity($parsed)) {
+        throw "SONDER_RPC_MAX_RTT_MS / -MaxRttMs must be a positive finite number (ms), got '$Value'."
+    }
+    if ($parsed -le 0.0 -or $parsed -gt $script:RpcMaxConfiguredRttMs) {
+        throw "SONDER_RPC_MAX_RTT_MS / -MaxRttMs must be in (0, $($script:RpcMaxConfiguredRttMs)], got '$Value'."
+    }
+    return $parsed
+}
+
 function Measure-RpcPeerRtt(
     [string]$TargetHost,
     [int]$TargetPort,
@@ -413,12 +436,13 @@ function Measure-RpcPeerRtt(
     if ($Samples -lt 1 -or $Samples -gt 20) {
         throw "RttSamples must be in 1..20, got $Samples."
     }
-    if ($MaxRttMs -le 0.0 -or [double]::IsNaN($MaxRttMs) -or [double]::IsInfinity($MaxRttMs)) {
-        throw "MaxRttMs must be a positive finite number, got $MaxRttMs."
+    if ([double]::IsNaN($MaxRttMs) -or [double]::IsInfinity($MaxRttMs) -or $MaxRttMs -le 0.0 -or $MaxRttMs -gt $script:RpcMaxConfiguredRttMs) {
+        throw "MaxRttMs must be in (0, $($script:RpcMaxConfiguredRttMs)], got $MaxRttMs."
     }
     $measured = @()
     for ($i = 0; $i -lt $Samples; $i++) {
         $client = New-Object System.Net.Sockets.TcpClient
+        $async = $null
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         try {
             $async = $client.BeginConnect($TargetHost, $TargetPort, $null, $null)
@@ -430,6 +454,9 @@ function Measure-RpcPeerRtt(
             $measured += [math]::Round($sw.Elapsed.TotalMilliseconds, 4)
         }
         finally {
+            if ($null -ne $async -and $null -ne $async.AsyncWaitHandle) {
+                $async.AsyncWaitHandle.Dispose()
+            }
             $client.Close()
         }
     }

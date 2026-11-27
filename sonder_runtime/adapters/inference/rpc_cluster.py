@@ -81,8 +81,13 @@ _RESERVED_SERVER_OPTIONS = frozenset({
     "--split-mode",
     "-sm",
     "--spec-type",
+    "--spec-draft-n-max",
     "--device",
     "-dev",
+    "--tensor-split",
+    "-ts",
+    "--override-tensor",
+    "-ot",
 })
 _MAX_HEALTH_BYTES = 1_048_576
 _MAX_PROFILES_BYTES = 262_144
@@ -455,7 +460,7 @@ class ShardedLlamaServerConfig:
             if option in _RESERVED_SERVER_OPTIONS:
                 raise RpcClusterConfigError(
                     f"extra_args must not set {option}; host, port, RPC peers, split_mode, "
-                    "spec_type and devices are validated fields"
+                    "spec_type, devices, tensor_split and tensor-override options are policy-controlled"
                 )
         object.__setattr__(self, "extra_args", extras)
 

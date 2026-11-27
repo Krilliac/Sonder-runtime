@@ -1,14 +1,18 @@
 """Cross-host RPC split policy enforcement and dedicated-link RTT probe (FED-05).
 
-Builds on FED-02's ``SONDER_RPC_LINK_CIDR`` / ``RpcShardingSettings`` /
-``RpcPeerEndpoint`` interfaces and the pure domain split-policy validators in
-:mod:`sonder_runtime.domain.routing.rpc_split_policy`.
+Uses ``RpcPeerEndpoint`` and ``RpcShardingConfigError`` from the base RPC
+sharding modules together with the pure domain split-policy validators in
+:mod:`sonder_runtime.domain.routing.rpc_split_policy`, aligning its link-CIDR
+environment variable name (``SONDER_RPC_LINK_CIDR``) with FED-02 (PR #927).
+Direct delegation to FED-02's ``parse_link_network`` /
+``RpcShardingSettings.link_network`` is deferred until PR #927 merges onto
+``main``.
 
 Before a cross-host split starts:
 1. Confirms ``split_mode == 'layer'``, local output-head placement (device order
    and trailing positive ``tensor_split`` weight), and speculative decoding on.
 2. Requires a dedicated private/link-local IPv4 CIDR (``SONDER_RPC_LINK_CIDR``
-   or ``link_network`` from FED-02) with prefix length >= /24 and verifies every
+   or explicit ``link_network``) with prefix length >= /24 and verifies every
    peer sits on that link.
 3. Measures TCP connect RTT over the dedicated link for every peer (bounded
    samples via injectable connector/clock) and fails closed if any peer is
@@ -95,6 +99,10 @@ class CrossHostSplitPolicy:
                 raise RpcShardingConfigError(f"{name} must be a finite number")
             if not (lo < float(val) <= hi):
                 raise RpcShardingConfigError(f"{name} must be within ({lo}, {hi}]")
+        if float(self.warn_rtt_ms) > float(self.max_rtt_ms):
+            raise RpcShardingConfigError(
+                f"warn_rtt_ms ({self.warn_rtt_ms}) must be <= max_rtt_ms ({self.max_rtt_ms})"
+            )
         if type(self.rtt_samples) is not int or not (1 <= self.rtt_samples <= MAX_RTT_SAMPLES):
             raise RpcShardingConfigError(f"rtt_samples must be in 1..{MAX_RTT_SAMPLES}")
         if type(self.min_link_prefixlen) is not int or not (8 <= self.min_link_prefixlen <= 32):
@@ -252,7 +260,10 @@ def check_cross_host_split_policy(
     if policy is None:
         try:
             max_rtt = parse_max_rtt_ms(source.get(ENV_RPC_MAX_RTT_MS))
-            active_policy = CrossHostSplitPolicy(max_rtt_ms=max_rtt)
+            active_policy = CrossHostSplitPolicy(
+                max_rtt_ms=max_rtt,
+                warn_rtt_ms=min(WARN_RTT_MS, max_rtt),
+            )
         except RpcShardingConfigError as exc:
             errors.append(str(exc))
             active_policy = CrossHostSplitPolicy()

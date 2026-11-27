@@ -32,7 +32,7 @@ param(
     [string]$SplitMode = 'layer',
     [string]$SpecType = 'ngram-mod',
     [string[]]$Devices = @(),
-    [double]$MaxRttMs = 2.0,
+    [string]$MaxRttMs = $env:SONDER_RPC_MAX_RTT_MS,
     [int]$RttSamples = 5,
     [int]$CtxSize = 8192,
     [int]$GpuLayers = 999,
@@ -220,17 +220,15 @@ switch ($Action) {
         }
 
         $splitPolicy = Assert-RpcSplitPolicy -SplitMode $SplitMode -SpecType $SpecType -TensorSplit $TensorSplit -PeerCount $validatedPeers.Count -Devices $Devices
-        $dedicatedLink = $null
-        if (([string]$RpcLinkCidr).Trim()) {
-            $dedicatedLink = Assert-RpcDedicatedLink -LinkCidr $RpcLinkCidr -PeerHosts @($validatedPeers | ForEach-Object { $_.Host })
-        }
+        $maxRttMsValue = ConvertTo-RpcMaxRttMs -Value $MaxRttMs
+        $dedicatedLink = Assert-RpcDedicatedLink -LinkCidr $RpcLinkCidr -PeerHosts @($validatedPeers | ForEach-Object { $_.Host })
 
         $peerRtts = @()
         foreach ($peer in $validatedPeers) {
             if (-not (Test-RpcTcpReachable -TargetHost $peer.Host -TargetPort $peer.Port)) {
                 throw "RPC peer $($peer.Address) is unreachable. Start rpc-server on that worker first (start-rpc-worker.ps1 -Action Start)."
             }
-            $peerRtts += (Measure-RpcPeerRtt -TargetHost $peer.Host -TargetPort $peer.Port -Samples $RttSamples -MaxRttMs $MaxRttMs)
+            $peerRtts += (Measure-RpcPeerRtt -TargetHost $peer.Host -TargetPort $peer.Port -Samples $RttSamples -MaxRttMs $maxRttMsValue)
         }
 
         $existing = Get-CurrentState
@@ -312,7 +310,8 @@ switch ($Action) {
                 splitPolicy = [ordered]@{
                     splitMode = $splitPolicy.splitMode
                     specType  = $splitPolicy.specType
-                    linkCidr  = if ($dedicatedLink) { $dedicatedLink.Cidr } else { $null }
+                    linkCidr  = $dedicatedLink.Cidr
+                    maxRttMs  = $maxRttMsValue
                     peerRtts  = $peerRtts
                 }
                 args        = $serverArgs

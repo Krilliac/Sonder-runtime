@@ -8,13 +8,16 @@ Enforces the measured cross-host split invariants verified against
    latency-floored (slower than layer split even at 0.25 ms RTT, #26610) and
    ``-sm row`` was removed from CUDA (#24216).
 2. **Logits / output head on the local node**: under ``LLAMA_SPLIT_MODE_LAYER``,
-   ``dev_output = get_layer_buft_list(n_layer_all)`` places ``output.weight``
-   and ``output_norm`` on the last device with positive ``tensor_split`` weight.
-   Therefore RPC devices must precede local GPUs (default llama.cpp order puts
-   RPC devices first; explicit ``--device`` lists must keep a local device last),
-   and any explicit ``--tensor-split`` must end with a strictly positive weight
-   for the local node. :func:`verify_split_load_log` verifies this directly from
-   ``llama-server`` load logs.
+   ``dev_output = get_layer_buft_list(n_layer_all)`` picks the device whose
+   cumulative ``tensor_split`` fraction exceeds ``n_layer / (n_layer + 1)``
+   via ``std::upper_bound``. Therefore RPC devices must precede local GPUs
+   (default llama.cpp order puts RPC devices first; explicit ``--device`` lists
+   must keep a local device last), and any explicit ``--tensor-split`` must end
+   with a strictly positive weight for the local node (necessary but not
+   sufficient: a tiny trailing weight such as ``1,0.001`` can still place
+   ``output.weight`` on an RPC device, and one RPC endpoint may expose multiple
+   ``RPC<idx>[endpoint]`` devices). :func:`verify_split_load_log` is the
+   authoritative check against ``llama-server -lv 4`` load logs.
 3. **Speculative decoding on** (default ``ngram-mod``): verifies ``k+1`` tokens
    per cross-host round trip to amortise Ethernet RTT.
 4. **Dedicated private link CIDR**: requires a private/link-local IPv4 subnet
@@ -58,9 +61,11 @@ _PRIVATE_LINK_ROOTS: tuple[ipaddress.IPv4Network, ...] = (
 )
 
 _DEVICE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63}\Z")
-_USING_DEVICE_RE = re.compile(r"using device\s+([A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63})\b")
+_USING_DEVICE_RE = re.compile(
+    r"using device\s+([A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63})(?=$|[\s,(])"
+)
 _LAYER_ASSIGN_RE = re.compile(
-    r"load_tensors:\s+layer\s+(\d+)\s+assigned to device\s+([A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63})\b"
+    r"load_tensors:\s+layer\s+(\d+)\s+assigned to device\s+([A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63})(?=$|[\s,(])"
 )
 _MAX_LOG_BYTES = 2 * 1024 * 1024
 
@@ -150,11 +155,16 @@ def validate_split_device_order(devices: Sequence[str]) -> tuple[str, ...]:
 
 
 def validate_split_tensor_weights(tensor_split: str, *, peer_count: int) -> str:
-    """Validate ``--tensor-split`` weights so the local node retains the output head.
+    """Validate ``--tensor-split`` weights as a necessary guard for local output head.
 
     When non-empty, requires at least ``peer_count + 1`` finite non-negative
     weights with a positive sum and a strictly positive final weight (for the
-    local GPU that hosts the output head / logits).
+    local GPU). Note that under llama.cpp v1.0.0 ``upper_bound`` cumulative
+    splitting, a tiny trailing weight (e.g. ``1,0.001``) can still place the
+    output layer on an RPC device and one endpoint can expose multiple
+    ``RPC<idx>[endpoint]`` devices; treat this as necessary-not-sufficient and
+    use :func:`verify_split_load_log` on ``llama-server -lv 4`` output to
+    confirm actual output-head placement.
     """
     if type(peer_count) is not int or peer_count < 1:
         raise ValueError(f"peer_count must be a positive integer, got {peer_count!r}")
@@ -250,8 +260,9 @@ def verify_split_load_log(log_text: str) -> SplitLoadLogVerdict:
     Fails closed when no device/layer assignment evidence is present.
     """
     text = str(log_text or "")
-    if len(text.encode("utf-8")) > _MAX_LOG_BYTES:
-        text = text[:_MAX_LOG_BYTES]
+    encoded = text.encode("utf-8")
+    if len(encoded) > _MAX_LOG_BYTES:
+        text = encoded[:_MAX_LOG_BYTES].decode("utf-8", errors="ignore")
 
     device_order: list[str] = []
     for match in _USING_DEVICE_RE.finditer(text):
