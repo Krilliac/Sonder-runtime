@@ -16,7 +16,7 @@ from uuid import uuid4
 import sonder_runtime.adapters.legacy_chat_bridge as legacy_chat_bridge
 from .model_transport import ModelCallError
 from ..application.chat import provider_bridge, stream_sink
-from ..application.context import current_operation_context, local_owner_context
+from ..application.context import current_operation_context, local_owner_context, narrow_private_node
 from ..domain.agents import sampling_policy
 
 _LOCAL_ONLY = ContextVar("tier_generation_local_only", default=False)
@@ -52,6 +52,7 @@ def _context(timeout, cancel_check, cloud_allowed, remote_ollama_allowed, origin
             timeout_seconds=timeout, cancellation=cancellation,
             cloud_allowed=cloud_allowed and not _LOCAL_ONLY.get(),
             remote_ollama_allowed=remote_ollama_allowed,
+            private_node_allowed=origin.private_node_allowed if origin is not None else None,
         )
     return replace(
         ambient,
@@ -59,6 +60,10 @@ def _context(timeout, cancel_check, cloud_allowed, remote_ollama_allowed, origin
         cancellation=cancellation,
         cloud_allowed=cloud_allowed and ambient.cloud_allowed and not _LOCAL_ONLY.get(),
         remote_ollama_allowed=remote_ollama_allowed and ambient.remote_ollama_allowed,
+        private_node_allowed=narrow_private_node(
+            ambient.private_node_allowed,
+            origin.private_node_allowed if origin is not None else None,
+        ),
     )
 
 

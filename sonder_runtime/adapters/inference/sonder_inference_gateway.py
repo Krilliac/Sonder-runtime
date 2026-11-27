@@ -1610,6 +1610,12 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
     def _enforce_consent(self, cfg: OpenAICompatibleConfig, context: OperationContext) -> None:
         settings = self.settings()
         check_endpoint_policy(settings)
+        if settings.private_worker and context.private_node_allowed is False:
+            raise Forbidden(
+                "sonder-inference private worker %s skipped: consent (this "
+                "operation context does not allow private nodes)"
+                % settings.display_base_url
+            )
         # An approved private worker is its own consent lane: it neither needs
         # nor grants cloud consent.  Every other non-loopback endpoint does.
         if not settings.loopback and not settings.private_worker and not context.cloud_allowed:
@@ -2694,6 +2700,13 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         except SonderError:
             pass
         for spec in settings.workers:
+            if context.private_node_allowed is False:
+                # Explicit per-operation refusal (None is legacy: allowed).
+                logger.info(
+                    "private sonder-inference worker %s skipped: consent",
+                    spec.url,
+                )
+                continue
             try:
                 gateway = self._worker_gateway(settings, spec)
             except SonderError as exc:

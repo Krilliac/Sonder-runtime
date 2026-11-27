@@ -243,6 +243,7 @@ class DelegationService:
                 ("context_workspace_roots", "|".join(map(str, context.workspace_roots))),
                 ("context_cloud_allowed", str(context.cloud_allowed)),
                 ("context_remote_ollama_allowed", str(context.remote_ollama_allowed)),
+                ("context_private_node_allowed", str(context.private_node_allowed)),
                 ("context_session_id", str(context.session_id)),
                 ("retry_max_attempts", "1"),
             )
