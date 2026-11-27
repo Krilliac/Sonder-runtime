@@ -146,3 +146,53 @@ def test_work_narration_reports_sonder_inference_not_ollama(monkeypatch):
     assert "sonder_inference" in text
     assert "127.0.0.1:11437" in text
     assert "11434" not in text
+
+
+def test_ollama_host_never_receives_traffic_or_si_bearer_key(monkeypatch, tmp_path):
+    """BLOCKING (4): OLLAMA_HOST and [ollama].url never hijack SI transport or receive SI keys."""
+    import json
+    from sonder_runtime.adapters.inference import ollama_endpoint
+    from sonder_runtime.adapters.web.lifecycle import RuntimeLifecycle
+    from sonder_runtime import __main__ as main_mod
+    from sonder_runtime.bootstrap import app as app_mod
+
+    ollama_endpoint.reset_typed_endpoint()
+    try:
+        monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+        monkeypatch.delenv("SONDER_INFERENCE_BASE_URL", raising=False)
+        monkeypatch.setenv("SONDER_INFERENCE_API_KEY", "test-si-secret-token")
+
+        # 1. ollama_endpoint ignores OLLAMA_HOST and resolves to SI default 11437.
+        origin = ollama_endpoint.configured_origin()
+        assert origin == "http://127.0.0.1:11437"
+
+        # 2. Lifecycle probe sends request + bearer token ONLY to SI (11437), never OLLAMA_HOST (11434).
+        seen = []
+
+        class _FakeResp:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n=-1): return json.dumps({"status": "ready"}).encode("utf-8")
+
+        def fake_open(req, timeout=30, **kwargs):
+            seen.append((req.full_url, dict(req.header_items())))
+            return _FakeResp()
+
+        monkeypatch.setattr(ollama_endpoint, "open_url", fake_open)
+        lc = RuntimeLifecycle()
+        assert lc.probe_inference_once(timeout=1.0) is True
+        assert len(seen) == 1
+        assert seen[0][0] == "http://127.0.0.1:11437/v1/sonder/health"
+        assert "11434" not in seen[0][0]
+        assert seen[0][1].get("Authorization") == "Bearer test-si-secret-token"
+
+        # 3. __main__ and bootstrap/app bind config.inference.url, not config.ollama.url.
+        main_src = inspect.getsource(main_mod)
+        app_src = inspect.getsource(app_mod)
+        assert "configure_typed_endpoint(config.ollama.url)" not in main_src
+        assert "configure_typed_endpoint(config.ollama.url)" not in app_src
+        assert "configure_typed_endpoint(config.inference.url)" in main_src
+        assert "configure_typed_endpoint(config.inference.url)" in app_src
+    finally:
+        ollama_endpoint.reset_typed_endpoint()

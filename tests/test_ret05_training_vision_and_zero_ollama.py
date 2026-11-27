@@ -328,6 +328,12 @@ def test_zero_local_ollama_api_or_port_11434_literals_in_code():
                     ):
                         docstrings.add(id(node.body[0].value))
             rel = path.relative_to(REPO_ROOT).as_posix()
+            ollama_host_allowlist = {
+                "sonder_runtime/adapters/inference/ollama_endpoint.py",
+                "sonder_runtime/platform/unsafe_lab_policy.py",
+                "sonder_runtime/platform/config.py",
+                "sonder_runtime/domain/ollama_policy.py",
+            }
             for node in ast.walk(tree):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
                     val = node.value
@@ -335,4 +341,6 @@ def test_zero_local_ollama_api_or_port_11434_literals_in_code():
                         offenders.append(f"{rel}:{node.lineno} api={val[:60]!r}")
                     if _PORT_PAT.search(val):
                         offenders.append(f"{rel}:{node.lineno} port11434={val[:60]!r}")
+                    if val == "OLLAMA_HOST" and rel not in ollama_host_allowlist:
+                        offenders.append(f"{rel}:{node.lineno} env_read={val!r}")
     assert offenders == [], "Remaining local-Ollama literals:\n" + "\n".join(offenders[:30])

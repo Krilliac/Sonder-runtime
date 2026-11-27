@@ -553,8 +553,16 @@ def build_application(
             # any lazy persistence factory can resolve a database path, and
             # must not be translated through the mutable process environment.
             runtime_paths.configure_home(config.state.home)
-        ollama_endpoint.configure_typed_endpoint(config.ollama.url)
-        ollama_endpoint.configure_typed_ca_bundle(config.ollama.ca_bundle)
+        if config.ollama.url and config.ollama.url != config.inference.url:
+            logger.warning(
+                "Ignoring deprecated [ollama].url (%s); using [inference].url (%s)",
+                config.ollama.url,
+                config.inference.url,
+            )
+        ollama_endpoint.configure_typed_endpoint(config.inference.url)
+        ollama_endpoint.configure_typed_ca_bundle(
+            config.inference.ca_bundle or config.ollama.ca_bundle
+        )
         from ..adapters.inference import ollama_pool
         logger.info(f"ollama pool configured, workers={len(config.ollama.workers)}, allow_remote={config.ollama.allow_remote}")
         logger.debug(f"configuring ollama pool: workers={len(config.ollama.workers)}, allow_remote={config.ollama.allow_remote}")
@@ -581,7 +589,7 @@ def build_application(
         from ..adapters.inference.static_membership import StaticMembershipSource
         from ..application.inference_membership.controller import MembershipController
         membership_clock = lambda: datetime.now(timezone.utc)
-        inference_pool = ollama_pool.from_environment(config.ollama.url)
+        inference_pool = ollama_pool.from_environment(config.inference.url)
         source_limits = high_water_store = None
         if config.membership.mode == "external":
             from ..adapters.inference.external_membership import (

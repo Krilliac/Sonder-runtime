@@ -1235,9 +1235,19 @@ def cmd_serve(args) -> int:
     # cannot leave a live route behind.
     _configure_typed_home(config)
     from sonder_runtime.adapters.inference import ollama_endpoint
-    ollama_endpoint.configure_typed_endpoint(config.ollama.url)
+    if config.ollama.url and config.ollama.url != config.inference.url:
+        import logging
+        logging.getLogger("sonder.cli").warning(
+            "Ignoring deprecated [ollama].url (%s); using [inference].url (%s)",
+            config.ollama.url,
+            config.inference.url,
+        )
+    ollama_endpoint.configure_typed_endpoint(config.inference.url)
+    ollama_endpoint.configure_typed_ca_bundle(
+        config.inference.ca_bundle or config.ollama.ca_bundle
+    )
     from sonder_runtime.adapters import embeddings as sonder_embeddings
-    sonder_embeddings.configure_typed_endpoint(config.ollama.url)
+    sonder_embeddings.configure_typed_endpoint(config.inference.url)
     from sonder_runtime.adapters.inference import ollama_pool
     ollama_pool.configure_typed_workers(
         config.ollama.workers,
@@ -1531,7 +1541,17 @@ def cmd_mcp(args) -> int:
         from sonder_runtime.bootstrap.app import default_app
         from sonder_runtime.bootstrap.legacy_mcp import configure_legacy_application
         from sonder_runtime.adapters.inference import ollama_endpoint
-        ollama_endpoint.configure_typed_endpoint(config.ollama.url)
+        if config.ollama.url and config.ollama.url != config.inference.url:
+            import logging
+            logging.getLogger("sonder.cli").warning(
+                "Ignoring deprecated [ollama].url (%s); using [inference].url (%s)",
+                config.ollama.url,
+                config.inference.url,
+            )
+        ollama_endpoint.configure_typed_endpoint(config.inference.url)
+        ollama_endpoint.configure_typed_ca_bundle(
+            config.inference.ca_bundle or config.ollama.ca_bundle
+        )
         from sonder_runtime.adapters.inference import ollama_pool
         ollama_pool.configure_typed_workers(
             config.ollama.workers,
