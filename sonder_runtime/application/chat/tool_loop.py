@@ -474,6 +474,11 @@ class ChatToolTurn:
         if not name:
             self.records.append(ChatToolRecord("", "", "error", backend, reason="tool name is required"))
             return "ERROR: tool name is required", run_count
+        if self._is_aborted():
+            msg = f"ERROR: HOST POLICY: turn cancelled before executing {name}."
+            self.records.append(ChatToolRecord("", name, "aborted", backend, reason=msg[:_MAX_RECEIPT_REASON_CHARS]))
+            self._emit({"phase": "aborted", "call_id": "", "tool": name})
+            return msg, run_count
         if name in self.blocked_tools and not self.allow_system_tools and not self.client_exec_only:
             msg = f"ERROR: HOST POLICY: tool '{name}' is restricted to operator control surfaces."
             self.records.append(ChatToolRecord("", name, "refused", backend, reason=msg[:200]))
@@ -491,11 +496,6 @@ class ChatToolTurn:
                     self._admit_dynamic_schemas([resolved_schema])
                     admitted = self._admitted_tool_names()
                     suggestions = []
-        if self._is_aborted():
-            msg = f"ERROR: HOST POLICY: turn cancelled before executing {name}."
-            self.records.append(ChatToolRecord("", name, "aborted", backend, reason=msg[:_MAX_RECEIPT_REASON_CHARS]))
-            self._emit({"phase": "aborted", "call_id": "", "tool": name})
-            return msg, run_count
         if name not in admitted and suggestions:
             msg = (
                 f"ERROR: unknown tool '{name}' is not in this turn's admitted tools. "
