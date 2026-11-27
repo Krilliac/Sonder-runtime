@@ -56,6 +56,12 @@ class OperationContext:
     workspace_roots: tuple[Path, ...] = ()
     cloud_allowed: bool = False
     remote_ollama_allowed: bool = False
+    # Tri-state consent for operator-approved private Sonder Inference workers.
+    # ``None`` is the legacy "unspecified" value: placement then treats workers
+    # as allowed (the operator already opted in via the worker list plus
+    # SONDER_ALLOW_REMOTE_INFERENCE=1).  ``False`` is an explicit refusal and
+    # may only ever be narrowed to, never widened from.
+    private_node_allowed: bool | None = None
     # The canonical session that owns durable model/tool/job evidence.  This
     # is optional for one-shot calls, but long-running coding runs bind it so
     # subprocess jobs can be replayed with the same conversation.
@@ -81,6 +87,7 @@ def local_owner_context(
     workspace_roots: tuple[Path, ...] = (),
     cloud_allowed: bool = False,
     remote_ollama_allowed: bool = False,
+    private_node_allowed: bool | None = None,
     timeout_seconds: float | None = None,
     cancellation: CancellationToken | None = None,
     session_id: str | None = None,
@@ -104,6 +111,7 @@ def local_owner_context(
         workspace_roots=workspace_roots,
         cloud_allowed=cloud_allowed,
         remote_ollama_allowed=remote_ollama_allowed,
+        private_node_allowed=private_node_allowed,
         session_id=session_id,
     )
 
@@ -134,3 +142,20 @@ def bind_operation_context(context: OperationContext) -> Iterator[OperationConte
 def current_operation_context() -> OperationContext | None:
     """Return the ambient operation context bound by the enclosing surface."""
     return _AMBIENT_OPERATION_CONTEXT.get()
+
+
+def narrow_private_node(
+    requested: bool | None, ceiling: bool | None,
+) -> bool | None:
+    """Combine private-node consent so it can only narrow, never widen.
+
+    ``False`` on either side wins; ``None`` (legacy/unspecified) yields to the
+    other side; ``True`` survives only when no side says ``False``.
+    """
+    if requested is False or ceiling is False:
+        return False
+    if requested is None:
+        return ceiling
+    if ceiling is None:
+        return requested
+    return True

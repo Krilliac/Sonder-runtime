@@ -155,6 +155,16 @@ def test_every_request_has_the_pinned_shape_and_the_run_is_scored(world):
     assert (world.out / "summary.md").read_text(encoding="utf-8").startswith("# Security eval: demo:9b")
 
 
+@pytest.mark.parametrize("allow_remote", [False, True])
+def test_private_node_consent_is_legacy_none_whatever_the_remote_opt_in(world, allow_remote):
+    gateway = FakeGateway()
+    runner, _ = make_runner(world, gateway, allow_remote=allow_remote)
+    runner.run(world.records[:2], plan(arms=("none",)))
+    assert gateway.generate_calls
+    assert all(context.private_node_allowed is None for _, context in gateway.generate_calls)
+    assert all(context.remote_ollama_allowed is allow_remote for _, context in gateway.generate_calls)
+
+
 def test_num_ctx_is_omitted_when_not_configured(world):
     gateway = FakeGateway()
     runner, _ = make_runner(world, gateway, num_ctx=None)

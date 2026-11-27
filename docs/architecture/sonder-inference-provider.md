@@ -191,10 +191,11 @@ to its own model. Tiers whose model only the primary serves therefore stay
 on the primary. A non-loopback primary is a candidate only for calls whose
 context allows cloud (its own consent rule); other calls go to an approved
 worker, or get the primary's refusal when no worker can take them. A call moves to another endpoint
-only after `SonderInferenceUnreachable` or a 503 `overloaded`
-(`SonderInferenceOverloaded`, a `CapacityExceeded`), both provably never
-executed there. A saturated endpoint (a timed-out readiness probe or 503
-`overloaded`) moves the call only to an endpoint with a free slot at that
+only after `SonderInferenceUnreachable` or an `overloaded` answer (503 or 429;
+`SonderInferenceOverloaded`, a `CapacityExceeded`), where nothing ran or no
+output was delivered (the full fault table, including the accepted 429
+scheduler-rejection exception, is in `docs/sonder-inference-federation.md`).
+A saturated endpoint (a timed-out readiness probe or `overloaded`) moves the call only to an endpoint with a free slot at that
 moment; otherwise the error is raised rather than queued behind a full
 endpoint. Send timeouts, 4xx and other 5xx are final, as on a single endpoint. When nothing is
 eligible the primary produces the refusal. `provider_status()` adds a
@@ -289,14 +290,19 @@ provider outage) is raised only when the request provably did not run:
 1. TCP connection refused;
 2. host name does not resolve;
 3. cached health is not `ready` (including a missing ready file);
-4. HTTP 503 with error code `not_ready`.
+4. HTTP 503 with error code `not_ready`;
+5. HTTP 503 with error code `upstream_unreachable` and the header
+   `X-Sonder-Proxy-Upstream: unreachable` (the proxy's upstream dial failed;
+   both signals are required, see `docs/sonder-inference-federation.md`).
 
 Everything else maps like the OpenAI-compatible gateway and is never
 "unreachable": 400/404/405/411/413/501 → `InvalidInput`; 401/403 →
 `Forbidden` (401 `unauthorized` names `SONDER_INFERENCE_API_KEY`; 403
 `forbidden_host`/`forbidden_origin` names the base URL host instead, which a
-key cannot fix); 429 → `CapacityExceeded`; 503 `overloaded` →
-`SonderInferenceOverloaded` (a `CapacityExceeded`); 3xx, 408,
+key cannot fix); 429 `overloaded` and 503 `overloaded` →
+`SonderInferenceOverloaded` (a `CapacityExceeded`; the 429 also covers SI's
+engine-scheduler rejection, retried on purpose because no output was
+delivered); any other 429 → `CapacityExceeded`; 3xx, 408,
 500, 503 `backend_unavailable`, malformed HTTP and connection resets →
 `DependencyUnavailable`; timeouts → `DeadlineExceeded`. Calls are single-attempt, and deadline
 and cancellation are checked before the health probe, before the send and
@@ -330,7 +336,8 @@ the default is bound to `sonder_inference`; otherwise composition fails.
 `build_model_gateway` constructs the Ollama gateway once and wraps the
 Inference gateway in `PreSendFallbackGateway`:
 
-- On `SonderInferenceUnreachable` only, the same `ModelRequest` goes to Ollama
+- On `SonderInferenceUnreachable` only (which includes a proxy 503
+  `upstream_unreachable` with its header on the primary), the same `ModelRequest` goes to Ollama
   once, after re-checking cancellation and deadline. The fallback is counted
   (`fallback_count`) and logged at WARNING with the correlation id.
 - Timeouts, 4xx, other 5xx, cancellation and capacity refusals propagate

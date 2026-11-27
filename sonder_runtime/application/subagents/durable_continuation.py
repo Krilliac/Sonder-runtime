@@ -549,7 +549,7 @@ class DurableContinuationService:
                 or getattr(current.cancellation, "cancelled", False)
                 or getattr(original.cancellation, "cancelled", False)):
             return False
-        for name in ("principal_id", "auth_level", "source", "cloud_allowed", "remote_ollama_allowed", "session_id"):
+        for name in ("principal_id", "auth_level", "source", "cloud_allowed", "remote_ollama_allowed", "private_node_allowed", "session_id"):
             if getattr(original, name, None) != getattr(current, name, None):
                 return False
         if tuple(original.workspace_roots) != tuple(current.workspace_roots):
@@ -571,6 +571,9 @@ class DurableContinuationService:
         for name in ("cloud_allowed", "remote_ollama_allowed", "session_id"):
             if metadata.get("context_" + name, "") != str(getattr(context, name, "")):
                 return False
+        if (metadata.get("context_private_node_allowed") == "False"
+                and getattr(context, "private_node_allowed", None) is not False):
+            return False
         return not getattr(context, "expired", False) and not getattr(
             getattr(context, "cancellation", None), "cancelled", False
         )
