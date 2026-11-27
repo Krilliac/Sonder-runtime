@@ -1,299 +1,187 @@
-"""Refuse project formatter configuration that executes code (protected check mode).
+"""Run a protected format check without loading anything the repository controls.
 
-``prettier --check`` loads ``prettier.config.js`` (or ``.prettierrc.mjs``, a
-``plugins`` entry in a data config, or a shared-config package named in
-``package.json``/``package.yaml``) in the process that runs it, and Prettier
-resolves a config for each file from that file's own folder. A "read-only"
-check of a hostile repository is therefore code execution. Biome loads
-plugins from ``biome.json``. ``format_code(check_only=True)`` calls
-:func:`executable_config_error` before it starts a formatter. It refuses when:
+``format_code(check_only=True)`` is a read-only tool, yet every formatter it can
+start reads project files that decide what code runs: ``npx --no-install
+prettier`` resolves ``node_modules/.bin/prettier`` and ``.npmrc`` from the
+working folder and every parent, and Prettier loads ``prettier.config.js``,
+``plugins`` and a module-path ``parser`` from configs it finds above each file.
+Inspecting those files failed review four times (each round found another way
+in), so the check path no longer reads project configuration at all:
 
-- any directory under the checked path (every folder the formatter will visit,
-  except ``node_modules`` and ``.git``) or above it up to the root carries an
-  executable config, a data config that names plugins or a shared config, or a
-  linked folder is present (a link could hide a config);
-- the project ships its own formatter (``node_modules/.bin/<tool>`` or the
-  package, in any checked folder): ``npx --no-install`` would run that
-  committed code.
+- Prettier: never ``npx``. :func:`resolve_trusted_prettier` returns an absolute
+  executable from ``SONDER_PRETTIER_EXE`` or PATH that is not inside the
+  project or any authorized root; the caller confirms ``--version`` reports 3
+  or newer (Prettier 2 loaded plugins and parsers on its own) and runs
+  :func:`prettier_check_argv`: ``--no-config --no-editorconfig`` and an empty
+  ``--ignore-path`` outside the root, from a working folder outside the root,
+  with :func:`sanitized_node_environment` (no ``NODE_*``/``npm_config_*``, no
+  PATH entry inside a forbidden root).
+- Ruff and Black: :func:`python_formatter_command` runs them from the runtime
+  interpreter (``python -I -m``) or a trusted PATH executable, never from a
+  project venv; the caller adds ``--isolated`` (Ruff) or an empty ``--config``
+  (Black) so project configuration is ignored.
+- Biome, ``dotnet format`` and ``cargo fmt`` are refused in check mode by
+  :func:`executable_config_error`: Sonder has no way to run them that ignores
+  project files which choose code to run.
 
-Data configs are parsed before their keys are inspected: JSON and TOML with the
-standard parsers (so an escaped key such as ``"plug\\u0069ns"`` is seen as
-``plugins``). YAML and JSON5 have no parser in the standard library, so they are
-refused when the word ``plugins`` appears anywhere or the file contains a
-backslash escape. Anything that cannot be read or parsed is refused.
-
-Stateless; safe from any thread. Reads only small regular files and never
-follows a link.
+Stateless; safe from any thread. Nothing here starts a process.
 """
 from __future__ import annotations
 
-import json
+import importlib.util
 import os
 import re
+import shutil
+import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from .filesystem import file_ops
 
-try:  # Python 3.11+
-    import tomllib
-except ImportError:  # pragma: no cover - older runtimes fall back to the text rule
-    tomllib = None  # type: ignore[assignment]
+PRETTIER_SETTING = "SONDER_PRETTIER_EXE"
+MIN_PRETTIER_MAJOR = 3
 
-_EXECUTABLE_PRETTIER = (
-    "prettier.config.js", "prettier.config.cjs", "prettier.config.mjs",
-    "prettier.config.ts", "prettier.config.cts", "prettier.config.mts",
-    ".prettierrc.js", ".prettierrc.cjs", ".prettierrc.mjs",
-    ".prettierrc.ts", ".prettierrc.cts", ".prettierrc.mts",
-)
-_DATA_PRETTIER = (
-    ".prettierrc", ".prettierrc.json", ".prettierrc.json5", ".prettierrc.yaml",
-    ".prettierrc.yml", ".prettierrc.toml",
-)
-_BIOME_CONFIGS = ("biome.json", "biome.jsonc", ".biome.json", ".biome.jsonc")
-_PLUGINS_WORD = re.compile(r"plugins", re.IGNORECASE)
-_PRETTIER_YAML_BLOCK = re.compile(r"^[\"']?prettier[\"']?[ \t]*:(.*(?:\n(?:[ \t].*)?)*)", re.MULTILINE)
-_MAX_CONFIG_BYTES = 256 * 1024
-_MAX_DIRECTORIES = 20000
-_PRUNED = frozenset({"node_modules", ".git"})
-_NODE_PACKAGES = {"prettier": "prettier", "biome": "@biomejs/biome"}
-# Formatters whose check mode evaluates project-controlled code and cannot be made safe by
-# inspecting a few config files: ``dotnet format`` evaluates the project through MSBuild
-# (Directory.Build.props/targets, analyzers); ``cargo fmt`` reads .cargo/config.toml aliases
-# from cwd and its parents and rust-toolchain.toml (``path`` selects a toolchain binary).
 _REFUSED_TOOLS = {
     "dotnet": "dotnet format evaluates the project through MSBuild (Directory.Build.*, analyzers)",
     "rustfmt": "cargo fmt reads .cargo/config.toml aliases and rust-toolchain.toml overrides",
+    "biome": "biome runs through npx (which resolves node_modules/.bin and .npmrc from every parent folder) "
+             "and reads project biome.json files that name plugins and extended configs",
 }
-_CHECKED_TOOLS = frozenset(_NODE_PACKAGES) | frozenset(_REFUSED_TOOLS)
 _GLOB_CHARS = frozenset("*?[]{}!")
+_VERSION = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
+# Node and npm read these from the environment: NODE_OPTIONS (--require), NODE_PATH (module
+# lookup) and npm_config_* (any .npmrc setting, including script-shell and node-options).
+# PRETTIER_* switches Prettier's own behaviour (for example the experimental CLI).
+_NODE_ENV_PREFIXES = ("NODE_", "NPM_CONFIG_", "PRETTIER_")
 
 
-def _read_text(path: Path) -> str | None:
+def _inside_any(path: Path, roots: Sequence[Path]) -> bool:
+    return any(path == root or file_ops._is_inside(path, root) for root in roots)
+
+
+def _forbidden(path: str, roots: Sequence[Path]) -> bool:
+    """True when ``path`` (as spelled, or after resolving links) lies in one of ``roots``."""
+    lexical = Path(os.path.normpath(path))
     try:
-        if file_ops.is_reparse_point(path) or path.stat().st_size > _MAX_CONFIG_BYTES:
-            return None
-        return path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
+        resolved = lexical.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return _inside_any(lexical, roots) or _inside_any(resolved, roots)
 
 
-def _has_plugins_key(value: object) -> bool:
-    """True when a parsed document has a ``plugins`` key at any depth."""
-    if isinstance(value, dict):
-        return any(
-            (isinstance(key, str) and key.lower() == "plugins") or _has_plugins_key(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, list):
-        return any(_has_plugins_key(item) for item in value)
-    return False
-
-
-def _text_may_name_plugins(text: str) -> bool:
-    """True when an unparsed (YAML/JSON5) document may name plugins."""
-    return bool(_PLUGINS_WORD.search(text)) or "\\" in text
-
-
-def _data_config_error(path: Path) -> str | None:
-    text = _read_text(path)
-    if text is None:
-        return "%s is a link, is too large or could not be read" % path.name
-    if "\x00" in text:
-        return "%s is not a text file" % path.name
-    suffix = path.suffix.lower()
-    if suffix == ".toml" and tomllib is not None:
-        try:
-            parsed = tomllib.loads(text)
-        except ValueError:
-            return "%s could not be parsed" % path.name
-        return _mapping_error(path.name, parsed)
-    if suffix in (".yaml", ".yml", ".json5", ".toml") or path.name == ".prettierrc":
-        # No YAML/JSON5 parser: only a text that parses as a JSON object is inspected. Anything
-        # else may be a bare string, which Prettier loads as a shared config module.
-        try:
-            parsed = json.loads(text)
-        except ValueError:
-            return "%s is not a JSON object, so it could name a shared config module" % path.name
-        return _mapping_error(path.name, parsed)
-    try:
-        parsed = json.loads(text)
-    except ValueError:
-        return "%s could not be parsed" % path.name
-    return _mapping_error(path.name, parsed)
-
-
-def _mapping_error(name: str, parsed: object) -> str | None:
-    """Prettier treats a string config as a shared config module and loads it."""
-    if not isinstance(parsed, dict):
-        return "%s is not a mapping (a string names a shared config module that Prettier loads)" % name
-    return "%s loads formatter plugins" % name if _has_plugins_key(parsed) else None
-
-
-def _package_json_error(path: Path) -> str | None:
-    text = _read_text(path)
-    if text is None:
-        return "package.json is a link, is too large or could not be read"
-    try:
-        data = json.loads(text)
-    except ValueError:
-        return "package.json could not be parsed"
-    section = data.get("prettier") if isinstance(data, dict) else None
-    if isinstance(section, str):
-        return "package.json names a shared prettier config package"
-    if isinstance(section, dict) and _has_plugins_key(section):
-        return "package.json prettier config loads formatter plugins"
-    return None
-
-
-def _package_yaml_error(path: Path) -> str | None:
-    text = _read_text(path)
-    if text is None:
-        return "package.yaml is a link, is too large or could not be read"
-    for match in _PRETTIER_YAML_BLOCK.finditer(text):
-        body = match.group(1)
-        inline = body.split("\n", 1)[0].split("#", 1)[0].strip()
-        if inline and inline[0] not in "{|>":
-            return "package.yaml names a shared prettier config package"
-        if _text_may_name_plugins(body):
-            return "package.yaml prettier config may load formatter plugins"
-    return None
-
-
-def _walk_directories(root: Path, target: str) -> tuple[list[Path], str | None]:
-    """The ancestors of the checked path plus every folder beneath it, or an error."""
-    found: list[Path] = [root]
-    start = root
-    walk_below = True
-    if target and target != ".":
-        start = root / target
-        if not start.is_dir():
-            start = start.parent
-            walk_below = False
-    current = start
-    while current != root and file_ops._is_inside(current, root):
-        found.append(current)
-        if current.parent == current:
-            break
-        current = current.parent
-    if not walk_below:
-        return found, None
-    pending = [start]
-    visited = 0
-    while pending:
-        directory = pending.pop()
-        visited += 1
-        if visited > _MAX_DIRECTORIES:
-            return found, "more than %d folders to check" % _MAX_DIRECTORIES
-        if directory not in found:
-            found.append(directory)
-        try:
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    if entry.name in _PRUNED:
-                        continue
-                    child = Path(entry.path)
-                    if entry.is_symlink() or file_ops.is_reparse_point(child):
-                        if child.is_dir():
-                            return found, "linked folder %s could hide a config" % entry.name
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        pending.append(child)
-        except OSError:
-            return found, "folder %s could not be listed" % directory.name
-    return found, None
-
-
-def _bundled_formatter_error(tool: str, directories: list[Path]) -> str | None:
-    package = _NODE_PACKAGES[tool]
-    bin_name = package.rsplit("/", 1)[-1]
-    for directory in directories:
-        modules = directory / "node_modules"
-        for candidate in (
-            modules / ".bin" / bin_name,
-            modules / ".bin" / (bin_name + ".cmd"),
-            modules / ".bin" / (bin_name + ".ps1"),
-            modules / package,
-        ):
-            if os.path.lexists(candidate):
-                return "the project ships its own %s (node_modules/%s); npx would run that committed code" % (
-                    tool, candidate.relative_to(modules).as_posix())
-    return None
-
-
-def _npmrc_error(root: Path) -> str | None:
-    """A project ``.npmrc`` (``script-shell``, ``node-options``) is run by npx from the local prefix.
-
-    npm's local prefix is the nearest folder at or above cwd holding ``package.json`` or
-    ``node_modules`` (cwd itself when none does). Every folder from the root up to it is checked.
-    """
-    def is_prefix(folder: Path) -> bool:
-        return os.path.lexists(folder / "package.json") or os.path.lexists(folder / "node_modules")
-
-    folders = [root]
-    if not is_prefix(root):
-        above: list[Path] = []
-        for parent in root.parents:
-            above.append(parent)
-            if is_prefix(parent):
-                folders.extend(above)
-                break
-    for folder in folders:
-        if os.path.lexists(folder / ".npmrc"):
-            return ".npmrc in %s: npx would apply its script-shell and node-options settings" % (
-                folder.name or str(folder))
-    return None
-
-
-def _target_error(root: Path, target: str) -> str | None:
-    """In check mode the formatter must be handed one existing path, never a pattern."""
-    if not target or target == ".":
-        return None
-    if any(ch in _GLOB_CHARS for ch in target):
-        return "the path contains glob characters; the formatter would expand it past the checked folders"
-    if not os.path.lexists(root / target):
-        return "the path does not exist"
-    return None
+def _trusted_file(path: str, roots: Sequence[Path]) -> bool:
+    return os.path.isabs(path) and os.path.isfile(path) and not _forbidden(path, roots)
 
 
 def executable_config_error(tool: str, root: Path | str, target: str = "") -> str | None:
-    """Why a protected check of ``tool`` must not run here, or None."""
-    if tool not in _CHECKED_TOOLS:
-        return None
-    root = Path(root)
+    """Why a protected check of ``tool`` must not run here, or None.
+
+    Refuses Biome, ``dotnet format`` and ``cargo fmt`` outright. For Prettier the
+    target must be one existing path with no glob characters (Prettier expands a
+    pattern itself).
+    """
     prefix = "refusing to run %s in check mode: " % tool
     if tool in _REFUSED_TOOLS:
         return prefix + _REFUSED_TOOLS[tool]
-    target_reason = _target_error(root, target)
-    if target_reason:
-        return prefix + target_reason
-    npmrc = _npmrc_error(root)
-    if npmrc:
-        return prefix + npmrc
-    directories, walk_error = _walk_directories(root, target)
-    if walk_error:
-        return prefix + walk_error
-    bundled = _bundled_formatter_error(tool, directories)
-    if bundled:
-        return prefix + bundled
-    for directory in directories:
-        if tool == "biome":
-            for name in _BIOME_CONFIGS:
-                if os.path.lexists(directory / name):
-                    text = _read_text(directory / name)
-                    if text is None or _text_may_name_plugins(text):
-                        return prefix + "%s may load formatter plugins or could not be read" % name
-            continue
-        for name in _EXECUTABLE_PRETTIER:
-            if os.path.lexists(directory / name):
-                return prefix + "executable project config %s" % name
-        for name in _DATA_PRETTIER:
-            if os.path.lexists(directory / name):
-                reason = _data_config_error(directory / name)
-                if reason:
-                    return prefix + reason
-        for name, check in (("package.json", _package_json_error), ("package.yaml", _package_yaml_error)):
-            if os.path.lexists(directory / name):
-                reason = check(directory / name)
-                if reason:
-                    return prefix + reason
+    if tool != "prettier" or not target or target == ".":
+        return None
+    if any(ch in _GLOB_CHARS for ch in target):
+        return prefix + "the path contains glob characters; the formatter would expand it past the checked folders"
+    if not os.path.lexists(Path(root) / target):
+        return prefix + "the path does not exist"
     return None
+
+
+def resolve_trusted_prettier(
+    forbidden_roots: Sequence[Path],
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str | None, str | None]:
+    """``(absolute executable, None)`` for a Prettier outside every forbidden root, or ``(None, error)``.
+
+    ``SONDER_PRETTIER_EXE`` wins when set and must name an absolute file; it never
+    falls back to PATH. Otherwise the PATH lookup must give an absolute path. A
+    candidate inside a forbidden root (the project root and every authorized
+    root), as spelled or after resolving links, is refused.
+    """
+    source = os.environ if environ is None else environ
+    configured = source.get(PRETTIER_SETTING, "").strip()
+    if configured:
+        if _trusted_file(configured, forbidden_roots):
+            return configured, None
+        return None, (
+            "%s must be the absolute path of a Prettier executable outside the project and every "
+            "authorized root" % PRETTIER_SETTING)
+    found = shutil.which("prettier")
+    if found and _trusted_file(found, forbidden_roots):
+        return found, None
+    if found:
+        return None, (
+            "the prettier on PATH is inside the project or an authorized root, so it is repository "
+            "code; install Prettier 3 elsewhere and set %s to it" % PRETTIER_SETTING)
+    return None, (
+        "no trusted Prettier: install Prettier 3 outside the project and set %s to its absolute "
+        "path (Sonder never runs npx or a project's node_modules in check mode)" % PRETTIER_SETTING)
+
+
+def prettier_major_version(stdout: str) -> int | None:
+    """The major version from ``prettier --version`` output, or None when it is not a version."""
+    lines = stdout.strip().splitlines()
+    match = _VERSION.fullmatch(lines[0].strip()) if lines else None
+    return int(match.group(1)) if match else None
+
+
+def prettier_check_argv(executable: str, ignore_path: Path, target: Path) -> list[str]:
+    """The check argv: no config, no editorconfig, an explicit ignore file, an absolute target."""
+    return [
+        executable, "--check", "--no-config", "--no-editorconfig",
+        "--ignore-path", str(ignore_path), str(target),
+    ]
+
+
+def sanitized_node_environment(
+    base: Mapping[str, str],
+    forbidden_roots: Sequence[Path],
+) -> dict[str, str]:
+    """``base`` without ``NODE_*``/``npm_config_*``/``PRETTIER_*`` keys and PATH entries in a forbidden root.
+
+    Keys compare case-insensitively (Windows environment names are). A relative
+    PATH entry is dropped too: it resolves against the child's working folder.
+    """
+    env: dict[str, str] = {}
+    for key, value in base.items():
+        if key.upper().startswith(_NODE_ENV_PREFIXES):
+            continue
+        if key.upper() == "PATH":
+            kept = [
+                entry for entry in value.split(os.pathsep)
+                if entry and os.path.isabs(entry)
+                and not _inside_any(Path(os.path.normpath(entry)), forbidden_roots)
+            ]
+            value = os.pathsep.join(kept)
+        env[key] = value
+    return env
+
+
+def runtime_module_available(name: str) -> bool:
+    """True when the runtime interpreter can import ``name`` (looked up, not imported)."""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def python_formatter_command(tool: str, forbidden_roots: Sequence[Path]) -> tuple[list[str] | None, str | None]:
+    """``(argv prefix, None)`` that runs ``tool`` without a project interpreter, or ``(None, error)``.
+
+    The runtime's own interpreter with ``-I`` (no cwd or user site on ``sys.path``)
+    when it has the module; else an absolute PATH executable outside every
+    forbidden root. ``tool`` is ``"ruff"`` or ``"black"``.
+    """
+    if runtime_module_available(tool):
+        return [sys.executable, "-I", "-m", tool], None
+    found = shutil.which(tool)
+    if found and _trusted_file(found, forbidden_roots):
+        return [found], None
+    return None, (
+        "refusing to run %s in check mode: it is not installed in the Sonder runtime and the one on "
+        "PATH (if any) is inside the project or an authorized root" % tool)

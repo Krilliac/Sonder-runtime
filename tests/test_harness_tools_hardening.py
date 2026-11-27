@@ -14,6 +14,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from pathlib import Path
 
 import harness_tools
 import pytest
@@ -94,11 +95,9 @@ def test_format_check_only_never_runs_a_writing_formatter(tmp_path, captured, to
     assert write not in captured[0]
 
 
+# Ruff, Black and Prettier check forms (runtime interpreter, no project config, a trusted
+# Prettier without npx) and the Biome refusal are covered in test_harness_tools_isolation.py.
 @pytest.mark.parametrize("tool, check", [
-    ("ruff", ["ruff", "format", "--check", "."]),
-    ("black", ["black", "--check", "."]),
-    ("prettier", ["npx", "--no-install", "prettier", "--check", "."]),
-    ("biome", ["npx", "--no-install", "@biomejs/biome", "format", "."]),
     ("dart", ["dart", "format", "--output=none", "--set-exit-if-changed", "."]),
 ])
 def test_format_check_only_keeps_the_existing_check_forms(tmp_path, captured, tool, check):
@@ -333,7 +332,11 @@ def test_dependency_audit_runs_pip_audit_without_pip(tmp_path, captured, monkeyp
     monkeypatch.setattr(harness_tools.shutil, "which", lambda name, *a, **k: fake if name == "pip-audit" else None)
     (tmp_path / "requirements.txt").write_text("\n", encoding="utf-8")
     result = harness_tools.dependency_audit(root=str(tmp_path))
-    assert captured == [[fake, "-r", "requirements.txt", "--no-deps", "--disable-pip"]]
+    assert len(captured) == 1
+    argv = captured[0]
+    # pip-audit gets a sanitized copy outside the root, never the repository's own file.
+    assert argv[0] == fake and argv[1] == "-r" and argv[3:] == ["--no-deps", "--disable-pip"]
+    assert os.path.isabs(argv[2]) and not file_ops._is_inside(Path(argv[2]), tmp_path)
     assert result["manager"] == "pip"
 
 
@@ -649,11 +652,13 @@ def test_ordinary_nested_requirements_with_hashes_and_markers_pass(tmp_path, cap
         "# top\n-r reqs/base.txt  # include\n-c reqs/constraints.txt\nrequests[socks]>=2.31,<3 ; python_version >= '3.9'\n",
         encoding="utf-8")
     (proj / "reqs" / "base.txt").write_text(
-        "urllib3==2.2.1 \\\n    --hash=sha256:abc123\n--require-hashes\n", encoding="utf-8")
+        "urllib3==2.2.1 \\\n    --hash=sha256:" + "0" * 64 + "\n--require-hashes\n", encoding="utf-8")
     (proj / "reqs" / "constraints.txt").write_text("idna<4\n", encoding="utf-8")
     fake = _pip_audit(monkeypatch, tmp_path)
     harness_tools.dependency_audit(root=str(proj))
-    assert captured == [[fake, "-r", "requirements.txt", "--no-deps", "--disable-pip"]]
+    assert len(captured) == 1
+    assert captured[0][:2] == [fake, "-r"] and captured[0][3:] == ["--no-deps", "--disable-pip"]
+    assert not file_ops._is_inside(Path(captured[0][2]), proj)
 
 
 def test_an_include_cycle_terminates(tmp_path, captured, monkeypatch):
@@ -690,46 +695,6 @@ def test_format_check_only_honors_the_protected_write_scope(tmp_path, no_child, 
     result = harness_tools.format_code(root=str(tmp_path), tool="ruff", check_only=True)
     assert result["ok"] is False
     assert "protected" in result["error"]
-
-
-@pytest.mark.parametrize("config", [
-    "prettier.config.js", "prettier.config.cjs", "prettier.config.mjs", ".prettierrc.js", ".prettierrc.mjs",
-])
-def test_prettier_check_refuses_executable_project_config(tmp_path, no_child, not_live, config):
-    (tmp_path / config).write_text("require('fs').writeFileSync('PWNED', 'x')\n", encoding="utf-8")
-    result = harness_tools.format_code(root=str(tmp_path), tool="prettier", check_only=True)
-    assert result["ok"] is False
-    assert config in result["error"]
-    assert not (tmp_path / "PWNED").exists()
-
-
-@pytest.mark.parametrize("name, text", [
-    (".prettierrc", '{"plugins": ["./evil.js"]}'),
-    (".prettierrc.json", '{"plugins": ["./evil.js"]}'),
-    (".prettierrc.yaml", "plugins:\n  - ./evil.js\n"),
-    ("package.json", '{"prettier": {"plugins": ["./evil.js"]}}'),
-    ("package.json", '{"prettier": "some-shared-config"}'),
-])
-def test_prettier_check_refuses_plugin_configs(tmp_path, no_child, not_live, name, text):
-    (tmp_path / name).write_text(text, encoding="utf-8")
-    result = harness_tools.format_code(root=str(tmp_path), tool="prettier", check_only=True)
-    assert result["ok"] is False
-    assert "check mode" in result["error"]
-
-
-def test_prettier_check_refuses_a_config_in_a_parent_of_the_checked_path(tmp_path, no_child, not_live):
-    (tmp_path / "pkg").mkdir()
-    (tmp_path / "pkg" / "prettier.config.js").write_text("module.exports = {}\n", encoding="utf-8")
-    result = harness_tools.format_code(root=str(tmp_path), tool="prettier", path="pkg", check_only=True)
-    assert result["ok"] is False
-
-
-def test_prettier_check_runs_with_a_data_only_config(tmp_path, captured, not_live):
-    (tmp_path / ".prettierrc.json").write_text('{"semi": false}', encoding="utf-8")
-    (tmp_path / "package.json").write_text('{"name": "x", "prettier": {"semi": false}}', encoding="utf-8")
-    result = harness_tools.format_code(root=str(tmp_path), tool="prettier", check_only=True)
-    assert result["ok"] is True
-    assert captured == [["npx", "--no-install", "prettier", "--check", "."]]
 
 
 def test_formatter_npx_never_installs(tmp_path, captured, not_live):
@@ -881,99 +846,12 @@ def test_rename_refuses_and_references_skip_a_short_name_shaped_file(workspace):
     assert {ref["file"] for ref in refs["references"]} == {os.path.join("src", "ok.txt")}
 
 
-# ---- review round 2: formatter configs below the checked path, bundled formatters ----------
+# ---- formatter check-mode guard (project configuration is never read; see test_harness_tools_isolation.py) ----
 
 def _guard(tool, root, target=""):
     from sonder_runtime.adapters import formatter_config_guard
 
     return formatter_config_guard.executable_config_error(tool, root, target)
-
-
-@pytest.mark.parametrize("target", ["", ".", "src", "src/sub"])
-def test_prettier_guard_checks_every_folder_under_the_checked_path(tmp_path, target):
-    sub = tmp_path / "src" / "sub"
-    sub.mkdir(parents=True)
-    (sub / "prettier.config.js").write_text("module.exports = {}\n", encoding="utf-8")
-    assert "prettier.config.js" in _guard("prettier", tmp_path, target)
-
-
-def test_prettier_guard_ignores_a_sibling_folder_outside_the_checked_file(tmp_path):
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "a.js").write_text("x\n", encoding="utf-8")
-    (tmp_path / "other").mkdir()
-    (tmp_path / "other" / "prettier.config.js").write_text("module.exports = {}\n", encoding="utf-8")
-    assert _guard("prettier", tmp_path, "src/a.js") is None
-    assert _guard("prettier", tmp_path, "") is not None
-
-
-@pytest.mark.parametrize("name, text", [
-    ("package.yaml", "name: x\nprettier: evil-shared-config\n"),
-    ("package.yaml", 'name: x\n"prettier": "evil-shared-config"\n'),
-    ("package.yaml", "name: x\nprettier:\n  plugins:\n    - ./evil.js\n"),
-    (".prettierrc", '{"plug\\u0069ns": ["./evil.js"]}'),
-    (".prettierrc.json", '{"overrides": [{"files": "*", "options": {"plug\\u0069ns": ["./evil.js"]}}]}'),
-    (".prettierrc.json", '{"plugins": ["./evil.js"]}'),
-    (".prettierrc.yaml", 'pl\\x75gins: ["./evil.js"]\n'),
-    (".prettierrc.yaml", "plugins:\n  - ./evil.js\n"),
-    (".prettierrc.json5", "{ 'plugins': ['./evil.js'] }"),
-    (".prettierrc.toml", 'plugins = ["./evil.js"]\n'),
-    (".prettierrc.toml", '"plug\\u0069ns" = ["./evil.js"]\n'),
-    (".prettierrc.json", "{not json"),
-])
-def test_prettier_guard_parses_data_configs_before_trusting_keys(tmp_path, name, text):
-    folder = tmp_path / "pkg"
-    folder.mkdir()
-    (folder / name).write_text(text, encoding="utf-8")
-    assert _guard("prettier", tmp_path, "pkg") is not None, (name, text)
-
-
-@pytest.mark.parametrize("name, text", [
-    (".prettierrc", '{"semi": false}'),
-    (".prettierrc.yaml", '{"semi": false}'),
-    (".prettierrc.toml", "semi = false\n"),
-    ("package.json", '{"name": "x", "prettier": {"semi": false}}'),
-    ("package.yaml", "name: x\ndependencies:\n  prettier: 3.0.0\n"),
-])
-def test_prettier_guard_allows_plain_option_configs(tmp_path, name, text):
-    (tmp_path / name).write_text(text, encoding="utf-8")
-    assert _guard("prettier", tmp_path, "") is None, name
-
-
-@pytest.mark.parametrize("relative", [
-    "node_modules/.bin/prettier", "node_modules/.bin/prettier.cmd", "node_modules/prettier/package.json",
-])
-def test_prettier_guard_refuses_a_project_shipped_formatter(tmp_path, relative):
-    target = tmp_path / relative
-    target.parent.mkdir(parents=True)
-    target.write_text("#!/bin/sh\n", encoding="utf-8")
-    assert "ships its own prettier" in _guard("prettier", tmp_path, "")
-
-
-def test_biome_guard_refuses_a_project_shipped_formatter_and_plugin_configs(tmp_path):
-    assert _guard("biome", tmp_path, "") is None
-    (tmp_path / "biome.json").write_text('{"plugins": ["./x.grit"]}', encoding="utf-8")
-    assert "biome.json" in _guard("biome", tmp_path, "")
-    (tmp_path / "biome.json").write_text("{}", encoding="utf-8")
-    bin_dir = tmp_path / "node_modules" / ".bin"
-    bin_dir.mkdir(parents=True)
-    (bin_dir / "biome").write_text("x", encoding="utf-8")
-    assert "ships its own biome" in _guard("biome", tmp_path, "")
-
-
-@pytest.mark.skipif(os.name != "nt", reason="junction creation is Windows-specific here")
-def test_prettier_guard_refuses_a_linked_folder(tmp_path):
-    target = tmp_path / "elsewhere"
-    target.mkdir()
-    (tmp_path / "root").mkdir()
-    subprocess.run(["cmd", "/c", "mklink", "/J", str(tmp_path / "root" / "hop"), str(target)],
-                   check=True, capture_output=True)
-    assert "linked folder" in _guard("prettier", tmp_path / "root", "")
-
-
-def test_format_check_runs_the_formatter_when_nothing_executable_is_present(tmp_path, captured, not_live):
-    (tmp_path / "a.js").write_text("x\n", encoding="utf-8")
-    result = harness_tools.format_code(root=str(tmp_path), tool="prettier", check_only=True)
-    assert captured == [["npx", "--no-install", "prettier", "--check", "."]], result
 
 
 # ---- review round 2: requirements ${VAR} and scheme-only includes ---------------------------
@@ -993,7 +871,8 @@ def test_requirements_guard_refuses_variable_expansion_and_url_schemes(tmp_path,
 
     (tmp_path / "requirements.txt").write_text(line + "\n", encoding="utf-8")
     (tmp_path / "x.txt").write_text("requests\n", encoding="utf-8")
-    assert requirements_guard.requirements_content_error(tmp_path, is_protected=lambda _p: False) is not None, line
+    assert requirements_guard.requirements_content_error(
+        tmp_path, is_protected=lambda _p: False, parse=harness_tools._parse_requirement) is not None, line
 
 
 def test_requirements_guard_still_allows_plain_relative_includes(tmp_path):
@@ -1001,44 +880,17 @@ def test_requirements_guard_still_allows_plain_relative_includes(tmp_path):
 
     (tmp_path / "requirements.txt").write_text("-r base.txt\nrequests==2.0\n", encoding="utf-8")
     (tmp_path / "base.txt").write_text("idna\n", encoding="utf-8")
-    assert requirements_guard.requirements_content_error(tmp_path, is_protected=lambda _p: False) is None
+    assert requirements_guard.requirements_content_error(
+        tmp_path, is_protected=lambda _p: False, parse=harness_tools._parse_requirement) is None
 
 
-# ---- review round 3: shared-config strings, globs, .npmrc, dotnet/cargo, archives, include secrets ----
-
-@pytest.mark.parametrize("name,text", [
-    (".prettierrc.json", '"./lib/x.cjs"'),
-    (".prettierrc", "./lib/x.cjs"),
-    (".prettierrc.yaml", "some-shared-config"),
-    (".prettierrc.json5", '"evil-config"'),
-    (".prettierrc.toml", "a = 1\n[[x"),
-    (".prettierrc.json", "[]"),
-])
-def test_prettier_guard_refuses_non_mapping_data_configs(tmp_path, name, text):
-    (tmp_path / name).write_text(text, encoding="utf-8")
-    assert _guard("prettier", tmp_path, ".") is not None
-
-
-def test_prettier_guard_allows_plain_json_object_config(tmp_path):
-    (tmp_path / ".prettierrc").write_text('{"semi": false}', encoding="utf-8")
-    assert _guard("prettier", tmp_path, ".") is None
-
+# ---- review round 3: globs, dotnet/cargo, archives, include secrets ----
 
 @pytest.mark.parametrize("target", ["**/*.js", "{sub,x}", "su?", "[s]ub", "!sub", "missing", "sub/missing.js"])
 def test_prettier_guard_refuses_globs_and_missing_paths(tmp_path, target):
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / ".prettierrc.cjs").write_text("module.exports = {}\n", encoding="utf-8")
     assert _guard("prettier", tmp_path, target) is not None
-
-
-@pytest.mark.parametrize("tool", ["prettier", "biome"])
-def test_node_guards_refuse_a_project_npmrc_at_root_and_prefix(tmp_path, tool):
-    (tmp_path / ".npmrc").write_text("script-shell=./tools/evil.cmd\n", encoding="utf-8")
-    assert ".npmrc" in _guard(tool, tmp_path, ".")
-    sub = tmp_path / "pkg" / "deep"
-    sub.mkdir(parents=True)
-    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
-    assert ".npmrc" in _guard(tool, sub, ".")
 
 
 @pytest.mark.parametrize("tool", ["dotnet", "rustfmt"])
@@ -1051,7 +903,8 @@ def test_requirements_guard_refuses_bare_local_archive_names(tmp_path, line):
     from sonder_runtime.adapters import requirements_guard
 
     (tmp_path / "requirements.txt").write_text(line + "\n", encoding="utf-8")
-    assert requirements_guard.requirements_content_error(tmp_path, is_protected=lambda _p: False) is not None
+    assert requirements_guard.requirements_content_error(
+        tmp_path, is_protected=lambda _p: False, parse=harness_tools._parse_requirement) is not None
 
 
 def test_requirements_include_of_a_secret_file_is_refused_without_echoing_it(tmp_path):
@@ -1067,6 +920,7 @@ def test_requirements_include_error_names_file_and_line_never_content(tmp_path):
 
     (tmp_path / "requirements.txt").write_text("-r base.txt\n", encoding="utf-8")
     (tmp_path / "base.txt").write_text("idna\nSECRET_TOKEN=abc123\n", encoding="utf-8")
-    error = requirements_guard.requirements_content_error(tmp_path, is_protected=lambda _p: False)
+    error = requirements_guard.requirements_content_error(
+        tmp_path, is_protected=lambda _p: False, parse=harness_tools._parse_requirement)
     assert error is not None and "base.txt line 2" in error
     assert "SECRET_TOKEN" not in error and "abc123" not in error

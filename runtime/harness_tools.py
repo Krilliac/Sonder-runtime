@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -39,6 +40,17 @@ from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thre
 import git_tools
 import sonder_logging
 import unsafe_lab
+
+# Strict PEP 508 parsing for ``requirements_guard`` (the adapters layer may not import a
+# third-party package, so it is injected from here). ``packaging`` is not a declared runtime
+# dependency; pip, which every pip lane already needs, vendors the same module.
+try:
+    from packaging.requirements import Requirement as _PEP508Requirement
+except ImportError:  # pragma: no cover - depends on the interpreter's installed packages
+    try:
+        from pip._vendor.packaging.requirements import Requirement as _PEP508Requirement
+    except ImportError:
+        _PEP508Requirement = None
 
 MAX_OUTPUT = 256_000
 MAX_TIMEOUT = 120
@@ -834,12 +846,16 @@ _FORMATTERS = {
 }
 
 # Read-only check form of every supported formatter: ``check_only=True`` uses
-# this argv and never falls back to a writing command.
+# this argv and never falls back to a writing command. Ruff and Black run from the
+# runtime interpreter (``formatter_config_guard.python_formatter_command`` replaces
+# the program name) without project configuration: ``--isolated`` for Ruff, an
+# empty ``--config`` file outside the root for Black. Prettier never runs through
+# npx: ``_prettier_check`` starts a trusted absolute Prettier with ``--no-config``.
+# Biome, dotnet and rustfmt are refused in check mode by ``formatter_config_guard``.
 _FORMATTER_CHECKS = {
-    "ruff": ["ruff", "format", "--check"],
+    "ruff": ["ruff", "format", "--check", "--isolated", "--no-cache"],
     "black": ["black", "--check"],
-    "prettier": ["npx", "--no-install", "prettier", "--check"],
-    "biome": ["npx", "--no-install", "@biomejs/biome", "format"],
+    "prettier": ["prettier", "--check", "--no-config", "--no-editorconfig"],
     "rustfmt": ["cargo", "fmt", "--check"],
     "gofmt": ["gofmt", "-l"],
     "clang-format": ["clang-format", "--dry-run", "--Werror"],
@@ -991,6 +1007,83 @@ def lint_run(root=".", tool="auto", path="", fix=False, timeout=60, extra_roots=
     return result
 
 
+_TEMP_INSIDE_ROOT = (
+    "refusing to run: the system temp folder is inside the project root, so Sonder has no "
+    "scratch folder outside it for the files it hands the tool")
+
+
+@contextlib.contextmanager
+def _outside_temp_dir(root, prefix):
+    """Yield a fresh private temp folder outside ``root`` (None when temp is inside it); remove it after.
+
+    The folder is created by ``mkdtemp`` (owner-only on POSIX) and holds only
+    files Sonder writes: an empty ignore or config file, or a sanitized
+    requirements copy. Owned by the calling thread for the duration of the block.
+    """
+    folder = Path(tempfile.mkdtemp(prefix=prefix))
+    try:
+        resolved = folder.resolve()
+        root_path = Path(root).resolve()
+        if resolved == root_path or file_ops._is_inside(resolved, root_path):
+            yield None
+        else:
+            yield resolved
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _formatter_forbidden_roots(root, extra_roots=""):
+    """The project root plus every authorized root: no trusted formatter may live under one."""
+    roots = [Path(root).resolve()]
+    for allowed in file_ops.allowed_roots(extra_roots or _AUTHORIZED_ROOT.get()):
+        if allowed not in roots:
+            roots.append(allowed)
+    return roots
+
+
+def _prettier_check(root, path, timeout, extra_roots=""):
+    """``prettier --check`` from a trusted absolute Prettier 3+ that reads no project configuration.
+
+    Never npx: npx resolves ``node_modules/.bin`` and ``.npmrc`` from the working
+    folder and every parent. The trusted executable (``SONDER_PRETTIER_EXE`` or
+    PATH, never under the project or an authorized root) runs twice from a temp
+    folder outside the root with a Node environment stripped of ``NODE_*`` and
+    ``npm_config_*``: ``--version`` (Prettier 2 resolved plugins and module
+    ``parser`` values on its own, so anything below 3 is refused), then
+    ``--check --no-config --no-editorconfig --ignore-path <empty file>`` on the
+    absolute target.
+    """
+    def refusal(reason):
+        return {"ok": False, "error": "refusing to run prettier in check mode: " + reason,
+                "tool": "prettier", "mode": "check"}
+
+    forbidden = _formatter_forbidden_roots(root, extra_roots)
+    executable, error = formatter_config_guard.resolve_trusted_prettier(forbidden)
+    if error:
+        return refusal(error)
+    env = formatter_config_guard.sanitized_node_environment(_child_env(), forbidden)
+    target = root / path if path else root
+    with _outside_temp_dir(root, "sonder-prettier-") as work:
+        if work is None:
+            return refusal(_TEMP_INSIDE_ROOT)
+        probe = _run([executable, "--version"], cwd=work, timeout=min(timeout, 30), env=env)
+        major = formatter_config_guard.prettier_major_version(probe.get("stdout", "")) if probe.get("ok") else None
+        if major is None:
+            return refusal("the trusted Prettier did not report a version; check mode needs Prettier %d or newer"
+                           % formatter_config_guard.MIN_PRETTIER_MAJOR)
+        if major < formatter_config_guard.MIN_PRETTIER_MAJOR:
+            return refusal("the trusted Prettier reports major version %d; check mode needs Prettier %d or newer "
+                           "(older versions load plugins and parser modules on their own)"
+                           % (major, formatter_config_guard.MIN_PRETTIER_MAJOR))
+        ignore = work / "empty.prettierignore"
+        ignore.write_bytes(b"")
+        result = _run(formatter_config_guard.prettier_check_argv(executable, ignore, target),
+                      cwd=work, timeout=timeout, env=env)
+    result["tool"] = "prettier"
+    result["mode"] = "check"
+    return result
+
+
 def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, extra_roots=""):
     root = _resolve_root(root, extra_roots)
     # Confine the argv-appended path too; see _resolve_target_path.
@@ -1023,15 +1116,22 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
                 "tool": tool,
                 "mode": "check",
             }
+        if tool == "prettier":
+            return _prettier_check(root, path, timeout, extra_roots)
         cmd = list(check_template)
+        if tool in ("ruff", "black"):
+            prefix, prefix_err = formatter_config_guard.python_formatter_command(
+                tool, _formatter_forbidden_roots(root, extra_roots))
+            if prefix_err:
+                return {"ok": False, "error": prefix_err, "tool": tool, "mode": "check"}
+            cmd = prefix + cmd[1:]
     else:
         cmd = list(cmd_template)
     if path:
-        cmd.append(path)
-    elif tool in ("ruff", "black", "dart") or (check_only and tool in ("gofmt", "prettier", "biome")):
-        # ``gofmt -l``, ``prettier --check`` and ``biome format`` with no path
-        # read empty stdin or check nothing instead of walking the root.
-        cmd.append(".")
+        target_args = [path]
+    elif tool in ("ruff", "black", "dart") or (check_only and tool == "gofmt"):
+        # ``gofmt -l`` with no path reads empty stdin instead of walking the root.
+        target_args = ["."]
     elif check_only and tool == "clang-format":
         # ``clang-format --dry-run`` has no directory mode and exits 0 on empty stdin.
         return {
@@ -1040,7 +1140,18 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
             "tool": tool,
             "mode": "check",
         }
-    result = _run(cmd, cwd=root, timeout=timeout)
+    else:
+        target_args = []
+    with contextlib.ExitStack() as scratch:
+        if check_only and tool == "black":
+            # An explicit, empty config: Black reads no pyproject.toml from the project.
+            work = scratch.enter_context(_outside_temp_dir(root, "sonder-black-"))
+            if work is None:
+                return {"ok": False, "error": _TEMP_INSIDE_ROOT, "tool": tool, "mode": "check"}
+            config = work / "black-empty.toml"
+            config.write_bytes(b"")
+            cmd += ["--config", str(config)]
+        result = _run(cmd + target_args, cwd=root, timeout=timeout)
     if check_only and tool == "gofmt" and result.get("ok") and result.get("stdout", "").strip():
         # ``gofmt -l`` lists files needing formatting and still exits 0.
         result["ok"] = False
@@ -1204,6 +1315,18 @@ def _project_pip(root, action):
     return [sys.executable, "-I", "-m", "pip", action, "--target", str(target)], None
 
 
+_NO_PEP508_PARSER = (
+    "refusing requirements.txt: neither packaging nor pip's vendored copy is importable, so "
+    "requirements cannot be parsed strictly")
+
+
+def _parse_requirement(text):
+    """Strict PEP 508 parse for ``requirements_guard``; ``ValueError`` when ``text`` is not one requirement."""
+    if _PEP508Requirement is None:
+        raise ValueError("no PEP 508 parser is available")
+    return _PEP508Requirement(text)
+
+
 def _requirements_link_error(root):
     """Return an error message if ``root/requirements.txt`` may not be handed to pip, else None.
 
@@ -1216,10 +1339,45 @@ def _requirements_link_error(root):
         req_path.exists() and _secret_scan_adapter.confined_path(req_path, Path(root)) is None
     ):
         return "refusing to read requirements.txt: it is a link or resolves outside the root"
-    content = requirements_guard.requirements_content_error(root, is_protected=_is_protected_read_target)
+    if _PEP508Requirement is None and os.path.lexists(req_path):
+        return _NO_PEP508_PARSER
+    content = requirements_guard.requirements_content_error(
+        root, is_protected=_is_protected_read_target, parse=_parse_requirement)
     if content:
         return "refusing requirements.txt: %s" % content
     return None
+
+
+@contextlib.contextmanager
+def _sanitized_requirements_file(root):
+    """Yield ``(path, None)`` for a sanitized flat copy of ``root/requirements.txt``, or ``(None, error)``.
+
+    pip and pip-audit never see the repository's pathname: the file and every
+    include are read once through ``confined_read`` and validated by
+    ``requirements_guard``, and only the validated, canonical lines are written
+    to a fresh temp folder outside the root, which is removed when the block
+    ends. Callers run the child with ``cwd`` set to that folder, so nothing is
+    resolved against the project either.
+    """
+    req_path = Path(root) / "requirements.txt"
+    if file_ops.is_reparse_point(req_path) or (
+        req_path.exists() and _secret_scan_adapter.confined_path(req_path, Path(root)) is None
+    ):
+        yield None, "refusing to read requirements.txt: it is a link or resolves outside the root"
+        return
+    if _PEP508Requirement is None:
+        yield None, _NO_PEP508_PARSER
+        return
+    sanitized, error = requirements_guard.sanitized_requirements(
+        root, is_protected=_is_protected_read_target, parse=_parse_requirement)
+    if sanitized is None:
+        yield None, "refusing requirements.txt: %s" % error
+        return
+    with _outside_temp_dir(root, "sonder-requirements-") as work:
+        if work is None:
+            yield None, _TEMP_INSIDE_ROOT
+        else:
+            yield sanitized.write(work), None
 
 
 def dependency_add(root=".", packages_json="[]", dev=False, timeout=60, extra_roots=""):
@@ -1341,10 +1499,15 @@ def dependency_update(root=".", packages_json="[]", timeout=120, extra_roots="")
         if packages:
             cmd = pip + ["--upgrade", "--"] + packages
         else:
-            req_err = _requirements_link_error(root)
-            if req_err:
-                return {"ok": False, "error": req_err, "manager": "pip"}
-            cmd = pip + ["--upgrade", "-r", "requirements.txt"]
+            if not os.path.lexists(root / "requirements.txt"):
+                return {"ok": False, "error": "no requirements.txt to update; name the packages to upgrade",
+                        "manager": "pip"}
+            with _sanitized_requirements_file(root) as (sanitized, req_err):
+                if req_err:
+                    return {"ok": False, "error": req_err, "manager": "pip"}
+                result = _run(pip + ["--upgrade", "-r", str(sanitized)], cwd=sanitized.parent, timeout=timeout)
+            result["manager"] = mgr
+            return result
     elif mgr == "uv":
         cmd = ["uv", "lock", "--upgrade"]
     elif mgr == "npm":
@@ -1384,18 +1547,22 @@ def dependency_audit(root=".", timeout=60, extra_roots=""):
     if mgr == "pip":
         # ``pip audit`` is not a pip command, and ``pip check`` audits Sonder's
         # own runtime environment. Use ``pip-audit --no-deps --disable-pip`` on
-        # a confined ``requirements.txt`` so sdist build hooks never run here.
-        req_err = _requirements_link_error(root)
+        # a sanitized copy of ``requirements.txt`` (see ``_sanitized_requirements_file``)
+        # so sdist build hooks never run and pip-audit never reopens a repository file.
         pip_audit = shutil.which("pip-audit")
-        if req_err:
-            result = {"ok": False, "error": req_err}
+        if os.path.lexists(root / "requirements.txt"):
+            with _sanitized_requirements_file(root) as (sanitized, req_err):
+                if req_err:
+                    result = {"ok": False, "error": req_err}
+                elif not pip_audit:
+                    result = {"ok": False, "error": "pip-audit not installed; run: pip install pip-audit"}
+                else:
+                    result = _run(
+                        [pip_audit, "-r", str(sanitized), "--no-deps", "--disable-pip"],
+                        cwd=sanitized.parent, timeout=timeout,
+                    )
         elif not pip_audit:
             result = {"ok": False, "error": "pip-audit not installed; run: pip install pip-audit"}
-        elif (root / "requirements.txt").is_file():
-            result = _run(
-                [pip_audit, "-r", "requirements.txt", "--no-deps", "--disable-pip"],
-                cwd=root, timeout=timeout,
-            )
         elif (root / "pyproject.toml").is_file():
             result = {
                 "ok": False,

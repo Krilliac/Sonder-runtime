@@ -947,6 +947,24 @@ can change any file their program writes; they are execution-risk tools
 shipped-file pin is what keeps the floor in force when such a write succeeds,
 for the life of the process.
 
+Two of those tools have a read-only form that runs no repository code.
+`format_code` with `check_only` reads no project configuration. Prettier never
+runs through npx: Sonder runs the absolute Prettier named by
+`SONDER_PRETTIER_EXE` (else the one on PATH) only when that file is outside the
+project and every authorized root and `--version` reports 3 or newer, with
+`--no-config --no-editorconfig`, an empty ignore file (so `.prettierignore` and
+`.gitignore` do not apply), a temp working folder outside the root and no
+`NODE_*` or `npm_config_*` variables. Ruff runs with `--isolated --no-cache` and
+Black with an empty `--config`, both from Sonder's own interpreter (or a copy on
+PATH outside every root). Biome, `dotnet format` and `cargo fmt` are refused in
+check mode. For pip, `dependency_update` without packages and
+`dependency_audit` parse every line of `requirements.txt` and its `-r`/`-c`
+includes as strict PEP 508 and hand pip or pip-audit a sanitized flat copy in a
+temp folder outside the root, never the repository's file. URLs, local archive
+names (with or without extras and markers), paths, editables, index and
+find-links overrides and every option other than `--hash`, `--require-hashes`,
+`--pre`, `--prefer-binary` and `--only-binary` are refused.
+
 The shipped file also holds `restricted_tool_ceiling` (the only tools any
 profile may ever grant: `text_search`, `repository_symbol_index`,
 `file_read_range`, `directory_tree`, `context_pack`) and
