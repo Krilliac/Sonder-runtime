@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 534,
+      "file_count": 535,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -413,6 +413,7 @@
         "sonder_runtime/adapters/persistence/queued_actions.py",
         "sonder_runtime/adapters/persistence/repair_journal.py",
         "sonder_runtime/adapters/persistence/runtime_owner.py",
+        "sonder_runtime/adapters/persistence/scratchpad_store.py",
         "sonder_runtime/adapters/persistence/served_action_receipts.py",
         "sonder_runtime/adapters/persistence/session_checkpoint_privacy.py",
         "sonder_runtime/adapters/persistence/session_repository.py",
@@ -578,7 +579,7 @@
       ]
     },
     {
-      "file_count": 461,
+      "file_count": 462,
       "name": "application",
       "python_files": [
         "sonder_runtime/application/__init__.py",
@@ -764,6 +765,7 @@
         "sonder_runtime/application/memory/receipt_observation.py",
         "sonder_runtime/application/memory/replication.py",
         "sonder_runtime/application/memory/retrieval_evaluation.py",
+        "sonder_runtime/application/memory/scratchpad_context.py",
         "sonder_runtime/application/memory/strategy_memory.py",
         "sonder_runtime/application/meshgen/__init__.py",
         "sonder_runtime/application/meshgen/loop.py",
@@ -1045,7 +1047,7 @@
       ]
     },
     {
-      "file_count": 92,
+      "file_count": 93,
       "name": "bootstrap",
       "python_files": [
         "sonder_runtime/bootstrap/__init__.py",
@@ -1130,6 +1132,7 @@
         "sonder_runtime/bootstrap/repl_host_selection.py",
         "sonder_runtime/bootstrap/repl_managed.py",
         "sonder_runtime/bootstrap/runtime_owner.py",
+        "sonder_runtime/bootstrap/scratchpad.py",
         "sonder_runtime/bootstrap/security_eval_agent_tools.py",
         "sonder_runtime/bootstrap/standalone_continuation.py",
         "sonder_runtime/bootstrap/strategy.py",
@@ -1143,7 +1146,7 @@
       ]
     },
     {
-      "file_count": 346,
+      "file_count": 347,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1331,6 +1334,7 @@
         "sonder_runtime/domain/memory/replication.py",
         "sonder_runtime/domain/memory/retention_gate.py",
         "sonder_runtime/domain/memory/rules.py",
+        "sonder_runtime/domain/memory/scratchpad.py",
         "sonder_runtime/domain/memory/wp6_typed.py",
         "sonder_runtime/domain/memory/write_quality.py",
         "sonder_runtime/domain/meshgen/__init__.py",
