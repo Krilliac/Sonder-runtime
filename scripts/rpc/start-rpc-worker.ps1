@@ -29,7 +29,8 @@ param(
     [string]$InstallDir = '',
     [string]$StateRoot = '',
     [switch]$EnsureFirewall,
-    [string]$AllowedPeer = ''
+    [string]$AllowedPeer = '',
+    [string]$LinkCidr = $env:SONDER_RPC_LINK_CIDR
 )
 
 $ErrorActionPreference = 'Stop'
@@ -68,12 +69,15 @@ if (-not ([string]$BindAddress).Trim()) {
     throw 'No worker bind address configured: pass -BindAddress <worker-ip> or set SONDER_RPC_WORKER_ADDRESS.'
 }
 $bindHost = ConvertTo-RpcPrivateIPv4 -Address $BindAddress -Label 'rpc-server bind address'
+$rpcLink = ConvertTo-RpcLinkNetwork $LinkCidr
+$null = Assert-RpcAddressOnLink -Address $bindHost -Link $rpcLink -Label 'rpc-server bind address'
 $rpcPort = if (([string]$Port).Trim()) { ConvertTo-RpcPort -Value $Port -Label 'Port' } else { $script:RpcDefaultPort }
 if ($Threads -lt 0) { throw "Threads must be >= 0, got $Threads." }
 $peerRaw = if (([string]$AllowedPeer).Trim()) { $AllowedPeer } else { [string]$env:SONDER_RPC_ALLOWED_PEER }
 $peerHost = ''
 if ($peerRaw.Trim()) {
     $peerHost = ConvertTo-RpcPrivateIPv4 -Address $peerRaw -Label 'AllowedPeer'
+    $null = Assert-RpcAddressOnLink -Address $peerHost -Link $rpcLink -Label 'AllowedPeer'
     if ($peerHost -eq $bindHost) { throw 'BindAddress and AllowedPeer must differ.' }
 }
 
@@ -677,6 +681,15 @@ switch ($Action) {
         }
 
         $exe = Resolve-RpcServerExe $InstallDir
+        # rpc-server has no --version and cannot report its build over RPC, so the
+        # worker's llama.cpp build comes from a sibling binary of the same release.
+        # Read before launch so it never runs alongside rpc-server's device setup.
+        $llamaBuild = $null
+        foreach ($sibling in @('llama-server.exe', 'llama-cli.exe')) {
+            $llamaBuild = Get-RpcLlamaBuild -ExePath (Join-Path $InstallDir $sibling)
+            if ($llamaBuild) { break }
+        }
+
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
         # Detached launch has no stdout/stderr capture (rpc-server has no verified
         # log-file option), so no log paths are recorded for the worker.
@@ -729,6 +742,7 @@ switch ($Action) {
             pid        = $launchedPid
             exe        = $recordedExe
             startedUtc = $startedUtc
+            llamaBuild = $llamaBuild
             host       = $bindHost
             port       = $rpcPort
             device     = $Device
