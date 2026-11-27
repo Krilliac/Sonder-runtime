@@ -399,9 +399,14 @@ def ollama_only_feature(
     """
     if not isinstance(payload, Mapping):
         return None
-    if payload.get("format") is not None and provider != "sonder_inference":
-        return ("format",
-                "response_format/schema decoding is only available on Sonder Inference tiers")
+    raw_format = payload.get("format")
+    if raw_format is not None:
+        if provider != "sonder_inference":
+            return ("format",
+                    "response_format/schema decoding is only available on Sonder Inference tiers")
+        if raw_format != "json" and not isinstance(raw_format, Mapping):
+            return ("format",
+                    "format must be 'json' or a JSON schema object")
     if payload.get("think") is True and provider not in THINKING_PROVIDERS:
         return ("think", "model thinking is only available on Sonder Inference tiers")
     allow_tools: bool | None = None
@@ -551,6 +556,8 @@ def model_request_from_ollama_payload(
                 "type": "json_schema",
                 "json_schema": {"name": "response", "schema": dict(raw_format)},
             }
+        else:
+            raise UnsupportedProviderFeature("format must be 'json' or a JSON schema object")
     if str(tier or "").strip().lower().startswith("model:"):
         pinned_model = str(payload.get("model") or str(tier).strip()[len("model:"):]).strip()
         if pinned_model:

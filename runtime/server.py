@@ -5076,6 +5076,8 @@ def _chat_request(
         local_only=local_only,
         single_send=single_send,
     )
+    from sonder_runtime.adapters.inference import si_chat_codec as _si_codec
+    out = _si_codec.from_openai_chat_response(out)
     _model_pace.observe(model, out, local=not (cloud or _is_cloud_model_name(model)))
     if not isinstance(out, dict):
         raise ModelCallError(
@@ -5331,27 +5333,41 @@ def _post(
         # Once per selected pool worker, inside all payload transformations and
         # local retries; admission may queue, or serve the model's pinned num_ctx.
         with ollama_pool.admitted(OLLAMA_POOL, path, effective_payload, origin, deadline=deadline) as ticket:
+            from sonder_runtime.adapters.inference import si_chat_codec as _si_codec
             body = ticket.body(send_data)
+            wire_obj = json.loads(body)
+            if path == "/v1/chat/completions":
+                wire_obj = _si_codec.to_openai_chat_payload(wire_obj)
+                wire_bytes = json.dumps(wire_obj).encode("utf-8")
+            elif path == "/v1/completions":
+                wire_obj = _si_codec.to_openai_completion_payload(wire_obj)
+                wire_bytes = json.dumps(wire_obj).encode("utf-8")
+            else:
+                wire_bytes = body
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError("Ollama worker pool request timeout expired")
-            req = urllib.request.Request(
-                f"{origin}{path}", data=body,
-                headers={"Content-Type": "application/json"},
-            )
+                raise TimeoutError("Sonder Inference worker pool request timeout expired")
+            headers = {"Content-Type": "application/json"}
+            if local_only:
+                headers["X-Sonder-Local-Only"] = "1"
+            req = urllib.request.Request(f"{origin}{path}", data=wire_bytes, headers=headers)
             def transport():
                 if path in {"/v1/chat/completions", "/v1/completions"}:
                     from sonder_runtime.application.agents.delegation_runtime import note_agent_execution as _note_exec; _note_exec(origin=origin)
                 with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
                     _record_residency_dispatch(
-                        path, json.loads(body), _residency_feedback, _is_cloud_model_name,
+                        path, wire_obj, _residency_feedback, _is_cloud_model_name,
                         origin=origin if getattr(OLLAMA_POOL, "enabled", False) else None,
                     )
-                    raw = _read_ollama_response_bytes(resp)
-                    return json.loads(raw.decode("utf-8"))
+                    parsed = json.loads(_read_ollama_response_bytes(resp).decode("utf-8"))
+                    if path == "/v1/chat/completions":
+                        return _si_codec.from_openai_chat_response(parsed)
+                    if path == "/v1/completions":
+                        return _si_codec.from_openai_completion_response(parsed)
+                    return parsed
 
             if path in {"/v1/chat/completions", "/v1/completions"}:  # metadata probes are not inference
-                return dispatch_provider("sonder-inference", path, json.loads(body), transport)
+                return dispatch_provider("sonder-inference", path, wire_obj, transport)
             return transport()
 
     if local_only and not ollama_endpoint.is_loopback(BASE):
@@ -21784,6 +21800,8 @@ def _fanout_synthesis_generate(model, source_bundle):
         timeout=FANOUT_SYNTHESIS_TIMEOUT_SECONDS, idempotent=True,
         local_only=True,
     )
+    from sonder_runtime.adapters.inference import si_chat_codec as _si_codec
+    out = _si_codec.from_openai_chat_response(out)
     if not isinstance(out, dict):
         raise ModelCallError("protocol", "local synthesis model returned a non-JSON response")
     message = out.get("message")

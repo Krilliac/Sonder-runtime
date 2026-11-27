@@ -239,6 +239,97 @@ def test_provider_bridge_carries_schema_format_and_images_for_sonder_inference()
         raise AssertionError("text/html image data URI must fail closed with InvalidInput")
     assert len(posted) == 1
 
+    # Invalid format value (neither "json" nor a schema dict) must be refused, not silently dropped.
+    bad_fmt_payload = {
+        "model": "qwen3.6:35b",
+        "messages": [{"role": "user", "content": "hi"}],
+        "format": "xml",
+    }
+    assert provider_bridge.ollama_only_feature(bad_fmt_payload, provider="sonder_inference") is not None
+    try:
+        provider_bridge.model_request_from_ollama_payload(
+            bad_fmt_payload, tier="code", provider="sonder_inference",
+        )
+    except provider_bridge.UnsupportedProviderFeature:
+        pass
+    else:
+        raise AssertionError("invalid format='xml' must raise UnsupportedProviderFeature")
+
+
+def test_server_post_and_fanout_translate_openai_chat_completions(monkeypatch):
+    """BLOCKING (3): _post and _fanout_synthesis_generate send OpenAI JSON and parse choices[0].message."""
+    import server as srv
+
+    sent_bodies = []
+    sent_headers = []
+
+    class _FakeResp:
+        def __init__(self, body: dict):
+            self._raw = json.dumps(body).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1): return self._raw
+
+    def fake_open_url(req, timeout=30):
+        sent_bodies.append(json.loads(req.data.decode("utf-8")))
+        sent_headers.append(dict(req.header_items()))
+        return _FakeResp({
+            "id": "chatcmpl-si-1",
+            "object": "chat.completion",
+            "model": "qwen3.6:35b",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "synthesized answer"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 5},
+        })
+
+    monkeypatch.setattr(srv.OLLAMA_POOL, "open_url", fake_open_url)
+    monkeypatch.setattr(srv, "BASE", "http://127.0.0.1:11437")
+    monkeypatch.setattr(srv, "dispatch_provider", lambda provider, path, body, transport: transport())
+
+    out = srv._post(
+        "/v1/chat/completions",
+        {
+            "model": "qwen3.6:35b",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": False,
+            "options": {"temperature": 0.2, "num_predict": 64, "num_ctx": 8192},
+            "keep_alive": "2m",
+            "think": False,
+        },
+        local_only=True,
+    )
+    assert len(sent_bodies) == 1
+    wire = sent_bodies[0]
+    assert "options" not in wire
+    assert "keep_alive" not in wire
+    assert "think" not in wire
+    assert wire["max_tokens"] == 64
+    assert wire["temperature"] == 0.2
+    assert wire["chat_template_kwargs"] == {"enable_thinking": False}
+    assert out["message"]["content"] == "synthesized answer"
+    assert out["done_reason"] == "stop"
+
+    # Also verify _fanout_synthesis_generate handles an OpenAI choices[0].message answer from _post_model.
+    monkeypatch.setattr(
+        srv,
+        "_post_model",
+        lambda path, payload, **kwargs: (
+            {
+                "id": "chatcmpl-fanout",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "merged fanout"}, "finish_reason": "stop"}],
+            },
+            1,
+        ),
+    )
+    synth = srv._fanout_synthesis_generate(
+        "qwen3.6:35b",
+        json.dumps({"question": "q", "sources": [{"model": "a", "answer": "x"}]}),
+    )
+    assert "merged fanout" in synth
+
 
 def test_prefix_cache_probe_uses_si_chat_completions():
     path, _body = prewarm_request("qwen3.6:35b", "2m", lambda: ("sys", {}))
