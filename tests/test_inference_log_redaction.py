@@ -189,7 +189,7 @@ def test_open_url_does_not_log_credentials(caplog):
 
 def test_vision_analyze_does_not_log_credentials(caplog, monkeypatch):
     caplog.set_level(logging.DEBUG)
-    monkeypatch.setattr(ollama_vision.ollama_endpoint, "normalize", lambda: CRED_URL)
+    monkeypatch.setattr(ollama_vision.ollama_endpoint, "normalize", lambda *_a: CRED_URL)
     monkeypatch.setattr(ollama_vision.ollama_endpoint, "is_loopback", lambda value: True)
     gateway = ollama_vision.OllamaVisionGateway(
         target_resolver=lambda tier, strict: ModelTarget("llava-local", False, "vision"),
@@ -212,8 +212,8 @@ def test_vision_post_failure_does_not_log_credentials(caplog, monkeypatch):
     monkeypatch.setattr(ollama_vision.gpu_admission, "process_service", boom)
     with pytest.raises(DependencyUnavailable):
         ollama_vision.OllamaVisionGateway._post(CRED_URL, {}, 1.0)
-    _assert_emitted(caplog, "Ollama vision request failed")
-    _assert_emitted(caplog, "Ollama vision inference request failed")
+    _assert_emitted(caplog, "Sonder Inference vision request failed")
+    _assert_emitted(caplog, "Sonder Inference vision inference request failed")
     _assert_clean(caplog)
 
 
@@ -306,7 +306,7 @@ class _FakeAdmissionTransport:
 
     def __call__(self, request, timeout=None, **_kwargs):
         self.urls.append(request.full_url)
-        if request.get_method() == "POST" and request.full_url.endswith("/api/chat"):
+        if request.get_method() == "POST" and request.full_url.endswith(("/api/chat", "/v1/chat/completions")):
             return io.BytesIO(json.dumps({"message": {"content": "ok"}}).encode("utf-8"))
         raise urllib.error.URLError("control plane down: " + request.full_url)
 
@@ -329,10 +329,10 @@ def test_vision_post_through_real_admission_does_not_log_credentials(
     monkeypatch.setattr(ollama_endpoint, "open_url", fake)
     payload = {"model": "llava-local", "messages": [], "options": {"num_ctx": 4096}}
     data = ollama_vision.OllamaVisionGateway._post(
-        "http://user:s3cret@127.0.0.1:11434/api/chat", payload, 5.0
+        "http://user:s3cret@127.0.0.1:11437/v1/chat/completions", payload, 5.0
     )
     assert data == {"message": {"content": "ok"}}
-    assert any(url.endswith("/api/ps") for url in fake.urls), "admission never read /api/ps"
+    assert any(url.endswith("/v1/sonder/health") for url in fake.urls), "admission never read /v1/sonder/health"
     _assert_emitted(caplog, "gpu admission could not read")
     _assert_clean(caplog)
 
@@ -352,7 +352,7 @@ def test_admission_drops_userinfo_for_every_caller(caplog, monkeypatch, tmp_path
     fake = _FakeAdmissionTransport()
     monkeypatch.setattr(ollama_endpoint, "open_url", fake)
     payload = {"model": "llava-local", "messages": [], "options": {"num_ctx": 4096}}
-    with service.admit("/api/chat", payload, origin="http://user:s3cret@127.0.0.1:11434"):
+    with service.admit("/v1/chat/completions", payload, origin="http://user:s3cret@127.0.0.1:11437"):
         pass
     assert fake.urls, "admission never read the control plane"
     assert all(SECRET not in url for url in fake.urls), fake.urls
@@ -590,7 +590,7 @@ def test_show_modelfile_failure_logs_no_credentials_and_no_traceback(
     service = _enforcing_service(tmp_path)
     monkeypatch.setattr(ollama_endpoint, "open_url", _FakeAdmissionTransport())
     assert service._show_modelfile(CRED_ORIGIN, "llava-local") is None
-    _assert_no_traceback(caplog, "gpu admission could not read /api/show")
+    _assert_no_traceback(caplog, "gpu admission could not read /v1/models")
     _assert_clean(caplog)
 
 
@@ -633,7 +633,7 @@ def test_vision_post_malformed_url_leaks_nothing(caplog, url):
     with pytest.raises(DependencyUnavailable) as caught:
         ollama_vision.OllamaVisionGateway._post(url, {"model": "m"}, 1.0)
     assert SECRET not in _chain_text(caught.value)
-    _assert_no_traceback(caplog, "Ollama vision request failed")
+    _assert_no_traceback(caplog, "Sonder Inference vision request failed")
     _assert_clean(caplog)
 
 

@@ -47,39 +47,45 @@ def test_default_capability_prober_reads_ps_and_caches_show_by_digest():
     show_calls: list[tuple[str, str]] = []
     digest = "sha256:aaa111"
 
-    def fake_open_url(request, **_kwargs):
+    def fake_open_url(request, **kwargs):
         url = request.full_url
-        if url.endswith("/api/version"):
-            return _json_response({"version": "0.12.6"})
-        if url.endswith("/api/tags"):
+        if url.endswith("/v1/sonder/health"):
             return _json_response({
-                "models": [
-                    {"name": MOE, "digest": digest, "details": {"parameter_size": "35B"}},
-                ]
-            })
-        if url.endswith("/api/ps"):
-            return _json_response({
+                "version": "0.12.6",
                 "models": [
                     {
+                        "id": MOE,
                         "name": MOE,
                         "size": 21_000_000_000,
                         "size_vram": 21_000_000_000,
                         "context_length": 32768,
                     }
-                ]
+                ],
             })
-        if url.endswith("/api/show"):
-            body = json.loads(request.data.decode("utf-8"))
-            show_calls.append((url, body["model"]))
+        if url.endswith("/v1/models"):
+            is_show = float(kwargs.get("timeout", 0.0) or 0.0) >= 5.0
+            if not is_show:
+                return _json_response({
+                    "object": "list",
+                    "data": [
+                        {"id": MOE, "name": MOE, "digest": digest, "details": {"parameter_size": "35B"}},
+                    ],
+                })
+            show_calls.append((url, MOE))
             return _json_response({
-                "parameters": "num_ctx 32768\ntemperature 0.6",
-                "details": {"parameter_size": "35B"},
-                "model_info": {
-                    "moe.context_length": 262144,
-                    "moe.expert_count": 256,
-                    "moe.expert_used_count": 8,
-                },
-                "capabilities": ["completion", "tools", "thinking"],
+                "object": "list",
+                "data": [{
+                    "id": MOE,
+                    "name": MOE,
+                    "parameters": "num_ctx 32768\ntemperature 0.6",
+                    "details": {"parameter_size": "35B"},
+                    "model_info": {
+                        "moe.context_length": 262144,
+                        "moe.expert_count": 256,
+                        "moe.expert_used_count": 8,
+                    },
+                    "capabilities": ["completion", "tools", "thinking"],
+                }],
             })
         raise AssertionError(f"unexpected URL {url}")
 
@@ -121,12 +127,12 @@ def test_default_capability_prober_reads_ps_and_caches_show_by_digest():
 
 
 def test_default_capability_prober_degrades_gracefully_when_ps_and_show_fail():
-    def fake_open_url(request, **_kwargs):
+    def fake_open_url(request, **kwargs):
         url = request.full_url
-        if url.endswith("/api/version"):
+        if url.endswith("/v1/sonder/health"):
             return _json_response({"version": "0.39.0"})
-        if url.endswith("/api/tags"):
-            return _json_response({"models": [{"name": "llama3:8b"}]})
+        if url.endswith("/v1/models") and float(kwargs.get("timeout", 0.0) or 0.0) < 5.0:
+            return _json_response({"object": "list", "data": [{"id": "llama3:8b", "name": "llama3:8b"}]})
         raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
 
     probe = _default_capability_prober(allow_remote=False, open_url=fake_open_url)
@@ -141,19 +147,21 @@ def test_default_capability_prober_degrades_gracefully_when_ps_and_show_fail():
 
 def test_default_capability_prober_bounds_show_fetches_per_probe():
     names = [f"m{i}:latest" for i in range(ollama_pool._SHOW_FETCHES_PER_PROBE + 4)]
+    ordered = sorted(names)
     show_calls: list[str] = []
+    idx = [0]
 
-    def fake_open_url(request, **_kwargs):
+    def fake_open_url(request, **kwargs):
         url = request.full_url
-        if url.endswith("/api/version"):
-            return _json_response({"version": "0.12.6"})
-        if url.endswith("/api/tags"):
-            return _json_response({"models": [{"name": n, "digest": "sha256:" + n} for n in names]})
-        if url.endswith("/api/ps"):
-            return _json_response({"models": []})
-        if url.endswith("/api/show"):
-            show_calls.append(json.loads(request.data.decode("utf-8"))["model"])
-            return _json_response({"capabilities": ["completion", "tools"]})
+        if url.endswith("/v1/sonder/health"):
+            return _json_response({"version": "0.12.6", "models": []})
+        if url.endswith("/v1/models"):
+            if float(kwargs.get("timeout", 0.0) or 0.0) < 5.0:
+                return _json_response({"object": "list", "data": [{"id": n, "name": n, "digest": "sha256:" + n} for n in names]})
+            model = ordered[idx[0] % len(ordered)]
+            idx[0] += 1
+            show_calls.append(model)
+            return _json_response({"object": "list", "data": [{"id": model, "name": model, "capabilities": ["completion", "tools"]}]})
         raise AssertionError(url)
 
     probe = _default_capability_prober(allow_remote=True, open_url=fake_open_url)
@@ -210,7 +218,7 @@ def test_register_worker_connects_and_pools_a_remote_worker_dynamically():
     with pytest.raises(ValueError, match="https"):
         pool.register_worker("http://192.0.2.10:11434", allow_remote=True)
     # ... and needs remote consent.
-    with pytest.raises(ValueError, match="SONDER_ALLOW_REMOTE_OLLAMA"):
+    with pytest.raises(ValueError, match="SONDER_ALLOW_REMOTE"):
         pool.register_worker(WORKER_A)
     assert pool.origins == (PRIMARY,)
 
@@ -444,14 +452,14 @@ def test_residency_feedback_isolates_ceilings_by_origin():
     )
 
     record_dispatched_context(
-        "/api/chat",
+        "/v1/chat/completions",
         {"model": "qwen3.6:35b", "options": {"num_ctx": 16384}},
         lambda: feedback,
         lambda _m: False,
         origin=PRIMARY,
     )
     record_dispatched_context(
-        "/api/chat",
+        "/v1/chat/completions",
         {"model": "qwen3.6:35b", "options": {"num_ctx": 32768}},
         lambda: feedback,
         lambda _m: False,

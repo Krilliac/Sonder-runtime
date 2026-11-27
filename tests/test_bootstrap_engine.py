@@ -171,46 +171,23 @@ def test_remote_ollama_is_blocked_before_runtime_probe(monkeypatch):
 
 
 def test_ensure_ollama_running_splits_bind_and_client_environments(monkeypatch):
-    probes = []
+    # Under RET-05 local Ollama daemon startup is retired; ensure_ollama_running probes SI /v1/sonder/health and never spawns `ollama serve`.
     serves = []
-    results = iter([1, 0])
-    monkeypatch.setattr(bootstrap_engine, "_ollama_executable", lambda value="": "ollama-test")
-    monkeypatch.setattr(bootstrap_engine.time, "sleep", lambda seconds: None)
-
-    def fake_run(command, **kwargs):
-        probes.append(kwargs["env"])
-        return SimpleNamespace(
-            returncode=next(results), stdout="", stderr="",
-        )
-
-    monkeypatch.setattr(bootstrap_engine.subprocess, "run", fake_run)
     monkeypatch.setattr(
         bootstrap_engine.subprocess,
         "Popen",
         lambda command, **kwargs: serves.append(kwargs["env"]),
     )
-
-    ok, _ = bootstrap_engine.ensure_ollama_running(
-        "ollama-test", env={"OLLAMA_HOST": "0.0.0.0:11434"},
+    ok, message = bootstrap_engine.ensure_ollama_running(
+        "ollama-test", env={"SONDER_INFERENCE_BASE_URL": "http://127.0.0.1:1"},
     )
-
-    assert ok is True
-    assert all(
-        env["OLLAMA_HOST"] == "http://127.0.0.1:11434" for env in probes
-    )
-    assert serves[0]["OLLAMA_HOST"] == "0.0.0.0:11434"
+    assert ok is False
+    assert "sonder-infer" in message.lower() or "sonder inference" in message.lower()
+    assert serves == []
 
 
 def test_ensure_ollama_running_does_not_start_daemon_for_remote(monkeypatch):
     serves = []
-    monkeypatch.setattr(bootstrap_engine, "_ollama_executable", lambda value="": "ollama-test")
-    monkeypatch.setattr(
-        bootstrap_engine.subprocess,
-        "run",
-        lambda command, **kwargs: SimpleNamespace(
-            returncode=1, stdout="", stderr="offline",
-        ),
-    )
     monkeypatch.setattr(
         bootstrap_engine.subprocess,
         "Popen",
@@ -220,13 +197,13 @@ def test_ensure_ollama_running_does_not_start_daemon_for_remote(monkeypatch):
     ok, message = bootstrap_engine.ensure_ollama_running(
         "ollama-test",
         env={
-            "OLLAMA_HOST": "https://models.example.test:11434",
-            "SONDER_ALLOW_REMOTE_OLLAMA": "1",
+            "SONDER_INFERENCE_BASE_URL": "https://models.example.test:11437",
+            "SONDER_ALLOW_REMOTE_INFERENCE": "1",
         },
     )
 
     assert ok is False
-    assert "Remote Ollama is unavailable" in message
+    assert "sonder-infer" in message.lower() or "sonder inference" in message.lower()
     assert serves == []
 
 

@@ -458,14 +458,13 @@ def backup_check(config=None, *, max_age_hours: float = 48.0):
 
 
 def _bind_ollama_ca_bundle(config, ollama_endpoint) -> str | None:
-    """Bind ``[ollama].ca_bundle`` as runtime composition does; return any error.
-
-    Without it every doctor probe used the system trust store and reported a
-    healthy private-CA endpoint as "self-signed certificate".
-    """
+    """Bind ``[inference].ca_bundle`` / ``[ollama].ca_bundle`` as runtime composition does; return any error."""
+    bundle = (
+        getattr(getattr(config, "inference", None), "ca_bundle", None)
+        or getattr(getattr(config, "ollama", None), "ca_bundle", None)
+    )
     try:
-        ollama_endpoint.configure_typed_ca_bundle(
-            getattr(getattr(config, "ollama", None), "ca_bundle", None))
+        ollama_endpoint.configure_typed_ca_bundle(bundle)
     except ValueError as exc:
         return "[ollama].ca_bundle: %s" % exc
     return None
@@ -498,6 +497,9 @@ def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
     except Exception as exc:  # pragma: no cover - import guard
         return _skip("Sonder Inference transport unavailable (%s)" % exc)
     host = urlsplit(url).hostname or ""
+    bundle_error = _bind_ollama_ca_bundle(config, ollama_endpoint)
+    if bundle_error is not None and urlsplit(url).scheme == "https":
+        return {"status": STATUS_FAIL, "detail": "%s: %s" % (host, bundle_error)}
     health_url = url.rstrip("/") + "/v1/sonder/health"
     try:
         from sonder_runtime.adapters.inference.sonder_inference_gateway import (
@@ -508,7 +510,10 @@ def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
         if api_key:
             headers["Authorization"] = "Bearer " + api_key
         request = urllib.request.Request(health_url, headers=headers, method="GET")
-        allow_remote = getattr(getattr(config, "inference", None), "allow_remote", False) is True
+        allow_remote = (
+            getattr(getattr(config, "inference", None), "allow_remote", False) is True
+            or getattr(getattr(config, "ollama", None), "allow_remote", False) is True
+        )
         with ollama_endpoint.open_url(
             request, timeout=timeout, allow_remote=allow_remote,
         ) as response:
@@ -534,10 +539,57 @@ def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
 
 
 def _check_ollama_workers(*, timeout: float = 5.0, config=None) -> dict:
-    """Report Sonder Inference private worker readiness."""
+    """Report Sonder Inference private worker and static pool worker readiness."""
     cfg = config if config is not None else _load_config_or_none()
+    if cfg is None:
+        return _skip("config unavailable for Sonder Inference worker endpoints")
     if getattr(getattr(cfg, "membership", None), "mode", None) == "external":
         return _skip("deferred: external membership requires explicit typed pool refresh")
+    static_workers = tuple(getattr(getattr(cfg, "ollama", None), "workers", ()) or ())
+    if static_workers:
+        try:
+            import json
+            import urllib.error
+            import urllib.request
+            from urllib.parse import urlsplit
+            from sonder_runtime.adapters.inference import ollama_endpoint
+            from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+                resolve_api_key,
+            )
+        except Exception as exc:  # pragma: no cover - import guard
+            return _skip("Sonder Inference transport unavailable (%s)" % exc)
+        bundle_error = _bind_ollama_ca_bundle(cfg, ollama_endpoint)
+        allow_remote = (
+            getattr(getattr(cfg, "inference", None), "allow_remote", False) is True
+            or getattr(getattr(cfg, "ollama", None), "allow_remote", False) is True
+        )
+        headers: dict[str, str] = {}
+        api_key = resolve_api_key()
+        if api_key:
+            headers["Authorization"] = "Bearer " + api_key
+        up: list[str] = []
+        down: list[str] = []
+        for origin in static_workers:
+            host = urlsplit(origin).hostname or origin
+            if bundle_error is not None:
+                down.append("%s (%s)" % (host, bundle_error))
+                continue
+            try:
+                request = urllib.request.Request(
+                    origin.rstrip("/") + "/v1/sonder/health", headers=headers, method="GET",
+                )
+                with ollama_endpoint.open_url(
+                    request, timeout=timeout, allow_remote=allow_remote,
+                ) as response:
+                    if response.status != 200:
+                        down.append("%s (HTTP %s)" % (host, response.status))
+                        continue
+                    payload = json.loads(response.read(1_048_576).decode("utf-8"))
+                    models = len(payload.get("models") or []) if isinstance(payload, dict) else 0
+                    up.append("%s: %d models" % (host, models))
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                down.append("%s (%s)" % (host, exc))
+        return _summarize_worker_probe(up, down, len(static_workers))
     try:
         from sonder_runtime.adapters.inference.sonder_inference_gateway import (
             SonderInferenceGateway,
@@ -547,7 +599,7 @@ def _check_ollama_workers(*, timeout: float = 5.0, config=None) -> dict:
     except Exception as exc:
         return _skip("Sonder Inference worker status unavailable (%s)" % exc)
     if not workers:
-        return _skip("no SI private workers configured (single-endpoint deployment)")
+        return _skip("no worker endpoints configured (single-endpoint deployment)")
     up = [
         "%s (%s)" % (w.get("base_url") or "?", w.get("state") or "ready")
         for w in workers if isinstance(w, dict) and w.get("state") == "ready"

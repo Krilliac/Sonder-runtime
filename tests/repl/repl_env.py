@@ -26,7 +26,7 @@ def base_env(home, fake_url, **extra):
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(home),
         "SONDER_HOME": str(home),
-        "OLLAMA_HOST": fake_url,
+        "SONDER_INFERENCE_BASE_URL": fake_url,
         "SONDER_PORT": CLOSED_PORT,
         "PYTHONPATH": str(ROOT),
         "PYTHONDONTWRITEBYTECODE": "1",

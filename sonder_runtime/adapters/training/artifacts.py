@@ -320,9 +320,16 @@ def run_external(
 ) -> subprocess.CompletedProcess[Any]:
     """Run an external command; alias lifecycle commands route over SI LoRA HTTP, never local Ollama CLI."""
     if ollama_command:
+        try:
+            env_map = _client_environment(kwargs.get("env"))
+        except ValueError as exc:
+            return subprocess.CompletedProcess(
+                command, 125, stdout="", stderr=f"Sonder Inference endpoint blocked: {exc}",
+            )
         timeout = float(kwargs.get("timeout", 30.0) or 30.0)
+        resolved_origin = si_origin or env_map.get("SONDER_INFERENCE_BASE_URL")
         return _execute_si_lora_alias_command(
-            command, si_opener=si_opener, si_origin=si_origin, timeout=timeout,
+            command, si_opener=si_opener, si_origin=resolved_origin, timeout=timeout,
         )
     try:
         return runner(command, **kwargs)

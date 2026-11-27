@@ -377,9 +377,7 @@ def ollama_client_environment() -> dict[str, str]:
 
 def _si_origin() -> str:
     raw = os.environ.get("SONDER_INFERENCE_BASE_URL", "").strip()
-    if raw:
-        return (raw if "://" in raw else "http://" + raw).rstrip("/")
-    return "http://127.0.0.1:11437"
+    return ollama_endpoint.configured_origin(raw or None)
 
 
 def ollama_models() -> set[str] | None:
@@ -428,7 +426,7 @@ def ollama_ok() -> bool:
             return False
         payload = json.loads(raw.decode("utf-8"))
         state = str(payload.get("status") or payload.get("state") or "").strip().lower() if isinstance(payload, dict) else ""
-        return response.status == 200 and state == "ready"
+        return getattr(response, "status", 200) == 200 and state == "ready"
     except (OSError, TimeoutError, ValueError, urllib.error.URLError):
         return False
 

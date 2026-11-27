@@ -21,20 +21,27 @@ class _Resp(io.BytesIO):
 
 def _make_transport(names, show_handler, ps_models=()):
     show_calls: list[str] = []
+    ordered = sorted(names)
+    call_idx = [0]
 
-    def fake(request, **_kwargs):
+    def fake(request, **kwargs):
         url = request.full_url
-        if url.endswith("/api/version"):
-            return _Resp(b'{"version":"0.12.6"}')
-        if url.endswith("/api/tags"):
-            return _Resp(json.dumps({"models": [
-                {"name": n, "digest": "sha256:" + n} for n in names]}).encode())
-        if url.endswith("/api/ps"):
-            return _Resp(json.dumps({"models": list(ps_models)}).encode())
-        if url.endswith("/api/show"):
-            model = json.loads(request.data)["model"]
+        if url.endswith("/v1/sonder/health"):
+            return _Resp(json.dumps({"version": "0.12.6", "models": list(ps_models)}).encode())
+        if url.endswith("/v1/models"):
+            is_show = float(kwargs.get("timeout", 0.0) or 0.0) >= 5.0
+            if not is_show:
+                return _Resp(json.dumps({"object": "list", "data": [
+                    {"id": n, "name": n, "digest": "sha256:" + n} for n in names]}).encode())
+            idx = call_idx[0]
+            call_idx[0] += 1
+            model = ordered[idx % len(ordered)]
             show_calls.append(model)
-            return _Resp(json.dumps(show_handler(model)).encode())
+            meta = show_handler(model)
+            row = {"id": model, "name": model, "digest": "sha256:" + model}
+            if isinstance(meta, dict):
+                row.update(meta)
+            return _Resp(json.dumps({"object": "list", "data": [row]}).encode())
         raise AssertionError(url)
 
     return fake, show_calls

@@ -4,16 +4,17 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 import urllib.request
 
 from ...application.context import OperationContext
 from ...application.ports.model_target import ModelTargetResolver
 from ...application.ports.vision_gateway import VisionRequest, VisionResponse, require_vision_text
 from ...domain.common.errors import (
-    Cancelled, DeadlineExceeded, DependencyUnavailable, Forbidden,
+    Cancelled, Conflict, DeadlineExceeded, DependencyUnavailable, Forbidden,
 )
 from ..provider_bindings import provider_bindings_from_env
-from . import ollama_endpoint
+from . import gpu_admission, ollama_endpoint
 from .log_safe import redact_url, safe_origin, urlsplit_or_none
 
 logger = logging.getLogger(__name__)
@@ -153,6 +154,7 @@ class OllamaVisionGateway:
         limit = RESPONSE_BODY_LIMIT
         budget = timeout or _configured_request_timeout
         try:
+            origin, path = _admission_target(url)
             headers = {
                 "Content-Type": "application/json",
                 "X-Sonder-Local-Only": "1",
@@ -160,12 +162,16 @@ class OllamaVisionGateway:
             api_key = os.environ.get("SONDER_INFERENCE_API_KEY", "").strip()
             if api_key:
                 headers["Authorization"] = "Bearer " + api_key
-            request = urllib.request.Request(
-                url, data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-                headers=headers, method="POST",
-            )
-            with ollama_endpoint.open_url(request, timeout=budget) as response:
-                raw = _read_bounded(response, limit)
+            with gpu_admission.process_service().admit(
+                path, payload, origin=origin,
+                deadline=time.monotonic() + budget,
+            ) as ticket:
+                request = urllib.request.Request(
+                    url, data=json.dumps(ticket.payload, separators=(",", ":")).encode("utf-8"),
+                    headers=headers, method="POST",
+                )
+                with ollama_endpoint.open_url(request, timeout=budget) as response:
+                    raw = _read_bounded(response, limit)
             if len(raw) > limit:
                 raise DependencyUnavailable(
                     "Sonder Inference vision response exceeds %d bytes" % limit
@@ -173,6 +179,8 @@ class OllamaVisionGateway:
             return json.loads(raw.decode("utf-8"))
         except DependencyUnavailable:
             raise
+        except gpu_admission.GpuAdmissionRefused as refused:
+            raise Conflict(refused.detail) from refused
         except Exception as exc:  # noqa: BLE001 - sanitize transport errors before raising
             logger.warning(
                 f"Sonder Inference vision request failed: url={redact_url(url)!r}, "

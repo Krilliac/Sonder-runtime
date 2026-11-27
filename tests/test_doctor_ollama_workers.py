@@ -173,6 +173,7 @@ def test_primary_probe_uses_the_configured_ca_bundle(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ollama_endpoint.ssl, "create_default_context", context)
     config = _config(())
+    config.inference = types.SimpleNamespace(url="https://pc2:443", allow_remote=True, ca_bundle=str(bundle))
     config.ollama.url = "https://pc2:443"
     config.ollama.ca_bundle = str(bundle)
 
@@ -187,6 +188,7 @@ def test_primary_probe_reports_an_invalid_ca_bundle(monkeypatch):
     monkeypatch.setattr(ollama_endpoint, "open_url",
                         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("probed")))
     config = _config(())
+    config.inference = types.SimpleNamespace(url="https://pc2:443", allow_remote=True, ca_bundle="relative/ca.pem")
     config.ollama.url = "https://pc2:443"
     config.ollama.ca_bundle = "relative/ca.pem"
 
