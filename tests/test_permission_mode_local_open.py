@@ -247,17 +247,24 @@ def test_local_open_post_may_return_from_plan_to_manual(monkeypatch, mode_sandbo
     assert pm.current_mode() == pm.MANUAL
 
 
-def test_authenticated_admin_may_still_raise_the_mode(monkeypatch, mode_sandbox):
+def test_authenticated_admin_cannot_raise_the_mode_over_http(monkeypatch, mode_sandbox):
+    """HTTP proves who is calling, not that a person is present: the raise is
+    refused for an authenticated administrator too, with the console remedy."""
     _api_key(monkeypatch)
     with _http_server(monkeypatch) as port:
         status, payload = _post_mode(port, "auto", {"Authorization": "Bearer " + API_KEY})
-        assert status == 200, payload
-        assert payload["mode"] == pm.AUTO
+        assert status == 403, payload
+        assert payload["error"]["code"] == ESCALATION_CODE
+        message = payload["error"]["message"]
+        assert "/mode auto" in message
+        assert "local-open" not in message and "SONDER_API_KEY" not in message
         # Without the key the same request is unauthenticated, not escalated.
         status, _payload = _post_mode(port, "manual")
         assert status == 401
-    assert pm.current_mode() == pm.AUTO
-    assert _saved_mode(mode_sandbox) == pm.AUTO
+        # Lowering still works for the authenticated administrator.
+        status, payload = _post_mode(port, "plan", {"Authorization": "Bearer " + API_KEY})
+        assert status == 200, payload
+    assert pm.current_mode() == pm.PLAN
 
 
 # --- end to end: the raise that made chat /run_code run host code -------------
@@ -287,8 +294,8 @@ def test_local_open_cannot_raise_then_run_code_through_chat(monkeypatch, mode_sa
     assert not mode_sandbox.exists()
 
 
-def test_admin_raise_still_lets_chat_run_code(monkeypatch, mode_sandbox):
-    """The attended raise keeps working end to end for an authenticated admin."""
+def test_admin_http_raise_cannot_run_code_through_chat(monkeypatch, mode_sandbox):
+    """An authenticated admin's HTTP raise is refused, so chat still refuses /run_code."""
     _api_key(monkeypatch)
     ran = []
 
@@ -301,11 +308,11 @@ def test_admin_raise_still_lets_chat_run_code(monkeypatch, mode_sandbox):
     auth = {"Authorization": "Bearer " + API_KEY}
     with _http_server(monkeypatch) as port:
         status, payload = _post_mode(port, "auto", auth)
-        assert status == 200, payload
+        assert status == 403, payload
         reply = _chat(port, "/run_code print(6*7)", auth)
-    assert len(ran) == 1, reply
-    assert "refused" not in reply
-    assert server.permission_mode_data()["mode"] == pm.AUTO
+    assert ran == [], reply
+    assert reply.startswith("refused /run_code:"), reply
+    assert server.permission_mode_data()["mode"] == pm.MANUAL
 
 
 # --- what the refusal tells the operator, and failing closed -----------------
@@ -349,12 +356,12 @@ def test_mode_applier_fails_closed_without_an_authenticated_context(mode_sandbox
 
 
 @pytest.mark.parametrize("mode", ["api-key", "account", "both", "either"])
-def test_mode_applier_keeps_the_attended_raise_for_authenticated_modes(mode_sandbox, mode):
+def test_mode_applier_refuses_the_raise_for_authenticated_modes_too(mode_sandbox, mode):
     from sonder_runtime.interfaces.http.facades import permission_mode_post
 
-    assert permission_mode_post.mode_applier(
-        ts.permission_policy, {"mode": mode}, "auto")() == pm.AUTO
-    assert pm.current_mode() == pm.AUTO
+    result = permission_mode_post.mode_applier(ts.permission_policy, {"mode": mode}, "auto")()
+    assert isinstance(result, pm.ModeEscalationRefused), result
+    assert pm.current_mode() == pm.MANUAL
 
 
 def test_unattended_refusal_does_not_send_callers_to_a_local_open_post(mode_sandbox):
@@ -363,5 +370,6 @@ def test_unattended_refusal_does_not_send_callers_to_a_local_open_post(mode_sand
     text = pm.unattended_escalation_refusal("auto")
     assert text.startswith("refused")
     assert "POST /v1/permission-mode" in text
-    assert "SONDER_API_KEY" in text and "SONDER_REQUIRE_ACCOUNT=1" in text
-    assert "local-open" in text
+    assert "/mode auto" in text
+    assert "SONDER_API_KEY" not in text and "SONDER_REQUIRE_ACCOUNT=1" not in text
+    assert "cannot raise the mode either" in text
