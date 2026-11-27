@@ -69,20 +69,8 @@ def test_training_alias_lifecycle_uses_si_namespace_and_lora_api_without_ollama_
     def forbidden_runner(*a, **k):
         raise AssertionError("subprocess runner must never be invoked for SI LoRA alias ops")
 
-    res_create = artifacts.run_external(
-        forbidden_runner,
-        [artifacts.ollama_executable(), "create", "sonder-personal:cand", "-f", str(modelfile)],
-        ollama_command=True,
-        si_opener=fake_open,
-        si_origin="http://127.0.0.1:11437",
-    )
-    assert res_create.returncode == 0
-    assert calls[0][0] == "POST"
-    assert calls[0][1].endswith("/v1/sonder/lora/aliases")
-    assert calls[0][2]["alias"] == "sonder-personal:cand"
-    assert calls[0][2]["base_model"] == "qwen2.5-coder:7b"
-    assert calls[0][2]["adapters"][0]["path"] == str(adapter)
-
+    # Verify `show` uses real SI /v1/sonder/identity, while mutating LoRA alias commands
+    # (create/cp/rm) fail closed with "not yet supported by Sonder-Inference" and ZERO HTTP calls.
     res_show = artifacts.run_external(
         forbidden_runner,
         [artifacts.ollama_executable(), "show", "sonder-personal:cand"],
@@ -91,18 +79,44 @@ def test_training_alias_lifecycle_uses_si_namespace_and_lora_api_without_ollama_
         si_origin="http://127.0.0.1:11437",
     )
     assert res_show.returncode == 0
+    assert len(calls) == 1
+    assert calls[0][0] == "GET"
+    assert "/v1/sonder/identity" in calls[0][1]
     assert artifacts.model_show_status(res_show, "sonder-personal:cand") == "exists"
     assert len(artifacts.show_identity(res_show)) == 64
+
+    def forbidden_http(*a, **k):
+        raise AssertionError("mutating LoRA alias op must never hit invented SI HTTP routes")
+
+    res_create = artifacts.run_external(
+        forbidden_runner,
+        [artifacts.ollama_executable(), "create", "sonder-personal:cand", "-f", str(modelfile)],
+        ollama_command=True,
+        si_opener=forbidden_http,
+        si_origin="http://127.0.0.1:11437",
+    )
+    assert res_create.returncode != 0
+    assert "not yet supported by Sonder-Inference" in res_create.stderr
+
+    res_cp = artifacts.run_external(
+        forbidden_runner,
+        [artifacts.ollama_executable(), "cp", "sonder-personal:cand", "sonder-personal:live"],
+        ollama_command=True,
+        si_opener=forbidden_http,
+        si_origin="http://127.0.0.1:11437",
+    )
+    assert res_cp.returncode != 0
+    assert "not yet supported by Sonder-Inference" in res_cp.stderr
 
     res_rm = artifacts.run_external(
         forbidden_runner,
         [artifacts.ollama_executable(), "rm", "sonder-personal:cand"],
         ollama_command=True,
-        si_opener=fake_open,
+        si_opener=forbidden_http,
         si_origin="http://127.0.0.1:11437",
     )
-    assert res_rm.returncode == 0
-    assert any(m == "DELETE" and "/v1/sonder/lora/aliases/" in u for m, u, _ in calls)
+    assert res_rm.returncode != 0
+    assert "not yet supported by Sonder-Inference" in res_rm.stderr
 
 
 def test_vision_gateway_sends_openai_image_url_to_si_chat_completions(monkeypatch):

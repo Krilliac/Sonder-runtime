@@ -271,34 +271,41 @@ def _execute_si_lora_alias_command(
         if not _valid_si_alias_name(alias):
             return subprocess.CompletedProcess(command, 2, stdout="", stderr="invalid SI alias name")
         try:
-            base_model, adapters = _parse_lora_modelfile(command[4])
+            _parse_lora_modelfile(command[4])
         except (OSError, ValueError) as exc:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr=str(exc))
-        code, text = _call(
-            "POST",
-            "/v1/sonder/lora/aliases",
-            {"alias": alias, "base_model": base_model, "adapters": adapters},
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr=f"LoRA alias 'create' for {alias!r} is not yet supported by Sonder-Inference",
         )
-        return subprocess.CompletedProcess(command, 0 if 200 <= code < 300 else 1, stdout=text, stderr="" if 200 <= code < 300 else text)
     if sub == "cp" and len(command) >= 4:
         if not _valid_si_alias_name(command[2]) or not _valid_si_alias_name(command[3]):
             return subprocess.CompletedProcess(command, 2, stdout="", stderr="invalid SI alias name")
-        code, text = _call(
-            "POST",
-            "/v1/sonder/lora/aliases/copy",
-            {"source": command[2], "target": command[3]},
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr=(
+                f"LoRA alias 'cp' ({command[2]!r} -> {command[3]!r}) "
+                "is not yet supported by Sonder-Inference"
+            ),
         )
-        return subprocess.CompletedProcess(command, 0 if 200 <= code < 300 else 1, stdout=text, stderr="" if 200 <= code < 300 else text)
     if sub == "rm" and len(command) >= 3:
         if not _valid_si_alias_name(command[2]):
             return subprocess.CompletedProcess(command, 2, stdout="", stderr="invalid SI alias name")
-        alias = urllib.parse.quote(command[2], safe="")
-        code, text = _call("DELETE", f"/v1/sonder/lora/aliases/{alias}")
-        if code == 404:
-            return subprocess.CompletedProcess(command, 1, stdout="", stderr=f"model '{command[2]}' not found")
-        return subprocess.CompletedProcess(command, 0 if 200 <= code < 300 else 1, stdout=text, stderr="" if 200 <= code < 300 else text)
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr=f"LoRA alias 'rm' for {command[2]!r} is not yet supported by Sonder-Inference",
+        )
     return subprocess.CompletedProcess(
-        command, 2, stdout="", stderr=f"unsupported SI LoRA alias subcommand: {sub!r}",
+        command,
+        2,
+        stdout="",
+        stderr=f"LoRA alias command {sub!r} is not yet supported by Sonder-Inference",
     )
 
 
