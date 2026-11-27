@@ -11,11 +11,18 @@ name: self-hosted
 # code the owner put there. Every job's `if:` admits a run only when the owner
 # triggered it (github.actor and github.triggering_actor, so a re-run by anyone
 # else is refused too) and it is either a manual dispatch or a same-repository
-# pull request that the owner opened. Fork PRs, bot PRs (Dependabot) and PRs from
-# any other account never reach these runners; they get only the hosted ci.yml
-# checks. Fork-PR workflow runs also need approval for all outside contributors
-# (repository Actions setting). Accepted residual risk: a compromised owner
-# account can run code here.
+# pull request that the owner opened. Bot PRs (Dependabot), bot pushes and PRs
+# from other accounts in this repository get only the hosted ci.yml checks.
+#
+# This `if:` is NOT a boundary against code that can edit .github/workflows/. A
+# run uses the workflow files at the event's commit, so a fork PR (or any app
+# with workflows write) can drop this condition or add its own `runs-on:
+# self-hosted` job. The only barrier against forks is the repository Actions
+# setting that requires approval for every outside contributor's run. Never
+# approve a fork's workflow run without reading every .github/workflows/ change
+# in it. Accepted residual risks: a compromised owner account; an owner-approved
+# fork run; and an owner action (push, update-branch, reopen, dispatch) on a
+# branch someone else has pushed to, which runs that branch's current code.
 # Every run installs into a fresh venv under RUNNER_TEMP and points
 # SONDER_HOME there, so no run touches the host's own Sonder state.
 
@@ -48,6 +55,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
           filter: blob:none
       # No setup-python on these runners: uv (pinned) provides CPython 3.14 from its
       # own cache, bootstrapped from the host's python3. A fresh venv per run.
@@ -135,6 +143,8 @@ jobs:
       SONDER_HOME: ${{ github.workspace }}\..\sonder-home-windows
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       # No setup-python: it cannot unpack Python on this host (the Store pwsh is not
       # readable by the runner and Windows PowerShell 5.1 Expand-Archive fails). Use the
       # host's Python 3.14 through the py launcher, with a fresh venv per run.
