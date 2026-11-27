@@ -471,46 +471,35 @@ $script:RpcAllowedSplitSpecTypes = @(
     'draft-simple', 'draft-eagle3', 'draft-mtp', 'draft-dflash', 'draft-dspark'
 )
 
-function ConvertTo-RpcIPv4UInt32([string]$Address) {
-    $ip = [System.Net.IPAddress]::Parse($Address)
-    $b = $ip.GetAddressBytes()
-    return ([uint32]$b[0] -shl 24) -bor ([uint32]$b[1] -shl 16) -bor ([uint32]$b[2] -shl 8) -bor [uint32]$b[3]
-}
-
-function Assert-RpcDedicatedLink([string]$LinkCidr, [string[]]$PeerHosts = @(), [int]$MinPrefixLength = 24) {
-    $text = ([string]$LinkCidr).Trim()
-    if (-not $text) {
-        throw 'SONDER_RPC_LINK_CIDR / -RpcLinkCidr must name a dedicated private IPv4 subnet (e.g. 10.77.0.0/30).'
+function Assert-RpcDedicatedLink(
+    [string]$LinkCidr = '',
+    [string[]]$PeerHosts = @(),
+    [int]$MinPrefixLength = 24,
+    $Link = $null
+) {
+    # Builds on FED-02's ConvertTo-RpcLinkNetwork and Assert-RpcAddressOnLink
+    # (which leave SONDER_RPC_LINK_CIDR optional with 0..32 prefixes on the base
+    # allowlist) and adds only the FED-05 cross-host split requirement:
+    # non-empty dedicated link with prefix length >= $MinPrefixLength (default /24).
+    $resolvedLink = if ($null -ne $Link) { $Link } else { ConvertTo-RpcLinkNetwork $LinkCidr }
+    if ($null -eq $resolvedLink) {
+        throw 'SONDER_RPC_LINK_CIDR / -RpcLinkCidr must name a dedicated private IPv4 subnet (e.g. 10.77.0.0/30) before enabling a cross-host RPC split.'
     }
-    if ($text -notmatch '^([^/]+)/([0-9]{1,2})$') {
-        throw "Invalid dedicated RPC link CIDR '$LinkCidr': expected IPv4/prefix (e.g. 10.77.0.0/30)."
-    }
-    $netText = ConvertTo-RpcPrivateIPv4 -Address $Matches[1] -Label 'RPC link network'
-    $prefix = [int]$Matches[2]
+    $parts = ([string]$resolvedLink.Text).Split('/')
+    $netText = $parts[0]
+    $prefix = [int]$parts[1]
     if ($prefix -lt $MinPrefixLength -or $prefix -gt 32) {
-        throw "Dedicated RPC link CIDR '$text' (/$prefix) must have prefix length in $MinPrefixLength..32 (e.g. /30)."
-    }
-    $mask = if ($prefix -eq 0) {
-        [uint32]0
-    }
-    else {
-        [uint32](([uint64]4294967295 -shl (32 - $prefix)) -band [uint64]4294967295)
-    }
-    $netInt = ConvertTo-RpcIPv4UInt32 $netText
-    if (($netInt -band $mask) -ne $netInt) {
-        throw "Dedicated RPC link CIDR '$text' has host bits set."
+        throw "Dedicated RPC link CIDR '$($resolvedLink.Text)' (/$prefix) must have prefix length in $MinPrefixLength..32 (e.g. /30)."
     }
     foreach ($peerHost in $PeerHosts) {
         $cleanPeer = ConvertTo-RpcPrivateIPv4 -Address $peerHost -Label 'RPC peer host'
-        $peerInt = ConvertTo-RpcIPv4UInt32 $cleanPeer
-        if (($peerInt -band $mask) -ne $netInt) {
-            throw "RPC peer host $cleanPeer is not on the configured dedicated private link $netText/$prefix."
-        }
+        $null = Assert-RpcAddressOnLink -Address $cleanPeer -Link $resolvedLink -Label 'RPC peer host'
     }
     return [pscustomobject]@{
-        Cidr         = "$netText/$prefix"
+        Cidr         = $resolvedLink.Text
         Network      = $netText
         PrefixLength = $prefix
+        Link         = $resolvedLink
     }
 }
 

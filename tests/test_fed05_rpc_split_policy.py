@@ -13,6 +13,7 @@ from sonder_runtime.adapters.inference.rpc_cluster import (
     RpcClusterConfigError,
     RpcPeerEndpoint,
     ShardedLlamaServerConfig,
+    rpc_sharding_settings_from_env,
 )
 from sonder_runtime.adapters.inference.rpc_split_policy import (
     DEFAULT_MAX_RTT_MS,
@@ -35,14 +36,19 @@ from sonder_runtime.domain.routing.rpc_split_policy import (
     MIN_DEDICATED_LINK_PREFIXLEN,
     SplitLoadLogVerdict,
     is_rpc_device_name,
-    validate_dedicated_link_cidr,
+    validate_dedicated_link_prefix,
     validate_split_device_order,
     validate_split_mode,
     validate_split_spec_type,
     validate_split_tensor_weights,
     verify_split_load_log,
 )
-from sonder_runtime.platform.rpc_sharding_config import RpcShardingConfigError
+from sonder_runtime.platform.rpc_sharding_config import (
+    RPC_LINK_CIDR_ENV,
+    RpcShardingConfigError,
+    parse_link_network,
+    rpc_peer_allowlist,
+)
 
 LINK_CIDR = "10.77.0.0/30"
 WORKER_ON_LINK = "10.77.0.2"
@@ -159,20 +165,92 @@ def test_speculative_decoding_required_on_cross_host_split() -> None:
             validate_split_spec_type(bad)
 
 
-# -- 4. Pure domain policy: dedicated link CIDR ------------------------------
+# -- 4. FED-02 + FED-05 dedicated link reconciliation (unset, /16, /24, /30) -
 
 
-def test_dedicated_link_cidr_requires_private_narrow_subnet() -> None:
+def test_dedicated_link_cidr_builds_on_fed02_and_reconciles_prefixes() -> None:
+    assert ENV_RPC_LINK_CIDR is RPC_LINK_CIDR_ENV
     assert MIN_DEDICATED_LINK_PREFIXLEN == 24
-    net = validate_dedicated_link_cidr(LINK_CIDR)
-    assert net == ipaddress.IPv4Network("10.77.0.0/30")
-    assert validate_dedicated_link_cidr("169.254.77.0/30") == ipaddress.IPv4Network("169.254.77.0/30")
-    assert validate_dedicated_link_cidr("192.168.99.0/24") == ipaddress.IPv4Network("192.168.99.0/24")
 
-    # Empty, public, IPv6, or overly broad shared subnet (/8, /16) are refused.
-    for bad in ("", "203.0.113.0/30", "10.0.0.0/8", "192.168.0.0/16", "fd00::/64", "10.77.0.1/30"):
-        with pytest.raises(ValueError):
-            validate_dedicated_link_cidr(bad)
+    # FED-02 base allowlist accepts unset, /16, /24, /30 (no restriction when unset, 0..32 allowed).
+    assert parse_link_network(None) is None
+    assert parse_link_network("") is None
+    net16 = parse_link_network("10.77.0.0/16")
+    net24 = parse_link_network("10.77.0.0/24")
+    net30 = parse_link_network(LINK_CIDR)
+    assert net16 == ipaddress.IPv4Network("10.77.0.0/16")
+    assert net24 == ipaddress.IPv4Network("10.77.0.0/24")
+    assert net30 == ipaddress.IPv4Network("10.77.0.0/30")
+    for raw_cidr in ("", "10.77.0.0/16", "10.77.0.0/24", LINK_CIDR):
+        allowlist = rpc_peer_allowlist({"SONDER_RPC_PEERS": WORKER_ON_LINK, RPC_LINK_CIDR_ENV: raw_cidr})
+        assert allowlist.active is True
+
+    # FED-05 pure prefix policy requires non-None and >= /24.
+    assert validate_dedicated_link_prefix(net24) == net24
+    assert validate_dedicated_link_prefix(net30) == net30
+    with pytest.raises(ValueError, match="configured"):
+        validate_dedicated_link_prefix(None)
+    with pytest.raises(ValueError, match="/24"):
+        validate_dedicated_link_prefix(net16)
+    with pytest.raises(ValueError, match="/24"):
+        validate_dedicated_link_prefix(ipaddress.IPv4Network("10.0.0.0/8"))
+
+    # FED-05 cross-host split gate (via env AND via FED-02 RpcShardingSettings.link_network):
+    # refuses unset and /16; accepts /24 and /30.
+    cfg = ShardedLlamaServerConfig(
+        model_path="model.gguf",
+        rpc_peers=(RpcPeerEndpoint(WORKER_ON_LINK),),
+        tensor_split="1,1",
+        devices=("RPC0", "CUDA0"),
+    )
+    for bad_cidr in ("", "10.77.0.0/16"):
+        base_env = {
+            "SONDER_RPC_PEERS": WORKER_ON_LINK,
+            "SONDER_OPENAI_BASE_URL": "http://127.0.0.1:11438",
+            RPC_LINK_CIDR_ENV: bad_cidr,
+        }
+        settings = rpc_sharding_settings_from_env(base_env)
+        assert settings is not None
+        conn, clk = _fake_clock_connector([0.15, 0.18, 0.20])
+        with pytest.raises(RpcShardingConfigError):
+            require_cross_host_split_policy(
+                cfg,
+                env=base_env,
+                policy=CrossHostSplitPolicy(rtt_samples=3),
+                connect_fn=conn,
+                clock=clk,
+            )
+        conn2, clk2 = _fake_clock_connector([0.15, 0.18, 0.20])
+        with pytest.raises(RpcShardingConfigError):
+            require_cross_host_split_policy(
+                cfg,
+                env={},
+                settings=settings,
+                policy=CrossHostSplitPolicy(rtt_samples=3),
+                connect_fn=conn2,
+                clock=clk2,
+            )
+
+    for good_cidr in ("10.77.0.0/24", LINK_CIDR):
+        base_env = {
+            "SONDER_RPC_PEERS": WORKER_ON_LINK,
+            "SONDER_OPENAI_BASE_URL": "http://127.0.0.1:11438",
+            RPC_LINK_CIDR_ENV: good_cidr,
+        }
+        settings = rpc_sharding_settings_from_env(base_env)
+        assert settings is not None
+        assert settings.link_network == ipaddress.IPv4Network(good_cidr)
+        conn, clk = _fake_clock_connector([0.15, 0.18, 0.20])
+        report = require_cross_host_split_policy(
+            cfg,
+            env={},
+            settings=settings,
+            policy=CrossHostSplitPolicy(rtt_samples=3),
+            connect_fn=conn,
+            clock=clk,
+        )
+        assert report.ok is True
+        assert report.link_network == ipaddress.IPv4Network(good_cidr)
 
 
 # -- 5. ShardedLlamaServerConfig enforces FED-05 flags & blocks bypass -------
@@ -342,12 +420,14 @@ def test_powershell_rpc_split_policy_helpers(shell: str, tmp_path: Path) -> None
     assert res.returncode == 0, res.stderr
     assert "OK:10.77.0.0/30:layer:ngram-mod" in res.stdout
 
-    # Refuses -sm tensor, -SpecType none, trailing 0 weight, broad /8 CIDR, bad MaxRttMs.
+    # Refuses -sm tensor, -SpecType none, trailing 0 weight, unset or broad /16 /8 CIDR, bad MaxRttMs.
     for bad_line in (
         "Assert-RpcSplitPolicy -SplitMode 'tensor' -SpecType 'ngram-mod' -TensorSplit '1,1' -PeerCount 1",
         "Assert-RpcSplitPolicy -SplitMode 'row' -SpecType 'ngram-mod' -TensorSplit '1,1' -PeerCount 1",
         "Assert-RpcSplitPolicy -SplitMode 'layer' -SpecType 'none' -TensorSplit '1,1' -PeerCount 1",
         "Assert-RpcSplitPolicy -SplitMode 'layer' -SpecType 'ngram-mod' -TensorSplit '1,0' -PeerCount 1",
+        "Assert-RpcDedicatedLink -LinkCidr '' -PeerHosts @('10.77.0.2')",
+        "Assert-RpcDedicatedLink -LinkCidr '10.77.0.0/16' -PeerHosts @('10.77.0.2')",
         "Assert-RpcDedicatedLink -LinkCidr '10.0.0.0/8' -PeerHosts @('10.77.0.2')",
         "Assert-RpcDedicatedLink -LinkCidr '10.77.0.0/30' -PeerHosts @('192.168.50.20')",
         "ConvertTo-RpcMaxRttMs '0'",
@@ -424,31 +504,67 @@ def test_powershell_measure_rpc_peer_rtt_and_sharded_start_requires_link_cidr(
         srv.close()
         thread.join(timeout=2)
 
-    # 2. start-rpc-sharded.ps1 -Action Start fails closed when SONDER_RPC_LINK_CIDR / -RpcLinkCidr is unset!
+    # 2. FED-02 vs FED-05 CIDR matrix on start-rpc-sharded.ps1:
+    #    -Action Env (base allowlist) accepts unset, /16, /24, /30.
+    #    -Action Start (cross-host split) refuses unset and /16, and passes the link check for /24 and /30.
+    import os
     fake_install = tmp_path / "llama-rpc"
     fake_install.mkdir()
     (fake_install / "llama-server.exe").write_bytes(b"")
     fake_model = tmp_path / "model.gguf"
     fake_model.write_bytes(b"GGUF")
-    env = {"SONDER_RPC_PEERS": WORKER_ON_LINK, "SONDER_RPC_LINK_CIDR": "", "SONDER_RPC_MAX_RTT_MS": ""}
-    import os
-    merged_env = dict(os.environ)
-    merged_env.update(env)
-    start_res = subprocess.run(
-        [
-            shell, "-NoProfile", "-File", str(SHARDED_PS1),
-            "-Action", "Start",
-            "-RpcPeers", WORKER_ON_LINK,
-            "-ModelPath", str(fake_model),
-            "-InstallDir", str(fake_install),
-        ],
-        capture_output=True, text=True, timeout=60, env=merged_env,
+    for cidr in ("", "10.77.0.0/16", "10.77.0.0/24", LINK_CIDR):
+        env_map = dict(os.environ)
+        env_map["LOCALAPPDATA"] = str(tmp_path / "localappdata")
+        env_map.update({
+            "SONDER_RPC_PEERS": WORKER_ON_LINK,
+            "SONDER_RPC_LINK_CIDR": cidr,
+            "SONDER_RPC_MAX_RTT_MS": "",
+        })
+        env_res = subprocess.run(
+            [shell, "-NoProfile", "-File", str(SHARDED_PS1), "-Action", "Env", "-RpcPeers", WORKER_ON_LINK],
+            capture_output=True, text=True, timeout=60, env=env_map,
+        )
+        assert env_res.returncode == 0, f"Env should accept cidr={cidr!r}: {env_res.stderr}"
+
+    # Start refuses unset CIDR and /16 CIDR fail-closed.
+    for bad_cidr, expected_marker in (("", "SONDER_RPC_LINK_CIDR"), ("10.77.0.0/16", "24..32")):
+        bad_env = dict(os.environ)
+        bad_env["LOCALAPPDATA"] = str(tmp_path / "localappdata")
+        bad_env.update({
+            "SONDER_RPC_PEERS": WORKER_ON_LINK,
+            "SONDER_RPC_LINK_CIDR": bad_cidr,
+            "SONDER_RPC_MAX_RTT_MS": "",
+        })
+        start_res = subprocess.run(
+            [
+                shell, "-NoProfile", "-File", str(SHARDED_PS1),
+                "-Action", "Start",
+                "-RpcPeers", WORKER_ON_LINK,
+                "-ModelPath", str(fake_model),
+                "-InstallDir", str(fake_install),
+            ],
+            capture_output=True, text=True, timeout=60, env=bad_env,
+        )
+        assert start_res.returncode != 0, f"Start must refuse cidr={bad_cidr!r}"
+        assert expected_marker in (start_res.stderr + start_res.stdout)
+
+    # Assert-RpcDedicatedLink accepts /24 and /30 using FED-02's ConvertTo-RpcLinkNetwork object.
+    link_ok = tmp_path / "link_ok.ps1"
+    link_ok.write_text(
+        f". '{POLICY_PS1}'\n$ErrorActionPreference = 'Stop'\n"
+        "$l24 = Assert-RpcDedicatedLink -Link (ConvertTo-RpcLinkNetwork '10.77.0.0/24') -PeerHosts @('10.77.0.2')\n"
+        "$l30 = Assert-RpcDedicatedLink -Link (ConvertTo-RpcLinkNetwork '10.77.0.0/30') -PeerHosts @('10.77.0.2')\n"
+        "Write-Output \"LINKS:$($l24.Cidr):$($l30.Cidr)\"\n",
+        encoding="utf-8-sig",
     )
-    assert start_res.returncode != 0
-    assert "SONDER_RPC_LINK_CIDR" in (start_res.stderr + start_res.stdout)
+    link_res = subprocess.run([shell, "-NoProfile", "-File", str(link_ok)], capture_output=True, text=True, timeout=60)
+    assert link_res.returncode == 0, link_res.stderr
+    assert "LINKS:10.77.0.0/24:10.77.0.0/30" in link_res.stdout
 
     # 3. start-rpc-sharded.ps1 -Action Start reads SONDER_RPC_MAX_RTT_MS and fails closed on invalid values!
     bad_rtt_env = dict(os.environ)
+    bad_rtt_env["LOCALAPPDATA"] = str(tmp_path / "localappdata")
     bad_rtt_env.update({
         "SONDER_RPC_PEERS": WORKER_ON_LINK,
         "SONDER_RPC_LINK_CIDR": LINK_CIDR,
@@ -468,11 +584,16 @@ def test_powershell_measure_rpc_peer_rtt_and_sharded_start_requires_link_cidr(
     assert "SONDER_RPC_MAX_RTT_MS" in (bad_rtt_res.stderr + bad_rtt_res.stdout)
 
 
-def test_start_rpc_sharded_script_wires_fed05_split_policy() -> None:
-    text = SHARDED_PS1.read_text(encoding="utf-8")
-    assert "'--split-mode'" in text
-    assert "'--spec-type'" in text
-    assert "Assert-RpcSplitPolicy" in text
-    assert "Measure-RpcPeerRtt" in text
-    assert "SONDER_RPC_MAX_RTT_MS" in text
-    assert "ConvertTo-RpcMaxRttMs" in text
+def test_start_rpc_sharded_script_wires_fed05_split_policy_on_fed02_interfaces() -> None:
+    sharded_text = SHARDED_PS1.read_text(encoding="utf-8")
+    policy_text = POLICY_PS1.read_text(encoding="utf-8")
+    assert "'--split-mode'" in sharded_text
+    assert "'--spec-type'" in sharded_text
+    assert "Assert-RpcSplitPolicy" in sharded_text
+    assert "Assert-RpcProtocolLockstep" in sharded_text
+    assert "Assert-RpcDedicatedLink -Link $rpcLink" in sharded_text
+    assert "Measure-RpcPeerRtt" in sharded_text
+    assert "SONDER_RPC_MAX_RTT_MS" in sharded_text
+    assert "ConvertTo-RpcMaxRttMs" in sharded_text
+    # No duplicated CIDR bit-math helper remains in rpc-policy.ps1.
+    assert "ConvertTo-RpcIPv4UInt32" not in policy_text

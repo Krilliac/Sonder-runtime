@@ -1,19 +1,21 @@
 """Cross-host RPC split policy enforcement and dedicated-link RTT probe (FED-05).
 
-Uses ``RpcPeerEndpoint`` and ``RpcShardingConfigError`` from the base RPC
-sharding modules together with the pure domain split-policy validators in
-:mod:`sonder_runtime.domain.routing.rpc_split_policy`, aligning its link-CIDR
-environment variable name (``SONDER_RPC_LINK_CIDR``) with FED-02 (PR #927).
-Direct delegation to FED-02's ``parse_link_network`` /
-``RpcShardingSettings.link_network`` is deferred until PR #927 merges onto
-``main``.
+Builds directly on FED-02's interfaces in
+:mod:`sonder_runtime.platform.rpc_sharding_config` (``RPC_LINK_CIDR_ENV``,
+``parse_link_network``, ``validate_host_on_link``) and
+:mod:`sonder_runtime.adapters.inference.rpc_cluster` (``RpcShardingSettings``,
+``RpcPeerEndpoint``), together with the pure domain validators in
+:mod:`sonder_runtime.domain.routing.rpc_split_policy`.
 
-Before a cross-host split starts:
+FED-02's base allowlist keeps ``SONDER_RPC_LINK_CIDR`` optional (unset = no
+link restriction, prefixes 0..32 inside private/link-local ranges). Before a
+cross-host split starts, FED-05 adds only the split-specific invariants on top:
 1. Confirms ``split_mode == 'layer'``, local output-head placement (device order
    and trailing positive ``tensor_split`` weight), and speculative decoding on.
-2. Requires a dedicated private/link-local IPv4 CIDR (``SONDER_RPC_LINK_CIDR``
-   or explicit ``link_network``) with prefix length >= /24 and verifies every
-   peer sits on that link.
+2. Requires ``SONDER_RPC_LINK_CIDR`` (via ``settings.link_network``, explicit
+   ``link_network``, or ``env``) parsed through FED-02's ``parse_link_network``,
+   pins prefix length >= /24 via ``validate_dedicated_link_prefix``, and checks
+   every peer through FED-02's ``validate_host_on_link``.
 3. Measures TCP connect RTT over the dedicated link for every peer (bounded
    samples via injectable connector/clock) and fails closed if any peer is
    unreachable or exceeds the configured RTT budget.
@@ -32,6 +34,7 @@ from typing import Any
 from sonder_runtime.adapters.inference.rpc_cluster import (
     DEFAULT_RPC_PORT,
     RpcPeerEndpoint,
+    RpcShardingSettings,
     ShardedLlamaServerConfig,
     TcpConnectProbe,
     _default_tcp_connect,
@@ -39,17 +42,21 @@ from sonder_runtime.adapters.inference.rpc_cluster import (
 from sonder_runtime.domain.routing.rpc_split_policy import (
     MIN_DEDICATED_LINK_PREFIXLEN,
     SplitLoadLogVerdict,
-    validate_dedicated_link_cidr,
+    validate_dedicated_link_prefix,
     validate_split_device_order,
     validate_split_mode,
     validate_split_spec_type,
     validate_split_tensor_weights,
     verify_split_load_log,
 )
-from sonder_runtime.platform.rpc_sharding_config import RpcShardingConfigError
+from sonder_runtime.platform.rpc_sharding_config import (
+    RPC_LINK_CIDR_ENV,
+    RpcShardingConfigError,
+    parse_link_network,
+    validate_host_on_link,
+)
 
-# Exact env variable name defined by FED-02 (PR #927) so both work seamlessly.
-ENV_RPC_LINK_CIDR = "SONDER_RPC_LINK_CIDR"
+ENV_RPC_LINK_CIDR = RPC_LINK_CIDR_ENV
 ENV_RPC_MAX_RTT_MS = "SONDER_RPC_MAX_RTT_MS"
 
 DEFAULT_MAX_RTT_MS = 2.0
@@ -214,32 +221,39 @@ class CrossHostSplitReport:
 def _resolve_link_network(
     *,
     link_network: ipaddress.IPv4Network | str | None,
+    settings: RpcShardingSettings | None,
     env: Mapping[str, str] | None,
     min_prefixlen: int,
     require_dedicated_link: bool,
 ) -> tuple[ipaddress.IPv4Network | None, list[str]]:
     errors: list[str] = []
-    raw_link: str | None = None
-    if isinstance(link_network, ipaddress.IPv4Network):
-        raw_link = str(link_network)
-    elif isinstance(link_network, str) and link_network.strip():
-        raw_link = link_network.strip()
-    else:
-        source: Mapping[str, str] = os.environ if env is None else env
-        env_val = str(source.get(ENV_RPC_LINK_CIDR, "") or "").strip()
-        if env_val:
-            raw_link = env_val
-    if raw_link is None:
-        if require_dedicated_link:
-            errors.append(
-                f"{ENV_RPC_LINK_CIDR} must be configured to a dedicated private subnet "
-                "(e.g. 10.77.0.0/30) before enabling a cross-host RPC split"
-            )
-        return None, errors
+    parsed: ipaddress.IPv4Network | None
     try:
-        return validate_dedicated_link_cidr(raw_link, min_prefixlen=min_prefixlen), errors
-    except ValueError as exc:
+        if isinstance(link_network, ipaddress.IPv4Network):
+            parsed = parse_link_network(str(link_network))
+        elif isinstance(link_network, str) and link_network.strip():
+            parsed = parse_link_network(link_network)
+        elif settings is not None and settings.link_network is not None:
+            parsed = parse_link_network(str(settings.link_network))
+        else:
+            source: Mapping[str, str] = os.environ if env is None else env
+            parsed = parse_link_network(source.get(RPC_LINK_CIDR_ENV))
+    except RpcShardingConfigError as exc:
         errors.append(str(exc))
+        return None, errors
+
+    if parsed is None:
+        if require_dedicated_link:
+            try:
+                validate_dedicated_link_prefix(None, min_prefixlen=min_prefixlen)
+            except ValueError as exc:
+                errors.append(f"{RPC_LINK_CIDR_ENV}: {exc}")
+        return None, errors
+
+    try:
+        return validate_dedicated_link_prefix(parsed, min_prefixlen=min_prefixlen), errors
+    except ValueError as exc:
+        errors.append(f"{RPC_LINK_CIDR_ENV}: {exc}")
         return None, errors
 
 
@@ -248,6 +262,7 @@ def check_cross_host_split_policy(
     *,
     env: Mapping[str, str] | None = None,
     link_network: ipaddress.IPv4Network | str | None = None,
+    settings: RpcShardingSettings | None = None,
     policy: CrossHostSplitPolicy | None = None,
     connect_fn: TcpConnectProbe | None = None,
     clock: Callable[[], float] | None = None,
@@ -294,6 +309,7 @@ def check_cross_host_split_policy(
 
     resolved_link, link_errors = _resolve_link_network(
         link_network=link_network,
+        settings=settings,
         env=source,
         min_prefixlen=active_policy.min_link_prefixlen,
         require_dedicated_link=active_policy.require_dedicated_link,
@@ -302,11 +318,10 @@ def check_cross_host_split_policy(
 
     rtts: list[RpcPeerRttMeasurement] = []
     for peer in config.rpc_peers:
-        if resolved_link is not None and ipaddress.IPv4Address(peer.host) not in resolved_link:
-            errors.append(
-                f"RPC peer {peer.address} is not on the configured dedicated private link "
-                f"{resolved_link} ({ENV_RPC_LINK_CIDR})"
-            )
+        try:
+            validate_host_on_link(peer.host, resolved_link, label="RPC peer host")
+        except RpcShardingConfigError as exc:
+            errors.append(str(exc))
             continue
         rtt = measure_rpc_peer_rtt(
             peer,
@@ -354,6 +369,7 @@ def require_cross_host_split_policy(
     *,
     env: Mapping[str, str] | None = None,
     link_network: ipaddress.IPv4Network | str | None = None,
+    settings: RpcShardingSettings | None = None,
     policy: CrossHostSplitPolicy | None = None,
     connect_fn: TcpConnectProbe | None = None,
     clock: Callable[[], float] | None = None,
@@ -364,6 +380,7 @@ def require_cross_host_split_policy(
         config,
         env=env,
         link_network=link_network,
+        settings=settings,
         policy=policy,
         connect_fn=connect_fn,
         clock=clock,

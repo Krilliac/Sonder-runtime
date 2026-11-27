@@ -53,12 +53,6 @@ ALLOWED_SPLIT_SPEC_TYPES: frozenset[str] = frozenset({
 })
 
 MIN_DEDICATED_LINK_PREFIXLEN = 24
-_PRIVATE_LINK_ROOTS: tuple[ipaddress.IPv4Network, ...] = (
-    ipaddress.IPv4Network("10.0.0.0/8"),
-    ipaddress.IPv4Network("172.16.0.0/12"),
-    ipaddress.IPv4Network("192.168.0.0/16"),
-    ipaddress.IPv4Network("169.254.0.0/16"),
-)
 
 _DEVICE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63}\Z")
 _USING_DEVICE_RE = re.compile(
@@ -200,28 +194,27 @@ def validate_split_tensor_weights(tensor_split: str, *, peer_count: int) -> str:
     return ",".join(parts)
 
 
-def validate_dedicated_link_cidr(
-    raw: str | None,
+def validate_dedicated_link_prefix(
+    network: ipaddress.IPv4Network | None,
     *,
     min_prefixlen: int = MIN_DEDICATED_LINK_PREFIXLEN,
 ) -> ipaddress.IPv4Network:
-    """Validate a dedicated private/link-local IPv4 CIDR (e.g. ``10.77.0.0/30``)."""
+    """Require a parsed dedicated link network with prefix length >= ``min_prefixlen`` (default /24).
+
+    CIDR parsing and RFC 1918 / link-local membership live in FED-02
+    (:func:`sonder_runtime.platform.rpc_sharding_config.parse_link_network`);
+    this pure domain predicate adds only the FED-05 requirement that cross-host
+    splits pin a dedicated subnet (``>= /24``, recommended ``/30``).
+    """
     if type(min_prefixlen) is not int or not (8 <= min_prefixlen <= 32):
         raise ValueError("min_prefixlen must be an integer in 8..32")
-    text = raw.strip() if isinstance(raw, str) else ""
-    if not text:
-        raise ValueError("dedicated RPC link CIDR must be configured (e.g. 10.77.0.0/30)")
-    try:
-        network = ipaddress.ip_network(text, strict=True)
-    except ValueError as exc:
-        raise ValueError(f"invalid dedicated RPC link CIDR {raw!r}: {exc}") from exc
-    if not isinstance(network, ipaddress.IPv4Network):
-        raise ValueError(f"dedicated RPC link CIDR must be IPv4, got {raw!r}")
-    if not any(network.subnet_of(root) for root in _PRIVATE_LINK_ROOTS):
+    if network is None:
         raise ValueError(
-            f"dedicated RPC link CIDR {network} is not inside a private (RFC 1918) "
-            "or link-local (169.254.0.0/16) IPv4 range"
+            "dedicated RPC link CIDR must be configured (e.g. 10.77.0.0/30) "
+            "before enabling a cross-host RPC split"
         )
+    if not isinstance(network, ipaddress.IPv4Network):
+        raise ValueError(f"dedicated RPC link CIDR must be IPv4, got {network!r}")
     if network.prefixlen < min_prefixlen:
         raise ValueError(
             f"dedicated RPC link CIDR {network} (/{network.prefixlen}) is broader than "
@@ -322,7 +315,7 @@ __all__ = [
     "MIN_DEDICATED_LINK_PREFIXLEN",
     "SplitLoadLogVerdict",
     "is_rpc_device_name",
-    "validate_dedicated_link_cidr",
+    "validate_dedicated_link_prefix",
     "validate_split_device_order",
     "validate_split_mode",
     "validate_split_spec_type",
