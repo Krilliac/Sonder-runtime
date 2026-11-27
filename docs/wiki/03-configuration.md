@@ -972,7 +972,11 @@ authorized root, and starts the tool with a PATH limited to those folders and
 `NoDefaultCurrentDirectoryInExePath=1`. A `.bat` or `.cmd` shim is refused
 (cmd.exe would resolve the commands it calls from the project folder; install
 the tool as a real executable). Prettier's shim is the exception because it runs
-from a temp folder with that same filtered environment. Known limit: a real
+from a temp folder with that same filtered environment. That environment also
+drops every `PYTHON*` variable and the Node and Dart VM options, sets
+`PYTHONNOUSERSITE=1` and `PYTHONSAFEPATH=1`, and pins `ComSpec` to the system
+`cmd.exe`, so a trusted Python console-script launcher cannot import a project
+`sitecustomize.py` through `PYTHONPATH`. Known limit: a real
 executable started in the project folder (gofmt, clang-format, dart) can still
 load a DLL placed there by the Windows loader's own search order; Sonder does
 not yet run those from a temp folder, because that would rewrite their output

@@ -343,6 +343,14 @@ def _run(cmd, *, cwd, timeout=DEFAULT_TIMEOUT, stdin_bytes=b"", env=None):
             "stdout": "", "stderr": "command not found: %s" % cmd[0],
             "command": [str(c) for c in cmd],
         }
+    except OSError as exc:
+        # e.g. WinError 216 for a .com file that is really batch text or a foreign binary.
+        return {
+            "ok": False, "returncode": -1, "timed_out": False,
+            "elapsed_ms": int((time.time() - started) * 1000),
+            "stdout": "", "stderr": "could not start %s: %s" % (cmd[0], exc),
+            "command": [str(c) for c in cmd],
+        }
     tree = (
         process_tree.ProcessTree.owning(proc)
         if process_tree.is_real_popen(proc) else None

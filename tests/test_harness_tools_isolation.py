@@ -682,6 +682,42 @@ def test_check_mode_environment_filters_path_and_pins_the_cwd_search_off(tmp_pat
     assert env["Keep"] == "1"
 
 
+def test_check_mode_environment_drops_interpreter_code_loading_variables(tmp_path):
+    # A trusted console-script launcher starts Python without -I, so PYTHONPATH
+    # would import a project sitecustomize.py (reproduced with a real launcher).
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    base = {
+        "PYTHONPATH": str(repo), "pythonhome": str(repo), "PYTHONSTARTUP": str(repo / "s.py"),
+        "PYTHONUSERBASE": str(repo), "PYTHONNOUSERSITE": "0", "PYTHONSAFEPATH": "",
+        "NODE_OPTIONS": "--require evil.js", "node_path": str(repo), "DART_VM_OPTIONS": "--x",
+        "ComSpec": str(repo / "cmd.exe"), "SystemRoot": r"C:\Windows", "Keep": "1",
+    }
+    env = formatter_config_guard.check_mode_environment(base, [repo])
+    upper = {key.upper(): value for key, value in env.items()}
+    for dropped in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
+                    "NODE_OPTIONS", "NODE_PATH", "DART_VM_OPTIONS"):
+        assert dropped not in upper
+    assert sum(1 for key in env if key.upper() == "PYTHONNOUSERSITE") == 1
+    assert upper["PYTHONNOUSERSITE"] == "1"
+    assert upper["PYTHONSAFEPATH"] == "1"
+    assert env["Keep"] == "1"
+    if os.name == "nt":
+        assert sum(1 for key in env if key.upper() == "COMSPEC") == 1
+        assert upper["COMSPEC"] == r"C:\Windows\System32\cmd.exe"
+
+
+def test_run_returns_an_error_when_the_os_cannot_start_the_program(tmp_path, monkeypatch):
+    def refuse(*_args, **_kwargs):
+        raise OSError(216, "not compatible")
+
+    monkeypatch.setattr(harness_tools.subprocess, "Popen", refuse)
+    monkeypatch.setattr(harness_tools, "_windows_executable", lambda cmd: list(cmd))
+    result = harness_tools._run([str(tmp_path / "gofmt.com")], cwd=tmp_path, timeout=5)
+    assert result["ok"] is False
+    assert "could not start" in result["stderr"]
+
+
 def test_check_mode_launches_get_the_filtered_environment(
         tmp_path, launches, not_live, trusted_dir, monkeypatch):
     repo = tmp_path / "repo"

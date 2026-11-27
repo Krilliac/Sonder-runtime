@@ -278,17 +278,38 @@ def check_mode_environment(base: Mapping[str, str], forbidden_roots: Sequence[Pa
     empty entries resolve against the child's folder), and
     ``NoDefaultCurrentDirectoryInExePath=1`` stops cmd.exe and the Windows
     loader's program search from consulting the current folder.
+
+    Variables that make an interpreter load code named by the environment are
+    dropped: every ``PYTHON*`` key (a trusted console-script launcher starts
+    its Python without ``-I``, so ``PYTHONPATH`` would import a project
+    ``sitecustomize.py``), plus Node and Dart VM options. User site is off and
+    safe-path is on for any Python child, and on Windows ``ComSpec`` is pinned
+    to the system ``cmd.exe``.
     """
     env: dict[str, str] = {}
     for key, value in base.items():
-        if key.upper() == "NODEFAULTCURRENTDIRECTORYINEXEPATH":
+        upper = key.upper()
+        if upper in _CHECK_MODE_DROPPED_KEYS or upper.startswith("PYTHON"):
             continue
-        if key.upper() == "PATH":
+        if upper == "PATH":
             value = os.pathsep.join(
                 entry for entry in value.split(os.pathsep) if not _entry_forbidden(entry, forbidden_roots))
         env[key] = value
     env["NoDefaultCurrentDirectoryInExePath"] = "1"
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PYTHONSAFEPATH"] = "1"
+    if os.name == "nt":
+        system_root = next(
+            (value for key, value in base.items() if key.upper() == "SYSTEMROOT"),
+            os.environ.get("SystemRoot") or r"C:\Windows")
+        env["ComSpec"] = str(Path(system_root) / "System32" / "cmd.exe")
     return env
+
+
+_CHECK_MODE_DROPPED_KEYS = frozenset({
+    "NODEFAULTCURRENTDIRECTORYINEXEPATH", "COMSPEC",
+    "NODE_OPTIONS", "NODE_PATH", "DART_VM_OPTIONS",
+})
 
 
 def python_formatter_command(tool: str, forbidden_roots: Sequence[Path]) -> tuple[list[str] | None, str | None]:
