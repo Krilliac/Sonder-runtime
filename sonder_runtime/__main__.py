@@ -1913,7 +1913,9 @@ def cmd_models(args) -> int:
 
     config = _load_config(args)
     _configure_typed_home(config)
-    return run_cloud_refresh(args, origin=config.ollama.url, home=config.state.home or None)
+    inf = getattr(config, "inference", None)
+    origin = getattr(inf, "url", "") or getattr(getattr(config, "ollama", None), "url", "")
+    return run_cloud_refresh(args, origin=origin, home=config.state.home or None)
 
 
 def build_parser() -> argparse.ArgumentParser:

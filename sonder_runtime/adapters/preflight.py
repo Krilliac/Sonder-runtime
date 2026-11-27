@@ -152,7 +152,7 @@ def _check_inference(config: SonderConfig, *, timeout: float = 5.0) -> CheckResu
         or os.environ.get("SONDER_INFERENCE_BASE_URL", "").strip()
         or "http://127.0.0.1:11437"
     )
-    allow_remote = bool(getattr(inf, "allow_remote", False))
+    allow_remote = getattr(inf, "allow_remote", False) is True
     return _check_inference_origin(
         url,
         name="inference",

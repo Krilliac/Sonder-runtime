@@ -19,7 +19,9 @@ import sonder_runtime.adapters.inference.ollama_endpoint as ollama_endpoint
 from sonder_runtime.domain.cloud_model_refresh import (
     ProbeResult,
     ProbeStatus,
+    is_cloud_stub_name,
     is_pulled_cloud_row,
+    parse_retirement,
     valid_model_name,
 )
 
@@ -115,10 +117,12 @@ class OllamaCloudMetadata:
         stubs: list[dict[str, Any]] = []
         rows, _outer = self._models_envelope(self._tags_timeout)
         for row in rows:
+            raw_sonder = row.get("sonder")
+            sonder_meta: dict[str, Any] = raw_sonder if isinstance(raw_sonder, dict) else {}
+            if row.get("error") or sonder_meta.get("error"):
+                continue
             if is_pulled_cloud_row(row):
                 name = str(row.get("id") or row.get("name") or row.get("model") or "")
-                raw_sonder = row.get("sonder")
-                sonder_meta: dict[str, Any] = raw_sonder if isinstance(raw_sonder, dict) else {}
                 backend = str(sonder_meta.get("backend") or "").strip().lower()
                 remote = bool(backend == "ollama_cloud" or row.get("remote_host"))
                 stubs.append({"name": name, "remote_host": remote})
@@ -142,6 +146,12 @@ class OllamaCloudMetadata:
             if row_id == model:
                 raw_sonder = row.get("sonder")
                 sonder_meta: dict[str, Any] = raw_sonder if isinstance(raw_sonder, dict) else {}
+                raw_error = row.get("error") or sonder_meta.get("error")
+                if isinstance(raw_error, str) and raw_error.strip():
+                    retired = parse_retirement(raw_error)
+                    if retired is not None:
+                        return ProbeResult(model, ProbeStatus.RETIRED, retired, detail="retired")
+                    return ProbeResult(model, ProbeStatus.ERROR, detail="upstream_error")
                 runtime_meta = sonder_meta.get("runtime")
                 profile_meta = sonder_meta.get("profile")
                 ctx: object = None
@@ -162,6 +172,8 @@ class OllamaCloudMetadata:
 
     def pull_stub(self, model: str) -> None:
         """Local Ollama ``:cloud`` stub pulls are retired; configure models in SI ``ollama_cloud``."""
+        if not isinstance(model, str) or not is_cloud_stub_name(model):
+            raise ValueError("not a cloud stub model name: %r" % (model,))
         raise OllamaPullFailed("cloud_stub_pull_retired_configure_in_si_ollama_cloud")
 
 

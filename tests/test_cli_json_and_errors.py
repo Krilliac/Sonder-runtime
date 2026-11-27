@@ -201,12 +201,12 @@ def test_smoke_json_emits_a_document(home, capsys):
 
 def test_smoke_json_reports_failures_in_the_document(home, capsys):
     capsys.readouterr()
-    rc = main(["smoke", "--json", "--set", "ollama.url=http://127.0.0.1:1",
+    rc = main(["smoke", "--json", "--set", "inference.url=http://127.0.0.1:1",
                "--set", "state.minimum_free_disk_bytes=0"])
     payload = json.loads(capsys.readouterr().out)
     assert rc == 1
     assert payload["ok"] is False
-    assert any(item.startswith("preflight: ollama") for item in payload["failures"])
+    assert any(item.startswith("preflight: inference") for item in payload["failures"])
 
 
 @pytest.mark.parametrize("flag", ["--config", "--secrets"])

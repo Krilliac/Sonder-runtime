@@ -483,8 +483,6 @@ def _si_url_from_config(config) -> str:
 
 def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
     """Probe Sonder Inference reachability read-only via GET /v1/sonder/health."""
-    import os
-
     config = config if config is not None else _load_config_or_none()
     if config is None:
         return _skip("config unavailable for Sonder Inference endpoint")
@@ -500,12 +498,15 @@ def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
     host = urlsplit(url).hostname or ""
     health_url = url.rstrip("/") + "/v1/sonder/health"
     try:
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+            resolve_api_key,
+        )
         headers: dict[str, str] = {}
-        api_key = os.environ.get("SONDER_INFERENCE_API_KEY", "").strip()
+        api_key = resolve_api_key()
         if api_key:
             headers["Authorization"] = "Bearer " + api_key
         request = urllib.request.Request(health_url, headers=headers, method="GET")
-        allow_remote = bool(getattr(getattr(config, "inference", None), "allow_remote", False))
+        allow_remote = getattr(getattr(config, "inference", None), "allow_remote", False) is True
         with ollama_endpoint.open_url(
             request, timeout=timeout, allow_remote=allow_remote,
         ) as response:
@@ -571,8 +572,15 @@ def _check_ollama_residency(*, timeout: float = 5.0, config=None) -> dict:
     host = urlsplit(url).hostname or ""
     health_url = url.rstrip("/") + "/v1/sonder/health"
     try:
-        request = urllib.request.Request(health_url, method="GET")
-        allow_remote = bool(getattr(getattr(config, "inference", None), "allow_remote", False))
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+            resolve_api_key,
+        )
+        headers: dict[str, str] = {}
+        api_key = resolve_api_key()
+        if api_key:
+            headers["Authorization"] = "Bearer " + api_key
+        request = urllib.request.Request(health_url, headers=headers, method="GET")
+        allow_remote = getattr(getattr(config, "inference", None), "allow_remote", False) is True
         with ollama_endpoint.open_url(
             request, timeout=timeout, allow_remote=allow_remote,
         ) as response:

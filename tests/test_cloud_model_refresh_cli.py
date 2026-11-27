@@ -27,7 +27,9 @@ def env(tmp_path, monkeypatch):
     world = make_world(tmp_path, monkeypatch, tags=("kimi-k3-code:cloud", "kimi-k3:cloud"), shows=standard_shows())
     world.write_preferences({"code": ["kimi-k2.7-code:cloud", "kimi-k3-code:cloud", "kimi-k3:cloud"]})
     monkeypatch.setattr(cli, "_load_config", lambda _args: SimpleNamespace(
-        ollama=SimpleNamespace(url=world.fake.url), state=SimpleNamespace(home=str(world.home))))
+        inference=SimpleNamespace(url=world.fake.url),
+        ollama=SimpleNamespace(url=world.fake.url),
+        state=SimpleNamespace(home=str(world.home))))
     monkeypatch.setenv("SONDER_WEB_TOOLS", "1")
     asked = []
 
@@ -98,8 +100,8 @@ def test_apply_then_second_apply_is_a_noop(env, capsys):
 
 def test_requests_are_only_metadata_and_only_the_two_catalog_url_shapes(env, capsys):
     _main(capsys, "--apply", "--json")
-    assert set(env.fake.paths()) <= {"/api/tags", "/api/show", "/api/pull"}
-    assert "/api/pull" not in env.fake.paths()  # auto-pull defaults to off
+    assert set(env.fake.paths()) <= {"/v1/models"}
+    assert "/api/pull" not in env.fake.paths()  # local stub pull retired
     assert set(env.asked) <= set(PAGES)
     assert env.asked[0] == catalog.SEARCH_URL
 
@@ -113,7 +115,7 @@ def test_unreachable_ollama_exits_one_and_writes_nothing(env, capsys):
     env.fake.close()
     before = snapshot(env.home)
     code, out = _main(capsys, "--apply", "--json")
-    assert code == 1 and json.loads(out)["reason"] == "ollama_unreachable"
+    assert code == 1 and json.loads(out)["reason"] == "inference_unreachable"
     assert snapshot(env.home) == before
 
 

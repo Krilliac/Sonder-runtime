@@ -301,7 +301,7 @@ def test_admin_job_result_surface_distinguishes_missing_nonterminal_and_terminal
 
 
 def test_ready_reflects_ollama_outage_without_false_success(http_server):
-    # Hermetic env points Ollama at a closed port: readiness must be 503
+    # Hermetic env points Sonder Inference at a closed port: readiness must be 503
     # with the dependency named, while liveness stays 200.
     lifecycle = sonder_lifecycle.get()
     lifecycle.probe_ollama_once(timeout=0.5)
@@ -309,7 +309,7 @@ def test_ready_reflects_ollama_outage_without_false_success(http_server):
     assert status == 503
     payload = json.loads(body)
     assert payload["ready"] is False
-    assert "ollama" in payload["reason"]
+    assert "inference" in payload["reason"]
     status, _, _ = _get(http_server, "/live")
     assert status == 200
 
@@ -317,7 +317,7 @@ def test_ready_reflects_ollama_outage_without_false_success(http_server):
 def test_ready_succeeds_when_dependencies_are_healthy(http_server):
     lifecycle = sonder_lifecycle.get()
     lifecycle.adopt_legacy_start()
-    lifecycle.tracker.set_dependency("ollama", DependencyState.READY)
+    lifecycle.tracker.set_dependency("inference", DependencyState.READY)
     status, body, _ = _get(http_server, "/ready")
     assert status == 200
     assert json.loads(body)["ready"] is True
@@ -328,7 +328,7 @@ def test_health_reports_state_dependencies_schemas(http_server):
     assert status == 200
     payload = json.loads(body)
     assert payload["process_state"] in ("ready", "degraded")
-    assert "ollama" in payload["dependencies"]
+    assert "inference" in payload["dependencies"]
     assert "operations" in payload["schemas"]
     assert "build" in payload
     assert payload["typed_health"]["states"]

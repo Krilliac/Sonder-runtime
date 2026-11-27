@@ -20,11 +20,11 @@ def test_smaller_request_is_served_at_the_pinned_window_with_one_warning(
     wire(monkeypatch, server, fake, make_service(tmp_path, fake))
     caplog.set_level(logging.DEBUG)
 
-    server._post("/api/chat", chat_body(16384))
-    server._post("/api/chat", chat_body(2048))
-    server._post("/api/chat", chat_body(2048))
+    server._post("/v1/chat/completions", chat_body(16384))
+    server._post("/v1/chat/completions", chat_body(2048))
+    server._post("/v1/chat/completions", chat_body(2048))
 
-    assert [b["options"]["num_ctx"] for b in fake.chat_bodies] == [16384, 16384, 16384]
+    assert fake.served_num_ctx == [16384, 16384, 16384]
     assert fake.reloads == 0
     assert len(_pinned_warnings(caplog)) == 1
 
@@ -35,11 +35,11 @@ def test_a_different_requested_window_logs_again_for_its_own_tuple(
     wire(monkeypatch, server, fake, make_service(tmp_path, fake))
     caplog.set_level(logging.DEBUG)
 
-    server._post("/api/chat", chat_body(16384))
-    server._post("/api/chat", chat_body(2048))
-    server._post("/api/chat", chat_body(4096))
+    server._post("/v1/chat/completions", chat_body(16384))
+    server._post("/v1/chat/completions", chat_body(2048))
+    server._post("/v1/chat/completions", chat_body(4096))
 
-    assert [b["options"]["num_ctx"] for b in fake.chat_bodies] == [16384] * 3
+    assert fake.served_num_ctx == [16384] * 3
     assert len(_pinned_warnings(caplog)) == 2
 
 
@@ -49,13 +49,13 @@ def test_wait_unload_raises_a_typed_conflict_instead_of_reloading(monkeypatch, t
                            max_queue_wait_seconds=1)
     wire(monkeypatch, server, fake, service)
 
-    server._post("/api/chat", chat_body(16384))
+    server._post("/v1/chat/completions", chat_body(16384))
     with pytest.raises(server.ModelCallError) as refused:
-        server._post("/api/chat", chat_body(2048), timeout=1)
+        server._post("/v1/chat/completions", chat_body(2048), timeout=1)
 
     assert refused.value.kind == "admission"
     assert fake.reloads == 0
-    assert [b["options"]["num_ctx"] for b in fake.chat_bodies] == [16384]
+    assert fake.served_num_ctx == [16384]
 
 
 def test_a_prompt_that_does_not_fit_the_pin_is_refused_not_truncated(monkeypatch, tmp_path):
@@ -63,9 +63,9 @@ def test_a_prompt_that_does_not_fit_the_pin_is_refused_not_truncated(monkeypatch
     service = make_service(tmp_path, fake, max_repins_per_model=0)
     wire(monkeypatch, server, fake, service)
 
-    server._post("/api/chat", chat_body(2048))
+    server._post("/v1/chat/completions", chat_body(2048))
     with pytest.raises(server.ModelCallError) as refused:
-        server._post("/api/chat", chat_body(16384, content="word " * 4000))
+        server._post("/v1/chat/completions", chat_body(16384, content="word " * 4000))
 
     assert refused.value.kind == "admission"
     assert fake.reloads == 0
@@ -76,9 +76,9 @@ def test_a_prompt_that_does_not_fit_repins_once_when_idle(monkeypatch, tmp_path,
     wire(monkeypatch, server, fake, make_service(tmp_path, fake, max_repins_per_model=1))
     caplog.set_level(logging.DEBUG)
 
-    server._post("/api/chat", chat_body(2048))
-    server._post("/api/chat", chat_body(16384, content="word " * 4000))
+    server._post("/v1/chat/completions", chat_body(2048))
+    server._post("/v1/chat/completions", chat_body(16384, content="word " * 4000))
 
-    assert [b["options"]["num_ctx"] for b in fake.chat_bodies] == [2048, 16384]
+    assert fake.served_num_ctx == [2048, 16384]
     assert fake.reloads == 1
     assert any("repin" in r.getMessage() for r in caplog.records)

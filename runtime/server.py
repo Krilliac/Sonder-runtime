@@ -5003,6 +5003,12 @@ def _chat_request(
         if tool_choice is not None:
             payload["tool_choice"] = tool_choice
     _tool_lane_guard.require_generation(model, rung=bridged_rung, text_only=text_only, payload=payload)  # deny list unless text-only
+    if (
+        bridged_rung is not None
+        and bridged_rung.provider == "sonder_inference"
+        and (reasoning_continuation or single_send)
+    ):
+        bridged_rung = None
     base_loopback = ollama_endpoint.is_loopback(BASE)
     rerouted = None if bridged_rung is None else _legacy_chat_bridge.ollama_only_reroute(  # a step Inference cannot carry
         _application().model_gateway, payload, bridged_rung, model=model, graph=_APP_GRAPH,
@@ -5404,7 +5410,7 @@ def prewarm_model(tier: str = "", *, announce: bool = False) -> bool:
     if cloud or not model or tier_label in (None, "cloud-disabled"):
         return False
     try:
-        if _bridge_provider_for_tier(tier_label) is not None:
+        if _bridge_provider_for_tier(tier_label) not in (None, "sonder_inference"):
             # The tier is served by another provider; loading its Ollama model
             # would be wasted work (and a probe of an Ollama that may be absent).
             return False
@@ -13964,8 +13970,8 @@ def _vision_local_target() -> str:
     endpoint is not an acceptable fallback.  The runtime policy owns the tier
     binding; callers cannot turn a free-form model string into a backend target.
     """
-    if _bridge_provider_for_tier("vision") is not None:
-        raise ModelCallError("unsupported_feature", "image analysis is only available on Ollama-bound vision tiers", status=400, attempts=0)
+    if _bridge_provider_for_tier("vision") not in (None, "sonder_inference"):
+        raise ModelCallError("unsupported_feature", "image analysis is only available on local Sonder Inference vision tiers", status=400, attempts=0)
     if not ollama_endpoint.is_loopback(BASE):
         raise ModelCallError(
             "configuration",
@@ -20751,7 +20757,20 @@ def _runtime_model_has_capability(model: str, capability: str, records) -> bool:
         details = _get("/v1/models")
     except ModelCallError:
         return False
-    return isinstance(details, dict) and wanted in _fanout_capabilities(details)
+    if not isinstance(details, dict):
+        return False
+    rows = details.get("data") if isinstance(details.get("data"), list) else details.get("models")
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_id = str(row.get("id") or row.get("name") or row.get("model") or "").strip()
+            if row_id and _runtime_model_is_installed(selected, (row_id,)):
+                sonder_meta = row.get("sonder") if isinstance(row.get("sonder"), dict) else {}
+                caps = _fanout_capabilities(row) | _fanout_capabilities(sonder_meta)
+                if caps:
+                    return wanted in caps
+    return wanted in _fanout_capabilities(details)
 
 
 def runtime_policy_data() -> dict:
@@ -23147,8 +23166,8 @@ def codegen_build_loop(
         rollout_selected=strategy_rollout.selected,
     )
     active_operation = plan.active_operation
-    if active_operation and any(_bridge_provider_for_tier(tier) for tier, _model in explicit_targets[:2]):
-        return "codegen canary unavailable: sealed single-send canaries require Ollama-bound tiers"
+    if active_operation and any(_bridge_provider_for_tier(tier) not in (None, "sonder_inference") for tier, _model in explicit_targets[:2]):
+        return "codegen canary unavailable: sealed single-send canaries require local Sonder Inference tiers"
     # A previous selected operation may have left uncertain project effects.
     # Read its sealed guard even after an operator changes rollout to off.
     try:
@@ -23262,7 +23281,7 @@ def codegen_build_loop(
         auto_model_context=_auto_model_context,
         is_local_ollama_route=lambda m_tier, m_model: (
             not _is_cloud_tier(m_tier, m_model)
-            and _bridge_provider_for_tier(m_tier) is None
+            and _bridge_provider_for_tier(m_tier) in (None, "sonder_inference")
         ),
         local_num_ctx=lambda m_model: int(_platform_local_model_options(
             0.2, max(64, num_predict), _auto_model_context(m_model),

@@ -22,13 +22,31 @@ class ConformanceOllama(FakeOllama):
     """FakeOllama with the identity documents the conformance battery validates."""
 
     def _respond(self, path, body):
-        if path == "/api/tags":
-            return {"models": [{"name": MODEL, "model": MODEL, "digest": DIGEST,
-                                "size": self.file_size}]}
-        if path == "/api/show":
-            return {"model_info": {"llama.context_length": 32768},
-                    "details": {"quantization_level": "Q8_0", "family": "qwen3"},
-                    "template": "{{ .Prompt }}"}
+        if path in {"/api/tags", "/v1/models"}:
+            return {
+                "object": "list",
+                "data": [{"id": MODEL, "name": MODEL, "model": MODEL, "digest": DIGEST,
+                          "size": self.file_size}],
+                "models": [{"name": MODEL, "model": MODEL, "digest": DIGEST,
+                            "size": self.file_size}],
+            }
+        if path in {"/api/show", "/v1/sonder/identity"}:
+            return {
+                "model_info": {"llama.context_length": 32768},
+                "details": {"quantization_level": "Q8_0", "family": "qwen3"},
+                "template": "{{ .Prompt }}",
+                "backend_identity": {
+                    "backend": "ollama",
+                    "model": MODEL,
+                    "model_digest": DIGEST,
+                    "quantization": "Q8_0",
+                    "backend_version": "0.0-test",
+                    "tokenizer_digest": "b" * 64,
+                    "template_digest": "c" * 64,
+                    "context_tokens": 4096,
+                    "hardware": "fixture",
+                },
+            }
         return super()._respond(path, body)
 
 
@@ -36,7 +54,7 @@ def _loaded_at_8192(tmp_path, monkeypatch):
     fake = ConformanceOllama()
     fake.loaded[MODEL] = 8192
     service = make_service(tmp_path, fake, max_queue_wait_seconds=1)
-    with service.admit("/api/chat", {"model": MODEL, "messages": [{"role": "user", "content": "x"}],
+    with service.admit("/v1/chat/completions", {"model": MODEL, "messages": [{"role": "user", "content": "x"}],
                                      "options": {"num_ctx": 8192}}, origin=ORIGIN):
         pass
     assert service._the_store().get_pin(ORIGIN, adapter.model_key(MODEL)).num_ctx == 8192
@@ -85,7 +103,7 @@ class RefuseChats:
 
     @contextlib.contextmanager
     def admit(self, path, payload, **_kwargs):
-        if path == "/api/chat" and self.refuse(payload):
+        if path == "/v1/chat/completions" and self.refuse(payload):
             self.refused += 1
             raise adapter.GpuAdmissionRefused(Refused(self.reason, "test", retry_after_seconds=2.0))
         yield adapter.passthrough_ticket(payload)
@@ -148,12 +166,24 @@ def test_the_battery_raises_an_admission_refusal_instead_of_recording_a_failure(
 
 
 def test_a_request_with_no_window_is_sent_at_the_inherited_pin(tmp_path, monkeypatch):
-    fake, _service = _loaded_at_8192(tmp_path, monkeypatch)
+    fake, service = _loaded_at_8192(tmp_path, monkeypatch)
+    served = []
+    raw_admit = service.admit
+
+    @contextlib.contextmanager
+    def record_admit(*args, **kwargs):
+        with raw_admit(*args, **kwargs) as ticket:
+            served.append(ticket.served_num_ctx)
+            if ticket.served_num_ctx is not None:
+                fake.served_num_ctx.append(ticket.served_num_ctx)
+            yield ticket
+
+    monkeypatch.setattr(service, "admit", record_admit)
     probe = ollama_conformance.OllamaConformanceProbe(ORIGIN, MODEL, context_tokens=8192)
     probe._deadline = time.monotonic() + 30.0
     payload = {"model": MODEL, "stream": False, "messages": [{"role": "user", "content": "hi"}]}
-    probe._request("/api/chat", payload, timeout=5.0)
-    assert (fake.chat_bodies[-1].get("options") or {}).get("num_ctx") == 8192
+    probe._request("/v1/chat/completions", payload, timeout=5.0)
+    assert served[-1] == 8192
     assert fake.reloads == 0
 
 

@@ -301,7 +301,7 @@ def test_commit_floor_wait_names_commit_headroom_not_ram(monkeypatch, tmp_path):
     reporter = wait_status.AdmissionWaitReporter(lines.append, interval_seconds=0)
     threading.Timer(0.35, lambda: state.update(commit=64 * GIB)).start()
     with wait_status.armed(reporter):
-        server._post_model("/api/chat", chat_body(16384), model=MODEL, timeout=10)
+        server._post_model("/v1/chat/completions", chat_body(16384), model=MODEL, timeout=10)
     assert lines
     assert lines[0].startswith("waiting for commit headroom to load ")
     assert "need ~17.0 GiB + 3.0 GiB floor, 18.0 GiB commit free" in lines[0]
@@ -318,7 +318,7 @@ def test_busy_slot_wait_is_reported_and_cleared_on_admission(tmp_path):
     release = threading.Event()
 
     def hold():
-        with service.admit("/api/chat", chat_body(4096), origin=origin):
+        with service.admit("/v1/chat/completions", chat_body(4096), origin=origin):
             held.set()
             release.wait(5)
 
@@ -328,7 +328,7 @@ def test_busy_slot_wait_is_reported_and_cleared_on_admission(tmp_path):
         assert held.wait(5)
         threading.Timer(0.4, release.set).start()
         with wait_status.armed(reporter):
-            with service.admit("/api/chat", chat_body(4096), origin=origin):
+            with service.admit("/v1/chat/completions", chat_body(4096), origin=origin):
                 pass
     finally:
         release.set()
@@ -406,7 +406,7 @@ def test_admission_queue_wait_is_reported_and_stops_when_admitted(monkeypatch, t
     threading.Timer(0.35, lambda: state.update(available=40 * GIB)).start()
 
     with wait_status.armed(reporter):
-        server._post_model("/api/chat", chat_body(16384), model=MODEL, timeout=10)
+        server._post_model("/v1/chat/completions", chat_body(16384), model=MODEL, timeout=10)
 
     assert len(fake.chat_bodies) == 1
     assert lines, "a queued load must say why it waits"
@@ -417,7 +417,7 @@ def test_admission_queue_wait_is_reported_and_stops_when_admitted(monkeypatch, t
     assert clear == wait_status.CLEAR  # admitted: the status is cleared once
     assert reporter.waiting is False  # admitted: no later wait line
     count = len(lines)
-    server._post_model("/api/chat", chat_body(16384), model=MODEL, timeout=10)
+    server._post_model("/v1/chat/completions", chat_body(16384), model=MODEL, timeout=10)
     assert len(lines) == count
 
 

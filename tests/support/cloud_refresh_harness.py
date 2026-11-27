@@ -75,6 +75,68 @@ class FakeOllama:
             def do_GET(self) -> None:  # noqa: N802 - http.server API
                 with owner._lock:
                     owner.requests.append(("GET", self.path, None))
+                if self.path.startswith("/v1/models"):
+                    if owner.tags_status != 200:
+                        return self._send(owner.tags_status, {"error": "models unavailable"})
+                    with owner._lock:
+                        owner._shows_seen += 1
+                        seen = owner._shows_seen
+                    if owner.drop_show_after is not None and seen > owner.drop_show_after + 1:
+                        self.close_connection = True
+                        return
+                    seen_ids: set[str] = set()
+                    data: list[dict[str, Any]] = []
+                    for name, (status, body) in owner.shows.items():
+                        seen_ids.add(name)
+                        if isinstance(body, dict) and isinstance(body.get("error"), str):
+                            from sonder_runtime.domain.cloud_model_refresh import parse_retirement
+                            if status == 404 and parse_retirement(body["error"]) is None:
+                                continue
+                            data.append({
+                                "id": name,
+                                "object": "model",
+                                "owned_by": "sonder-inference",
+                                "sonder": {"backend": "ollama_cloud", "error": body["error"]},
+                            })
+                        elif not isinstance(body, dict):
+                            data.append({
+                                "id": name,
+                                "object": "model",
+                                "owned_by": "sonder-inference",
+                                "sonder": {"backend": "ollama_cloud", "error": "malformed"},
+                            })
+                        else:
+                            data.append({
+                                "id": name,
+                                "object": "model",
+                                "owned_by": "sonder-inference",
+                                "sonder": {
+                                    "backend": "ollama_cloud",
+                                    "runtime": {"context_tokens": 262144},
+                                },
+                            })
+                    for n in owner.tags:
+                        if n not in seen_ids:
+                            seen_ids.add(n)
+                            data.append({
+                                "id": n,
+                                "object": "model",
+                                "owned_by": "sonder-inference",
+                                "sonder": {
+                                    "backend": "ollama_cloud",
+                                    "runtime": {"context_tokens": 262144},
+                                },
+                            })
+                    return self._send(200, {
+                        "object": "list",
+                        "data": data,
+                        "sonder": {
+                            "backends": [{
+                                "name": "ollama_cloud",
+                                "capabilities": ["completion", "tools", "thinking"],
+                            }],
+                        },
+                    })
                 if self.path.startswith("/api/tags"):
                     rows = [{"name": n, "model": n, "size": 1} for n in owner.tags]
                     if owner.tags_status != 200:

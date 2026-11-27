@@ -27,7 +27,7 @@ ORIGIN = "http://127.0.0.1:11434"
 
 
 def _chat(service, num_ctx=4096, **kwargs):
-    with service.admit("/api/chat", chat_body(num_ctx), origin=ORIGIN, **kwargs) as ticket:
+    with service.admit("/v1/chat/completions", chat_body(num_ctx), origin=ORIGIN, **kwargs) as ticket:
         return ticket
 
 
@@ -35,8 +35,8 @@ def test_a_probe_never_takes_the_gpu_slot(monkeypatch, tmp_path):
     fake = FakeOllama()
     service = make_service(tmp_path, fake, gpu_slots=1)
     wire(monkeypatch, server, fake, service)
-    with service.admit("/api/chat", chat_body(4096), origin=ORIGIN):
-        with service.admit("/api/show", {"model": MODEL}, origin=ORIGIN) as ticket:
+    with service.admit("/v1/chat/completions", chat_body(4096), origin=ORIGIN):
+        with service.admit("/v1/sonder/identity", {"model": MODEL}, origin=ORIGIN) as ticket:
             assert ticket.lane is None
     assert service.snapshot()["admitted"] == 1
 
@@ -48,7 +48,7 @@ def test_an_unload_is_admitted_while_a_slot_is_held_and_clears_the_pin(tmp_path)
     held = threading.Event()
 
     def hold():
-        with service.admit("/api/chat", chat_body(4096), origin=ORIGIN):
+        with service.admit("/v1/chat/completions", chat_body(4096), origin=ORIGIN):
             held.set()
             holder_done.wait(5)
 
@@ -59,7 +59,7 @@ def test_an_unload_is_admitted_while_a_slot_is_held_and_clears_the_pin(tmp_path)
         assert service._the_store().get_pin(ORIGIN, adapter.model_key(MODEL)).num_ctx == 4096
         unload = {"model": MODEL, "keep_alive": 0}
         started = time.monotonic()
-        with service.admit("/api/generate", unload, origin=ORIGIN):
+        with service.admit("/v1/completions", unload, origin=ORIGIN):
             pass
         assert time.monotonic() - started < 1.0
         assert service._the_store().get_pin(ORIGIN, adapter.model_key(MODEL)) is None
@@ -82,7 +82,7 @@ def _pin_8192_with_the_model_loaded(tmp_path):
 def test_the_exact_policy_never_serves_a_probe_at_another_window(tmp_path):
     fake, service = _pin_8192_with_the_model_loaded(tmp_path)
     with pytest.raises(adapter.GpuAdmissionRefused) as caught:
-        with service.admit("/api/chat", chat_body(4096), origin=ORIGIN,
+        with service.admit("/v1/chat/completions", chat_body(4096), origin=ORIGIN,
                            ctx_policy=domain.CtxPolicy.EXACT):
             pytest.fail("admitted at another window")
     assert caught.value.refusal.reason is domain.RefusalReason.CTX_PIN_CONFLICT
@@ -100,7 +100,7 @@ def test_the_conformance_probe_waits_on_a_pinned_window_instead_of_reloading(
     probe._deadline = time.monotonic() + 30.0
     payload = chat_body(4096)
     with pytest.raises(adapter.GpuAdmissionRefused) as caught:
-        probe._request("/api/chat", payload, timeout=5.0)
+        probe._request("/v1/chat/completions", payload, timeout=5.0)
     assert caught.value.refusal.reason is domain.RefusalReason.CTX_PIN_CONFLICT
     assert fake.chat_bodies == [] and fake.reloads == 0 and fake.loaded[MODEL] == 8192
 
@@ -209,8 +209,8 @@ def test_off_mode_touches_no_store(tmp_path):
 def test_cloud_models_and_remote_origins_skip_the_slot(tmp_path):
     fake = FakeOllama()
     service = make_service(tmp_path, fake, gpu_slots=1)
-    with service.admit("/api/chat", chat_body(4096, model="gpt-oss:120b-cloud"), origin=ORIGIN):
-        with service.admit("/api/chat", chat_body(4096), origin="http://10.1.2.3:11434") as remote:
+    with service.admit("/v1/chat/completions", chat_body(4096, model="gpt-oss:120b-cloud"), origin=ORIGIN):
+        with service.admit("/v1/chat/completions", chat_body(4096), origin="http://10.1.2.3:11434") as remote:
             assert remote.lane is domain.AdmissionLane.INFERENCE
     assert service._the_store().leases() == ()
 
@@ -218,8 +218,8 @@ def test_cloud_models_and_remote_origins_skip_the_slot(tmp_path):
 def test_a_nested_admit_in_the_same_context_passes_through(tmp_path):
     fake = FakeOllama()
     service = make_service(tmp_path, fake, gpu_slots=1)
-    with service.admit("/api/chat", chat_body(4096), origin=ORIGIN):
-        with service.admit("/api/chat", chat_body(4096), origin=ORIGIN) as inner:
+    with service.admit("/v1/chat/completions", chat_body(4096), origin=ORIGIN):
+        with service.admit("/v1/chat/completions", chat_body(4096), origin=ORIGIN) as inner:
             assert inner.lane is None
 
 
@@ -231,12 +231,12 @@ def test_interactive_waiters_are_served_before_background_waiters(tmp_path):
     held = threading.Event()
 
     def hold():
-        with service.admit("/api/chat", chat_body(4096), origin=ORIGIN):
+        with service.admit("/v1/chat/completions", chat_body(4096), origin=ORIGIN):
             held.set()
             release.wait(5)
 
     def waiter(name, caller):
-        with service.admit("/api/chat", chat_body(4096), origin=ORIGIN, caller=caller):
+        with service.admit("/v1/chat/completions", chat_body(4096), origin=ORIGIN, caller=caller):
             order.append(name)
 
     holder = threading.Thread(target=hold)
@@ -261,7 +261,7 @@ def test_the_queue_times_out_with_queue_timeout(tmp_path):
     held = threading.Event()
 
     def hold():
-        with service.admit("/api/chat", chat_body(4096), origin=ORIGIN):
+        with service.admit("/v1/chat/completions", chat_body(4096), origin=ORIGIN):
             held.set()
             release.wait(5)
 
@@ -308,7 +308,7 @@ def test_prewarm_is_a_load_and_a_cold_load_stores_its_footprint(tmp_path):
     service = make_service(tmp_path, fake)
     service._memory_reader = lambda _key: (6 * GIB, 7 * GIB)
     body = {"model": MODEL, "options": {"num_ctx": 4096}, "keep_alive": "5m"}
-    with service.admit("/api/generate", body, origin=ORIGIN, prewarm=True) as ticket:
+    with service.admit("/v1/completions", body, origin=ORIGIN, prewarm=True) as ticket:
         assert ticket.lane is domain.AdmissionLane.LOAD
     digest = next(iter(service._read_tags(ORIGIN).values())).digest
     rows = service._the_store().footprints_for(digest)
@@ -347,7 +347,7 @@ def _service_worker(directory, name, results):
     from tests.support.gpu_admission_harness import FakeOllama as _Fake, make_service as _make
     from pathlib import Path
     service = _make(Path(directory), _Fake(), gpu_slots=1, max_queue_wait_seconds=60)
-    with service.admit("/api/chat", chat_body(4096), origin=ORIGIN):
+    with service.admit("/v1/chat/completions", chat_body(4096), origin=ORIGIN):
         started = time.time()
         time.sleep(0.4)
         ended = time.time()

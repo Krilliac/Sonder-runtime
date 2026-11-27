@@ -305,7 +305,7 @@ def test_a_giant_ollama_model_is_refused_by_the_ordinary_estimate(tmp_path):
     fake = FakeOllama(file_size=120 * GIB)
     service = _service(tmp_path, fake, available=40 * GIB)
     with pytest.raises(adapter.GpuAdmissionRefused) as caught:
-        with service.admit("/api/chat", chat_body(32_768), origin=ORIGIN):
+        with service.admit("/v1/chat/completions", chat_body(32_768), origin=ORIGIN):
             pass
     assert caught.value.refusal.reason is domain.RefusalReason.HOST_RAM_FLOOR
     assert caught.value.refusal.footprint.source is domain.FootprintSource.ESTIMATED
@@ -314,7 +314,7 @@ def test_a_giant_ollama_model_is_refused_by_the_ordinary_estimate(tmp_path):
 def test_a_declared_streamed_ollama_model_is_admitted_on_its_resident_size(tmp_path):
     fake = FakeOllama(file_size=120 * GIB)
     service = _service(tmp_path, fake, available=40 * GIB, streamed={MODEL: _GIANT})
-    with service.admit("/api/chat", chat_body(32_768), origin=ORIGIN) as ticket:
+    with service.admit("/v1/chat/completions", chat_body(32_768), origin=ORIGIN) as ticket:
         assert ticket.lane is domain.AdmissionLane.INFERENCE
 
 
@@ -322,7 +322,7 @@ def test_a_streamed_model_is_still_refused_when_even_its_resident_size_does_not_
     fake = FakeOllama(file_size=120 * GIB)
     service = _service(tmp_path, fake, available=30 * GIB, streamed={MODEL: _GIANT})
     with pytest.raises(adapter.GpuAdmissionRefused) as caught:
-        with service.admit("/api/chat", chat_body(32_768), origin=ORIGIN):
+        with service.admit("/v1/chat/completions", chat_body(32_768), origin=ORIGIN):
             pass
     refusal = caught.value.refusal
     assert refusal.footprint.source is domain.FootprintSource.STREAMED
@@ -341,7 +341,7 @@ def test_streamed_sizing_reads_expert_metadata_from_api_show_once(tmp_path):
     service = _service(tmp_path, fake, available=64 * GIB, streamed={MODEL: policy_free}, show=show,
                        host_overhead_mb=0)
     for _ in range(2):
-        with service.admit("/api/chat", chat_body(1000), origin=ORIGIN):
+        with service.admit("/v1/chat/completions", chat_body(1000), origin=ORIGIN):
             pass
         fake.loaded.clear()
     assert len(calls) == 1
@@ -363,7 +363,7 @@ def test_an_unreadable_api_show_is_not_asked_again_for_a_while(tmp_path):
     fake = FakeOllama(file_size=120 * GIB)
     service = _service(tmp_path, fake, available=64 * GIB, streamed={MODEL: _GIANT}, show=show)
     for _ in range(2):
-        with service.admit("/api/chat", chat_body(32_768), origin=ORIGIN):
+        with service.admit("/v1/chat/completions", chat_body(32_768), origin=ORIGIN):
             pass
         fake.loaded.clear()
     assert len(calls) == 1
@@ -378,7 +378,7 @@ def test_an_idle_measured_model_that_fit_is_still_admitted_after_eight_days(tmp_
     store.record_footprint(digest, 4096, 18 * GIB, 18 * GIB)
     clock.now += 8 * DAY
     # the measurement is the only evidence; the 26 GiB estimate would be refused
-    with service.admit("/api/chat", chat_body(4096), origin=ORIGIN) as ticket:
+    with service.admit("/v1/chat/completions", chat_body(4096), origin=ORIGIN) as ticket:
         assert ticket.lane is domain.AdmissionLane.INFERENCE
 
 
@@ -387,7 +387,7 @@ def test_a_declared_model_without_enough_metadata_falls_back_to_the_ordinary_est
     service = _service(tmp_path, fake, available=40 * GIB,
                        streamed={MODEL: domain.StreamedPlacement(expert_cache_bytes=GIB)})
     with pytest.raises(adapter.GpuAdmissionRefused) as caught:
-        with service.admit("/api/chat", chat_body(4096), origin=ORIGIN):
+        with service.admit("/v1/chat/completions", chat_body(4096), origin=ORIGIN):
             pass
     assert caught.value.refusal.footprint.source is domain.FootprintSource.ESTIMATED
 
@@ -396,7 +396,7 @@ def test_a_streamed_model_never_has_its_runner_working_set_recorded(tmp_path):
     fake = FakeOllama(file_size=120 * GIB)
     service = _service(tmp_path, fake, available=64 * GIB, streamed={MODEL: _GIANT})
     service._memory_reader = lambda _key: (100 * GIB, 100 * GIB)
-    with service.admit("/api/chat", chat_body(32_768), origin=ORIGIN):
+    with service.admit("/v1/chat/completions", chat_body(32_768), origin=ORIGIN):
         pass
     digest = next(iter(service._read_tags(ORIGIN).values())).digest
     assert service._the_store().footprints_for(digest) == ()
@@ -535,7 +535,7 @@ def test_an_ollama_request_with_no_window_is_charged_kv_for_the_declared_window(
     service = _service(tmp_path, fake, available=20 * GIB, streamed={MODEL: placement})
     body = dict(chat_body(1), options={})
     with pytest.raises(adapter.GpuAdmissionRefused) as caught:
-        with service.admit("/api/chat", body, origin=ORIGIN):
+        with service.admit("/v1/chat/completions", body, origin=ORIGIN):
             pass
     footprint = caught.value.refusal.footprint
     assert footprint.source is domain.FootprintSource.STREAMED and footprint.num_ctx == 32_768

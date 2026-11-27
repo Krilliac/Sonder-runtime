@@ -48,20 +48,24 @@ class FakeOllama:
         self.chat_active = 0
         self.max_chat_active = 0
         self.chat_intervals: list[tuple[float, float]] = []
+        self.served_num_ctx: list[int | None] = []
 
     # -- what admission reads --------------------------------------------
     def ps(self, origin=None):
         models = []
         for name, ctx in self.loaded.items():
-            row = {"name": name, "model": name, "size": 11 * GIB, "size_vram": 11 * GIB}
+            row = {"name": name, "model": name, "id": name, "size": 11 * GIB, "size_vram": 11 * GIB}
             if self.report_context_length:
                 row["context_length"] = self.ps_context_override.get(name, ctx)
             models.append(row)
-        return {"models": models}
+        return {"status": "ready", "models": models}
 
     def tags(self, origin=None):
-        return {"models": [{"name": MODEL, "model": MODEL, "digest": DIGEST,
-                            "size": self.file_size}]}
+        return {
+            "object": "list",
+            "data": [{"id": MODEL, "name": MODEL, "model": MODEL, "digest": DIGEST, "size": self.file_size}],
+            "models": [{"name": MODEL, "model": MODEL, "digest": DIGEST, "size": self.file_size}],
+        }
 
     # -- the wire ---------------------------------------------------------
     def open_url(self, request, timeout=None, **_kwargs):
@@ -69,13 +73,16 @@ class FakeOllama:
         body = json.loads(request.data) if request.data else None
         with self.lock:
             self.requests.append((request.get_method(), path, body))
-        probe = path in {"/api/show", "/api/version", "/api/tags", "/api/ps"}
+        probe = path in {
+            "/api/show", "/api/version", "/api/tags", "/api/ps",
+            "/v1/sonder/health", "/v1/models", "/v1/sonder/identity", "/v1/sonder/node",
+        }
         if probe:
             with self.lock:
                 self.probe_active += 1
                 self.max_probe_active = max(self.max_probe_active, self.probe_active)
         try:
-            if path == "/api/show" and self.show_gate is not None:
+            if path in {"/api/show", "/v1/sonder/identity"} and self.show_gate is not None:
                 self.show_gate.wait(self.gate_timeout)
             return io.BytesIO(json.dumps(self._respond(path, body)).encode())
         finally:
@@ -86,18 +93,26 @@ class FakeOllama:
     def _respond(self, path, body):
         if path == "/api/version":
             return {"version": "0.0-test"}
-        if path == "/api/tags":
-            return {"models": [{"name": MODEL}]}
-        if path == "/api/ps":
+        if path in {"/api/tags", "/v1/models"}:
+            return {
+                "object": "list",
+                "data": [{"id": MODEL, "name": MODEL, "object": "model"}],
+                "models": [{"name": MODEL}],
+            }
+        if path in {"/api/ps", "/v1/sonder/health"}:
             return self.ps()
-        if path == "/api/show":
-            return {"model_info": {"llama.context_length": 32768}, "details": {}}
+        if path in {"/api/show", "/v1/sonder/identity"}:
+            return {"model_info": {"llama.context_length": 32768}, "details": {}, "context_length": 32768}
         model = (body or {}).get("model", "")
         if (body or {}).get("keep_alive") == 0 and not (body or {}).get("messages"):
             with self.lock:
                 self.loaded.pop(model, None)
             return {"model": model, "done": True}
-        ctx = ((body or {}).get("options") or {}).get("num_ctx", 4096)
+        ctx = ((body or {}).get("options") or {}).get("num_ctx")
+        if ctx is None and self.served_num_ctx:
+            ctx = self.served_num_ctx[-1]
+        if ctx is None:
+            ctx = 4096
         with self.lock:
             if model in self.loaded and self.loaded[model] != ctx:
                 self.reloads += 1
@@ -112,11 +127,16 @@ class FakeOllama:
             with self.lock:
                 self.chat_active -= 1
                 self.chat_intervals.append((started, time.monotonic()))
-        return {"model": model, "message": {"role": "assistant", "content": "ok"}, "done": True}
+        return {
+            "model": model,
+            "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            "message": {"role": "assistant", "content": "ok"},
+            "done": True,
+        }
 
     @property
     def chat_bodies(self):
-        return [body for _method, path, body in self.requests if path == "/api/chat"]
+        return [body for _method, path, body in self.requests if path in {"/v1/chat/completions", "/api/chat"}]
 
     def count(self, path):
         return sum(1 for _method, seen, _body in self.requests if seen == path)
@@ -128,12 +148,25 @@ def chat_body(num_ctx, *, model=MODEL, content="hello"):
             "options": {"num_ctx": num_ctx}}
 
 
-def wire(monkeypatch, server, fake, service, *, base="http://127.0.0.1:11434"):
+def wire(monkeypatch, server, fake, service, *, base="http://127.0.0.1:11437"):
     """Point ``server`` at ``fake`` with the production single-host pool shape."""
+    import contextlib
+
     monkeypatch.setattr(server, "BASE", base)
     monkeypatch.setattr(server, "_require_ollama_endpoint", lambda **_kwargs: None)
     monkeypatch.setattr(server, "_residency_feedback", lambda: None)
     monkeypatch.setattr(server, "dispatch_provider", lambda _provider, _path, _payload, send: send())
+    if service is not None:
+        raw_admit = service.admit
+
+        @contextlib.contextmanager
+        def recording_admit(*args, **kwargs):
+            with raw_admit(*args, **kwargs) as ticket:
+                if ticket.served_num_ctx is not None:
+                    fake.served_num_ctx.append(ticket.served_num_ctx)
+                yield ticket
+
+        monkeypatch.setattr(service, "admit", recording_admit)
     pool = SimpleNamespace(
         enabled=False, open_url=fake.open_url,
         request_primary=lambda send, *, origin=None, **_kwargs: send(origin),

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from urllib.error import URLError
 
 import pytest
 
@@ -56,13 +55,13 @@ def test_unreachable_ollama_fails_required_check(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "SONDER_RUNTIME_POLICY", str(tmp_path / "home" / "runtime_policy.json")
     )
-    config = _config(tmp_path, OLLAMA_HOST="127.0.0.1:1")
+    config = _config(tmp_path, SONDER_INFERENCE_BASE_URL="http://127.0.0.1:1")
     report = sonder_preflight.run_preflight(
         config, check_ollama=True, ollama_timeout=0.5
     )
     assert not report.ok
-    ollama = next(c for c in report.checks if c.name == "ollama")
-    assert not ollama.ok and ollama.required
+    inference = next(c for c in report.checks if c.name == "inference")
+    assert not inference.ok and inference.required
 
 
 def test_missing_workspace_root_fails(tmp_path, monkeypatch):
@@ -105,8 +104,7 @@ def test_optional_worker_outage_is_reported_as_degraded_not_failed(
     )
     config = _config(
         tmp_path,
-        SONDER_ALLOW_REMOTE_OLLAMA="1",
-        SONDER_OLLAMA_WORKERS="https://worker.example:443",
+        SONDER_INFERENCE_BASE_URL="http://127.0.0.1:11437",
     )
 
     class Response:
@@ -119,25 +117,26 @@ def test_optional_worker_outage_is_reported_as_degraded_not_failed(
             return False
 
         def read(self, _limit):
-            return json.dumps({"models": [{"name": "local:latest"}]}).encode()
+            return json.dumps({
+                "status": "ready",
+                "models": [{"id": "local:latest"}],
+            }).encode()
 
     def open_url(request, timeout):
         del timeout
-        if "worker.example" in request.full_url:
-            raise URLError("worker offline")
         return Response()
 
     monkeypatch.setattr(sonder_preflight.ollama_endpoint._OPENER, "open", open_url)
     report = sonder_preflight.run_preflight(config, ollama_timeout=0.1)
 
-    worker = next(row for row in report.checks if row.name == "ollama_worker_1")
+    inference = next(row for row in report.checks if row.name == "inference")
     assert report.ok
-    assert report.degraded
-    assert not worker.ok and not worker.required
+    assert report.degraded  # fresh home has pending schema migrations
+    assert inference.ok and inference.required
 
 
 def test_worker_probe_uses_the_configured_ca_bundle(tmp_path, monkeypatch):
-    """Preflight verifies a private-CA HTTPS worker with ``[ollama].ca_bundle``."""
+    """Preflight verifies a private-CA HTTPS inference endpoint with ``[inference].ca_bundle``."""
     monkeypatch.setenv(
         "SONDER_RUNTIME_POLICY", str(tmp_path / "home" / "runtime_policy.json")
     )
@@ -150,10 +149,10 @@ def test_worker_probe_uses_the_configured_ca_bundle(tmp_path, monkeypatch):
             "SONDER_HOME": str(tmp_path / "home"),
             "SONDER_OPERATIONS_DB": str(tmp_path / "home" / "operations.db"),
             "SONDER_RUNTIME_POLICY": str(tmp_path / "home" / "runtime_policy.json"),
-            "SONDER_ALLOW_REMOTE_OLLAMA": "1",
-            "SONDER_OLLAMA_WORKERS": "https://worker.example:443",
+            "SONDER_ALLOW_REMOTE_INFERENCE": "1",
+            "SONDER_INFERENCE_BASE_URL": "https://worker.example:443",
         },
-        overrides={"state.minimum_free_disk_bytes": "0", "ollama.ca_bundle": str(bundle)},
+        overrides={"state.minimum_free_disk_bytes": "0", "inference.ca_bundle": str(bundle)},
     )
     seen = []
 
@@ -162,10 +161,6 @@ def test_worker_probe_uses_the_configured_ca_bundle(tmp_path, monkeypatch):
         raise sonder_preflight.ollama_endpoint.ssl.SSLError("stub context")
 
     monkeypatch.setattr(sonder_preflight.ollama_endpoint.ssl, "create_default_context", context)
-    monkeypatch.setattr(
-        sonder_preflight.ollama_endpoint._OPENER, "open",
-        lambda request, timeout: (_ for _ in ()).throw(URLError("primary offline")),
-    )
     sonder_preflight.run_preflight(config, ollama_timeout=0.1)
 
     assert seen == [str(bundle)]

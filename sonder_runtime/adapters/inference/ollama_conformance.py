@@ -77,7 +77,13 @@ class OllamaConformanceProbe:
             if remaining <= 0:
                 raise TimeoutError("Ollama conformance wall budget exhausted")
             sent = ticket.payload  # the decided body (INHERIT_PINNED names the window)
-            body = None if sent is None else json.dumps(sent, separators=(",", ":")).encode()
+            if sent is not None and path == "/v1/chat/completions":
+                from sonder_runtime.adapters.inference import si_chat_codec as _si_codec
+
+                wire_payload: Mapping[str, object] = _si_codec.to_openai_chat_payload(sent)
+            else:
+                wire_payload = sent  # type: ignore[assignment]
+            body = None if wire_payload is None else json.dumps(wire_payload, separators=(",", ":")).encode()
             request = urllib.request.Request(
                 self.base_url + path, data=body,
                 headers={"Content-Type": "application/json"} if body is not None else {},
@@ -90,6 +96,10 @@ class OllamaConformanceProbe:
         value = json.loads(raw.decode("utf-8"))
         if not isinstance(value, dict):
             raise ValueError("Ollama response must be an object")
+        if path == "/v1/chat/completions":
+            from sonder_runtime.adapters.inference import si_chat_codec as _si_codec
+
+            value = _si_codec.from_openai_chat_response(value)
         return value
 
     def read_identity(self) -> BackendIdentity:

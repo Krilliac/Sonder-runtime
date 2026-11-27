@@ -163,17 +163,20 @@ def test_vision_analysis_uses_show_for_sparse_catalog_capability(monkeypatch):
     )
     seen = {}
 
-    def show(path, payload, **kwargs):
-        seen.update(path=path, payload=payload, kwargs=kwargs)
-        return {"capabilities": ["vision", "completion"]}
+    def get_models(path):
+        seen["path"] = path
+        return {
+            "object": "list",
+            "data": [{
+                "id": "qwen2.5vl:3b",
+                "sonder": {"capabilities": ["vision", "completion"]},
+            }],
+        }
 
-    monkeypatch.setattr(server, "_post", show)
+    monkeypatch.setattr(server, "_get", get_models)
 
     assert server._vision_local_target() == "qwen2.5vl:3b"
-    assert seen == {
-        "path": "/api/show", "payload": {"model": "qwen2.5vl:3b", "name": "qwen2.5vl:3b"},
-        "kwargs": {"timeout": 30},
-    }
+    assert seen == {"path": "/v1/models"}
 
 
 def test_vision_analysis_resolves_omitted_latest_tag(monkeypatch):
