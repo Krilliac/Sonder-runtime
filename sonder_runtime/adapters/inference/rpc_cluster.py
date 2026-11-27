@@ -30,6 +30,14 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from sonder_runtime.adapters.provider_bindings import TIER_PROVIDER_ENV
+from sonder_runtime.domain.routing.rpc_split_policy import (
+    DEFAULT_SPLIT_MODE,
+    DEFAULT_SPLIT_SPEC_TYPE,
+    validate_split_device_order,
+    validate_split_mode,
+    validate_split_spec_type,
+    validate_split_tensor_weights,
+)
 from sonder_runtime.platform.rpc_sharding_config import (
     DEFAULT_RPC_PORT,
     MAX_RPC_PEERS,
@@ -64,8 +72,18 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _VALID_KV_TYPES = frozenset({"f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"})
 _VALID_FLASH_ATTN = frozenset({"on", "off", "auto"})
 # Options the launcher owns. Letting extra_args repeat them could move the
-# listener off loopback or point --rpc at an address the allowlist refused.
-_RESERVED_SERVER_OPTIONS = frozenset({"--host", "--port", "--rpc"})
+# listener off loopback, point --rpc at an address the allowlist refused, or
+# bypass the FED-05 layer-split / local-output-head / speculation policy.
+_RESERVED_SERVER_OPTIONS = frozenset({
+    "--host",
+    "--port",
+    "--rpc",
+    "--split-mode",
+    "-sm",
+    "--spec-type",
+    "--device",
+    "-dev",
+})
 _MAX_HEALTH_BYTES = 1_048_576
 _MAX_PROFILES_BYTES = 262_144
 _PROFILE_FIELDS = frozenset({"worker_device", "tensor_split", "ctx_size", "n_gpu_layers", "notes"})
@@ -376,6 +394,9 @@ class ShardedLlamaServerConfig:
     ctx_size: int = DEFAULT_CTX_SIZE
     n_gpu_layers: int = DEFAULT_GPU_LAYERS
     tensor_split: str = ""
+    split_mode: str = DEFAULT_SPLIT_MODE
+    spec_type: str = DEFAULT_SPLIT_SPEC_TYPE
+    devices: tuple[str, ...] = ()
     flash_attn: str = DEFAULT_FLASH_ATTN
     cache_type_k: str = DEFAULT_KV_CACHE_TYPE
     cache_type_v: str = DEFAULT_KV_CACHE_TYPE
@@ -397,11 +418,24 @@ class ShardedLlamaServerConfig:
             raise RpcClusterConfigError("rpc_peers must contain RpcPeerEndpoint values")
         if len({peer.port for peer in peers}) != 1:
             raise RpcClusterConfigError("every RPC peer must use the one configured RPC port")
-        object.__setattr__(self, "rpc_peers", _coerce_peers(peers, port=peers[0].port))
+        coerced_peers = _coerce_peers(peers, port=peers[0].port)
+        object.__setattr__(self, "rpc_peers", coerced_peers)
         _validate_int(self.ctx_size, label="ctx_size", minimum=128)
         _validate_int(self.n_gpu_layers, label="n_gpu_layers", minimum=0)
         _validate_int(self.parallel, label="parallel", minimum=1)
-        object.__setattr__(self, "tensor_split", validate_tensor_split(self.tensor_split))
+        try:
+            validated_split = validate_split_tensor_weights(
+                self.tensor_split, peer_count=len(coerced_peers)
+            )
+            validated_mode = validate_split_mode(self.split_mode)
+            validated_spec = validate_split_spec_type(self.spec_type)
+            validated_devices = validate_split_device_order(self.devices)
+        except ValueError as exc:
+            raise RpcClusterConfigError(str(exc)) from exc
+        object.__setattr__(self, "tensor_split", validated_split)
+        object.__setattr__(self, "split_mode", validated_mode)
+        object.__setattr__(self, "spec_type", validated_spec)
+        object.__setattr__(self, "devices", validated_devices)
         fa = str(self.flash_attn or "").strip().lower()
         if fa not in _VALID_FLASH_ATTN:
             raise RpcClusterConfigError(
@@ -420,7 +454,8 @@ class ShardedLlamaServerConfig:
             option = item.split("=", 1)[0].strip().lower()
             if option in _RESERVED_SERVER_OPTIONS:
                 raise RpcClusterConfigError(
-                    f"extra_args must not set {option}; host, port and RPC peers are validated fields"
+                    f"extra_args must not set {option}; host, port, RPC peers, split_mode, "
+                    "spec_type and devices are validated fields"
                 )
         object.__setattr__(self, "extra_args", extras)
 
@@ -442,6 +477,10 @@ class ShardedLlamaServerConfig:
             str(self.port),
             "--rpc",
             rpc_arg,
+            "--split-mode",
+            self.split_mode,
+            "--spec-type",
+            self.spec_type,
             "--ctx-size",
             str(self.ctx_size),
             "--n-gpu-layers",
@@ -455,6 +494,8 @@ class ShardedLlamaServerConfig:
             "--parallel",
             str(self.parallel),
         ]
+        if self.devices:
+            args.extend(["--device", ",".join(self.devices)])
         if self.tensor_split:
             args.extend(["--tensor-split", self.tensor_split])
         if self.no_webui:
