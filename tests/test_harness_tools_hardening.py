@@ -61,7 +61,7 @@ def not_live(monkeypatch):
 @pytest.fixture
 def bare_tools(monkeypatch):
     """Check-mode bare-name tools resolve to themselves; trust is covered in test_harness_tools_isolation.py."""
-    monkeypatch.setattr(formatter_config_guard, "trusted_which", lambda name, roots, environ=None: name)
+    monkeypatch.setattr(formatter_config_guard, "vetted_which", lambda name, roots, environ=None: name)
 
 
 # ---- option-shaped path ----------------------------------------------------

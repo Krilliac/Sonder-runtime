@@ -8,7 +8,7 @@ working folder and every parent, and Prettier loads ``prettier.config.js``,
 Inspecting those files failed review four times (each round found another way
 in), so the check path no longer reads project configuration at all:
 
-- Prettier: never ``npx``. :func:`resolve_trusted_prettier` returns an absolute
+- Prettier: never ``npx``. :func:`resolve_vetted_prettier` returns an absolute
   executable from ``SONDER_PRETTIER_EXE`` or PATH that is not inside the
   project or any authorized root; the caller confirms ``--version`` reports 3
   or newer (Prettier 2 loaded plugins and parsers on its own) and runs
@@ -100,11 +100,11 @@ def _entry_forbidden(entry: str, roots: Sequence[Path]) -> bool:
     return _inside_any(lexical, roots) or _inside_any(resolved, roots)
 
 
-def _trusted_file(path: str, roots: Sequence[Path]) -> bool:
+def _vetted_file(path: str, roots: Sequence[Path]) -> bool:
     return os.path.isabs(path) and os.path.isfile(path) and not _forbidden(path, roots)
 
 
-def trusted_which(
+def vetted_which(
     name: str,
     forbidden_roots: Sequence[Path],
     environ: Mapping[str, str] | None = None,
@@ -116,7 +116,7 @@ def trusted_which(
     result that CreateProcess then resolves against the parent's folder. Here a
     relative, device, extended-length, UNC or project-resident PATH entry is
     skipped, each remaining folder is searched on its own, and the hit must pass
-    :func:`_trusted_file`.
+    :func:`_vetted_file`.
     """
     source = os.environ if environ is None else environ
     path_value = next((value for key, value in source.items() if key.upper() == "PATH"), "")
@@ -124,7 +124,7 @@ def trusted_which(
         if _entry_forbidden(entry, forbidden_roots):
             continue
         found = which_in_directory(name, entry)
-        if found and _trusted_file(found, forbidden_roots):
+        if found and _vetted_file(found, forbidden_roots):
             return found
     return None
 
@@ -134,11 +134,11 @@ def pip_audit_command(forbidden_roots: Sequence[Path]) -> tuple[list[str] | None
 
     The runtime interpreter with ``-I -m pip_audit`` when its own install provides
     the module (:func:`runtime_module_available`); else an absolute, non-batch PATH
-    executable found by :func:`trusted_which`.
+    executable found by :func:`vetted_which`.
     """
     if runtime_module_available("pip_audit"):
         return [sys.executable, "-I", "-m", "pip_audit"], None
-    found = trusted_which("pip-audit", forbidden_roots)
+    found = vetted_which("pip-audit", forbidden_roots)
     if found:
         refusal = batch_shim_error(found, "pip-audit")
         if refusal:
@@ -168,7 +168,7 @@ def executable_config_error(tool: str, root: Path | str, target: str = "") -> st
     return None
 
 
-def resolve_trusted_prettier(
+def resolve_vetted_prettier(
     forbidden_roots: Sequence[Path],
     environ: Mapping[str, str] | None = None,
 ) -> tuple[str | None, str | None]:
@@ -182,12 +182,12 @@ def resolve_trusted_prettier(
     source = os.environ if environ is None else environ
     configured = source.get(PRETTIER_SETTING, "").strip()
     if configured:
-        if _trusted_file(configured, forbidden_roots):
+        if _vetted_file(configured, forbidden_roots):
             return configured, None
         return None, (
             "%s must be the absolute path of a Prettier executable outside the project and every "
             "authorized root" % PRETTIER_SETTING)
-    found = trusted_which("prettier", forbidden_roots, source)
+    found = vetted_which("prettier", forbidden_roots, source)
     if found:
         return found, None
     return None, (
@@ -321,7 +321,7 @@ def python_formatter_command(tool: str, forbidden_roots: Sequence[Path]) -> tupl
     """
     if runtime_module_available(tool):
         return [sys.executable, "-I", "-m", tool], None
-    found = trusted_which(tool, forbidden_roots)
+    found = vetted_which(tool, forbidden_roots)
     if found:
         refusal = batch_shim_error(found, tool)
         if refusal:

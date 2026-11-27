@@ -209,7 +209,7 @@ def test_prettier_with_an_unreadable_version_is_refused(tmp_path, recorder, not_
 
 
 def test_prettier_check_without_a_trusted_prettier_is_refused(tmp_path, no_child, not_live, monkeypatch):
-    monkeypatch.setattr(formatter_config_guard, "trusted_which", lambda *a, **k: None)
+    monkeypatch.setattr(formatter_config_guard, "vetted_which", lambda *a, **k: None)
     result = harness_tools.format_code(root=str(tmp_path), tool="prettier", check_only=True)
     assert result["ok"] is False
     assert "SONDER_PRETTIER_EXE" in result["error"]
@@ -626,7 +626,7 @@ def test_extended_device_and_unc_spellings_of_a_path_in_the_root_are_forbidden(t
     inside.write_text("x", encoding="utf-8")
     for spelling in _spellings(inside):
         assert formatter_config_guard._forbidden(spelling, [tmp_path]) is True, spelling
-        assert formatter_config_guard._trusted_file(spelling, [tmp_path]) is False, spelling
+        assert formatter_config_guard._vetted_file(spelling, [tmp_path]) is False, spelling
 
 
 @pytest.mark.skipif(not _IS_NT, reason="drive-letter spellings")

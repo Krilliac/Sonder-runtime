@@ -1076,7 +1076,7 @@ def _prettier_check(root, path, timeout, extra_roots=""):
                 "tool": "prettier", "mode": "check"}
 
     forbidden = _formatter_forbidden_roots(root, extra_roots)
-    executable, error = formatter_config_guard.resolve_trusted_prettier(forbidden)
+    executable, error = formatter_config_guard.resolve_vetted_prettier(forbidden)
     if error:
         return refusal(error)
     # Unlike gofmt/clang-format/dart/pip-audit, a batch shim is allowed here (the npm-global
@@ -1152,9 +1152,9 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
             # A bare name (gofmt, clang-format, dart) is resolved here, never by the child
             # launch: only an absolute file in a PATH folder outside the project and every
             # authorized root runs.
-            trusted = formatter_config_guard.trusted_which(
+            resolved = formatter_config_guard.vetted_which(
                 cmd[0], _formatter_forbidden_roots(root, extra_roots))
-            if not trusted:
+            if not resolved:
                 return {
                     "ok": False,
                     "error": "refusing to run %s in check mode: no %s on PATH outside the project and "
@@ -1162,10 +1162,10 @@ def format_code(root=".", tool="auto", path="", check_only=False, timeout=60, ex
                     "tool": tool,
                     "mode": "check",
                 }
-            batch = formatter_config_guard.batch_shim_error(trusted, tool)
+            batch = formatter_config_guard.batch_shim_error(resolved, tool)
             if batch:
                 return {"ok": False, "error": batch, "tool": tool, "mode": "check"}
-            cmd[0] = trusted
+            cmd[0] = resolved
     else:
         cmd = list(cmd_template)
     if path:
