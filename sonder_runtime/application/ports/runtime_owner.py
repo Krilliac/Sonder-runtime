@@ -1,9 +1,12 @@
 """Host lifecycle commands, distinct from the canonical child/process ledgers."""
+from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
 import json
 import re
+from typing import Any
 
 
 # Windows CPython minor versions the managed runtime profile may be sealed on.
@@ -22,14 +25,14 @@ class OwnerUnsupported(OwnerRefused):
 
 
 class OwnerCommitAmbiguous(OwnerRefused):
-    def __init__(self, prepared):
+    def __init__(self, prepared: PreparedOwnerOperation) -> None:
         self.prepared = prepared
         super().__init__(
             "owner storage outcome is unresolved; reconcile the exact operation ID"
         )
 
 
-def canonical(value):
+def canonical(value: Any) -> bytes:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode()
@@ -42,7 +45,7 @@ class PreparedOwnerOperation:
     expected_revision: int
     payload: bytes
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not isinstance(self.operation_id, str) or not re.fullmatch(
             r"[A-Za-z0-9_-]{1,64}", self.operation_id
         ):
@@ -69,7 +72,7 @@ class PreparedOwnerOperation:
             raise OwnerRefused("invalid immutable owner payload") from None
 
     @property
-    def digest(self):
+    def digest(self) -> str:
         return hashlib.sha256(
             canonical(
                 [
@@ -82,7 +85,12 @@ class PreparedOwnerOperation:
         ).hexdigest()
 
 
-def prepare_owner_operation(operation_id, action, expected_revision, arguments):
+def prepare_owner_operation(
+    operation_id: str,
+    action: str,
+    expected_revision: int,
+    arguments: Mapping[str, Any],
+) -> PreparedOwnerOperation:
     return PreparedOwnerOperation(
         operation_id, action, expected_revision, canonical(arguments)
     )

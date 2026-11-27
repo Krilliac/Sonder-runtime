@@ -1,25 +1,29 @@
 """Host-injected worker factories; application code does not own OS threads."""
+from __future__ import annotations
+
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor as _NativePool
 from dataclasses import dataclass
 from threading import RLock, Thread as _NativeThread
+from typing import Any
 
 
 @dataclass(frozen=True)
 class RuntimeWorkerFactories:
-    thread: object
-    pool: object
+    thread: Callable[..., Any]
+    pool: Callable[..., Any]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not callable(self.thread) or not callable(self.pool):
             raise TypeError("callable worker factories required")
 
 
-_FACTORIES = None
+_FACTORIES: RuntimeWorkerFactories | None = None
 _NATIVE_USED = False
 _INSTALL_LOCK = RLock()
 
 
-def install_disposable_factories(factories):
+def install_disposable_factories(factories: RuntimeWorkerFactories) -> None:
     global _FACTORIES
     with _INSTALL_LOCK:
         if type(factories) is not RuntimeWorkerFactories or _FACTORIES is not None or _NATIVE_USED:
@@ -27,7 +31,7 @@ def install_disposable_factories(factories):
         _FACTORIES = factories
 
 
-def Thread(*args, **kwargs):
+def Thread(*args: Any, **kwargs: Any) -> Any:
     global _NATIVE_USED
     with _INSTALL_LOCK:
         factories = _FACTORIES
@@ -36,7 +40,7 @@ def Thread(*args, **kwargs):
     return _NativeThread(*args, **kwargs) if factories is None else factories.thread(*args, **kwargs)
 
 
-def ThreadPoolExecutor(*args, **kwargs):
+def ThreadPoolExecutor(*args: Any, **kwargs: Any) -> Any:
     global _NATIVE_USED
     with _INSTALL_LOCK:
         factories = _FACTORIES
