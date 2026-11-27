@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import struct
@@ -19,6 +20,21 @@ _SHELLS = [name for name in ("powershell", "pwsh") if shutil.which(name)]
 EXPECTED_HELLO = bytes([14]) + (24).to_bytes(8, "little") + bytes(24)
 
 pytestmark = pytest.mark.skipif(not _SHELLS, reason="PowerShell is not available")
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_BOX = re.compile(r"\n[ \t]*\|[ \t]?")
+
+
+def _err(result: subprocess.CompletedProcess[str]) -> str:
+    """stderr with PowerShell's error formatting removed.
+
+    pwsh 7 on a Linux runner colours errors and wraps them at the console width inside a
+    "     | " box, so a message such as "did not answer the RPC HELLO" can be split across lines.
+    Strip the colour codes and the box prefixes, and collapse whitespace, before matching text.
+    """
+    text = _BOX.sub(" ", _ANSI.sub("", result.stderr))
+    return " ".join(text.split())
 
 
 @pytest.fixture(params=_SHELLS)
@@ -119,19 +135,19 @@ def test_ps_lockstep_refuses_a_pinned_major_mismatch(shell: str, tmp_path: Path)
         body = f"Assert-RpcProtocolLockstep -Peers {_peers_literal(ports)} -ExpectedMajor 10 -TimeoutMs 5000"
         result = _run(shell, tmp_path, body)
     assert result.returncode != 0
-    assert "Cross-host RPC split refused" in result.stderr
-    assert "7.0.0" in result.stderr and "SONDER_RPC_PROTO_MAJOR=10" in result.stderr
+    assert "Cross-host RPC split refused" in _err(result)
+    assert "7.0.0" in _err(result) and "SONDER_RPC_PROTO_MAJOR=10" in _err(result)
 
 
 def test_ps_lockstep_refuses_disagreeing_or_silent_workers(shell: str, tmp_path: Path) -> None:
     with _fake_rpc_servers([_reply(10), _reply(7)]) as (ports, _):
         result = _run(shell, tmp_path, f"Assert-RpcProtocolLockstep -Peers {_peers_literal(ports)} -TimeoutMs 5000")
     assert result.returncode != 0
-    assert "between workers" in result.stderr
+    assert "between workers" in _err(result)
     with _fake_rpc_servers([None]) as (ports, _):
         result = _run(shell, tmp_path, f"Assert-RpcProtocolLockstep -Peers {_peers_literal(ports)} -TimeoutMs 5000")
     assert result.returncode != 0
-    assert "did not answer the RPC HELLO" in result.stderr
+    assert "did not answer the RPC HELLO" in _err(result)
 
 
 def test_ps_link_network_matches_the_python_policy(shell: str, tmp_path: Path) -> None:
@@ -158,7 +174,7 @@ def test_ps_peer_list_refuses_off_link_peers(shell: str, tmp_path: Path) -> None
     body = "$l = ConvertTo-RpcLinkNetwork '10.77.0.0/29'; ConvertTo-RpcPeerList -Entries @('10.77.0.2,192.168.50.20') -Port 50052 -Link $l"
     result = _run(shell, tmp_path, body)
     assert result.returncode != 0
-    assert "not on the configured private link 10.77.0.0/29" in result.stderr
+    assert "not on the configured private link 10.77.0.0/29" in _err(result)
 
 
 def test_ps_proto_major_and_build_parsing(shell: str, tmp_path: Path) -> None:
@@ -184,10 +200,10 @@ def test_sharded_launcher_refuses_off_link_peers_and_bad_pin(shell: str, tmp_pat
     assert "10.77.0.2:50052" in ok.stdout
     off = _run_script(shell, tmp_path, "start-rpc-sharded.ps1",
                       ["-Action", "Env", "-RpcPeers", "10.77.0.2", "-RpcLinkCidr", "10.88.0.0/24"])
-    assert off.returncode != 0 and "not on the configured private link" in off.stderr
+    assert off.returncode != 0 and "not on the configured private link" in _err(off)
     pin = _run_script(shell, tmp_path, "start-rpc-sharded.ps1",
                       ["-Action", "Env", "-RpcPeers", "10.77.0.2", "-RpcProtoMajor", "abc"])
-    assert pin.returncode != 0 and "SONDER_RPC_PROTO_MAJOR" in pin.stderr
+    assert pin.returncode != 0 and "SONDER_RPC_PROTO_MAJOR" in _err(pin)
 
 
 def test_worker_refuses_a_bind_address_off_the_link(shell: str, tmp_path: Path) -> None:
@@ -195,4 +211,4 @@ def test_worker_refuses_a_bind_address_off_the_link(shell: str, tmp_path: Path) 
                          ["-Action", "Health", "-BindAddress", "10.77.0.2", "-LinkCidr", "10.88.0.0/24",
                           "-InstallDir", str(tmp_path)])
     assert result.returncode != 0
-    assert "rpc-server bind address 10.77.0.2 is not on the configured private link" in result.stderr
+    assert "rpc-server bind address 10.77.0.2 is not on the configured private link" in _err(result)
