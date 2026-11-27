@@ -38,16 +38,17 @@ jobs:
         with:
           fetch-depth: 0
           filter: blob:none
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
-        with:
-          python-version: "3.14"
+      # No setup-python on these runners: uv (pinned) provides CPython 3.14 from its
+      # own cache, bootstrapped from the host's python3. A fresh venv per run.
       - name: Install deps into a fresh venv
         id: install-core-deps
         run: |
-          rm -rf "$RUNNER_TEMP/venv" "$SONDER_HOME"
-          python -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/python" -m pip install -q uv==0.12.19
-          "$RUNNER_TEMP/venv/bin/uv" pip install -r requirements-dev.txt --python "$RUNNER_TEMP/venv/bin/python"
+          rm -rf "$RUNNER_TEMP/boot" "$RUNNER_TEMP/venv" "$SONDER_HOME"
+          python3 -m venv "$RUNNER_TEMP/boot"
+          "$RUNNER_TEMP/boot/bin/python" -m pip install -q uv==0.12.19
+          "$RUNNER_TEMP/boot/bin/uv" venv --python 3.14 "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/boot/bin/uv" pip install -r requirements-dev.txt --python "$RUNNER_TEMP/venv/bin/python"
+          echo "$RUNNER_TEMP/boot/bin" >> "$GITHUB_PATH"
           echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - name: Verify MCP compatibility API
         run: >-
@@ -116,14 +117,14 @@ jobs:
       SONDER_HOME: ${{ github.workspace }}\..\sonder-home-windows
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
-        with:
-          python-version: "3.14"
+      # No setup-python: it cannot unpack Python on this host (the Store pwsh is not
+      # readable by the runner and Windows PowerShell 5.1 Expand-Archive fails). Use the
+      # host's Python 3.14 through the py launcher, with a fresh venv per run.
       - name: Install dependencies in a fresh Windows venv
         id: venv
         run: |
           if (Test-Path "$env:RUNNER_TEMP\sonder-ci-venv") { Remove-Item -Recurse -Force "$env:RUNNER_TEMP\sonder-ci-venv" }
-          python -m venv "$env:RUNNER_TEMP\sonder-ci-venv"
+          py -3.14 -m venv "$env:RUNNER_TEMP\sonder-ci-venv"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & "$env:RUNNER_TEMP\sonder-ci-venv\Scripts\python.exe" -m pip install -q uv==0.12.19
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
