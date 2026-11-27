@@ -32,6 +32,7 @@ sonder_runtime/adapters/command_surface.py
 sonder_runtime/adapters/compute_fabric/__init__.py
 sonder_runtime/adapters/compute_fabric/local_snapshot.py
 sonder_runtime/adapters/config_validation.py
+sonder_runtime/adapters/confined_read.py
 sonder_runtime/adapters/content_services.py
 sonder_runtime/adapters/context_formatting.py
 sonder_runtime/adapters/context_planning.py
@@ -63,6 +64,7 @@ sonder_runtime/adapters/filesystem/sealed_python_main.py
 sonder_runtime/adapters/filesystem/typed.py
 sonder_runtime/adapters/fleet_aggregation.py
 sonder_runtime/adapters/fleet_synthesis.py
+sonder_runtime/adapters/formatter_config_guard.py
 sonder_runtime/adapters/generation_permit.py
 sonder_runtime/adapters/git/__init__.py
 sonder_runtime/adapters/git_change_targets.py
@@ -197,6 +199,7 @@ sonder_runtime/adapters/playbook_search.py
 sonder_runtime/adapters/preflight_executor.py
 sonder_runtime/adapters/process_probe.py
 sonder_runtime/adapters/process_tree.py
+sonder_runtime/adapters/project_venv.py
 sonder_runtime/adapters/protected_write_scope.py
 sonder_runtime/adapters/provider_bindings.py
 sonder_runtime/adapters/provider_dispatch/__init__.py
@@ -208,6 +211,7 @@ sonder_runtime/adapters/repl_services.py
 sonder_runtime/adapters/repository_errors.py
 sonder_runtime/adapters/reproducible_evaluation.py
 sonder_runtime/adapters/request_temperature_guard.py
+sonder_runtime/adapters/requirements_guard.py
 sonder_runtime/adapters/restricted_tool_lane.py
 sonder_runtime/adapters/runtime_capabilities.py
 sonder_runtime/adapters/runtime_configuration.py
@@ -580,15 +584,27 @@ sonder_runtime/domain/__init__.py
 sonder_runtime/domain/adaptive_batcher.py
 sonder_runtime/domain/adaptive_concurrency.py
 sonder_runtime/domain/agent_escalation_identity.py
+sonder_runtime/domain/agent_help_parsing.py
 sonder_runtime/domain/agent_modes.py
+sonder_runtime/domain/agent_mutation_policy.py
 sonder_runtime/domain/agent_observation_quality.py
+sonder_runtime/domain/agent_path_keys.py
 sonder_runtime/domain/agents/__init__.py
+sonder_runtime/domain/agents/activity_command.py
+sonder_runtime/domain/agents/claim_review.py
 sonder_runtime/domain/agents/decision_parsing.py
 sonder_runtime/domain/agents/delegation.py
 sonder_runtime/domain/agents/evidence_quality.py
+sonder_runtime/domain/agents/file_page_rendering.py
 sonder_runtime/domain/agents/interpreter_argv.py
+sonder_runtime/domain/agents/observation_prompt.py
 sonder_runtime/domain/agents/policy_refusal_guard.py
 sonder_runtime/domain/agents/roles.py
+sonder_runtime/domain/agents/sampling_policy.py
+sonder_runtime/domain/agents/tool_args.py
+sonder_runtime/domain/agents/tool_help.py
+sonder_runtime/domain/agents/tool_naming.py
+sonder_runtime/domain/agents/verification_reach.py
 sonder_runtime/domain/anthropic_policy.py
 sonder_runtime/domain/approval.py
 sonder_runtime/domain/approvals_limit.py
@@ -621,6 +637,7 @@ sonder_runtime/domain/circuit_breaker.py
 sonder_runtime/domain/claim_check.py
 sonder_runtime/domain/client_tools.py
 sonder_runtime/domain/cloud_access.py
+sonder_runtime/domain/cloud_agent_tool_policy.py
 sonder_runtime/domain/cloud_model_policy.py
 sonder_runtime/domain/cloud_model_refresh.py
 sonder_runtime/domain/cloud_thinking_budget.py
@@ -664,6 +681,7 @@ sonder_runtime/domain/extensions/artifact.py
 sonder_runtime/domain/extensions/manifest.py
 sonder_runtime/domain/fanout_policy.py
 sonder_runtime/domain/fanout_redaction.py
+sonder_runtime/domain/fleet_briefing.py
 sonder_runtime/domain/fleet_intent.py
 sonder_runtime/domain/fleet_pressure.py
 sonder_runtime/domain/gpu_admission.py
@@ -776,6 +794,7 @@ sonder_runtime/domain/training/models.py
 sonder_runtime/domain/training/reproducible.py
 sonder_runtime/domain/updates/__init__.py
 sonder_runtime/domain/updates/models.py
+sonder_runtime/domain/verification_progress.py
 sonder_runtime/domain/work_stealing.py
 sonder_runtime/domain/worker_capacity.py
 sonder_runtime/interfaces/__init__.py

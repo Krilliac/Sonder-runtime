@@ -345,8 +345,11 @@ def test_rename_symbol_cannot_change_a_policy_file(checkout, which):
     result = harness_tools.rename_symbol(str(checkout.repo), "astra", "zzzz", glob="**/*", dry_run=False)
     assert result["ok"] is False, result
     assert (checkout.project / "mod.py").read_text(encoding="utf-8") == "astra = 1\nhelper = 2\n"
-    # The preview still works, and an ordinary rename is applied.
-    assert harness_tools.rename_symbol(str(checkout.repo), "astra", "zzzz", glob=glob)["ok"] is True
+    # The preview is refused too: a protected file's lines are never shown,
+    # as file_read refuses them. An ordinary rename is applied.
+    result = harness_tools.rename_symbol(str(checkout.repo), "astra", "zzzz", glob=glob)
+    assert result["ok"] is False and "protected" in result["error"], result
+    assert "preview" not in result
     result = harness_tools.rename_symbol(str(checkout.repo), "astra", "zzzz", glob="proj/*.py", dry_run=False)
     assert result["ok"] is True and result["files_changed"] == 1, result
     assert (checkout.project / "mod.py").read_text(encoding="utf-8") == "zzzz = 1\nhelper = 2\n"
