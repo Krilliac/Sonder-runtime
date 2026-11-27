@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from typing import Any, cast
 
 
 # Greedy item captures that end at ``$`` (the caller strips them): a lazy
@@ -86,15 +87,15 @@ _BUILD_LENSES = (
 )
 
 
-def positive_count(value) -> int:
+def positive_count(value: object) -> int:
     """Zero (including the string form) and nonpositive input are unspecified."""
     try:
-        return max(0, int(value or 0))
+        return max(0, int(cast(Any, value or 0)))
     except (TypeError, ValueError, OverflowError):
         return 0
 
 
-def normalize_request(task: str, agents=0, *, is_retry: bool = False) -> tuple[str, object, bool]:
+def normalize_request(task: str, agents: object = 0, *, is_retry: bool = False) -> tuple[str, object, bool]:
     """Strip one leading routing prefix; an explicit API count takes priority.
 
     Call exactly once at the master entry boundary, before scope/provenance
@@ -238,7 +239,8 @@ def assign_subtasks(items: Sequence[str], count: int) -> tuple[str, ...]:
 
 def subtask_prompts(
     task: str, count: int, *, tool_access: bool = False, project: str = "",
-    objective_contracts=(), protected: bool = False, build_projects=(),
+    objective_contracts: Sequence[str] = (), protected: bool = False,
+    build_projects: Sequence[str] = (),
 ) -> list[str]:
     """Keep protected/single-worker bytes stable; vary ordinary shared tasks."""
     subtasks = (

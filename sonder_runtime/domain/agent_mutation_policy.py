@@ -15,34 +15,34 @@ WORK_MUTATION_TOOLS = frozenset({
 })
 
 
-def invocation_mutates(tool_name, args):
+def invocation_mutates(tool_name: str, args: object) -> bool:
     """Return whether this invocation can change persistent workspace state."""
-    args = args if isinstance(args, dict) else {}
+    args_map = args if isinstance(args, dict) else {}
     if tool_name == "agent_lane":
-        return args.get("action") in {"spawn", "send_message", "message", "resume"}
+        return args_map.get("action") in {"spawn", "send_message", "message", "resume"}
     if tool_name not in WORK_MUTATION_TOOLS:
         return False
     if tool_name == "file_delete":
-        return args.get("dry_run") is False
+        return args_map.get("dry_run") is False
     if tool_name == "json_patch":
-        return str(args.get("mode", "preview")).strip().lower() == "apply"
+        return str(args_map.get("mode", "preview")).strip().lower() == "apply"
     if tool_name == "text_patch":
-        return args.get("apply") is True
+        return args_map.get("apply") is True
     if tool_name == "rename_symbol":
-        return not bool(args.get("dry_run", True))
+        return not bool(args_map.get("dry_run", True))
     if tool_name == "apply_patch":
-        return not bool(args.get("check_only", False))
+        return not bool(args_map.get("check_only", False))
     if tool_name == "lint_run":
-        return bool(args.get("fix", False))
+        return bool(args_map.get("fix", False))
     if tool_name == "format_code":
-        return not bool(args.get("check_only", False))
+        return not bool(args_map.get("check_only", False))
     if tool_name == "data_convert":
-        return args.get("apply") is True
+        return args_map.get("apply") is True
     if tool_name == "sqlite_mutate":
-        return str(args.get("mode", "preview")).strip().lower() == "apply"
+        return str(args_map.get("mode", "preview")).strip().lower() == "apply"
     if tool_name in {
         "memory_quality_repair", "memory_privacy_repair",
         "memory_embedding_backfill", "memory_interaction_embedding_backfill",
     }:
-        return args.get("apply") is True
+        return args_map.get("apply") is True
     return True
