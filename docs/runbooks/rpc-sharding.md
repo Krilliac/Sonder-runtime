@@ -53,6 +53,18 @@ variables are listed in the
 - The main machine's `llama-server` listens on loopback only
   (`127.0.0.1:11438` by default). The launcher refuses any other bind address
   and refuses `extra_args` that would override `--host`, `--port` or `--rpc`.
+- Set `SONDER_RPC_LINK_CIDR` to the private link's network (for example
+  `10.77.0.0/30`) to pin every worker, and the worker's bind address, to that
+  link. A private address that is not on the link (a LAN or VPN address) is
+  then refused too.
+- **Version lockstep.** The RPC wire protocol changes between llama.cpp
+  releases (`RPC_PROTO_MAJOR_VERSION` 7 at b11195, 10 at v1.0.0 and v1.1.0).
+  Before launching, `start-rpc-sharded.ps1 -Action Start` sends one RPC HELLO
+  to every worker and refuses the split when a worker does not answer, when
+  workers report different majors, or when one differs from
+  `SONDER_RPC_PROTO_MAJOR` (`-RpcProtoMajor`) if set. Set the pin to the major
+  of the main machine's release. `rpc-server` serves one client at a time, so
+  the check runs only when no sharded server is already connected.
 
 ## 3. Prepare and start the worker
 
@@ -89,7 +101,9 @@ powershell -NoProfile -File .\scripts\rpc\start-rpc-sharded.ps1 -Action Start `
   -ModelPath '<path-to-model.gguf>' -TensorSplit '1,1' -CtxSize 16384
 ```
 
-`Start` refuses to launch when a worker is unreachable, waits up to
+`Start` refuses to launch when a worker is unreachable or fails the version
+lockstep check, records each worker's RPC protocol (`rpcNodes`) and this
+machine's llama.cpp build (`llamaBuild`, from `llama-server --version`), waits up to
 `-ReadyWaitSeconds` (default 180) for `/health` to report `ok`, and records its
 state in `%LOCALAPPDATA%\sonder\run\llama-rpc-server.json`. `-OllamaModel <tag>`
 uses an already-pulled Ollama model's GGUF file instead of `-ModelPath`.
@@ -151,5 +165,8 @@ back at their previous providers.
 | `RPC peer <worker-ip>:50052 is unreachable` | Worker not started, firewall rule missing or naming the wrong addresses, or the link is down. Run `start-rpc-worker.ps1 -Action Health` on the worker and `Test-NetConnection <worker-ip> -Port 50052` on the main machine. |
 | `... is not a private ... or link-local ... IPv4 address` | The allowlist names a hostname, public address or IPv6 address. Use the worker's private-link IPv4 address. |
 | `... uses port N, but the configured RPC port is M` | An entry's `:port` differs from `SONDER_RPC_PORT` / `-RpcPort`. Use one port for every worker. |
+| `Cross-host RPC split refused: ... RPC protocol mismatch` | A worker runs a different llama.cpp release. Install the same release on every node (the worker's `Start` records its build as `llamaBuild` in `llama-rpc-worker.json`), or correct `SONDER_RPC_PROTO_MAJOR`. |
+| `... did not answer the RPC HELLO` | Worker not running, firewall closed, or another `llama-server` already holds that `rpc-server` (it serves one client at a time). |
+| `... is not on the configured private link` | An address lies outside `SONDER_RPC_LINK_CIDR`. Use the link address or correct the CIDR. |
 | `llama-server exited during startup` | Mismatched llama.cpp releases, not enough VRAM for the split, or a bad model path. The stderr tail is in the error and in `%LOCALAPPDATA%\sonder\logs`. |
 | Very slow generation | Expected to a degree; check the link speed and move layers to the main GPU with a larger first `-TensorSplit` weight. |
