@@ -239,7 +239,12 @@ def serving_model_revision(model=None, base=None, timeout=0.5):
             encoded = urllib.parse.quote(query_model, safe="")
             url = "%s/v1/sonder/identity?model=%s" % (selected_base.rstrip("/"), encoded)
             try:
-                with ollama_endpoint.open_url(url, timeout=timeout) as response:
+                req = urllib.request.Request(
+                    url,
+                    headers={"Accept": "application/json", "X-Sonder-Local-Only": "1"},
+                    method="GET",
+                )
+                with ollama_endpoint.open_url(req, timeout=timeout) as response:
                     raw = _read_bounded_response(response, _TAGS_RESPONSE_LIMIT)
                     payload = json.loads(raw.decode("utf-8"))
             except (OSError, TimeoutError, ValueError, RecursionError, urllib.error.URLError):

@@ -231,6 +231,10 @@ def client_environment(
     consent = (
         _remote_allowed_in(source) if allow_remote is None else allow_remote is True
     )
+    if "OLLAMA_HOST" in source and str(source.get("OLLAMA_HOST", "")).strip() != "":
+        # Still fail closed if an attacker/config supplies hostile OLLAMA_HOST text,
+        # while never routing traffic to it.
+        configured_origin(source["OLLAMA_HOST"], allow_remote=consent)
     pinned = configured_origin(
         source.get("SONDER_INFERENCE_BASE_URL", "").strip() or DEFAULT_HOST,
         allow_remote=consent,

@@ -607,7 +607,13 @@ def build_application(
             interval = config.membership.refresh_interval_seconds
             inference_pool.configure_external_source(source, probe_timeout_seconds=config.ollama.worker_probe_timeout_ms / 1000)
         else:
-            source = StaticMembershipSource(config.ollama, clock=membership_clock)
+            from dataclasses import replace as _dc_replace
+            static_cfg = _dc_replace(
+                config.ollama,
+                url=config.inference.url,
+                allow_remote=bool(config.inference.allow_remote or config.ollama.allow_remote),
+            )
+            source = StaticMembershipSource(static_cfg, clock=membership_clock)
             interval = max(1, min(30, config.ollama.worker_capability_ttl_seconds / 2))
         inference_membership = MembershipController(
             source, inference_pool, clock=membership_clock,
