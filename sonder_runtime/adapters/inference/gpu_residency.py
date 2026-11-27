@@ -576,23 +576,68 @@ def inspect_inference_nodes(
     combined_free = 0
     saw_pool = False
     hybrid_nodes: list[str] = []
-    for snap in ok_snaps:
+    hosts: list[dict[str, Any]] = []
+    host_by_key: dict[tuple[str, tuple[int, ...]], dict[str, Any]] = {}
+    sigs_by_node_id: dict[str, list[tuple[int, ...]]] = {}
+    warnings: list[str] = []
+    for index, snap in enumerate(ok_snaps):
         pool = snap.gpu_pool
+        snap_combined = (
+            snap.combined_gpu_vram_mib
+            if snap.combined_gpu_vram_mib is not None
+            else (pool.combined_gpu_vram_mib if pool is not None else None)
+        )
+        if pool is None and snap_combined is None:
+            continue
+        # One host reports one DXGI pool no matter how many endpoints reach it: endpoints that
+        # share a node_id AND report an identical pool are the same host and count once.
+        sig: tuple[int, ...] = (
+            (
+                pool.discrete_vram_mib,
+                pool.integrated_uma_vram_mib,
+                snap_combined or 0,
+            )
+            if pool is not None
+            else (-1, -1, snap_combined or 0)
+        )
+        node_id = snap.node_id or ""
+        key = (node_id if node_id else "<endpoint-%d>" % index, sig)
+        existing = host_by_key.get(key)
+        if existing is not None:
+            existing["endpoints"].append(snap.base_url)
+            continue
+        if node_id:
+            known = sigs_by_node_id.setdefault(node_id, [])
+            if known:
+                warnings.append(
+                    "node_id %r reported by multiple endpoints with different GPU pools; "
+                    "possible node_id collision, pools not merged" % node_id
+                )
+            known.append(sig)
+        row: dict[str, Any] = {
+            "node_id": snap.node_id,
+            "endpoints": [snap.base_url],
+            "discrete_vram_mib": pool.discrete_vram_mib if pool is not None else None,
+            "integrated_uma_vram_mib": pool.integrated_uma_vram_mib if pool is not None else None,
+            "combined_gpu_vram_mib": snap_combined,
+        }
+        host_by_key[key] = row
+        hosts.append(row)
+        saw_pool = True
         if pool is not None:
-            saw_pool = True
             discrete_total += pool.discrete_vram_mib
             uma_total += pool.integrated_uma_vram_mib
-            combined_total += (
-                snap.combined_gpu_vram_mib
-                if snap.combined_gpu_vram_mib is not None
-                else pool.combined_gpu_vram_mib
-            )
             combined_free += pool.combined_free_gpu_vram_mib
-            if snap.hybrid_gpu_spread and pool.hybrid_vulkan_pool_available and snap.base_url:
-                hybrid_nodes.append(snap.base_url)
-        elif snap.combined_gpu_vram_mib is not None:
-            saw_pool = True
-            combined_total += snap.combined_gpu_vram_mib
+        combined_total += snap_combined or 0
+    for snap in ok_snaps:
+        pool = snap.gpu_pool
+        if (
+            pool is not None
+            and snap.hybrid_gpu_spread
+            and pool.hybrid_vulkan_pool_available
+            and snap.base_url
+        ):
+            hybrid_nodes.append(snap.base_url)
 
     return {
         "primary": primary_snap.to_dict(),
@@ -604,6 +649,8 @@ def inspect_inference_nodes(
         "combined_gpu_vram_mib": combined_total if saw_pool else None,
         "combined_free_gpu_vram_mib": combined_free if saw_pool else None,
         "hybrid_gpu_spread_nodes": hybrid_nodes,
+        "hosts": hosts,
+        "warnings": warnings,
         "summary": format_inference_nodes_summary(primary_snap, worker_snaps),
     }
 
