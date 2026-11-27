@@ -1819,6 +1819,30 @@
       "summary": "Validate a guarded JSON, JSONL, or TOML file against a JSON Schema file or inline schema_json."
     },
     {
+      "category": "memory",
+      "name": "/scratchpad",
+      "risk": "ask",
+      "summary": "List, read, search, write/append, or delete persistent free-form Markdown scratchpad notes."
+    },
+    {
+      "category": "memory",
+      "name": "/scratchpad_delete",
+      "risk": "ask",
+      "summary": "Delete one named note from your persistent scratchpad."
+    },
+    {
+      "category": "memory",
+      "name": "/scratchpad_read",
+      "risk": "safe",
+      "summary": "Read, list, or search your persistent free-form Markdown scratchpad notes."
+    },
+    {
+      "category": "memory",
+      "name": "/scratchpad_write",
+      "risk": "ask",
+      "summary": "Create, replace, or append to a persistent free-form Markdown scratchpad note."
+    },
+    {
       "category": "creative",
       "name": "/screen_capture",
       "risk": "ask",
@@ -2655,6 +2679,18 @@
     {
       "name": "schema_validate",
       "summary": "Validate a guarded JSON, JSONL, or TOML file against a guarded JSON Schema file or inline schema_json"
+    },
+    {
+      "name": "scratchpad_delete",
+      "summary": "Delete one named note from the owner's persistent Markdown scratchpad"
+    },
+    {
+      "name": "scratchpad_read",
+      "summary": "Read, list, or search owner-scoped restart-persistent Markdown scratchpad notes"
+    },
+    {
+      "name": "scratchpad_write",
+      "summary": "Create, replace, or append to an owner-scoped restart-persistent Markdown scratchpad note"
     },
     {
       "name": "script_search",

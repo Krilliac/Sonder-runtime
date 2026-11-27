@@ -640,3 +640,55 @@ def test_doctor_multi_node_check_combines_primary_and_private_worker_gpu_pools(t
     assert f"worker {NODE1} gpu pool: 48896 MiB combined" in check["detail"]
     assert "hybrid_gpu_spread=available (Vulkan0,Vulkan1)" in check["detail"]
     assert NODE1_TOKEN not in check["detail"]
+
+
+def _two_endpoint_report(
+    tmp_path: Any, primary_doc: dict[str, Any], worker_doc: dict[str, Any]
+) -> dict[str, Any]:
+    ca_file = tmp_path / "node1-ca.pem"
+    ca_file.write_text("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n", encoding="utf-8")
+
+    def fake_get(url: str, _headers: dict[str, str], _timeout: float) -> tuple[int, bytes]:
+        doc = worker_doc if url.startswith(NODE1) else primary_doc
+        return 200, json.dumps(doc).encode("utf-8")
+
+    env = {
+        "SONDER_INFERENCE_BASE_URL": PRIMARY,
+        "SONDER_INFERENCE_API_KEY": PRIMARY_KEY,
+        "SONDER_ALLOW_REMOTE_INFERENCE": "1",
+        ENV_PRIVATE_WORKERS: json.dumps([{"url": NODE1, "ca_bundle": str(ca_file), "token_env": "SONDER_NODE1_TEST_TOKEN"}]),
+        "SONDER_NODE1_TEST_TOKEN": NODE1_TOKEN,
+    }
+    return gpu_residency.inspect_inference_nodes(
+        env=env, get_transport=fake_get, cache=gpu_residency.NodeSnapshotCache()
+    )
+
+
+def test_same_node_id_endpoints_count_gpu_pool_once(tmp_path):
+    report = _two_endpoint_report(tmp_path, _hybrid_node_doc(), _hybrid_node_doc())
+    assert report["ready_nodes"] == 2
+    assert report["discrete_vram_mib"] == 16304
+    assert report["integrated_uma_vram_mib"] == 32592
+    assert report["combined_gpu_vram_mib"] == 48896
+    assert report["combined_free_gpu_vram_mib"] == 44120
+    assert len(report["hosts"]) == 1
+    assert report["hosts"][0]["node_id"] == "node1"
+    assert report["hosts"][0]["endpoints"] == [PRIMARY, NODE1]
+    assert report["warnings"] == []
+
+
+def test_different_node_ids_still_sum(tmp_path):
+    report = _two_endpoint_report(tmp_path, _discrete_only_node_doc(), _hybrid_node_doc())
+    assert report["discrete_vram_mib"] == 16303 + 16304
+    assert len(report["hosts"]) == 2
+    assert report["warnings"] == []
+
+
+def test_same_node_id_with_different_pools_warns_and_does_not_merge(tmp_path):
+    other = _discrete_only_node_doc()
+    other["node_id"] = "node1"
+    report = _two_endpoint_report(tmp_path, other, _hybrid_node_doc())
+    assert len(report["hosts"]) == 2
+    assert report["discrete_vram_mib"] == 16303 + 16304
+    assert len(report["warnings"]) == 1
+    assert "node_id collision" in report["warnings"][0]

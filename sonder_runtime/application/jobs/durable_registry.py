@@ -12,7 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from threading import RLock
-from typing import Any, Callable, Iterable, Mapping, Protocol
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from typing import Any, Protocol
 
 from ..execution.world_control import (
     BoundedOutputBuffer,
@@ -167,10 +168,10 @@ class DurableJobRegistry:
         self._outputs: dict[str, BoundedOutputBuffer] = {}
         self._processes: dict[str, tuple[int, int | None]] = {}
         self._metadata: dict[str, dict[str, Any]] = {}
-        self._cleanup_evidence = {}
+        self._cleanup_evidence: dict[str, str] = {}
         self._lock = RLock()
 
-    def _record_process_cleanup(self, job_id, proof):
+    def _record_process_cleanup(self, job_id: str, proof: Mapping[str, Any]) -> None:
         """Provider-internal evidence sink; never exposed as a job mutation tool."""
         import json
 
@@ -183,12 +184,15 @@ class DurableJobRegistry:
                 raise ValueError("immutable process cleanup evidence conflict")
             self._cleanup_evidence[job_id] = encoded
 
-    def process_cleanup_proof(self, job_id):
+    def process_cleanup_proof(self, job_id: str) -> dict[str, Any] | None:
         import json
 
         with self._lock:
             value = self._cleanup_evidence.get(job_id)
-            return None if value is None else json.loads(value)
+            if value is None:
+                return None
+            loaded = json.loads(value)
+            return loaded if isinstance(loaded, dict) else None
 
     def start(
         self,
@@ -314,7 +318,7 @@ class DurableJobRegistry:
         *,
         include_terminal: bool = True,
         page_size: int = 256,
-    ):
+    ) -> Iterator[JobRecord]:
         """Iterate a stable kind-scoped snapshot without a fixed recovery cap."""
         if not isinstance(kind_prefix, str):
             raise TypeError("kind_prefix must be text")
@@ -341,11 +345,13 @@ class DurableJobRegistry:
         with self._lock:
             record = self.poll(job_id)
             process = self._processes.get(job_id)
+            process_id, process_group_id = process if process is not None else (None, None)
             return DurableJobView(
                 record,
                 record.identity.parent_job_id,
                 tuple(self._children.get(job_id, ())),
-                *(process or (None, None)),
+                process_id,
+                process_group_id,
                 dict(self._metadata.get(job_id, {})),
             )
 
@@ -570,7 +576,7 @@ __all__ = [
 ]
 
 
-def _validate_cleanup_evidence(record, proof):
+def _validate_cleanup_evidence(record: JobRecord, proof: Mapping[str, Any]) -> None:
     if (
         not record.is_terminal
         or proof.get("job_id") != record.identity.job_id

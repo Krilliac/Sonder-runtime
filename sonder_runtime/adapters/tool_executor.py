@@ -204,6 +204,63 @@ class ToolExecutorAdapter:
                     output=json.dumps(res, sort_keys=True),
                     evidence=res,
                 )
+            if call.tool in ("scratchpad_read", "scratchpad_write", "scratchpad_delete"):
+                from pathlib import Path as _Path
+
+                from sonder_runtime.adapters.persistence.scratchpad_store import ScratchpadStore
+                from sonder_runtime.adapters.security import approval_ledger as _approval_ledger
+                from sonder_runtime.domain.memory.scratchpad import ScratchpadPolicy
+                from sonder_runtime.platform import paths as _runtime_paths
+                from sonder_runtime.platform.config import load_config as _load_config
+                from sonder_runtime.platform.logging import redactor_for_config as _redactor_for_config
+
+                # Same owner order and redaction as the MCP path
+                # (bootstrap/scratchpad.py resolve_owner and get_store), so a note
+                # written through either path lands in the same bucket, redacted
+                # the same way.
+                owner = ""
+                for attr in ("owner_id", "principal", "account_id"):
+                    val = getattr(context, attr, None)
+                    if val and str(val).strip():
+                        owner = str(val).strip()
+                        break
+                owner = owner or str(_approval_ledger.current_owner() or "local")
+                home = getattr(context, "sonder_home", None) or _runtime_paths.default_home()
+                cfg_file = _Path(home) / "sonder.toml"
+                store = ScratchpadStore(
+                    home,
+                    ScratchpadPolicy(),
+                    redactor=_redactor_for_config(_load_config(cfg_file if cfg_file.is_file() else None)),
+                )
+                if call.tool == "scratchpad_read":
+                    note_name = str(args.get("name") or "").strip()
+                    query_text = str(args.get("query") or "").strip()
+                    if note_name:
+                        res = store.read(
+                            owner,
+                            note_name,
+                            start_line=args.get("start_line", 1),
+                            max_lines=args.get("max_lines", 200),
+                        )
+                    elif query_text:
+                        res = store.search(owner, query_text)
+                    else:
+                        res = store.list_notes(owner, tag=str(args.get("tag") or ""))
+                elif call.tool == "scratchpad_write":
+                    res = store.write(
+                        owner,
+                        str(args.get("name") or ""),
+                        str(args.get("content") or ""),
+                        mode=str(args.get("mode") or "replace"),
+                        tags=args.get("tags"),
+                    )
+                else:
+                    res = store.delete(owner, str(args.get("name") or ""))
+                return ToolResult(
+                    ok=bool(res.get("ok")),
+                    output=json.dumps(res, ensure_ascii=False, sort_keys=True),
+                    evidence=res,
+                )
             if call.tool == "symbol_verify":
                 import sonder_runtime.adapters.inspection.symbol_verify as symbol_verify_mod
 
