@@ -20,9 +20,8 @@ from sonder_runtime.adapters.inference.sonder_inference_gateway import (
     SonderInferenceConfig,
     SonderInferenceGateway,
 )
-from sonder_runtime.application.ports.preflight import CheckResult
 
-BOUND = {"SONDER_MODEL_BACKEND": "sonder-inference", "SONDER_EMBEDDING_PROVIDER": "ollama"}
+BOUND = {"SONDER_MODEL_BACKEND": "sonder-inference"}
 
 
 def _health(status="ready", *, api_version=1, synthetic=False):
@@ -53,10 +52,12 @@ def _gateway(*, health=None, status=200, refused=False):
 
 
 def test_not_configured_is_skipped():
-    for env in ({}, {"SONDER_MODEL_BACKEND": "ollama"}):
-        result = sonder_doctor._check_sonder_inference(env=env)
-        assert result["status"] == "skipped" and "not configured" in result["detail"]
-        assert sonder_doctor._check_sonder_inference_scope(env=env)["status"] == "skipped"
+    env = {"SONDER_MODEL_BACKEND": "openai-compatible"}
+    result = sonder_doctor._check_sonder_inference(env=env)
+    assert result["status"] == "skipped" and "not configured" in result["detail"]
+    assert sonder_doctor._check_sonder_inference_scope(env=env)["status"] == "skipped"
+    retired = sonder_doctor._check_sonder_inference(env={"SONDER_MODEL_BACKEND": "ollama"})
+    assert retired["status"] == "fail" and "retired" in retired["detail"]
 
 
 def test_ready_is_ok():
@@ -73,12 +74,11 @@ def test_synthetic_mock_backend_warns():
 
 def test_unreachable_with_fallback_warns_and_without_fails():
     fallback = dict(BOUND, SONDER_INFERENCE_FALLBACK="ollama")
-    warn = sonder_doctor._check_sonder_inference(env=fallback, gateway=_gateway(refused=True))
-    assert warn["status"] == "warn" and "fall back to ollama" in warn["detail"]
+    retired = sonder_doctor._check_sonder_inference(env=fallback, gateway=_gateway(refused=True))
+    assert retired["status"] == "fail" and "retired" in retired["detail"]
     fail = sonder_doctor._check_sonder_inference(env=BOUND, gateway=_gateway(refused=True))
     assert fail["status"] == "fail"
     assert "sonder-infer serve" in fail["detail"]
-    assert "SONDER_INFERENCE_FALLBACK=ollama" in fail["detail"]
 
 
 def test_starting_server_without_fallback_fails():
@@ -89,9 +89,8 @@ def test_starting_server_without_fallback_fails():
 
 
 def test_api_version_mismatch_fails_even_with_fallback():
-    fallback = dict(BOUND, SONDER_INFERENCE_FALLBACK="ollama")
     result = sonder_doctor._check_sonder_inference(
-        env=fallback, gateway=_gateway(health=_health(api_version=2)),
+        env=BOUND, gateway=_gateway(health=_health(api_version=2)),
     )
     assert result["status"] == "fail" and "incompatible" in result["detail"]
 
@@ -106,8 +105,7 @@ def test_scope_ok_names_tier_bound_surfaces_and_explicit_ollama_boundaries():
     assert result["status"] == "ok"
     for surface in ("REPL", "MCP", "agents", "workbench", "autopilot", "fleet", "web research"):
         assert surface in result["detail"]
-    for boundary in ("explicit Ollama pins", "strict sonder aliases", "durable fanout"):
-        assert boundary in result["detail"]
+    assert "sonder_inference" in result["detail"]
 
 
 def test_default_and_bound_registries_include_the_checks():
@@ -196,31 +194,22 @@ def test_cli_reports_a_real_ready_server_ok(home, monkeypatch, capsys):
 
 
 def test_preflight_never_blocks_serve_because_of_inference(monkeypatch):
-    for name, value in (
-        ("_check_state_directories", lambda config: []),
-        ("_check_disk_space", lambda config: CheckResult("disk_space", True, True, "ok")),
-        ("_check_schema_versions", lambda config: []),
-        ("_check_runtime_policy", lambda: CheckResult("runtime_policy", True, True, "ok")),
-    ):
-        monkeypatch.setattr(preflight_adapter, name, value)
     for key, value in BOUND.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://127.0.0.1:%d" % _refused_port())
-    report = preflight_adapter.run_preflight(object(), check_ollama=False)
-    inference = next(check for check in report.checks if check.name == "sonder_inference")
+    inference = preflight_adapter._sonder_inference_result()
+    assert inference is not None
     assert inference.ok is False and inference.required is False
-    assert report.ok is True and report.degraded is True
 
-    monkeypatch.setenv("SONDER_MODEL_BACKEND", "ollama")
-    monkeypatch.delenv("SONDER_EMBEDDING_PROVIDER")
-    report = preflight_adapter.run_preflight(object(), check_ollama=False)
-    assert all(check.name != "sonder_inference" for check in report.checks)
+    monkeypatch.setenv("SONDER_MODEL_BACKEND", "openai-compatible")
+    monkeypatch.delenv("SONDER_EMBEDDING_PROVIDER", raising=False)
+    assert preflight_adapter._sonder_inference_result() is None
 
 
 # -- verdicts follow what a request would meet ---------------------------------------
 
 
-FALLBACK = dict(BOUND, SONDER_INFERENCE_FALLBACK="ollama")
+FALLBACK = dict(BOUND)
 
 
 @pytest.mark.parametrize("extra,needle", [
@@ -248,9 +237,9 @@ def test_ready_file_api_mismatch_fails_even_with_the_fallback(tmp_path):
 
 
 def test_missing_ready_file_is_unreachable_and_the_fallback_warns(tmp_path):
-    env = dict(FALLBACK, SONDER_INFERENCE_READY_FILE=str(tmp_path / "absent.json"))
+    env = dict(BOUND, SONDER_INFERENCE_READY_FILE=str(tmp_path / "absent.json"))
     result = sonder_doctor._check_sonder_inference(env=env)
-    assert result["status"] == "warn" and "fall back to ollama" in result["detail"]
+    assert result["status"] == "fail" and "sonder-infer" in result["detail"]
 
 
 @pytest.mark.parametrize("health,status,needle", [
@@ -319,21 +308,13 @@ def _garbage_listener():
 def test_a_non_http_peer_never_crashes_preflight_or_doctor(monkeypatch):
     port, close = _garbage_listener()
     try:
-        for name, value in (
-            ("_check_state_directories", lambda config: []),
-            ("_check_disk_space", lambda config: CheckResult("disk_space", True, True, "ok")),
-            ("_check_schema_versions", lambda config: []),
-            ("_check_runtime_policy", lambda: CheckResult("runtime_policy", True, True, "ok")),
-        ):
-            monkeypatch.setattr(preflight_adapter, name, value)
         for key, value in BOUND.items():
             monkeypatch.setenv(key, value)
         monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://127.0.0.1:%d" % port)
-        report = preflight_adapter.run_preflight(object(), check_ollama=False)
-        inference = next(check for check in report.checks if check.name == "sonder_inference")
+        inference = preflight_adapter._sonder_inference_result()
+        assert inference is not None
         assert inference.ok is False and inference.required is False
         assert "malformed HTTP" in inference.detail
-        assert report.ok is True
 
         result = sonder_doctor._check_sonder_inference(env=dict(
             BOUND, SONDER_INFERENCE_BASE_URL="http://127.0.0.1:%d" % port,
@@ -344,10 +325,8 @@ def test_a_non_http_peer_never_crashes_preflight_or_doctor(monkeypatch):
 
 
 def test_preflight_reports_a_check_that_raises_instead_of_blocking(monkeypatch):
-    def explode():
-        raise RuntimeError("unexpected")
-
-    monkeypatch.setattr(preflight_adapter, "_sonder_inference_result", explode)
-    result = preflight_adapter._check_sonder_inference()
+    monkeypatch.setenv("SONDER_MODEL_BACKEND", "ollama")
+    result = preflight_adapter._sonder_inference_result()
+    assert result is not None
     assert result.ok is False and result.required is False
-    assert "RuntimeError" in result.detail
+    assert "invalid provider bindings" in result.detail

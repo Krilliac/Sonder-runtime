@@ -68,6 +68,8 @@ def served_prompt_model(
     for the tier label ``bind_rung`` gives the gateway; anything else, and any
     error reading the config, keeps ``model`` so the prompt never gets worse.
     """
+    if isinstance(tier, str) and tier.strip().lower().startswith("model:"):
+        return model
     if provider == "openrouter":
         try:
             from .openrouter_gateway import config_from_env as openrouter_config

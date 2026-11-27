@@ -260,12 +260,12 @@ def test_embed_restores_input_order_from_response_indexes():
 
 def test_graph_selects_backend_by_env(tmp_path, monkeypatch):
     monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "policy.json"))
-    # Default: Ollama.
+    # Default: Sonder Inference.
     monkeypatch.delenv("SONDER_MODEL_BACKEND", raising=False)
     bootstrap_app.reset_for_tests()
-    from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import SonderInferenceGateway
 
-    assert isinstance(bootstrap_app.build_application().model_gateway, OllamaGateway)
+    assert isinstance(bootstrap_app.build_application().model_gateway, SonderInferenceGateway)
     # Opt-in: OpenAI-compatible.
     monkeypatch.setenv("SONDER_MODEL_BACKEND", "openai")
     bootstrap_app.reset_for_tests()

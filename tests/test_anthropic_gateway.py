@@ -695,7 +695,7 @@ def test_stream_fails_over_on_a_connect_time_401_but_not_on_a_server_error(ledge
 def test_tier_binding_routes_to_the_gateway_and_only_when_bound(monkeypatch):
     assert provider_id_for_label("anthropic") == "anthropic"
     assert PROVIDER_LABEL_IDS["anthropic"] == "anthropic"
-    assert provider_bindings_from_env({}).bound_providers == frozenset({"ollama"})
+    assert provider_bindings_from_env({}).bound_providers == frozenset({"sonder_inference"})
     env = {"SONDER_REASONING_PROVIDER": " Anthropic "}
     assert provider_bindings_from_env(env).tier_providers["reasoning"] == "anthropic"
     assert provider_bindings_from_env({"SONDER_MODEL_BACKEND": "anthropic"}).bound_providers == frozenset({"anthropic"})
@@ -716,12 +716,12 @@ def test_tier_binding_routes_to_the_gateway_and_only_when_bound(monkeypatch):
 
     claude, local = Marker("claude"), Marker("local")
     bindings = ProviderBindings(
-        default_generation_provider="ollama",
-        tier_providers={"fast": "ollama", "general": "ollama", "code": "ollama",
-                        "reasoning": "anthropic", "vision": "ollama"},
-        embedding_provider="ollama",
+        default_generation_provider="sonder_inference",
+        tier_providers={"fast": "sonder_inference", "general": "sonder_inference", "code": "sonder_inference",
+                        "reasoning": "anthropic", "vision": "sonder_inference"},
+        embedding_provider="sonder_inference",
     )
-    gateway = build_model_gateway(bindings, {"ollama": lambda: local, "anthropic": lambda: claude})
+    gateway = build_model_gateway(bindings, {"sonder_inference": lambda: local, "anthropic": lambda: claude})
     assert isinstance(gateway, ProviderDispatchGateway)
     assert gateway.generate(ModelRequest(prompt="p", tier="reasoning"), _context()).text == "claude"
     assert gateway.generate(ModelRequest(prompt="p", tier="fast"), _context()).text == "local"

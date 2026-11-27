@@ -30,8 +30,7 @@ class FakeMcp:
 
 
 def bindings():
-    return ProviderBindings("ollama", {"fast": "ollama", "general": "ollama", "code": "ollama",
-                                       "reasoning": "ollama", "vision": "ollama"}, "ollama")
+    return ProviderBindings.uniform("sonder_inference")
 
 
 @pytest.fixture

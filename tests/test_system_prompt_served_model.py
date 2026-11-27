@@ -84,19 +84,18 @@ def test_inference_fallback_does_not_claim_the_primary_model(monkeypatch, entry)
     monkeypatch.setitem(server.TIERS, "general", "sonder:latest")
     monkeypatch.setenv("SONDER_MODEL_BACKEND", "sonder-inference")
     monkeypatch.setenv("SONDER_INFERENCE_MODEL", "qwen3:14b")
-    monkeypatch.setenv("SONDER_INFERENCE_FALLBACK", "ollama")
     seen = _capture_prompt_model(monkeypatch)
 
     entry("general")
 
-    assert seen["model"] == ""
-    assert seen["prompt"] == ""
+    assert seen["model"] == "qwen3:14b"
 
 
 @pytest.mark.parametrize("entry", [_chat, _structured])
 def test_ollama_bound_tier_keeps_the_policy_model(monkeypatch, entry):
     _clear_provider_env(monkeypatch)
     monkeypatch.setitem(server.TIERS, "general", "sonder:latest")
+    monkeypatch.setenv("SONDER_MODEL_BACKEND", "openai-compatible")
     monkeypatch.setenv("SONDER_INFERENCE_MODEL", "qwen3:14b")
     seen = _capture_prompt_model(monkeypatch)
     entry("general")

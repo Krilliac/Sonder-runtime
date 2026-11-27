@@ -33,13 +33,13 @@ class _Gateway:
         )
 
 
-def _graph(*, fast="sonder_inference", code="ollama", fallback=None):
+def _graph(*, fast="sonder_inference", code="sonder_inference", fallback=None):
     bindings = ProviderBindings(
-        "ollama",
-        {"fast": fast, "general": "ollama", "code": code,
-         "reasoning": "ollama", "vision": "ollama"},
-        "ollama",
-        {"sonder_inference": "ollama"} if fallback else {},
+        "sonder_inference",
+        {"fast": fast, "general": "sonder_inference", "code": code,
+         "reasoning": "sonder_inference", "vision": "sonder_inference"},
+        "sonder_inference",
+        {},
     )
     return SimpleNamespace(provider_bindings=bindings, model_gateway=_Gateway())
 
@@ -108,7 +108,7 @@ def test_six_concurrent_planning_calls_use_bound_sonder_inference_gateway_only()
 
 
 def test_same_model_follows_tier_binding_and_ollama_call_preserves_wire_options():
-    graph = _graph(fast="sonder_inference", code="ollama")
+    graph = _graph(fast="sonder_inference", code="openai_compatible")
     calls = []
     factory = _factory(graph, calls)
     fast = make_generate(
@@ -120,8 +120,8 @@ def test_same_model_follows_tier_binding_and_ollama_call_preserves_wire_options(
         {"cloud": False}, graph=graph, consent=lambda: (True, False),
     )
     assert fast("through gateway") == '{"tasks": [{"id": "t1"}]}'
-    assert code("through ollama") == "ollama-parity"
-    assert len(graph.model_gateway.requests) == 1
+    assert code("through openai") == '{"tasks": [{"id": "t1"}]}'
+    assert len(graph.model_gateway.requests) == 2
     assert calls[0][1]["cloud"] is False
     assert calls[1][0][2:] == (.2, 654, 2048)
 
@@ -242,7 +242,7 @@ def test_bridged_budget_env_is_bounded(monkeypatch, raw, expected):
     assert json_num_predict("ollama", False, False) == 1800
 
 
-@pytest.mark.parametrize("provider", ["sonder_inference", "ollama", "openrouter"])
+@pytest.mark.parametrize("provider", ["sonder_inference", "openai_compatible", "openrouter"])
 def test_agent_sampling_env_only_changes_thinking_provider(monkeypatch, provider):
     monkeypatch.setenv("SONDER_AGENT_SAMPLING", "0.95,20,0")
     monkeypatch.setenv("SONDER_AGENT_TEMPERATURE", "0.6")
@@ -338,9 +338,9 @@ def test_thinking_health_uses_selected_primary_in_mixed_fallback_graph(monkeypat
     fallback.health = lambda: pytest.fail("fallback must not be probed")
     graph = _graph()
     graph.model_gateway = ProviderDispatchGateway(
-        providers={"sonder_inference": PreSendFallbackGateway(primary, fallback=fallback), "ollama": fallback},
+        providers={"sonder_inference": PreSendFallbackGateway(primary, fallback=fallback)},
         tier_providers=graph.provider_bindings.tier_providers,
-        default_generation_provider="ollama", embedding_provider="ollama",
+        default_generation_provider="sonder_inference", embedding_provider="sonder_inference",
     )
     generator = make_generate(_factory(graph, []), "fast", ("model", "system", .1, 4096, 0),
                               {"generation_kind": "decision"}, graph=graph, consent=lambda: (True, False))

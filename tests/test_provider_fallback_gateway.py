@@ -20,8 +20,6 @@ from sonder_runtime.adapters.inference.sonder_inference_gateway import (
 from sonder_runtime.adapters.model_gateway_factory import build_model_gateway
 from sonder_runtime.adapters.provider_bindings import provider_bindings_from_env
 from sonder_runtime.adapters.provider_dispatch.fallback import PreSendFallbackGateway
-from sonder_runtime.adapters.provider_dispatch.gateway import ProviderDispatchGateway
-from sonder_runtime.adapters.runtime_configuration import RuntimeConfig
 from sonder_runtime.application.context import local_owner_context
 from sonder_runtime.application.ports.model_gateway import ModelRequest, ModelResponse
 from sonder_runtime.domain.common.errors import (
@@ -188,7 +186,7 @@ def test_status_reports_fallback_and_count_and_forwards_metadata():
     # A ready primary without embeddings capability forwards its exact refusal.
     healthy_primary, _ = _primary()
     healthy_gateway = PreSendFallbackGateway(healthy_primary, fallback=FakeOllama())
-    with pytest.raises(DependencyUnavailable, match="SONDER_EMBEDDING_PROVIDER"):
+    with pytest.raises(DependencyUnavailable):
         healthy_gateway.embed(["x"], _ctx())
 
 
@@ -204,88 +202,40 @@ def test_served_tier_models_describe_the_primary():
 
 def test_default_is_no_fallback_and_the_error_names_the_fix():
     bindings = provider_bindings_from_env({
-        "SONDER_MODEL_BACKEND": "sonder-inference", "SONDER_EMBEDDING_PROVIDER": "ollama",
+        "SONDER_MODEL_BACKEND": "sonder-inference",
     })
     primary, _ = _primary(get_error=REFUSED)
-    ollama = FakeOllama()
     gateway = build_model_gateway(
-        bindings, {"sonder_inference": lambda: primary, "ollama": lambda: ollama},
+        bindings, {"sonder_inference": lambda: primary},
     )
-    assert isinstance(gateway, ProviderDispatchGateway)
     with pytest.raises(SonderInferenceUnreachable) as info:
         gateway.generate(ModelRequest(prompt="x", tier="general"), _ctx())
-    for needle in ("http://127.0.0.1:18437", "sonder-infer serve", "SONDER_INFERENCE_FALLBACK"):
+    for needle in ("http://127.0.0.1:18437", "sonder-infer serve"):
         assert needle in str(info.value)
-    assert ollama.calls == []
 
 
 def test_factory_wraps_the_primary_and_shares_one_ollama_instance():
-    bindings = provider_bindings_from_env({
-        "SONDER_MODEL_BACKEND": "sonder-inference",
-        "SONDER_EMBEDDING_PROVIDER": "ollama",
-        "SONDER_INFERENCE_FALLBACK": "ollama",
-    })
-    primary, _ = _primary(get_error=REFUSED)
-    built = []
-
-    def ollama_factory():
-        built.append(FakeOllama())
-        return built[-1]
-
-    gateway = build_model_gateway(
-        bindings, {"sonder_inference": lambda: primary, "ollama": ollama_factory},
-    )
-    assert len(built) == 1
-    response = gateway.generate(ModelRequest(prompt="x", tier="code"), _ctx())
-    assert response.text == "from ollama" and len(built[0].calls) == 1
-    status = gateway.provider_status()
-    assert status["sonder_inference"]["fallback_count"] == 1
-    assert status["ollama"] == {"provider": "ollama", "state": "unknown"}
+    with pytest.raises(ValueError, match="retired"):
+        provider_bindings_from_env({
+            "SONDER_MODEL_BACKEND": "sonder-inference",
+            "SONDER_INFERENCE_FALLBACK": "ollama",
+        })
 
 
 def test_fallback_target_is_not_a_routable_binding():
-    bindings = provider_bindings_from_env({
-        "SONDER_MODEL_BACKEND": "sonder-inference",
-        "SONDER_INFERENCE_FALLBACK": "ollama",
-    })
-    primary, _ = _primary()
-    ollama = FakeOllama()
-    gateway = build_model_gateway(
-        bindings, {"sonder_inference": lambda: primary, "ollama": lambda: ollama},
-    )
-    # Uniform binding: the wrapper is returned directly; Ollama is reachable
-    # only through the fallback, never via strict alias or tier dispatch.
-    assert isinstance(gateway, PreSendFallbackGateway)
-    assert gateway.generate(ModelRequest(prompt="x", tier="sonder"), _ctx()).text == "from inference"
-    assert ollama.calls == []
+    with pytest.raises(ValueError, match="retired"):
+        provider_bindings_from_env({
+            "SONDER_MODEL_BACKEND": "sonder-inference",
+            "SONDER_INFERENCE_FALLBACK": "ollama",
+        })
 
 
 def test_identity_bound_runtime_rejects_a_fallback_configuration(tmp_path):
-    from sonder_runtime.adapters.runtime_capabilities import RuntimeCapabilities
-    from sonder_runtime.adapters.runtime_container import build_runtime
-    from sonder_runtime.application.model_gateway.health_and_roles import (
-        LogicalRole,
-        RoleBinding,
-    )
-    from sonder_runtime.application.routing.backend_conformance import (
-        RecentCapabilityEvidence,
-    )
-
-    config = RuntimeConfig(
-        model_backend="sonder-inference",
-        provider_bindings=provider_bindings_from_env({
+    with pytest.raises(ValueError, match="retired"):
+        provider_bindings_from_env({
             "SONDER_MODEL_BACKEND": "sonder-inference",
             "SONDER_INFERENCE_FALLBACK": "ollama",
-        }),
-    )
-    role = next(iter(LogicalRole))
-    with pytest.raises(ValueError, match="fallback"):
-        build_runtime(
-            config, RuntimeCapabilities(),
-            route_evidence=RecentCapabilityEvidence(tmp_path / "evidence.json"),
-            route_identity_for=lambda route: None,
-            route_bindings={role: RoleBinding(role, "sonder_inference", "m")},
-        )
+        })
 
 
 # -- the fallback never widens where a prompt goes -------------------------------
@@ -365,7 +315,7 @@ def test_fallback_warning_states_the_cause_once(caplog):
     assert "set SONDER_INFERENCE_FALLBACK" not in warning
 
 
-@pytest.mark.parametrize("fallback", ["", "ollama"])
+@pytest.mark.parametrize("fallback", ["", "none"])
 def test_strict_local_alias_is_refused_with_or_without_the_fallback(fallback):
     # Mirrors bootstrap/app.py: the strict-alias gate reads required_providers.
     from sonder_runtime.application.chat.handle_chat import ChatCommand, ChatService
@@ -374,9 +324,8 @@ def test_strict_local_alias_is_refused_with_or_without_the_fallback(fallback):
         "SONDER_MODEL_BACKEND": "sonder-inference", "SONDER_INFERENCE_FALLBACK": fallback,
     })
     primary, posts = _primary()
-    ollama = FakeOllama()
     gateway = build_model_gateway(
-        bindings, {"sonder_inference": lambda: primary, "ollama": lambda: ollama},
+        bindings, {"sonder_inference": lambda: primary},
     )
     service = ChatService(
         gateway, chat_default_tier=lambda: "sonder",
@@ -384,4 +333,4 @@ def test_strict_local_alias_is_refused_with_or_without_the_fallback(fallback):
     )
     with pytest.raises(InvalidInput, match="strict chat alias"):
         service.complete(ChatCommand(content="hi", tier="sonder"), _ctx())
-    assert posts == [] and ollama.calls == []
+    assert posts == []

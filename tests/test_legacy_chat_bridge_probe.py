@@ -112,17 +112,17 @@ def _graph_for(gw: object, *, provider: str = "sonder_inference") -> SimpleNames
             "general": provider,
             "code": provider,
             "reasoning": provider,
-            "vision": "ollama",
+            "vision": "sonder_inference",
         },
-        embedding_provider="ollama",
+        embedding_provider="sonder_inference",
     )
-    providers: dict[str, object] = {"ollama": SimpleNamespace()}
+    providers: dict[str, object] = {"sonder_inference": SimpleNamespace()}
     providers[provider] = gw
     dispatch = ProviderDispatchGateway(
         providers=providers,  # type: ignore[arg-type]
         tier_providers=dict(bindings.tier_providers),
         default_generation_provider=provider,
-        embedding_provider="ollama",
+        embedding_provider="sonder_inference",
     )
     return SimpleNamespace(provider_bindings=bindings, model_gateway=dispatch)
 
@@ -541,21 +541,21 @@ def test_routing_semantics_health_dict_models_ollama_pool_isolation_and_prefix_m
         health_models=[{"id": "qwen3.6:35b"}, {"id": "mix:8x7b:q4"}],
     )
     graph = _graph_for(gw_health_dicts)
-    assert legacy_chat_bridge.provider_for_tier("model:qwen3.6:35b", False, graph) == "sonder_inference"
-    assert legacy_chat_bridge.provider_for_tier("model:qwen3.6", False, graph) == "sonder_inference"
-    assert legacy_chat_bridge.provider_for_tier("model:qwen3.6-extra", False, graph) is None
-    assert legacy_chat_bridge.provider_for_tier("model:mix:8x7b", False, graph) is None
-    assert legacy_chat_bridge.provider_for_tier("model:mix", False, graph) == "sonder_inference"
-    assert legacy_chat_bridge.provider_for_tier("model:ollama-only:7b", False, graph) is None
-    # Cloud turns never probe or route to sonder_inference.
-    assert legacy_chat_bridge.provider_for_tier("model:qwen3.6:35b", True, graph) is None
+    assert legacy_chat_bridge._sonder_inference_advertises_model(graph, "qwen3.6:35b") is True
+    assert legacy_chat_bridge._sonder_inference_advertises_model(graph, "qwen3.6") is True
+    assert legacy_chat_bridge._sonder_inference_advertises_model(graph, "qwen3.6-extra") is False
+    assert legacy_chat_bridge._sonder_inference_advertises_model(graph, "mix:8x7b") is False
+    assert legacy_chat_bridge._sonder_inference_advertises_model(graph, "mix") is True
+    assert legacy_chat_bridge._sonder_inference_advertises_model(graph, "ollama-only:7b") is False
+    # Cloud turns route straight to sonder_inference (ollama_cloud) without probing.
+    assert legacy_chat_bridge.provider_for_tier("model:qwen3.6:35b", True, graph) == "sonder_inference"
     assert gw_health_dicts.status_calls == 1
     assert gw_health_dicts.health_calls == 1
 
     # 2. health() fallback also preserves compatibility with plain string model lists.
     gw_health_strings = _StubGateway(models=[], health_models=["plain-str-model:latest"])
     graph_str = _graph_for(gw_health_strings)
-    assert legacy_chat_bridge.provider_for_tier("model:plain-str-model", False, graph_str) == "sonder_inference"
+    assert legacy_chat_bridge._sonder_inference_advertises_model(graph_str, "plain-str-model") is True
     assert gw_health_strings.status_calls == 1
 
 
@@ -586,7 +586,7 @@ def test_thread_ownership_refusal_degrades_cleanly_without_hanging(monkeypatch):
     graph = _graph_for(gw)
 
     started = time.monotonic()
-    assert legacy_chat_bridge.provider_for_tier("model:qwen3.6:35b", False, graph) is None
+    assert legacy_chat_bridge._sonder_inference_advertises_model(graph, "qwen3.6:35b") is False
     assert time.monotonic() - started < 0.2
     assert legacy_chat_bridge._MODEL_ADVERTISEMENT_CACHE.inflight_count == 0
     assert gw.status_calls == 0
@@ -616,10 +616,10 @@ def test_real_sonder_inference_gateway_health_dict_models_cached():
     )
     graph = _graph_for(gw)
 
-    assert legacy_chat_bridge.provider_for_tier("model:qwen3.6:35b", False, graph) == "sonder_inference"
-    assert legacy_chat_bridge.provider_for_tier("model:qwen3.6", False, graph) == "sonder_inference"
-    assert legacy_chat_bridge.provider_for_tier("model:bonsai-27b:q4", False, graph) == "sonder_inference"
-    assert legacy_chat_bridge.provider_for_tier("model:unknown-local", False, graph) is None
+    assert legacy_chat_bridge._sonder_inference_advertises_model(graph, "qwen3.6:35b") is True
+    assert legacy_chat_bridge._sonder_inference_advertises_model(graph, "qwen3.6") is True
+    assert legacy_chat_bridge._sonder_inference_advertises_model(graph, "bonsai-27b:q4") is True
+    assert legacy_chat_bridge._sonder_inference_advertises_model(graph, "unknown-local") is False
     assert len(get_calls) == 1
 
 

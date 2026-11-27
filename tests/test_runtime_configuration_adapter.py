@@ -31,20 +31,20 @@ def test_build_config_from_env_uses_defaults_without_environment_keys():
 def test_build_config_from_env_treats_a_blank_backend_as_ollama():
     assert build_config_from_env(
         "local", {"SONDER_MODEL_BACKEND": "   "}
-    ).model_backend == "ollama"
+    ).model_backend == "sonder-inference"
 
 
 def test_build_config_from_env_captures_mixed_provider_bindings():
     config = build_config_from_env(
         "local",
         {
-            "SONDER_MODEL_BACKEND": "ollama",
+            "SONDER_MODEL_BACKEND": "sonder-inference",
             "SONDER_FAST_PROVIDER": "llamacpp",
-            "SONDER_EMBEDDING_PROVIDER": "ollama",
+            "SONDER_EMBEDDING_PROVIDER": "sonder-inference",
         },
     )
 
     assert config.provider_bindings is not None
     assert config.provider_bindings.tier_providers["fast"] == "openai_compatible"
-    assert config.provider_bindings.tier_providers["code"] == "ollama"
-    assert config.provider_bindings.embedding_provider == "ollama"
+    assert config.provider_bindings.tier_providers["code"] == "sonder_inference"
+    assert config.provider_bindings.embedding_provider == "sonder_inference"

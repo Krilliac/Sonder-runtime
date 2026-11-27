@@ -24,10 +24,10 @@ def test_aliases_and_unset_bindings_inherit_global_backend():
 def test_mixed_profile_has_explicit_ollama_embeddings_and_content_free_status():
     bindings = provider_bindings_from_env(
         {
-            "SONDER_MODEL_BACKEND": "ollama",
+            "SONDER_MODEL_BACKEND": "sonder-inference",
             "SONDER_FAST_PROVIDER": "openai-compatible",
             "SONDER_GENERAL_PROVIDER": "vllm",
-            "SONDER_EMBEDDING_PROVIDER": "ollama",
+            "SONDER_EMBEDDING_PROVIDER": "sonder-inference",
             "SONDER_OPENAI_BASE_URL": "http://127.0.0.1:18080",
             "SONDER_OPENAI_API_KEY": "must-not-appear",
         }
@@ -35,22 +35,22 @@ def test_mixed_profile_has_explicit_ollama_embeddings_and_content_free_status():
 
     assert bindings.tier_providers["fast"] == "openai_compatible"
     assert bindings.tier_providers["general"] == "openai_compatible"
-    assert bindings.tier_providers["code"] == "ollama"
-    assert bindings.embedding_provider == "ollama"
-    assert bindings.required_providers == frozenset({"ollama", "openai_compatible"})
+    assert bindings.tier_providers["code"] == "sonder_inference"
+    assert bindings.embedding_provider == "sonder_inference"
+    assert bindings.required_providers == frozenset({"sonder_inference", "openai_compatible"})
     assert bindings.status_projection() == {
-        "default_generation_provider": "ollama",
+        "default_generation_provider": "sonder_inference",
         "tier_providers": {
             "fast": "openai_compatible",
             "general": "openai_compatible",
-            "code": "ollama",
-            "reasoning": "ollama",
-            "vision": "ollama",
-            "security": "ollama",
-            "creative": "ollama",
-            "draft": "ollama",
+            "code": "sonder_inference",
+            "reasoning": "sonder_inference",
+            "vision": "sonder_inference",
+            "security": "sonder_inference",
+            "creative": "sonder_inference",
+            "draft": "sonder_inference",
         },
-        "embedding_provider": "ollama",
+        "embedding_provider": "sonder_inference",
         "fallbacks": {},
     }
 
@@ -68,12 +68,12 @@ def test_uniform_constructor_normalizes_alias():
 
 def test_required_providers_includes_an_otherwise_unreferenced_default():
     bindings = ProviderBindings(
-        default_generation_provider="ollama",
+        default_generation_provider="sonder_inference",
         tier_providers={tier: "openai_compatible" for tier in PROVIDER_TIERS},
         embedding_provider="openai_compatible",
     )
 
-    assert bindings.required_providers == frozenset({"ollama", "openai_compatible"})
+    assert bindings.required_providers == frozenset({"sonder_inference", "openai_compatible"})
 
 
 @pytest.mark.parametrize(
@@ -92,26 +92,11 @@ def test_sonder_is_a_tier_name_not_a_provider():
 
 
 def test_inference_fallback_is_parsed_and_required_but_not_bound():
-    bindings = provider_bindings_from_env({
-        "SONDER_MODEL_BACKEND": "sonder-inference",
-        "SONDER_EMBEDDING_PROVIDER": "ollama",
-        "SONDER_INFERENCE_FALLBACK": " OLLAMA ",
-    })
-    assert dict(bindings.fallbacks) == {"sonder_inference": "ollama"}
-    assert bindings.required_providers == frozenset({"sonder_inference", "ollama"})
-    assert bindings.constructed_providers == frozenset({"sonder_inference", "ollama"})
-    assert bindings.status_projection()["fallbacks"] == {"sonder_inference": "ollama"}
-
-    only_inference = provider_bindings_from_env({
-        "SONDER_MODEL_BACKEND": "sonder-inference",
-        "SONDER_INFERENCE_FALLBACK": "ollama",
-    })
-    # The fallback target is constructed, but it is not a routable binding:
-    # required_providers keeps its routing meaning (bootstrap's strict
-    # local-alias gate reads it), so it must not grow with the fallback.
-    assert only_inference.bound_providers == frozenset({"sonder_inference"})
-    assert only_inference.required_providers == frozenset({"sonder_inference"})
-    assert only_inference.constructed_providers == frozenset({"sonder_inference", "ollama"})
+    with pytest.raises(ValueError, match="retired"):
+        provider_bindings_from_env({
+            "SONDER_MODEL_BACKEND": "sonder-inference",
+            "SONDER_INFERENCE_FALLBACK": " OLLAMA ",
+        })
 
 
 @pytest.mark.parametrize("value", ["", "none", "NONE"])
@@ -133,22 +118,22 @@ def test_unknown_fallback_values_fail_closed(value):
 
 
 def test_fallback_without_an_inference_binding_fails_closed():
-    with pytest.raises(ValueError, match="no generation tier is bound to sonder_inference"):
+    with pytest.raises(ValueError, match="retired"):
         provider_bindings_from_env({"SONDER_INFERENCE_FALLBACK": "ollama"})
 
 
 def test_only_sonder_inference_to_ollama_fallback_is_constructible():
-    with pytest.raises(ValueError, match="unsupported provider fallback"):
+    with pytest.raises(ValueError, match="retired|unsupported provider fallback"):
         ProviderBindings(
             default_generation_provider="openai_compatible",
             tier_providers={tier: "openai_compatible" for tier in PROVIDER_TIERS},
-            embedding_provider="ollama",
+            embedding_provider="sonder_inference",
             fallbacks={"openai_compatible": "ollama"},
         )
-    with pytest.raises(ValueError, match="serves no generation binding"):
+    with pytest.raises(ValueError, match="retired|unsupported provider fallback"):
         ProviderBindings(
-            default_generation_provider="ollama",
-            tier_providers={tier: "ollama" for tier in PROVIDER_TIERS},
+            default_generation_provider="sonder_inference",
+            tier_providers={tier: "sonder_inference" for tier in PROVIDER_TIERS},
             embedding_provider="sonder_inference",
             fallbacks={"sonder_inference": "ollama"},
         )
@@ -157,7 +142,6 @@ def test_only_sonder_inference_to_ollama_fallback_is_constructible():
 def test_dispatch_labels_map_to_binding_ids():
     from sonder_runtime.adapters.provider_bindings import provider_id_for_label
 
-    assert provider_id_for_label("ollama") == "ollama"
     assert provider_id_for_label("openai-compatible") == "openai_compatible"
     assert provider_id_for_label("sonder-inference") == "sonder_inference"
     with pytest.raises(ValueError):

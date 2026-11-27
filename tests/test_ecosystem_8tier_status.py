@@ -84,12 +84,12 @@ def test_full_8_tier_bindings_project_every_tier_and_bound_provider():
         "SONDER_FAST_PROVIDER": "openai-compatible",
         "SONDER_GENERAL_PROVIDER": "openai-compatible",
         "SONDER_CODE_PROVIDER": "openai-compatible",
-        "SONDER_REASONING_PROVIDER": "ollama",
-        "SONDER_VISION_PROVIDER": "ollama",
+        "SONDER_REASONING_PROVIDER": "sonder-inference",
+        "SONDER_VISION_PROVIDER": "sonder-inference",
         "SONDER_SECURITY_PROVIDER": "sonder-inference",
-        "SONDER_CREATIVE_PROVIDER": "ollama",
+        "SONDER_CREATIVE_PROVIDER": "sonder-inference",
         "SONDER_DRAFT_PROVIDER": "openai-compatible",
-        "SONDER_EMBEDDING_PROVIDER": "ollama",
+        "SONDER_EMBEDDING_PROVIDER": "sonder-inference",
     })
     doc = _build_doc(bindings, SimpleNamespace())
     assert tuple(doc["providers"]["tier_providers"].keys()) == ALL_8_TIERS
@@ -97,13 +97,13 @@ def test_full_8_tier_bindings_project_every_tier_and_bound_provider():
         "fast": "openai_compatible",
         "general": "openai_compatible",
         "code": "openai_compatible",
-        "reasoning": "ollama",
-        "vision": "ollama",
+        "reasoning": "sonder_inference",
+        "vision": "sonder_inference",
         "security": "sonder_inference",
-        "creative": "ollama",
+        "creative": "sonder_inference",
         "draft": "openai_compatible",
     }
-    assert set(doc["providers"]["status"]) == {"openai_compatible", "ollama", "sonder_inference"}
+    assert set(doc["providers"]["status"]) == {"openai_compatible", "sonder_inference"}
 
 
 def test_legacy_5_tier_duck_typed_bindings_remain_backward_compatible():
@@ -309,12 +309,12 @@ def test_provider_dispatch_surfaces_openai_compat_tier_models_in_ecosystem_statu
     )
     bindings = provider_bindings_from_env({
         "SONDER_MODEL_BACKEND": "openai-compatible",
-        "SONDER_EMBEDDING_PROVIDER": "ollama",
-        "SONDER_REASONING_PROVIDER": "ollama",
-        "SONDER_VISION_PROVIDER": "ollama",
+        "SONDER_EMBEDDING_PROVIDER": "sonder-inference",
+        "SONDER_REASONING_PROVIDER": "sonder-inference",
+        "SONDER_VISION_PROVIDER": "sonder-inference",
     })
     dispatch = ProviderDispatchGateway(
-        providers={"openai_compatible": openai_gw, "ollama": SimpleNamespace()},
+        providers={"openai_compatible": openai_gw, "sonder_inference": SimpleNamespace()},
         tier_providers=bindings.tier_providers,
         default_generation_provider=bindings.default_generation_provider,
         embedding_provider=bindings.embedding_provider,
@@ -467,7 +467,7 @@ def test_ecosystem_document_fails_closed_when_application_floor_unavailable(monk
     monkeypatch.setenv(mtp.ALLOW_SECURITY_MODEL_TOOLS_ENV, mtp.ALLOW_SECURITY_MODEL_TOOLS_ACK)
     producer = ObservatoryProducer(version="0.10.0", node_id="n", instance_hex="0123456789ab")
     app = SimpleNamespace(
-        provider_bindings=ProviderBindings.uniform("ollama"),
+        provider_bindings=ProviderBindings.uniform("sonder_inference"),
         model_gateway=SimpleNamespace(),
         runtime_policy=SimpleNamespace(
             _floor_provider=lambda: ToolLaneFloor.unavailable("tampered"),
@@ -533,15 +533,15 @@ def test_http_ecosystem_route_exposes_8_tiers_openai_models_image_and_policy_wit
 
     bindings = provider_bindings_from_env({
         "SONDER_MODEL_BACKEND": "openai-compatible",
-        "SONDER_REASONING_PROVIDER": "ollama",
-        "SONDER_VISION_PROVIDER": "ollama",
-        "SONDER_SECURITY_PROVIDER": "ollama",
-        "SONDER_CREATIVE_PROVIDER": "ollama",
-        "SONDER_EMBEDDING_PROVIDER": "ollama",
+        "SONDER_REASONING_PROVIDER": "sonder-inference",
+        "SONDER_VISION_PROVIDER": "sonder-inference",
+        "SONDER_SECURITY_PROVIDER": "sonder-inference",
+        "SONDER_CREATIVE_PROVIDER": "sonder-inference",
+        "SONDER_EMBEDDING_PROVIDER": "sonder-inference",
     })
     openai_gw = OpenAICompatibleGateway(request_admission=HostModelRequestAdmission(None))
     dispatch = ProviderDispatchGateway(
-        providers={"openai_compatible": openai_gw, "ollama": SimpleNamespace()},
+        providers={"openai_compatible": openai_gw, "sonder_inference": SimpleNamespace()},
         tier_providers=bindings.tier_providers,
         default_generation_provider=bindings.default_generation_provider,
         embedding_provider=bindings.embedding_provider,
@@ -576,7 +576,7 @@ def test_http_ecosystem_route_exposes_8_tiers_openai_models_image_and_policy_wit
     assert doc["schema"] == ECOSYSTEM_SCHEMA
     assert tuple(doc["providers"]["tier_providers"].keys()) == ALL_8_TIERS
     assert doc["providers"]["tier_providers"]["draft"] == "openai_compatible"
-    assert doc["providers"]["tier_providers"]["security"] == "ollama"
+    assert doc["providers"]["tier_providers"]["security"] == "sonder_inference"
     oai = doc["providers"]["status"]["openai_compatible"]
     assert oai["base_url"] == "http://127.0.0.1:18080"
     assert oai["model"] == "bonsai-27b-pq2"

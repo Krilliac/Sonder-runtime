@@ -34,7 +34,7 @@ def test_aliases_select_openrouter_only_when_named():
     assert "openrouter" not in default.bound_providers
     bound = provider_bindings_from_env({"SONDER_CODE_PROVIDER": "open-router"})
     assert bound.tier_providers["code"] == "openrouter"
-    assert bound.tier_providers["fast"] == "ollama"
+    assert bound.tier_providers["fast"] == "sonder_inference"
 
 
 def test_unconfigured_composition_never_constructs_openrouter(monkeypatch):
@@ -47,8 +47,8 @@ def test_unconfigured_composition_never_constructs_openrouter(monkeypatch):
     monkeypatch.setattr(
         "sonder_runtime.adapters.inference.openrouter_gateway.OpenRouterGateway", Spy,
     )
-    gateway = build_model_gateway(ProviderBindings.uniform("ollama"))
-    assert built == [] and type(gateway).__name__ == "OllamaGateway"
+    gateway = build_model_gateway(ProviderBindings.uniform("sonder_inference"))
+    assert built == [] and type(gateway).__name__ == "SonderInferenceGateway"
 
 
 def test_bound_tier_composes_openrouter_behind_dispatch():

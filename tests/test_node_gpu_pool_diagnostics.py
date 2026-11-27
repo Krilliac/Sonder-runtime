@@ -31,7 +31,7 @@ PRIMARY = "http://127.0.0.1:18437"
 NODE1 = "https://192.0.2.20:8443"
 NODE1_TOKEN = "n" * 32
 PRIMARY_KEY = "p" * 32
-BOUND_ENV = {"SONDER_MODEL_BACKEND": "sonder-inference", "SONDER_EMBEDDING_PROVIDER": "ollama"}
+BOUND_ENV = {"SONDER_MODEL_BACKEND": "sonder-inference"}
 GIB = 1024 * 1024 * 1024
 
 

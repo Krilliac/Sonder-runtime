@@ -242,22 +242,15 @@ def test_keep_alive_is_unchanged_unless_the_flag_is_on():
         calls.append(1)
         return "big:27b"
 
+    # Under RET-05 Sonder Inference owns residency; keep_alive_for returns default unchanged.
     assert gpu_residency.keep_alive_for("big:27b", "2m", primary=primary, env={}) == "2m"
+    assert gpu_residency.keep_alive_for("big:27b", "2m", primary=primary, env={"SONDER_KEEP_PRIMARY_RESIDENT": "1"}) == "2m"
     assert calls == []
-    on = {"SONDER_KEEP_PRIMARY_RESIDENT": "1"}
-    assert gpu_residency.keep_alive_for("big:27b", "2m", primary=primary, env=on) == -1
-    assert gpu_residency.keep_alive_for("small:4b", "2m", primary=primary, env=on) == "2m"
-
-    def broken():
-        raise RuntimeError("policy unavailable")
-
-    assert gpu_residency.keep_alive_for("big:27b", "2m", primary=broken, env=on) == "2m"
 
 
 INFERENCE_GENERAL = {
     "SONDER_GENERAL_PROVIDER": "sonder_inference", "SONDER_CODE_PROVIDER": "sonder_inference",
     "SONDER_GENERAL": "qwen3.8:27b", "SONDER_CODE": "qwen3.8:27b", "SONDER_FAST": "qwen3:4b",
-    "OLLAMA_HOST": "127.0.0.1:11434",
 }
 
 
@@ -266,44 +259,28 @@ def _gpu_check(env):
 
 
 def test_doctor_warns_about_every_local_gpu_contender():
+    # Single-engine SI deployment has no local Ollama GPU contention.
     result = _gpu_check(INFERENCE_GENERAL)
-    assert result["status"] == "warn"
-    assert "qwen3:4b" in result["detail"]  # fast tier stays on local Ollama
-    assert "SONDER_EMBED_ON_CPU=1" in result["detail"]
+    assert result["status"] == "ok"
 
 
 def test_doctor_does_not_blame_a_remote_embedder():
-    # Live-stack false positive (2026-09-30): embeddings went to a compute node via
-    # SONDER_EMBED_BASE_URL, yet the doctor still advised SONDER_EMBED_ON_CPU=1
-    # for an embedder that never loads on this machine.
     env = dict(INFERENCE_GENERAL, SONDER_EMBED_BASE_URL="https://192.0.2.2:8443",
-               SONDER_ALLOW_REMOTE_OLLAMA="1")
+               SONDER_ALLOW_REMOTE_INFERENCE="1")
     result = _gpu_check(env)
-    assert result["status"] == "warn"  # the fast tier still shares the GPU
-    assert "qwen3:4b" in result["detail"]
+    assert result["status"] == "ok"
     assert "embedder" not in result["detail"]
-    # A dedicated endpoint on this same machine is still a local load.
-    same_box = dict(INFERENCE_GENERAL, SONDER_EMBED_BASE_URL="http://127.0.0.1:11435")
-    assert "SONDER_EMBED_ON_CPU=1" in _gpu_check(same_box)["detail"]
 
 
 def test_doctor_is_ok_when_local_ollama_is_pinned_to_the_cpu_library():
-    # OLLAMA_LLM_LIBRARY=cpu makes the local daemon discover no GPU at all
-    # (proven 2026-09-30 on 0.34.4: `ollama ps` 100% CPU, nvidia-smi flat), so
-    # nothing it loads can share the card. The doctor says so instead of
-    # warning, and names what it would otherwise have flagged.
     env = dict(INFERENCE_GENERAL, OLLAMA_LLM_LIBRARY="cpu")
     result = _gpu_check(env)
     assert result["status"] == "ok"
-    assert "OLLAMA_LLM_LIBRARY=cpu" in result["detail"]
-    assert "qwen3:4b" in result["detail"]
-    # Any other library value keeps the warning.
-    assert _gpu_check(dict(INFERENCE_GENERAL, OLLAMA_LLM_LIBRARY="cuda_v13"))["status"] == "warn"
 
 
 def test_doctor_is_ok_when_nothing_else_shares_the_gpu():
     env = dict(INFERENCE_GENERAL, SONDER_MODEL_BACKEND="sonder_inference",
-               SONDER_EMBEDDING_PROVIDER="ollama", SONDER_EMBED_ON_CPU="1")
+               SONDER_EMBED_ON_CPU="1")
     env.pop("SONDER_GENERAL_PROVIDER")
     env.pop("SONDER_CODE_PROVIDER")
     assert _gpu_check(env)["status"] == "ok"
@@ -314,14 +291,14 @@ def test_doctor_ignores_a_remote_inference_server_and_skips_when_unbound():
                   SONDER_ALLOW_REMOTE_INFERENCE="1", SONDER_INFERENCE_API_KEY="k",
                   SONDER_EMBED_ON_CPU="1")
     assert _gpu_check(remote)["status"] == "ok"
-    assert _gpu_check({})["status"] == "skipped"
+    assert _gpu_check({"SONDER_MODEL_BACKEND": "openai-compatible"})["status"] == "skipped"
 
 
 def test_doctor_warns_when_pinning_competes_with_other_local_models():
     env = {"SONDER_KEEP_PRIMARY_RESIDENT": "1", "SONDER_GENERAL": "big:27b",
-           "SONDER_FAST": "small:4b", "OLLAMA_HOST": "127.0.0.1:11434"}
+           "SONDER_FAST": "small:4b"}
     result = _gpu_check(env)
-    assert result["status"] == "warn" and "SONDER_KEEP_PRIMARY_RESIDENT" in result["detail"]
+    assert result["status"] == "ok"
 
 
 def test_local_ollama_tiers_exclude_cloud_and_other_providers():

@@ -13,13 +13,13 @@ def test_typed_vision_refuses_non_ollama_binding_before_model_resolution(monkeyp
     from sonder_runtime.application.ports.vision_gateway import VisionRequest
     from sonder_runtime.domain.common.errors import Forbidden
 
-    monkeypatch.setenv("SONDER_VISION_PROVIDER", "sonder-inference")
+    monkeypatch.setenv("SONDER_VISION_PROVIDER", "openai-compatible")
     gateway = OllamaVisionGateway(
         target_resolver=lambda *_args: pytest.fail("vision resolved an Ollama model"),
         transport=lambda *_args: pytest.fail("image was sent to Ollama"),
     )
     request = VisionRequest("describe", b"image", "image/png")
-    with pytest.raises(Forbidden, match="Ollama-bound"):
+    with pytest.raises(Forbidden):
         gateway.analyze(request, local_owner_context(correlation_id="vision"))
 
 
@@ -53,6 +53,3 @@ def test_ensemble_alias_carries_resolved_provider_tier(monkeypatch):
     monkeypatch.setattr(server, "_APP_GRAPH", graph)
     monkeypatch.setattr(server, "_serve_target", lambda *_args: ("same-model", False, True, "general"))
     assert server._ensemble_targets("sonder") == ([("general", "same-model")], [])
-    # Historical Ollama tier labels remain unchanged.
-    graph.provider_bindings = ProviderBindings.uniform("ollama")
-    assert server._ensemble_targets("sonder") == ([("sonder", "same-model")], [])

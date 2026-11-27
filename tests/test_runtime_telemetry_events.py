@@ -318,7 +318,7 @@ def test_composition_wires_producer_redaction_and_observer():
     from sonder_runtime.platform.config import ObservabilityConfig, SonderConfig
 
     live = bootstrap_app._compose_live_telemetry(
-        SonderConfig(), Redactor(), ProviderBindings.uniform("ollama"),
+        SonderConfig(), Redactor(), ProviderBindings.uniform("sonder_inference"),
     )
     try:
         assert attempts._attempt_observer is live.telemetry
@@ -334,7 +334,7 @@ def test_composition_wires_producer_redaction_and_observer():
     assert events[-1] == "session.ended"
     disabled = bootstrap_app._compose_live_telemetry(
         SonderConfig(observability=ObservabilityConfig(live_export=False)),
-        Redactor(), ProviderBindings.uniform("ollama"),
+        Redactor(), ProviderBindings.uniform("sonder_inference"),
     )
     assert (disabled.telemetry, disabled.producer, disabled.event_bridge, disabled.close) == (
         None, None, None, None,

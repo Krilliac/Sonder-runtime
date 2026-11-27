@@ -41,7 +41,7 @@ def request_identity_key(route, payload):
     """Bind the gateway cache to the same origin and context as observation."""
     from .ollama_endpoint import normalize
 
-    origin = normalize() if route.provider_id == "ollama" and not route.cloud else None
+    origin = normalize() if route.provider_id in ("sonder_inference", "ollama") and not route.cloud else None
     return (route.provider_id, route.cloud, origin, route.model, identity_context_tokens(payload))
 
 
@@ -63,7 +63,7 @@ def ollama_identity(origin: str, model: str, payload=None):
 
 def request_identity(route, payload):
     """The resolved route must be local Ollama; other providers stay unmeasured."""
-    if route.provider_id != "ollama" or route.cloud:
+    if route.provider_id not in ("sonder_inference", "ollama") or route.cloud:
         return None
     from .ollama_endpoint import normalize
 

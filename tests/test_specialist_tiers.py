@@ -30,11 +30,11 @@ class SpecialistTiersTests(unittest.TestCase):
         self.assertEqual(bindings.tier_providers["draft"], "openai_compatible")
         # Legacy 5-tier direct construction remains accepted and defaults new tiers.
         legacy = ProviderBindings(
-            "ollama",
-            {t: "ollama" for t in ("fast", "general", "code", "reasoning", "vision")},
-            "ollama",
+            "sonder_inference",
+            {t: "sonder_inference" for t in ("fast", "general", "code", "reasoning", "vision")},
+            "sonder_inference",
         )
-        self.assertEqual(legacy.tier_providers["security"], "ollama")
+        self.assertEqual(legacy.tier_providers["security"], "sonder_inference")
 
     def test_capability_router_routes_and_degrades_specialist_tiers(self):
         full = {"fast", "general", "code", "reasoning", "vision", "security", "creative", "draft"}
