@@ -949,6 +949,41 @@ can change any file their program writes; they are execution-risk tools
 shipped-file pin is what keeps the floor in force when such a write succeeds,
 for the life of the process.
 
+Two of those tools have a read-only form that runs no repository code.
+`format_code` with `check_only` reads no project configuration. Prettier never
+runs through npx: Sonder runs the absolute Prettier named by
+`SONDER_PRETTIER_EXE` (else the one on PATH) only when that file is outside the
+project and every authorized root and `--version` reports 3 or newer, with
+`--no-config --no-editorconfig`, an empty ignore file (so `.prettierignore` and
+`.gitignore` do not apply), a temp working folder outside the root and no
+`NODE_*` or `npm_config_*` variables. Ruff runs with `--isolated --no-cache` and
+Black with an empty `--config`, both from Sonder's own interpreter (or a copy on
+PATH outside every root). Biome, `dotnet format` and `cargo fmt` are refused in
+check mode. For pip, `dependency_update` without packages and
+`dependency_audit` parse every line of `requirements.txt` and its `-r`/`-c`
+includes as strict PEP 508 and hand pip or pip-audit a sanitized flat copy in a
+temp folder outside the root, never the repository's file. URLs, local archive
+names (with or without extras and markers), paths, editables, index and
+find-links overrides and every option other than `--hash`, `--require-hashes`,
+`--pre`, `--prefer-binary` and `--only-binary` are refused.
+
+Check-mode bare tool names (gofmt, clang-format, dart, pip-audit, and Ruff or
+Black when not in Sonder's interpreter) are never looked up through the current
+folder: Sonder searches only absolute PATH folders outside the project and every
+authorized root, and starts the tool with a PATH limited to those folders and
+`NoDefaultCurrentDirectoryInExePath=1`. A `.bat` or `.cmd` shim is refused
+(cmd.exe would resolve the commands it calls from the project folder; install
+the tool as a real executable). Prettier's shim is the exception because it runs
+from a temp folder with that same filtered environment. That environment also
+drops every `PYTHON*` variable and the Node and Dart VM options, sets
+`PYTHONNOUSERSITE=1` and `PYTHONSAFEPATH=1`, and pins `ComSpec` to the system
+`cmd.exe`, so a trusted Python console-script launcher cannot import a project
+`sitecustomize.py` through `PYTHONPATH`. Known limit: a real
+executable started in the project folder (gofmt, clang-format, dart) can still
+load a DLL placed there by the Windows loader's own search order; Sonder does
+not yet run those from a temp folder, because that would rewrite their output
+paths.
+
 The shipped file also holds `restricted_tool_ceiling` (the only tools any
 profile may ever grant: `text_search`, `repository_symbol_index`,
 `file_read_range`, `directory_tree`, `context_pack`) and
