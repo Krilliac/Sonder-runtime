@@ -6,10 +6,16 @@ name: self-hosted
 # hosted queue. A green run here is what the merge train requires before it
 # merges with the admin bypass. The hosted ci.yml checks keep running as before.
 #
-# Security: these runners are the owner's own machines and this repository is
-# public. Only same-repository pull requests (and manual dispatch) reach them,
-# never a fork: see the `if:` on every job. Fork-PR workflow runs also need
-# approval for all outside contributors (repository Actions setting).
+# Security: these runners are persistent and run as the owner's account on the
+# owner's own machines, and this repository is public, so they must only ever run
+# code the owner put there. Every job's `if:` admits a run only when the owner
+# triggered it (github.actor and github.triggering_actor, so a re-run by anyone
+# else is refused too) and it is either a manual dispatch or a same-repository
+# pull request that the owner opened. Fork PRs, bot PRs (Dependabot) and PRs from
+# any other account never reach these runners; they get only the hosted ci.yml
+# checks. Fork-PR workflow runs also need approval for all outside contributors
+# (repository Actions setting). Accepted residual risk: a compromised owner
+# account can run code here.
 # Every run installs into a fresh venv under RUNNER_TEMP and points
 # SONDER_HOME there, so no run touches the host's own Sonder state.
 
@@ -27,7 +33,12 @@ permissions:
 jobs:
   linux:
     name: self-hosted linux
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.user.login == github.repository_owner))
     runs-on: [self-hosted, sonder-linux]
     timeout-minutes: 45
     env:
@@ -112,7 +123,12 @@ jobs:
 
   windows:
     name: self-hosted windows
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.user.login == github.repository_owner))
     runs-on: [self-hosted, sonder-win]
     timeout-minutes: 45
     env:
