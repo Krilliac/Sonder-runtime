@@ -167,8 +167,9 @@ def test_sonder_inference_on_loopback_without_remote_routes_is_local(monkeypatch
 
     _env(monkeypatch)
     assert lane._is_non_local_provider("sonder_inference") is False
+    # Local Ollama fallback is retired, so SONDER_INFERENCE_FALLBACK=ollama fails closed as non-local.
     _env(monkeypatch, SONDER_INFERENCE_FALLBACK="ollama")
-    assert lane._is_non_local_provider("sonder_inference") is False
+    assert lane._is_non_local_provider("sonder_inference") is True
 
 
 def test_sonder_inference_with_ollama_fallback_and_remote_workers_is_non_local(monkeypatch):
@@ -231,7 +232,7 @@ def test_sonder_inference_with_typed_remote_endpoint_is_non_local(monkeypatch):
 def test_sonder_inference_with_loopback_only_ollama_workers_is_local(monkeypatch):
     from sonder_runtime.adapters import restricted_tool_lane as lane
 
-    _env(monkeypatch, SONDER_INFERENCE_FALLBACK="ollama", SONDER_OLLAMA_WORKERS="http://127.0.0.1:11435")
+    _env(monkeypatch, SONDER_OLLAMA_WORKERS="http://127.0.0.1:11435")
     assert lane._is_non_local_provider("sonder_inference") is False
 
 

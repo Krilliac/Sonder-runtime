@@ -650,12 +650,46 @@ def _check_ollama_residency(*, timeout: float = 5.0, config=None) -> dict:
         return _skip("%s: /v1/sonder/health unreachable (%s)" % (host, exc))
 
     models = payload.get("models") or [] if isinstance(payload, dict) else []
-    resident = [
-        str(m.get("id") or m.get("model") or "?")
-        for m in models if isinstance(m, dict) and m.get("state") == "resident"
+    resident_rows = [
+        m for m in models
+        if isinstance(m, dict)
+        and (m.get("state") == "resident" or ("state" not in m and (m.get("id") or m.get("name") or m.get("model"))))
     ]
-    if not resident:
+    if not resident_rows:
         return {"status": STATUS_OK, "detail": "%s: no models resident" % host}
+    import datetime
+
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    expired: list[str] = []
+    has_expiry = False
+    for row in resident_rows:
+        raw_exp = row.get("expires_at")
+        if not isinstance(raw_exp, str) or not raw_exp.strip():
+            continue
+        try:
+            exp = datetime.datetime.fromisoformat(raw_exp.strip().replace("Z", "+00:00"))
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=datetime.timezone.utc)
+            has_expiry = True
+            if exp < now_utc:
+                expired.append(str(row.get("id") or row.get("name") or row.get("model") or "?"))
+        except ValueError:
+            continue
+    if expired:
+        return {
+            "status": STATUS_WARN,
+            "detail": "%s: %d/%d resident model(s) past keep_alive expiry: %s" % (
+                host, len(expired), len(resident_rows), _bounded_join(expired),
+            ),
+        }
+    resident = [str(m.get("id") or m.get("name") or m.get("model") or "?") for m in resident_rows]
+    if has_expiry:
+        return {
+            "status": STATUS_OK,
+            "detail": "%s: %d model(s) resident, all within keep_alive (%s)" % (
+                host, len(resident), _bounded_join(resident),
+            ),
+        }
     return {
         "status": STATUS_OK,
         "detail": "%s: %d model(s) resident: %s" % (host, len(resident), _bounded_join(resident)),

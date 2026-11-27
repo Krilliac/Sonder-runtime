@@ -636,10 +636,10 @@ class RuntimeLifecycle:
 
         def probe_loop() -> None:
             while not self._probe_stop.wait(interval):
-                self.probe_inference_once()
+                self._invoke_probe_once()
 
         try:
-            self.probe_inference_once()
+            self._invoke_probe_once()
         except BaseException:
             with self._probe_state_changed:
                 self._probe_starting = False
@@ -702,6 +702,20 @@ class RuntimeLifecycle:
         return healthy
 
     probe_ollama_once = probe_inference_once
+
+    def _invoke_probe_once(self) -> bool:
+        default_fn = _DEFAULT_PROBE_INFERENCE_ONCE
+        if (
+            "probe_inference_once" in self.__dict__
+            or getattr(type(self), "probe_inference_once", None) is not default_fn
+        ):
+            return self.probe_inference_once()
+        if (
+            "probe_ollama_once" in self.__dict__
+            or getattr(type(self), "probe_ollama_once", None) is not default_fn
+        ):
+            return self.probe_ollama_once()
+        return self.probe_inference_once()
 
     def stop_probe(self) -> bool:
         """Signal and bounded-join the probe before retiring this lifecycle."""
@@ -1291,6 +1305,7 @@ class RuntimeLifecycle:
 
 
 # Compatibility name retained for lifecycle callers and tests.
+_DEFAULT_PROBE_INFERENCE_ONCE = RuntimeLifecycle.probe_inference_once
 _state_number = process_state_number
 
 

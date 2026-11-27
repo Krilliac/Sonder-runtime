@@ -17,7 +17,7 @@ import pytest
 
 from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
 from sonder_runtime.bootstrap import app as bootstrap_app
-from sonder_runtime.platform.config import OllamaConfig, SonderConfig, StateConfig
+from sonder_runtime.platform.config import InferenceConfig, OllamaConfig, SonderConfig, StateConfig
 
 
 _PRODUCER_COMPLETED = False
@@ -82,6 +82,11 @@ def test_01_typed_composition_owns_ca_and_pool(local_certificates, tmp_path):
         assert ollama_pool._configured_workers is None
     config = SonderConfig(
         state=StateConfig(home=str(tmp_path / "state")),
+        inference=InferenceConfig(
+            url="http://127.0.0.1:18443",
+            allow_remote=False,
+            ca_bundle=str(local_certificates["typed-a"][0]),
+        ),
         ollama=OllamaConfig(
             url="http://127.0.0.1:18443",
             workers=("http://127.0.0.2:18443",),
@@ -104,9 +109,9 @@ def test_01_typed_composition_owns_ca_and_pool(local_certificates, tmp_path):
     application = bootstrap_app.build_application(config=config)
     try:
         assert ollama_endpoint.tls_trust_source() == "configured-ca-bundle"
-        assert ollama_pool.from_environment(config.ollama.url) is application.inference_pool
+        assert ollama_pool.from_environment(config.inference.url) is application.inference_pool
         assert application.inference_pool.configured_origins == (
-            config.ollama.url, *config.ollama.workers,
+            config.inference.url, *config.ollama.workers,
         )
     finally:
         application.close_providers(timeout=2)

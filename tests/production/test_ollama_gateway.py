@@ -528,9 +528,12 @@ def test_embed_honours_expired_context(monkeypatch):
 
 
 def test_bootstrap_uses_the_gateway():
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import SonderInferenceGateway
     from sonder_runtime.bootstrap import app as bootstrap_app
 
     bootstrap_app.reset_for_tests()
-    application = bootstrap_app.build_application()
-    assert isinstance(application.model_gateway, OllamaGateway)
-    bootstrap_app.reset_for_tests()
+    try:
+        application = bootstrap_app.build_application()
+        assert isinstance(application.model_gateway, SonderInferenceGateway)
+    finally:
+        bootstrap_app.reset_for_tests()

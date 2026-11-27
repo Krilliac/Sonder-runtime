@@ -13,6 +13,6 @@ def test_typed_endpoint_wins_over_legacy_environment(monkeypatch):
 
 
 def test_endpoint_restores_environment_compatibility_fallback(monkeypatch):
-    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11999")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://127.0.0.1:11999")
     ollama_endpoint.reset_typed_endpoint()
     assert ollama_endpoint.normalize() == "http://127.0.0.1:11999"

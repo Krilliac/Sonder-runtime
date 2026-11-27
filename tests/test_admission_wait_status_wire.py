@@ -31,7 +31,7 @@ def test_streamed_turn_with_a_queued_admission_sends_status_then_clear(tmp_path,
     fake, _service = _low_ram_service(tmp_path, monkeypatch, state)
 
     def answer(*_args, **_kwargs):
-        server._post_model("/api/chat", chat_body(16384), model=MODEL, timeout=10)
+        server._post_model("/v1/chat/completions", chat_body(16384), model=MODEL, timeout=10)
         return "late answer"
 
     def release_once_waiting(received):
@@ -63,7 +63,7 @@ def test_no_clear_frame_when_no_status_was_sent(tmp_path, monkeypatch):
     _low_ram_service(tmp_path, monkeypatch, state)
 
     def answer(*_args, **_kwargs):
-        server._post_model("/api/chat", chat_body(16384), model=MODEL, timeout=10)
+        server._post_model("/v1/chat/completions", chat_body(16384), model=MODEL, timeout=10)
         return "prompt answer"
 
     monkeypatch.setattr(ts._legacy_runtime(), "answer_with_history", answer)

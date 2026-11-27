@@ -2918,6 +2918,7 @@ def load_config(
         if config.features.cloud:
             effective_env["SONDER_ALLOW_CLOUD"] = "1"
         effective_env["SONDER_INFERENCE_BASE_URL"] = config.inference.url
+        effective_env["OLLAMA_HOST"] = config.ollama.url
         if config.inference.private_workers:
             effective_env["SONDER_INFERENCE_PRIVATE_WORKERS"] = config.inference.private_workers
         lab_error = unsafe_lab_policy.validation_error(

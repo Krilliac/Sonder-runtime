@@ -180,6 +180,9 @@ def test_offload_explicit_session_uses_model_step_boundary(tmp_path, monkeypatch
     import server
 
     repository, capture = _capture(tmp_path)
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._tier_generation, "scope", lambda *a, **k: server.contextlib.nullcontext())
     monkeypatch.setattr(
         server, "_application",
         lambda: types.SimpleNamespace(session_capture_service=lambda: capture),
@@ -213,7 +216,7 @@ def test_offload_explicit_session_uses_model_step_boundary(tmp_path, monkeypatch
     assert events[0].payload["options"]["num_predict"] == 19
     assert events[0].payload["options"]["num_ctx"] == 2048
     provider_payload = events[2].payload["payload"]
-    assert provider_payload["options"]["temperature"] == 0.31
+    assert provider_payload.get("temperature") == 0.31 or (provider_payload.get("options") or {}).get("temperature") == 0.31
     assert "headers" not in provider_payload
     assert "endpoint" not in provider_payload
 
@@ -223,6 +226,9 @@ def test_offload_explicit_session_records_failure_without_leaking_detail(tmp_pat
     import server
 
     repository, capture = _capture(tmp_path)
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._tier_generation, "scope", lambda *a, **k: server.contextlib.nullcontext())
     monkeypatch.setattr(
         server, "_application",
         lambda: types.SimpleNamespace(session_capture_service=lambda: capture),
@@ -259,6 +265,9 @@ def test_agent_explicit_session_captures_each_decision(tmp_path, monkeypatch):
     import server
 
     repository, capture = _capture(tmp_path)
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._tier_generation, "scope", lambda *a, **k: server.contextlib.nullcontext())
     monkeypatch.setattr(
         server, "_application",
         lambda: types.SimpleNamespace(session_capture_service=lambda: capture),

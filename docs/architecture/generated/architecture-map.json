@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 536,
+      "file_count": 537,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -236,6 +236,7 @@
         "sonder_runtime/adapters/inference/launch_profile_cache.py",
         "sonder_runtime/adapters/inference/log_safe.py",
         "sonder_runtime/adapters/inference/membership_high_water.py",
+        "sonder_runtime/adapters/inference/model_context_probe.py",
         "sonder_runtime/adapters/inference/model_gateway_factory.py",
         "sonder_runtime/adapters/inference/ollama.py",
         "sonder_runtime/adapters/inference/ollama_cloud_metadata.py",

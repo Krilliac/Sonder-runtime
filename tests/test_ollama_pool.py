@@ -191,7 +191,7 @@ def test_agent_admission_configuration_rejects_unbounded_or_invalid_values(value
 
 
 def test_remote_worker_requires_https_and_explicit_consent():
-    with pytest.raises(ValueError, match="require SONDER_ALLOW_REMOTE_OLLAMA"):
+    with pytest.raises(ValueError, match="require SONDER_ALLOW_REMOTE_(?:INFERENCE|OLLAMA)"):
         validate_worker_origin("http://192.168.1.20:11434", allow_remote=False)
     with pytest.raises(ValueError, match="must use https"):
         validate_worker_origin("http://192.168.1.20:11434", allow_remote=True)

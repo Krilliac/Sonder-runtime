@@ -140,8 +140,9 @@ def _reroute(monkeypatch, *, loopback_endpoint):
 def test_ollama_only_reroute_on_loopback_may_be_placed_on_configured_pool_workers(monkeypatch):
     from sonder_runtime.adapters import legacy_chat_bridge
 
+    # Local Ollama reroute is retired; Sonder Inference handles structured format directly.
     rerouted = _reroute(monkeypatch, loopback_endpoint=True)
-    assert rerouted is not None and rerouted["options"]["num_ctx"] == 32768
+    assert rerouted is None
     pool = OllamaWorkerPool(LOCAL, (NODE1,), allow_remote=True, capability_prober=lambda o: {})
     assert pool.enabled and pool.has_remote_workers
     assert legacy_chat_bridge.reroute_may_use_pool(pool, base_loopback=True, local_only=False) is True
@@ -159,9 +160,7 @@ def test_ollama_only_reroute_refuses_a_remote_primary_even_with_a_pool(monkeypat
                             capability_prober=lambda o: {})
     assert pool.enabled and pool.has_remote_workers  # the primary itself is the remote member
     assert legacy_chat_bridge.reroute_may_use_pool(pool, base_loopback=False, local_only=False) is False
-    with pytest.raises(server.ModelCallError) as caught:
-        _reroute(monkeypatch, loopback_endpoint=False)
-    assert "remote" in caught.value.detail
+    assert _reroute(monkeypatch, loopback_endpoint=False) is None
 
 
 def test_ensemble_answer_runs_distinct_nodes_concurrently_and_skips_unneeded_unload(monkeypatch):

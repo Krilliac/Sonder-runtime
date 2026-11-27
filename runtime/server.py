@@ -5386,7 +5386,7 @@ def _post(
         return OLLAMA_POOL.request_primary(send, model=model_hint, payload=payload, origin=pinned_origin)
     if local_only or not OLLAMA_POOL.enabled:
         return OLLAMA_POOL.request_primary(send, model=model_hint, payload=payload, origin=BASE)
-    if path in {"/v1/chat/completions", "/v1/completions"}:  # never fail behind our own prewarm
+    if path in {"/v1/chat/completions", "/v1/completions", "/api/chat", "/api/generate"}:  # never fail behind our own prewarm
         prewarm_gate.await_prewarm(model_hint, min(request_timeout, _PREWARM_LOAD_TIMEOUT))
     return OLLAMA_POOL.request(send, model=model_hint, idempotent=idempotent, payload=payload)
 
@@ -18532,7 +18532,7 @@ def _agent_turn(
     # the generator actually uses. Pin it for this turn rather than observing
     # one window and silently dispatching with another after metadata refresh.
     agent_num_ctx = (
-        _auto_model_context(model) if pre_model_context is not None and not cloud and provider is None else 0
+        _auto_model_context(model) if pre_model_context is not None and not cloud and provider in (None, "sonder_inference") else 0
     )
     cloud_budget_state = (
         {"spent": 0, "total": _CLOUD_AGENT_OUTPUT_BUDGET}

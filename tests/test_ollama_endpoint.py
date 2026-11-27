@@ -93,15 +93,15 @@ def test_locality_distinguishes_invalid_from_blocked_remote(monkeypatch):
 
 def test_client_environment_canonicalizes_without_mutating_bind_environment():
     original = {
-        "OLLAMA_HOST": "0.0.0.0:11434",
+        "SONDER_INFERENCE_BASE_URL": "0.0.0.0:11437",
         "PATH": "keep",
     }
 
     client = endpoint.client_environment(original)
 
-    assert client["OLLAMA_HOST"] == "http://127.0.0.1:11434"
+    assert client["SONDER_INFERENCE_BASE_URL"] == "http://127.0.0.1:11437"
     assert client["PATH"] == "keep"
-    assert original["OLLAMA_HOST"] == "0.0.0.0:11434"
+    assert original["SONDER_INFERENCE_BASE_URL"] == "0.0.0.0:11437"
 
 
 def test_client_environment_uses_passed_remote_consent_not_process_env(monkeypatch):

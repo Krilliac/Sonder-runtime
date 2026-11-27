@@ -25,7 +25,13 @@ def home(tmp_path, monkeypatch):
     path = tmp_path / "home"
     path.mkdir()
     monkeypatch.setenv("SONDER_HOME", str(path))
-    for name in ("SONDER_CONFIG", "SONDER_SECRETS", "SONDER_DB", "OLLAMA_HOST"):
+    for name in (
+        "SONDER_CONFIG", "SONDER_SECRETS", "SONDER_DB", "OLLAMA_HOST",
+        "SONDER_MODEL_BACKEND", "SONDER_EMBEDDING_PROVIDER",
+        "SONDER_VISION_PROVIDER", "SONDER_INFERENCE_FALLBACK",
+        "SONDER_FAST_PROVIDER", "SONDER_GENERAL_PROVIDER",
+        "SONDER_CODE_PROVIDER", "SONDER_REASONING_PROVIDER",
+    ):
         monkeypatch.delenv(name, raising=False)
     return path
 

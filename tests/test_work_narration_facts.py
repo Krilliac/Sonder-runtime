@@ -11,8 +11,8 @@ def _runtime(provider, gateway):
 
 
 def test_ollama_runtime_endpoint_is_host_only():
-    runtime = SimpleNamespace(BASE="http://user:secret@127.0.0.1:11434/api?x=1")
-    assert configured_host(runtime, "code") == "ollama 127.0.0.1:11434"
+    runtime = SimpleNamespace(BASE="http://user:secret@127.0.0.1:11437/api?x=1")
+    assert configured_host(runtime, "code") == "sonder_inference 127.0.0.1:11437"
 
 
 def test_dispatch_provider_uses_loaded_sonder_settings_and_fallback():

@@ -58,7 +58,7 @@ def test_remote_ollama_contact_failure_names_the_remote_opt_in():
     )
     assert message.startswith("ERROR contacting remote Ollama")
     hint = error_hint(message)
-    assert "SONDER_ALLOW_REMOTE_OLLAMA=1" in hint
+    assert "SONDER_ALLOW_REMOTE_INFERENCE=1" in hint
 
 
 def test_hosted_contact_failure_gets_a_network_hint():
@@ -76,7 +76,7 @@ def test_http_404_hint_explains_missing_model_tags():
     )
     assert "rejected the model request (HTTP 404" in message
     hint = error_hint(message)
-    assert "ollama pull" in hint
+    assert "Sonder Inference" in hint or "/model" in hint
 
 
 @pytest.mark.parametrize("status", [408, 429, 502, 503, 504])

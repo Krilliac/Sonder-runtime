@@ -76,7 +76,7 @@ def test_pool_disabled_uses_a_single_get(monkeypatch):
     monkeypatch.setattr(server, "_pool_member_tags",
                         lambda *a, **k: pytest.fail("pool must not be read when disabled"))
     assert "kimi-k3:cloud" in server.discovered_models()
-    assert seen == ["/api/tags"]
+    assert seen == ["/v1/models"]
 
 
 def test_one_unreachable_member_is_skipped_all_unreachable_is_503(pooled, monkeypatch):

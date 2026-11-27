@@ -435,7 +435,10 @@ def cmd_doctor(args) -> int:
         for name, check in checks
     ]
     if args.skip_ollama:
-        skipped_names = {"ollama", "ollama_workers", "ollama_residency", "embeddings"}
+        skipped_names = {
+            "ollama", "ollama_workers", "ollama_residency", "embeddings",
+            "sonder_inference",
+        }
         checks = [
             (name, check) for name, check in checks if name not in skipped_names
         ]
@@ -1107,6 +1110,21 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     # OLLAMA_HOST remains a legacy compatibility override and is exported only
     # for compatibility subcommands; canonical typed serve uses its bound
     # endpoint directly.
+    if config.ollama.workers:
+        os.environ["SONDER_OLLAMA_WORKERS"] = ",".join(config.ollama.workers)
+    if include_typed_runtime:
+        os.environ["SONDER_OLLAMA_POOL_MAX_WORKERS"] = str(
+            config.ollama.worker_pool_max_workers
+        )
+        os.environ["SONDER_OLLAMA_WORKER_PROBE_PARALLELISM"] = str(
+            config.ollama.worker_capability_probe_parallelism
+        )
+        os.environ["SONDER_OLLAMA_WORKER_PROBE_BATCH_SIZE"] = str(
+            config.ollama.worker_capability_probe_batch_size
+        )
+        os.environ["SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE"] = str(
+            config.ollama.worker_status_page_size
+        )
     os.environ["SONDER_INFERENCE_BASE_URL"] = config.inference.url
     if config.inference.ready_file:
         os.environ["SONDER_INFERENCE_READY_FILE"] = config.inference.ready_file

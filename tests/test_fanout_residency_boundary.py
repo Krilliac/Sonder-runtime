@@ -30,4 +30,4 @@ def test_root_delegate_fetches_live_residency_through_the_server_seam(monkeypatc
     assert server._fanout_dispatch_residency_reason(LOADED, "phi4:latest") == ""
     assert server._fanout_dispatch_residency_reason(LOADED, "other") == "model is no longer resident at dispatch"
     assert server._fanout_dispatch_residency_reason({}, "other") == ""
-    assert fetched == ["/api/ps", "/api/ps"]
+    assert fetched == ["/v1/sonder/health", "/v1/sonder/health"]

@@ -79,8 +79,6 @@ class OllamaVisionGateway:
         return context.remaining_seconds
 
     def analyze(self, request: VisionRequest, context: OperationContext) -> VisionResponse:
-        import os
-
         timeout = self._check_context(context)
         if self._provider_bindings.tier_providers.get(request.tier, "sonder_inference") != "sonder_inference":
             raise Forbidden("image analysis is only available on Sonder Inference vision tiers")
@@ -91,8 +89,7 @@ class OllamaVisionGateway:
         mime = str(getattr(request, "media_type", "") or "image/png").strip().lower() or "image/png"
         if mime not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
             raise Forbidden("unsupported vision image media_type")
-        raw_endpoint = os.environ.get("SONDER_INFERENCE_BASE_URL", "").strip()
-        endpoint = ollama_endpoint.normalize(raw_endpoint or None)
+        endpoint = ollama_endpoint.normalize()
         logger.debug(f"OllamaVisionGateway.analyze: endpoint={redact_url(endpoint)!r}, tier={request.tier!r}")
         if not ollama_endpoint.is_loopback(endpoint):
             raise Forbidden("vision analysis requires a loopback Sonder Inference endpoint")

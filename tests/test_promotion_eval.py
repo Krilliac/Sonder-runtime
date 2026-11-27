@@ -435,7 +435,7 @@ def test_default_generator_posts_fixed_nondeterminism_controls(monkeypatch):
         captured["timeout"] = timeout
         return Response()
 
-    monkeypatch.setenv("OLLAMA_HOST", "127.0.0.1:11434")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://127.0.0.1:11434")
     monkeypatch.setattr(pe, "_open_local", open_local)
     result = pe._default_generate(
         "model@digest",
@@ -457,7 +457,7 @@ def test_default_generator_posts_fixed_nondeterminism_controls(monkeypatch):
 
 
 def test_default_generator_rejects_non_loopback_host(monkeypatch):
-    monkeypatch.setenv("OLLAMA_HOST", "https://models.example.test:11434")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "https://models.example.test:11434")
     try:
         pe._default_generate("model", "prompt", options=dict(pe.INFERENCE_OPTIONS), timeout=1)
     except ValueError as error:
@@ -471,10 +471,11 @@ def test_default_generator_rejects_non_loopback_host(monkeypatch):
 def test_promotion_origin_rewrites_ipv6_bind_all_and_ignores_remote_opt_in(
     monkeypatch,
 ):
-    monkeypatch.setenv("OLLAMA_HOST", "[::]:11434")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://[::]:11434")
     assert pe._local_ollama_origin() == "http://[::1]:11434"
 
-    monkeypatch.setenv("OLLAMA_HOST", "https://models.example.test:11434")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "https://models.example.test:11434")
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_INFERENCE", "1")
     monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
     with pytest.raises(ValueError, match="loopback"):
         pe._local_ollama_origin()

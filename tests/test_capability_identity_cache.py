@@ -214,10 +214,10 @@ def test_production_identity_cache_isolates_origin_and_effective_context(tmp_pat
         _Gateway(), store, capability_evidence.request_identity,
         identity_key_for=capability_evidence.request_identity_key, clock=_Clock(),
     )
-    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://127.0.0.1:11434")
     gateway.generate(_request(), _context())
     gateway.generate(_request(), _context())
-    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11435")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://127.0.0.1:11435")
     gateway.generate(_request(), _context())
     gateway.generate(_request(options={"num_ctx": 4096}), _context())
     default_context[0] = 4096

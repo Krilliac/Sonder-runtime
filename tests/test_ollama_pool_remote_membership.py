@@ -333,7 +333,7 @@ def test_real_request_waits_for_its_own_prewarm_instead_of_failing_admission(mon
     def open_url(request, *, timeout, allow_remote=None):
         body = json.loads(request.data)
         bodies.append(body)
-        if "prompt" not in body and "messages" not in body:
+        if body.get("max_tokens") == 1 or ("prompt" not in body and "messages" not in body):
             loading.set()
             assert release.wait(5)
         yield io.BytesIO(b'{"done": true}')

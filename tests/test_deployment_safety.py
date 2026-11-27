@@ -50,7 +50,7 @@ def test_legacy_deploy_preflight_imports_the_packaged_ollama_endpoint():
         check=False,
     )
     assert preflight.returncode == 0, preflight.stderr
-    assert preflight.stdout.strip() == "http://127.0.0.1:11434"
+    assert preflight.stdout.strip() == "http://127.0.0.1:11437"
 
 
 def test_legacy_deploy_never_prints_the_api_key():

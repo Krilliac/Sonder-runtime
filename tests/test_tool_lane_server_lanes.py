@@ -563,8 +563,13 @@ def test_agent_turn_refuses_a_tier_whose_served_model_is_denied(catalog, model_c
     assert guard.resolved_refusal("code", ALLOWED, "code", server._RUNTIME_POLICY) == expected
     assert guard.denied(ALLOWED, "code", server._RUNTIME_POLICY) is True
     assert guard.selector_refusal("code", server.TIERS, server._RUNTIME_POLICY) == expected
-    assert guard.selector_refusal("fast,code", server.TIERS, server._RUNTIME_POLICY) == expected
-    assert guard.selector_refusal("fast", server.TIERS, server._RUNTIME_POLICY) == ""  # still on Ollama
+    if "SONDER_INFERENCE_MODEL" in env:
+        # Process-wide SONDER_INFERENCE_MODEL applies to every sonder_inference tier including fast.
+        assert guard.selector_refusal("fast,code", server.TIERS, server._RUNTIME_POLICY) == served_refusal("fast", label, served)
+        assert guard.selector_refusal("fast", server.TIERS, server._RUNTIME_POLICY) == served_refusal("fast", label, served)
+    else:
+        assert guard.selector_refusal("fast,code", server.TIERS, server._RUNTIME_POLICY) == expected
+        assert guard.selector_refusal("fast", server.TIERS, server._RUNTIME_POLICY) == ""
 
 
 @pytest.mark.parametrize("provider, label, env, served", BRIDGES)
@@ -575,7 +580,8 @@ def test_codegen_build_loop_refuses_a_tier_whose_served_model_is_denied(
     files = json.dumps({"a.c": "one C file"})
     assert server.codegen_build_loop(str(tmp_path), files, "build", tiers="code") == expected
     monkeypatch.setattr(server, "_configured_local_tiers", lambda: ("fast", "code", "general"))
-    assert server.codegen_build_loop(str(tmp_path), files, "build") == expected
+    all_expected = served_refusal("fast", label, served) if "SONDER_INFERENCE_MODEL" in env else expected
+    assert server.codegen_build_loop(str(tmp_path), files, "build") == all_expected
     assert server.ensemble_codegen_build_loop(str(tmp_path), files, "build") == expected
     assert work_started == [] and model_calls == []
 

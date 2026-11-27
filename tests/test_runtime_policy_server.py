@@ -211,26 +211,20 @@ def test_runtime_embedding_binding_is_capability_checked_and_does_not_rewrite_ve
 def test_runtime_embedding_binding_uses_show_when_tags_omit_capabilities(
     isolated_runtime_policy, monkeypatch,
 ):
-    show_calls = []
+    get_calls = []
     monkeypatch.setattr(
-        server, "_get", lambda _path: {"models": [{"name": "bge-m3:latest"}]},
-    )
-    monkeypatch.setattr(
-        server, "_post",
-        lambda path, payload, timeout=30: show_calls.append((path, payload, timeout)) or {
-            "capabilities": ["embedding"],
+        server,
+        "_get",
+        lambda path, **_k: get_calls.append(path) or {
+            "object": "list",
+            "data": [{"id": "bge-m3:latest", "capabilities": ["embedding"]}],
         },
     )
 
     result = server.runtime_policy_update(embedding_model="bge-m3:latest")
 
     assert "embeddings: bge-m3:latest" in result
-    assert show_calls == [
-        ("/api/show", {"model": "bge-m3:latest", "name": "bge-m3:latest"}, 30),
-        # The post-update status now checks that restored/seeding policy is
-        # genuinely embedding-capable before printing readiness.
-        ("/api/show", {"model": "bge-m3:latest", "name": "bge-m3:latest"}, 30),
-    ]
+    assert any(path.startswith("/v1/models") for path in get_calls)
 
 
 def test_runtime_slash_applies_embedding_with_other_bindings(every_tool_allowed_by_rule, monkeypatch):

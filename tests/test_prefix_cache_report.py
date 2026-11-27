@@ -159,10 +159,13 @@ def test_prewarm_request_falls_back_to_weight_load():
     def broken():
         raise ValueError("profile unreadable")
 
-    assert prewarm_request("m", "5m", broken) == ("/api/generate", {"model": "m", "keep_alive": "5m"})
-    assert prewarm_request("m", "5m", lambda: ("", {}))[0] == "/api/generate"
+    assert prewarm_request("m", "5m", broken) == (
+        "/v1/chat/completions",
+        {"model": "m", "messages": [{"role": "user", "content": ""}], "max_tokens": 1, "stream": False},
+    )
+    assert prewarm_request("m", "5m", lambda: ("", {}))[0] == "/v1/chat/completions"
     path, body = prewarm_request("m", "5m", lambda: ("SYS", {"num_ctx": 4096}))
-    assert path == "/api/chat" and body["options"] == {"num_ctx": 4096, "num_predict": 1}
+    assert path == "/v1/chat/completions" and body["options"] == {"num_ctx": 4096, "num_predict": 1}
 
 
 # --- server wiring --------------------------------------------------------------
@@ -220,7 +223,7 @@ def test_prewarm_prefills_the_local_system_prefix(monkeypatch):
     monkeypatch.setattr(server, "owned_runtime_thread", _Immediate)
     assert server.prewarm_model("general") is True
     [(path, body)] = posts
-    assert path == "/api/chat"
+    assert path == "/v1/chat/completions"
     assert body["messages"] == [{"role": "system", "content": "SYSTEM PREFIX"}]
     assert body["options"]["num_ctx"] == 8192 and body["options"]["num_predict"] == 1
     assert body["keep_alive"] == server.KEEP_ALIVE

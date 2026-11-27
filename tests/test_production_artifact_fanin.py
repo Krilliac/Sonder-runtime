@@ -281,6 +281,7 @@ def test_tier_wrapped_shared_generator_keeps_completion_per_producer(monkeypatch
     # (#610). The raw closure records each reply's completion, so the per-thread
     # slot must live on it: bound to the wrapper, the check fell back to the
     # shared last_response_meta and a truncated sibling passed as complete.
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
     observed = _race_shared_generator(monkeypatch, lambda: server._make_tier_generate(
         "code", server.TIERS.get("code") or "local", "", 0.0, 10, 4096, cloud=False,
     ))

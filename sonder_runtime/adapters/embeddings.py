@@ -247,7 +247,11 @@ def serving_model_revision(model=None, base=None, timeout=0.5):
                 with ollama_endpoint.open_url(req, timeout=timeout) as response:
                     raw = _read_bounded_response(response, _TAGS_RESPONSE_LIMIT)
                     payload = json.loads(raw.decode("utf-8"))
-            except (OSError, TimeoutError, ValueError, RecursionError, urllib.error.URLError):
+            except ValueError as exc:
+                if "exceeds byte limit" in str(exc):
+                    return ""
+                continue
+            except (OSError, TimeoutError, RecursionError, urllib.error.URLError):
                 continue
             digest = _extract_si_model_digest(payload)
             if digest:

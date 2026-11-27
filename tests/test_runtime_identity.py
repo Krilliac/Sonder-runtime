@@ -33,6 +33,6 @@ def test_sonder_inference_provider_names_inference_not_ollama():
 def test_ollama_and_cloud_identity_unchanged_by_provider_argument():
     from sonder_runtime.adapters.prompt_store import runtime_identity_block as block
 
-    assert block("qwen3:14b") == block("qwen3:14b", provider=None) == block("qwen3:14b", provider="ollama")
-    assert "served by Ollama on this machine" in block("qwen3:14b")
+    assert block("qwen3:14b") == block("qwen3:14b", provider=None) == block("qwen3:14b", provider="sonder_inference")
+    assert "served through Sonder Inference" in block("qwen3:14b")
     assert block("glm:cloud", cloud=True) == block("glm:cloud", cloud=True, provider="sonder_inference")
