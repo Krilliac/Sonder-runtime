@@ -243,6 +243,10 @@ def test_effective_bandwidth_and_baseline_delta_math() -> None:
     assert known_gpu_spec_bandwidth_gbps("AMD Radeon RX 9060 XT") == pytest.approx(320.0)
     assert known_gpu_spec_bandwidth_gbps("AMD Radeon(TM) 780M Graphics") is None
     assert known_gpu_spec_bandwidth_gbps("Unknown Accelerator 9000") is None
+    # Laptop / Mobile / GRE variants must NOT map to desktop spec bandwidths.
+    assert known_gpu_spec_bandwidth_gbps("NVIDIA GeForce RTX 5090 Laptop GPU") is None
+    assert known_gpu_spec_bandwidth_gbps("NVIDIA GeForce RTX 4090 Laptop") is None
+    assert known_gpu_spec_bandwidth_gbps("AMD Radeon RX 9070 GRE") is None
 
 
 def test_device_telemetry_catches_vram_eviction_host_spill_pcie_and_rebar() -> None:
@@ -269,10 +273,21 @@ def test_device_telemetry_catches_vram_eviction_host_spill_pcie_and_rebar() -> N
     assert spill_res.degraded is True
     assert "host_spill_detected" in spill_res.reasons
 
-    # PCIe lane width drop (x1 instead of x4 on OCuLink).
-    width_drop = parse_node_gpu_device(_nat08_gpu_json(current_width=1, max_width=4))
+    # An x16 card in an x4/x8-wired slot (OCuLink / chipset slot) must NOT degrade
+    # without an explicit expected_pcie_width baseline; it emits a warning only.
+    oculink_x4 = parse_node_gpu_device(_nat08_gpu_json(current_width=4, max_width=16))
+    assert oculink_x4 is not None
+    oculink_res = evaluate_gpu_device_telemetry([oculink_x4])
+    assert oculink_res.degraded is False
+    assert "pcie_width_below_max" in oculink_res.warnings
+    assert "pcie_width_downgraded" not in oculink_res.reasons
+
+    # With an explicit expected_pcie_width baseline, dropping below it degrades.
+    width_drop = parse_node_gpu_device(_nat08_gpu_json(current_width=1, max_width=16))
     assert width_drop is not None
-    width_res = evaluate_gpu_device_telemetry([width_drop])
+    width_res = evaluate_gpu_device_telemetry(
+        [width_drop], baseline=NodeHealthBaseline(expected_pcie_width=4)
+    )
     assert width_res.degraded is True
     assert "pcie_width_downgraded" in width_res.reasons
 
@@ -404,6 +419,7 @@ def _health_doc(
     *,
     models: tuple[str, ...] = ("sonder:latest",),
     gpus: list[dict[str, Any]] | None = None,
+    backends: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     doc: dict[str, Any] = {
         "status": "ready",
@@ -416,6 +432,8 @@ def _health_doc(
     }
     if gpus is not None:
         doc["gpus"] = gpus
+    if backends is not None:
+        doc["backends"] = backends
     return doc
 
 
@@ -530,7 +548,35 @@ def test_gateway_routes_away_from_worker_with_nat08_vram_eviction(ca_bundle: str
     assert status[PRIMARY]["state"] == NODE_STATE_HEALTHY
 
 
-def test_gateway_routes_away_from_degraded_primary_to_healthy_worker(ca_bundle: str) -> None:
+def test_gateway_does_not_degrade_x16_card_in_x4_slot_without_baseline(ca_bundle: str) -> None:
+    """An x16 GPU in an x4 OCuLink/chipset slot stays routable with no expected_pcie_width baseline."""
+    hosts = _DualHost(
+        health={
+            PRIMARY: _health_doc(
+                gpus=[_nat08_gpu_json(name="NVIDIA GeForce RTX 5070 Ti", current_width=4, max_width=16)]
+            ),
+            WORKER: _health_doc(gpus=[_nat08_gpu_json(name="AMD Radeon RX 9060 XT")]),
+        },
+    )
+    gw = SonderInferenceGateway(
+        transport=hosts.post,
+        get_transport=hosts.get,
+        env=_gateway_env(ca_bundle),
+        wall_clock=lambda: datetime(2026, 11, 27, tzinfo=timezone.utc),
+    )
+    ctx = local_owner_context(correlation_id="fed03-2a", source="mcp", timeout_seconds=30.0)
+    for prompt in ("a", "b"):
+        resp = gw.generate(ModelRequest(prompt=prompt, tier="fast"), ctx)
+        assert resp.text == "ok"
+
+    assert set(hosts.posts) == {PRIMARY, WORKER}
+    status = gw.node_health_status()
+    assert status[PRIMARY]["state"] == NODE_STATE_HEALTHY
+    assert "pcie_width_below_max" in status[PRIMARY]["warnings"]
+
+
+def test_gateway_routes_away_from_degraded_primary_with_expected_pcie_width_baseline(ca_bundle: str) -> None:
+    baselines = json.dumps({PRIMARY: {"expected_pcie_width": 8}})
     hosts = _DualHost(
         health={
             PRIMARY: _health_doc(
@@ -542,7 +588,7 @@ def test_gateway_routes_away_from_degraded_primary_to_healthy_worker(ca_bundle: 
     gw = SonderInferenceGateway(
         transport=hosts.post,
         get_transport=hosts.get,
-        env=_gateway_env(ca_bundle),
+        env=_gateway_env(ca_bundle, **{ENV_NODE_HEALTH_BASELINES: baselines}),
         wall_clock=lambda: datetime(2026, 11, 27, tzinfo=timezone.utc),
     )
     ctx = local_owner_context(correlation_id="fed03-2", source="mcp", timeout_seconds=30.0)
@@ -556,7 +602,167 @@ def test_gateway_routes_away_from_degraded_primary_to_healthy_worker(ca_bundle: 
     assert "pcie_width_downgraded" in status[PRIMARY]["reasons"]
 
 
-def test_gateway_routes_away_after_sustained_throughput_drop_against_env_baselines(ca_bundle: str) -> None:
+def test_gateway_routes_away_from_worker_reporting_si_gpu_memory_spill(ca_bundle: str) -> None:
+    """Real SI backends[].runtime.gpu_memory (spilled:true / threshold breach / vram_evicted)."""
+    spilled_backend = [{
+        "name": "llamacpp",
+        "available": True,
+        "runtime": {
+            "gpu_memory": {
+                "probe": "win32_pdh",
+                "status": "ok",
+                "dedicated_bytes": 15 * GIB,
+                "shared_bytes": 972 * 1024 * 1024,
+                "peak_shared_bytes": 972 * 1024 * 1024,
+                "shared_baseline_bytes": 0,
+                "spill_threshold_bytes": 256 * 1024 * 1024,
+                "spilled": True,
+                "samples": 3,
+            },
+        },
+    }]
+    clean_backend = [{
+        "name": "llamacpp",
+        "available": True,
+        "runtime": {
+            "gpu_memory": {
+                "probe": "win32_pdh",
+                "status": "ok",
+                "dedicated_bytes": 10 * GIB,
+                "shared_bytes": 128 * 1024 * 1024,
+                "peak_shared_bytes": 128 * 1024 * 1024,
+                "shared_baseline_bytes": 0,
+                "spill_threshold_bytes": 256 * 1024 * 1024,
+                "spilled": False,
+                "samples": 3,
+            },
+        },
+    }]
+    hosts = _DualHost(
+        health={
+            PRIMARY: _health_doc(
+                gpus=[_nat08_gpu_json(name="NVIDIA GeForce RTX 5070 Ti")],
+                backends=clean_backend,
+            ),
+            WORKER: _health_doc(
+                gpus=[_nat08_gpu_json(name="AMD Radeon RX 9060 XT")],
+                backends=spilled_backend,
+            ),
+        },
+    )
+    gw = SonderInferenceGateway(
+        transport=hosts.post,
+        get_transport=hosts.get,
+        env=_gateway_env(ca_bundle),
+        wall_clock=lambda: datetime(2026, 11, 27, tzinfo=timezone.utc),
+    )
+    ctx = local_owner_context(correlation_id="fed03-spill", source="mcp", timeout_seconds=30.0)
+    for prompt in ("a", "b", "c"):
+        resp = gw.generate(ModelRequest(prompt=prompt, tier="fast"), ctx)
+        assert resp.text == "ok"
+
+    assert hosts.posts == [PRIMARY, PRIMARY, PRIMARY]
+    status = gw.node_health_status()
+    assert status[WORKER]["state"] == NODE_STATE_DEGRADED
+    assert "host_spill_detected" in status[WORKER]["reasons"]
+    assert status[PRIMARY]["state"] == NODE_STATE_HEALTHY
+
+
+def test_gateway_routes_away_on_threshold_breach_and_vram_evicted_and_ignores_unsupported(
+    ca_bundle: str,
+) -> None:
+    # 1. status=='ok' with (shared_bytes - shared_baseline_bytes) > spill_threshold_bytes even if spilled omitted/False
+    threshold_breach = [{
+        "name": "llamacpp",
+        "runtime": {
+            "gpu_memory": {
+                "probe": "win32_pdh",
+                "status": "ok",
+                "dedicated_bytes": 15 * GIB,
+                "shared_bytes": 512 * 1024 * 1024,
+                "shared_baseline_bytes": 128 * 1024 * 1024,
+                "spill_threshold_bytes": 256 * 1024 * 1024,
+                "spilled": False,
+            },
+        },
+    }]
+    unsupported_probe = [{
+        "name": "llamacpp",
+        "runtime": {
+            "gpu_memory": {
+                "probe": "none",
+                "status": "unsupported",
+                "shared_bytes": 999 * 1024 * 1024,
+                "shared_baseline_bytes": 0,
+                "spill_threshold_bytes": 256 * 1024 * 1024,
+                "spilled": False,
+            },
+        },
+    }]
+    hosts = _DualHost(
+        health={
+            PRIMARY: _health_doc(
+                gpus=[_nat08_gpu_json(name="NVIDIA GeForce RTX 5070 Ti")],
+                backends=unsupported_probe,
+            ),
+            WORKER: _health_doc(
+                gpus=[_nat08_gpu_json(name="AMD Radeon RX 9060 XT")],
+                backends=threshold_breach,
+            ),
+        },
+    )
+    gw = SonderInferenceGateway(
+        transport=hosts.post,
+        get_transport=hosts.get,
+        env=_gateway_env(ca_bundle),
+        wall_clock=lambda: datetime(2026, 11, 27, tzinfo=timezone.utc),
+    )
+    ctx = local_owner_context(correlation_id="fed03-spill-thresh", source="mcp", timeout_seconds=30.0)
+    for prompt in ("a", "b"):
+        gw.generate(ModelRequest(prompt=prompt, tier="fast"), ctx)
+    assert hosts.posts == [PRIMARY, PRIMARY]
+    status = gw.node_health_status()
+    assert status[WORKER]["state"] == NODE_STATE_DEGRADED
+    assert "host_spill_detected" in status[WORKER]["reasons"]
+    assert status[PRIMARY]["state"] == NODE_STATE_HEALTHY
+
+    # 2. residency.vram_evicted == True degrades even without spill.
+    evicted_backend = [{
+        "name": "llamacpp",
+        "runtime": {
+            "gpu_memory": {
+                "probe": "win32_pdh",
+                "status": "ok",
+                "spilled": False,
+                "residency": {"vram_evicted": True},
+            },
+        },
+    }]
+    hosts2 = _DualHost(
+        health={
+            PRIMARY: _health_doc(gpus=[_nat08_gpu_json(name="NVIDIA GeForce RTX 5070 Ti")]),
+            WORKER: _health_doc(
+                gpus=[_nat08_gpu_json(name="AMD Radeon RX 9060 XT")],
+                backends=evicted_backend,
+            ),
+        },
+    )
+    gw2 = SonderInferenceGateway(
+        transport=hosts2.post,
+        get_transport=hosts2.get,
+        env=_gateway_env(ca_bundle),
+        wall_clock=lambda: datetime(2026, 11, 27, tzinfo=timezone.utc),
+    )
+    for prompt in ("a", "b"):
+        gw2.generate(ModelRequest(prompt=prompt, tier="fast"), ctx)
+    assert hosts2.posts == [PRIMARY, PRIMARY]
+    assert "vram_evicted" in gw2.node_health_status()[WORKER]["reasons"]
+
+
+def test_gateway_routes_away_after_sustained_throughput_drop_via_real_generate_responses(
+    ca_bundle: str,
+) -> None:
+    """Drives _observe_node_health_inference through real generate() calls (no direct gate injection)."""
     baselines = json.dumps({
         PRIMARY: {"baseline_tg_tps": 90.0, "baseline_pp_tps": 2000.0, "spec_bandwidth_gbps": 896.0, "active_bytes_per_token": 5_000_000_000},
         WORKER: {"baseline_tg_tps": 50.0, "baseline_pp_tps": 1800.0, "spec_bandwidth_gbps": 320.0, "active_bytes_per_token": 5_600_000_000},
@@ -575,7 +781,7 @@ def test_gateway_routes_away_after_sustained_throughput_drop_against_env_baselin
         },
     )
     gate = NodeHealthGate(
-        policy=NodeHealthGatePolicy(min_samples=2, degraded_cooldown_seconds=60.0),
+        policy=NodeHealthGatePolicy(min_samples=1, degraded_cooldown_seconds=60.0),
         baselines=parse_node_health_baselines(baselines),
     )
     gw = SonderInferenceGateway(
@@ -586,21 +792,39 @@ def test_gateway_routes_away_after_sustained_throughput_drop_against_env_baselin
         node_health_gate=gate,
     )
     ctx = local_owner_context(correlation_id="fed03-3", source="mcp", timeout_seconds=30.0)
-    # Feed 2 slow observations directly (or via traffic) to trip the worker gate.
-    gate.observe_inference(
-        WORKER, now=gw._monotonic(), decode_tps=8.0, prompt_tps=300.0,
-        output_tokens=64, prompt_tokens=256, prompt_uncached_tokens=256, load_state="warm",
-    )
-    gate.observe_inference(
-        WORKER, now=gw._monotonic(), decode_tps=8.0, prompt_tps=300.0,
-        output_tokens=64, prompt_tokens=256, prompt_uncached_tokens=256, load_state="warm",
-    )
+    # First two calls probe both unmeasured idle endpoints via real generate().
+    gw.generate(ModelRequest(prompt="probe-1", tier="fast"), ctx)
+    gw.generate(ModelRequest(prompt="probe-2", tier="fast"), ctx)
+    assert set(hosts.posts) == {PRIMARY, WORKER}
+    assert gw.node_health_status()[WORKER]["state"] == NODE_STATE_DEGRADED
+    hosts.posts.clear()
+
+    # Every subsequent call routes away from the degraded WORKER to PRIMARY.
     for prompt in ("a", "b", "c", "d"):
         gw.generate(ModelRequest(prompt=prompt, tier="fast"), ctx)
     assert hosts.posts == [PRIMARY, PRIMARY, PRIMARY, PRIMARY]
     decision = gw._last_routing_decision
     assert isinstance(decision, dict)
     assert WORKER in decision.get("degraded_skipped", ())
+
+
+def test_gateway_constructor_ignores_malformed_baselines_env_instead_of_crashing(
+    ca_bundle: str,
+) -> None:
+    hosts = _DualHost(
+        health={
+            PRIMARY: _health_doc(),
+            WORKER: _health_doc(),
+        },
+    )
+    gw = SonderInferenceGateway(
+        transport=hosts.post,
+        get_transport=hosts.get,
+        env=_gateway_env(ca_bundle, **{ENV_NODE_HEALTH_BASELINES: "{bad json"}),
+        wall_clock=lambda: datetime(2026, 11, 27, tzinfo=timezone.utc),
+    )
+    ctx = local_owner_context(correlation_id="fed03-bad-env", source="mcp", timeout_seconds=30.0)
+    assert gw.generate(ModelRequest(prompt="ok", tier="fast"), ctx).text == "ok"
 
 
 def test_gateway_falls_back_when_all_nodes_degraded_without_deadlocking(ca_bundle: str) -> None:

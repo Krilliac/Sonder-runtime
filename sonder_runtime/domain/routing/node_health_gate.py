@@ -73,11 +73,16 @@ def _positive_int(value: object, *, maximum: int) -> int | None:
     return value
 
 
+_EXCLUDED_SKU_MARKERS: tuple[str, ...] = ("laptop", "mobile", "max-q", " gre")
+
+
 def known_gpu_spec_bandwidth_gbps(gpu_name: str | None) -> float | None:
-    """Return documented discrete GPU memory bandwidth (GB/s), or ``None`` if unknown."""
+    """Return documented desktop discrete GPU memory bandwidth (GB/s), or ``None`` if unknown."""
     if not isinstance(gpu_name, str) or not gpu_name.strip():
         return None
     lowered = " ".join(gpu_name.lower().split())
+    if any(excluded in lowered for excluded in _EXCLUDED_SKU_MARKERS):
+        return None
     for marker, bw_gbps in KNOWN_GPU_SPEC_BANDWIDTH_GBPS:
         if marker in lowered:
             return bw_gbps
@@ -167,6 +172,7 @@ class NodeHealthGatePolicy:
     min_samples: int = 3
     min_decode_tokens: int = 16
     min_uncached_prompt_tokens: int = 64
+    default_max_context_tokens: int = 32_768
     vram_budget_overcommit_ratio: float = 1.0
     vram_pressure_ratio: float = 0.95
     host_spill_warn_bytes: int = 512 * 1024 * 1024
@@ -200,6 +206,7 @@ class NodeHealthGatePolicy:
             ("min_samples", 1, 100),
             ("min_decode_tokens", 1, 100_000),
             ("min_uncached_prompt_tokens", 1, 1_000_000),
+            ("default_max_context_tokens", 1, 10_000_000),
             ("host_spill_warn_bytes", 1, _MAX_ACTIVE_BYTES),
             ("recovery_samples", 1, 100),
             ("max_nodes", 1, _MAX_NODES_LIMIT),
@@ -227,9 +234,11 @@ def evaluate_gpu_device_telemetry(
     *,
     baseline: NodeHealthBaseline | None = None,
     policy: NodeHealthGatePolicy | None = None,
+    host_spilled: bool = False,
+    vram_evicted: bool = False,
     host_spill_bytes: int | None = None,
 ) -> DeviceTelemetryHealth:
-    """Evaluate NAT-08 discrete GPU telemetry for eviction, spill, PCIe, and ReBAR faults."""
+    """Evaluate NAT-08 discrete GPU telemetry and SI runtime gpu_memory spill/eviction signals."""
     pol = policy or NodeHealthGatePolicy()
     reasons: list[str] = []
     warnings: list[str] = []
@@ -238,12 +247,14 @@ def evaluate_gpu_device_telemetry(
     driver_build: str | None = None
     observed_rebar: bool | None = None
 
-    if (
+    if host_spilled or (
         host_spill_bytes is not None
         and type(host_spill_bytes) is int
         and host_spill_bytes >= pol.host_spill_warn_bytes
     ):
         reasons.append("host_spill_detected")
+    if vram_evicted:
+        reasons.append("vram_evicted")
 
     discrete_gpus = [gpu for gpu in gpus if not gpu.is_integrated_uma]
     for gpu in discrete_gpus:
@@ -287,6 +298,9 @@ def evaluate_gpu_device_telemetry(
         ):
             device_local_pressure = True
 
+        # Secondary Vulkan-heap spill heuristic (only when discrete VRAM is under pressure
+        # and host-visible usage exceeds host_spill_warn_bytes; primary signal is SI's
+        # backends[].runtime.gpu_memory.spilled).
         if device_local_pressure and host_heap_usage >= pol.host_spill_warn_bytes:
             if "host_spill_detected" not in reasons:
                 reasons.append("host_spill_detected")
@@ -298,11 +312,14 @@ def evaluate_gpu_device_telemetry(
                     baseline is not None
                     and baseline.expected_pcie_width is not None
                     and pcie.current_width < baseline.expected_pcie_width
-                ) or (
-                    pcie.max_width is not None and pcie.current_width < pcie.max_width
                 ):
                     if "pcie_width_downgraded" not in reasons:
                         reasons.append("pcie_width_downgraded")
+                elif pcie.max_width is not None and pcie.current_width < pcie.max_width:
+                    # An x16 card in a normal x8/x4 chipset or OCuLink slot reports
+                    # current_width < max_width; warn only unless expected_pcie_width is pinned.
+                    if "pcie_width_below_max" not in warnings:
+                        warnings.append("pcie_width_below_max")
             if pcie.current_gen is not None:
                 if (
                     baseline is not None
@@ -439,9 +456,11 @@ class NodeHealthGate:
         gpus: Sequence[NodeGpuDevice],
         *,
         now: float,
+        host_spilled: bool = False,
+        vram_evicted: bool = False,
         host_spill_bytes: int | None = None,
     ) -> NodeHealthVerdict:
-        """Fold one NAT-08 GPU inventory snapshot into the endpoint's health verdict."""
+        """Fold one NAT-08 GPU inventory and SI runtime gpu_memory snapshot into the verdict."""
         clean = str(endpoint or "").strip().rstrip("/")
         if not clean or not math.isfinite(now):
             return NodeHealthVerdict(endpoint=clean, state=NODE_STATE_UNKNOWN)
@@ -452,6 +471,8 @@ class NodeHealthGate:
                 gpus,
                 baseline=baseline,
                 policy=self._policy,
+                host_spilled=host_spilled,
+                vram_evicted=vram_evicted,
                 host_spill_bytes=host_spill_bytes,
             )
             rec.device_observed_at = now
@@ -479,25 +500,25 @@ class NodeHealthGate:
             rec = self._record_for(clean)
             if isinstance(load_state, str) and load_state.strip().casefold() == "cold":
                 return self._verdict_locked(clean, rec, baseline, now=now)
-            if (
-                baseline is not None
-                and baseline.max_baseline_context_tokens is not None
-                and type(prompt_tokens) is int
-                and prompt_tokens > baseline.max_baseline_context_tokens
-            ):
+            pol = self._policy
+            max_ctx = (
+                baseline.max_baseline_context_tokens
+                if baseline is not None and baseline.max_baseline_context_tokens is not None
+                else pol.default_max_context_tokens
+            )
+            if type(prompt_tokens) is int and prompt_tokens > max_ctx:
                 return self._verdict_locked(clean, rec, baseline, now=now)
 
-            pol = self._policy
             alpha = pol.ewma_alpha
             valid_tg = (
                 _positive_finite(decode_tps, maximum=_MAX_TPS)
-                if (output_tokens is None or (type(output_tokens) is int and output_tokens >= pol.min_decode_tokens))
+                if (type(output_tokens) is int and output_tokens >= pol.min_decode_tokens)
                 else None
             )
             uncached = prompt_uncached_tokens if type(prompt_uncached_tokens) is int else prompt_tokens
             valid_pp = (
                 _positive_finite(prompt_tps, maximum=_MAX_TPS)
-                if (uncached is None or (type(uncached) is int and uncached >= pol.min_uncached_prompt_tokens))
+                if (type(uncached) is int and uncached >= pol.min_uncached_prompt_tokens)
                 else None
             )
             if valid_tg is None and valid_pp is None:
