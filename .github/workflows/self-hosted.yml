@@ -86,7 +86,9 @@ jobs:
           python scripts/eval_harness.py run --suite tool_policy_gates --check-baseline
           --no-record-history --out "$RUNNER_TEMP/eval_runs/tool_policy_gates"
       - name: Run test suite
-        run: python -m pytest -q -n 12 --dist load -p no:cacheprovider
+        # Capped: the WSL VM shares the workstation's memory with a concurrent
+        # Sonder-Inference build (it thrashed at higher parallelism on 2026-11-27).
+        run: python -m pytest -q -n 4 --dist load -p no:cacheprovider
       - name: Run the TUF update-trust suites (no skips allowed)
         if: ${{ !cancelled() && steps.install-core-deps.outcome == 'success' }}
         shell: bash
