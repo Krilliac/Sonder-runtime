@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextvars
 import hashlib
 import json
+import math
 import re
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -29,8 +30,9 @@ from sonder_runtime.domain.chat_tools import (
     DEFAULT_CHAT_TOOL_BUDGET,
     ChatToolBudget,
     ChatToolRecord,
-    parse_tool_arguments,
+    detect_bidi_chars,
     preview_tool_arguments,
+    validate_tool_arguments,
 )
 from sonder_runtime.domain.code_audit import (
     audit_source,
@@ -47,7 +49,6 @@ from sonder_runtime.domain.resilience import (
     classify_model_error,
     compact_messages_for_retry,
     format_fallback_hint,
-    repair_tool_arguments,
     resolve_tool_name,
 )
 from sonder_runtime.domain.tools.builtin_traits import builtin_traits
@@ -87,6 +88,10 @@ _EXECUTION_CAP_TOOLS = frozenset({
     "test_run", "lint_run", "format_code", "typecheck_run", "build_run",
 })
 _CREDENTIAL_KEYS = frozenset({"token", "approval", "extra_roots", "bypass", "developer_authorized"})
+_MAX_TOOL_CALL_ID_CHARS = 128
+_MAX_RECEIPT_PREVIEW_CHARS = 500
+_MAX_RECEIPT_REASON_CHARS = 240
+_SLEEP_SLICE_SECONDS = 0.025
 
 
 def _has_credential_argument(args: Mapping[str, Any]) -> bool:
@@ -94,6 +99,135 @@ def _has_credential_argument(args: Mapping[str, Any]) -> bool:
         key in args and args.get(key) not in (None, "", False, (), [], {})
         for key in _CREDENTIAL_KEYS
     )
+
+
+def _safe_nonneg_int(raw: Any) -> int:
+    """Coerce a token count into a non-negative int, rejecting bools/NaN/negatives."""
+    if raw is None or isinstance(raw, bool):
+        return 0
+    if isinstance(raw, int):
+        return max(0, raw)
+    if isinstance(raw, float):
+        return max(0, int(raw)) if math.isfinite(raw) else 0
+    try:
+        parsed = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int(parsed)) if math.isfinite(parsed) else 0
+
+
+def _extract_step_usage(step: Mapping[str, Any]) -> tuple[int, int]:
+    """Extract ``(tokens_in, tokens_out)`` across normalized, OpenAI, and Ollama shapes."""
+    usage_raw = step.get("usage")
+    usage: Mapping[str, Any] = usage_raw if isinstance(usage_raw, Mapping) else {}
+    tokens_in = 0
+    for candidate in (
+        usage.get("tokens_in"),
+        usage.get("prompt_tokens"),
+        usage.get("prompt_eval_count"),
+        usage.get("input_tokens"),
+        step.get("prompt_eval_count"),
+        step.get("prompt_tokens"),
+    ):
+        val = _safe_nonneg_int(candidate)
+        if val > 0:
+            tokens_in = val
+            break
+    tokens_out = 0
+    for candidate in (
+        usage.get("tokens_out"),
+        usage.get("completion_tokens"),
+        usage.get("eval_count"),
+        usage.get("output_tokens"),
+        step.get("eval_count"),
+        step.get("completion_tokens"),
+    ):
+        val = _safe_nonneg_int(candidate)
+        if val > 0:
+            tokens_out = val
+            break
+    return tokens_in, tokens_out
+
+
+def _is_valid_tool_call_id(raw: Any) -> bool:
+    if not isinstance(raw, str):
+        return False
+    stripped = raw.strip()
+    if not stripped or len(stripped) > _MAX_TOOL_CALL_ID_CHARS:
+        return False
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in stripped):
+        return False
+    has_bidi, _ = detect_bidi_chars(stripped)
+    return not has_bidi
+
+
+def _unique_synthetic_id(prefix: str, seen_ids: set[str]) -> str:
+    candidate = prefix[:_MAX_TOOL_CALL_ID_CHARS]
+    if candidate not in seen_ids:
+        seen_ids.add(candidate)
+        return candidate
+    suffix_n = 2
+    base = prefix[: _MAX_TOOL_CALL_ID_CHARS - 12]
+    while True:
+        alt = f"{base}_dup{suffix_n}"
+        if alt not in seen_ids:
+            seen_ids.add(alt)
+            return alt
+        suffix_n += 1
+
+
+def _normalize_tool_call_entry(
+    raw_call: Any,
+    *,
+    round_index: int,
+    call_index: int,
+    seen_ids: set[str],
+    force_id: bool,
+) -> tuple[dict[str, Any], str, str]:
+    """Return ``(normalized_call_copy, call_id, raw_tool_name)`` without mutating ``raw_call``."""
+    if not isinstance(raw_call, Mapping):
+        call_id = _unique_synthetic_id(f"call_r{round_index}_{call_index}", seen_ids) if force_id else ""
+        stub: dict[str, Any] = {"type": "function", "function": {"name": "", "arguments": ""}}
+        if call_id:
+            stub["id"] = call_id
+        return stub, call_id, ""
+
+    has_id_key = "id" in raw_call and raw_call.get("id") is not None
+    raw_id = raw_call.get("id")
+    call_id = ""
+    if has_id_key or force_id:
+        if _is_valid_tool_call_id(raw_id):
+            cleaned = str(raw_id).strip()
+            if cleaned in seen_ids:
+                call_id = _unique_synthetic_id(cleaned, seen_ids)
+                GLOBAL_TELEMETRY.record("duplicate_tool_call_id", detail=f"{cleaned[:60]} -> {call_id[:60]}")
+            else:
+                seen_ids.add(cleaned)
+                call_id = cleaned
+        else:
+            call_id = _unique_synthetic_id(f"call_r{round_index}_{call_index}", seen_ids)
+            if has_id_key:
+                GLOBAL_TELEMETRY.record("malformed_tool_call_id", detail=f"replaced -> {call_id}")
+
+    raw_fn = raw_call.get("function")
+    fn_dict: dict[str, Any] = dict(raw_fn) if isinstance(raw_fn, Mapping) else {}
+    raw_name = str(fn_dict.get("name") or "").strip().lstrip("/") if fn_dict else ""
+
+    normalized: dict[str, Any] = {
+        "type": str(raw_call.get("type") or "function"),
+        "function": fn_dict if isinstance(raw_fn, Mapping) else raw_fn,
+    }
+    if call_id:
+        normalized["id"] = call_id
+    return normalized, call_id, raw_name
+
+
+def _safe_signature_key(tool_name: str, args: Mapping[str, Any]) -> str:
+    try:
+        rendered = json.dumps(args, sort_keys=True, default=str)[:400]
+    except (TypeError, ValueError, RecursionError):
+        rendered = repr(args)[:400]
+    return f"{tool_name}:{rendered}"
 
 
 @dataclass(frozen=True)
@@ -133,6 +267,38 @@ class ChatToolTurn:
     client_handoffs: list[dict[str, Any]] = field(default_factory=list)
     records: list[ChatToolRecord] = field(default_factory=list)
 
+    def _is_aborted(self) -> bool:
+        if self.is_aborted is None:
+            return False
+        try:
+            return bool(self.is_aborted())
+        except Exception:
+            return True
+
+    def _wall_exceeded(self, started: float | None) -> bool:
+        if started is None:
+            return False
+        return (time.monotonic() - started) >= self.budget.wall_seconds
+
+    def _sleep_interruptible(self, seconds: float, *, started: float | None = None) -> bool:
+        """Sleep up to *seconds* while polling abort/wall bounds; return ``False`` if cancelled."""
+        remaining = max(0.0, float(seconds))
+        if remaining <= 0.0:
+            return not (self._is_aborted() or self._wall_exceeded(started))
+        end = time.monotonic() + remaining
+        while True:
+            if self._is_aborted() or self._wall_exceeded(started):
+                return False
+            left = end - time.monotonic()
+            if left <= 0.0:
+                return True
+            if started is not None:
+                wall_left = self.budget.wall_seconds - (time.monotonic() - started)
+                if wall_left <= 0.0:
+                    return False
+                left = min(left, wall_left)
+            time.sleep(min(_SLEEP_SLICE_SECONDS, left))
+
     def _emit(self, payload: Mapping[str, Any]) -> None:
         if self.on_tool_event is None:
             return
@@ -141,17 +307,34 @@ class ChatToolTurn:
         except Exception:
             pass
 
-    def _clip(self, text: str, limit: int) -> tuple[str, bool]:
-        if len(text) <= limit:
-            return text, False
-        omitted = len(text) - limit
-        if limit < 600:
-            return text[:limit] + f"\n... (truncated {omitted} chars)", True
-        # Preserve both opening context (65%) and trailing error/summary (35%)
-        head_len = int(limit * 0.65)
-        tail_len = max(120, limit - head_len)
-        marker = f"\n... (truncated {omitted} middle chars; head & tail preserved) ...\n"
-        return text[:head_len] + marker + text[-tail_len:], True
+    def _clip(self, text: Any, limit: int) -> tuple[str, bool]:
+        raw = "" if text is None else str(text)
+        cap = 0 if isinstance(limit, bool) else max(0, int(limit))
+        if len(raw) <= cap:
+            return raw, False
+        if cap == 0:
+            return "", True
+        if cap >= 600:
+            # Reserve exact space for the middle marker so len(result) <= cap holds strictly.
+            probe = f"\n... (truncated {len(raw)} middle chars; head & tail preserved) ...\n"
+            usable = cap - len(probe)
+            if usable >= 240:
+                head_len = int(usable * 0.65)
+                tail_len = usable - head_len
+                omitted = len(raw) - head_len - tail_len
+                marker = f"\n... (truncated {omitted} middle chars; head & tail preserved) ...\n"
+                result = raw[:head_len] + marker + raw[-tail_len:]
+                if len(result) <= cap:
+                    return result, True
+        suffix_probe = f"\n... (truncated {len(raw)} chars)"
+        if cap > len(suffix_probe) + 16:
+            head_len = cap - len(suffix_probe)
+            omitted = len(raw) - head_len
+            suffix = f"\n... (truncated {omitted} chars)"
+            result = raw[:head_len] + suffix
+            if len(result) <= cap:
+                return result, True
+        return raw[:cap], True
 
     def _guard_observation(self, tool_name: str, text: str) -> str:
         """Apply always-on secret redaction, Trojan-Source stripping, and prompt-injection defense."""
@@ -201,21 +384,26 @@ class ChatToolTurn:
         *,
         run_count: int,
         failed_tools: set[str] | None = None,
+        started: float | None = None,
     ) -> tuple[str, int]:
         fn = raw_call.get("function") if isinstance(raw_call, Mapping) else None
         if not isinstance(fn, Mapping):
+            self.records.append(ChatToolRecord("", "", "error", "host", reason="malformed native tool call"))
             return "ERROR: malformed native tool call", run_count
         admitted = self._admitted_tool_names()
         raw_name = str(fn.get("name") or "").strip().lstrip("/")
         name, suggestions, aliased = resolve_tool_name(raw_name, admitted)
         if aliased:
             GLOBAL_TELEMETRY.record("tool_name_aliased", tool=name, detail=f"{raw_name} -> {name}")
-        args, repaired_args = repair_tool_arguments(fn.get("arguments"))
-        if repaired_args:
-            GLOBAL_TELEMETRY.record("tool_args_repaired", tool=name)
-        backend = self.backend.backend_for(name)
+        backend = self.backend.backend_for(name) if name else "host"
         if not name:
+            self.records.append(ChatToolRecord("", "", "error", backend, reason="tool name is required"))
             return "ERROR: tool name is required", run_count
+        if self._is_aborted():
+            msg = f"ERROR: HOST POLICY: turn cancelled before executing {name}."
+            self.records.append(ChatToolRecord("", name, "aborted", backend, reason=msg[:_MAX_RECEIPT_REASON_CHARS]))
+            self._emit({"phase": "aborted", "call_id": "", "tool": name})
+            return msg, run_count
         if name not in admitted and suggestions:
             msg = (
                 f"ERROR: unknown tool '{name}' is not in this turn's admitted tools. "
@@ -252,11 +440,34 @@ class ChatToolTurn:
             msg = f"ERROR: HOST POLICY: tool '{name}' is restricted to operator control surfaces."
             self.records.append(ChatToolRecord("", name, "refused", backend, reason=msg[:200]))
             return msg, run_count
+
+        args, repaired_args, arg_err = validate_tool_arguments(
+            fn.get("arguments"),
+            max_chars=self.budget.max_argument_chars,
+            max_depth=self.budget.max_argument_depth,
+        )
+        if arg_err:
+            msg = f"ERROR: invalid arguments for tool '{name}': {arg_err}."
+            self.records.append(ChatToolRecord("", name, "error", backend, reason=msg[:_MAX_RECEIPT_REASON_CHARS]))
+            GLOBAL_TELEMETRY.record("tool_args_rejected", tool=name, detail=arg_err[:120])
+            if failed_tools is not None:
+                failed_tools.add(name)
+            hint = format_fallback_hint(
+                name, msg, available_tools=admitted, tried_tools=failed_tools,
+            )
+            return msg + hint, run_count
+        if repaired_args:
+            GLOBAL_TELEMETRY.record("tool_args_repaired", tool=name)
+
         if _has_credential_argument(args):
             msg = f"ERROR: HOST POLICY: tool '{name}' cannot receive caller credential arguments."
             self.records.append(ChatToolRecord("", name, "refused", backend, reason=msg[:200]))
             return msg, run_count
         if self.delegate_client_tool is not None and name in self.client_exec_tools:
+            if self._is_aborted():
+                msg = f"ERROR: HOST POLICY: turn cancelled before delegating {name}."
+                self.records.append(ChatToolRecord("", name, "aborted", "client", reason=msg[:_MAX_RECEIPT_REASON_CHARS]))
+                return msg, run_count
             if name in _EXECUTION_CAP_TOOLS and run_count >= self.budget.max_runs:
                 msg = (
                     f"ERROR: HOST POLICY: chat turn execution budget reached "
@@ -317,7 +528,12 @@ class ChatToolTurn:
                     "bidi_chars": preview["bidi_chars"],
                     "timeout_seconds": int(self.budget.approval_wait_seconds),
                 })
-                outcome = self.wait_for_approval(name, call_id, decision, preview)
+                if self._is_aborted():
+                    outcome = "aborted"
+                else:
+                    outcome = self.wait_for_approval(name, call_id, decision, preview)
+                if outcome == "approved" and self._is_aborted():
+                    outcome = "aborted"
                 if outcome == "approved":
                     self._emit({"phase": "approved", "call_id": call_id, "tool": name})
                     decision = self.permission_policy.decide(
@@ -357,6 +573,27 @@ class ChatToolTurn:
             "bidi_warning": preview["bidi_warning"],
             "bidi_chars": preview["bidi_chars"],
         })
+        if self._is_aborted():
+            msg = f"ERROR: HOST POLICY: turn cancelled before executing {name}."
+            self.records.append(ChatToolRecord(
+                call_id, name, "aborted", backend,
+                bidi_warning=bool(preview["bidi_warning"]),
+                bidi_chars=tuple(preview["bidi_chars"]),
+                reason=msg[:_MAX_RECEIPT_REASON_CHARS],
+            ))
+            self._emit({"phase": "aborted", "call_id": call_id, "tool": name})
+            return msg, run_count
+        if self._wall_exceeded(started):
+            msg = f"ERROR: HOST POLICY: wall-time budget exceeded before executing {name}."
+            self.records.append(ChatToolRecord(
+                call_id, name, "timeout", backend,
+                timed_out=True,
+                bidi_warning=bool(preview["bidi_warning"]),
+                bidi_chars=tuple(preview["bidi_chars"]),
+                reason=msg[:_MAX_RECEIPT_REASON_CHARS],
+            ))
+            return msg, run_count
+
         _delegation.emit_agent_event(
             phase="tool_call",
             tool=name,
@@ -371,7 +608,13 @@ class ChatToolTurn:
         is_safe_retryable = bool(builtin_traits(name).is_read_only) and name not in _EXECUTION_CAP_TOOLS
         exec_result = None
         last_exc: Exception | None = None
+        cancelled_mid_exec = False
         for attempt in range(2 if is_safe_retryable else 1):
+            if self._is_aborted():
+                cancelled_mid_exec = True
+                break
+            if attempt > 0 and self._wall_exceeded(started):
+                break
             try:
                 with preapproved_ctx:
                     exec_result = self.backend.execute(name, args)
@@ -380,35 +623,63 @@ class ChatToolTurn:
                     attempt == 0
                     and is_safe_retryable
                     and not exec_result.ok
+                    and not self._is_aborted()
+                    and not self._wall_exceeded(started)
                     and any(tok in str(exec_result.output or "").lower() for tok in ("database is locked", "temporarily unavailable", "timed out"))
                 ):
                     GLOBAL_TELEMETRY.record("readonly_tool_retry", tool=name)
-                    time.sleep(0.1)
+                    if not self._sleep_interruptible(0.1, started=started):
+                        if self._is_aborted():
+                            cancelled_mid_exec = True
+                        break
                     continue
                 break
             except (TimeoutError, ConnectionError, OSError) as exc:
                 last_exc = exc
-                if attempt == 0 and is_safe_retryable:
+                if self._is_aborted():
+                    cancelled_mid_exec = True
+                    break
+                if attempt == 0 and is_safe_retryable and not self._wall_exceeded(started):
                     GLOBAL_TELEMETRY.record("readonly_tool_retry", tool=name, detail=str(exc)[:120])
-                    time.sleep(0.1)
+                    if not self._sleep_interruptible(0.1, started=started):
+                        if self._is_aborted():
+                            cancelled_mid_exec = True
+                        break
                     continue
                 break
             except Exception as exc:
                 last_exc = exc
+                if self._is_aborted():
+                    cancelled_mid_exec = True
                 break
 
-        if exec_result is None or last_exc is not None:
-            err_msg = f"ERROR: tool '{name}' failed unexpectedly: {type(last_exc).__name__}: {last_exc}"
+        if cancelled_mid_exec and exec_result is None:
+            msg = f"ERROR: HOST POLICY: turn cancelled while executing {name}."
             self.records.append(ChatToolRecord(
-                call_id=call_id, tool=name, status="error", backend=backend, reason=err_msg[:200],
+                call_id=call_id, tool=name, status="aborted", backend=backend,
+                bidi_warning=bool(preview["bidi_warning"]),
+                bidi_chars=tuple(preview["bidi_chars"]),
+                reason=msg[:_MAX_RECEIPT_REASON_CHARS],
             ))
-            GLOBAL_TELEMETRY.record("tool_exec_failed", tool=name, detail=err_msg[:160])
+            self._emit({"phase": "aborted", "call_id": call_id, "tool": name})
+            return msg, run_count
+
+        if exec_result is None or last_exc is not None:
+            raw_err = f"ERROR: tool '{name}' failed unexpectedly: {type(last_exc).__name__}: {last_exc}"
+            clipped_err, truncated_err = self._clip(raw_err, self.budget.model_output_chars)
+            guarded_err = self._guard_observation(name, clipped_err)
+            self.records.append(ChatToolRecord(
+                call_id=call_id, tool=name, status="error", backend=backend,
+                truncated=truncated_err,
+                reason=guarded_err[:_MAX_RECEIPT_REASON_CHARS],
+            ))
+            GLOBAL_TELEMETRY.record("tool_exec_failed", tool=name, detail=guarded_err[:160])
             if failed_tools is not None:
                 failed_tools.add(name)
             hint = format_fallback_hint(
-                name, err_msg, available_tools=admitted, tried_tools=failed_tools,
+                name, guarded_err, available_tools=admitted, tried_tools=failed_tools,
             )
-            return err_msg + hint, run_count
+            return guarded_err + hint, run_count
 
         _delegation.emit_agent_event(
             phase="tool_result",
@@ -431,9 +702,9 @@ class ChatToolTurn:
             truncated=truncated,
             bidi_warning=bool(preview["bidi_warning"]),
             bidi_chars=tuple(preview["bidi_chars"]),
-            stdout_preview=exec_result.stdout_preview,
-            stderr_preview=exec_result.stderr_preview,
-            reason=exec_result.reason,
+            stdout_preview=str(exec_result.stdout_preview or "")[:_MAX_RECEIPT_PREVIEW_CHARS],
+            stderr_preview=str(exec_result.stderr_preview or "")[:_MAX_RECEIPT_PREVIEW_CHARS],
+            reason=str(exec_result.reason or "")[:_MAX_RECEIPT_REASON_CHARS],
         ))
         self._emit({
             "phase": "finished",
@@ -475,9 +746,9 @@ class ChatToolTurn:
         last_exc: Exception | None = None
 
         for attempt in range(max_attempts):
-            if self.is_aborted is not None and self.is_aborted():
-                return None, cur_messages, tools_disabled, last_exc
-            if (time.monotonic() - started) >= self.budget.wall_seconds:
+            if self._is_aborted():
+                return None, cur_messages, tools_disabled, None
+            if self._wall_exceeded(started):
                 return None, cur_messages, tools_disabled, last_exc
             try:
                 step = generate_step(cur_messages, cur_tools)
@@ -485,6 +756,8 @@ class ChatToolTurn:
                     GLOBAL_TELEMETRY.record("model_call_recovered", detail=f"attempt={attempt + 1}")
                 return step, cur_messages, tools_disabled, None
             except Exception as exc:
+                if self._is_aborted():
+                    return None, cur_messages, tools_disabled, None
                 last_exc = exc
                 err_class = classify_model_error(exc)
                 GLOBAL_TELEMETRY.record("model_call_failed", detail=f"{err_class}: {exc}"[:160])
@@ -504,7 +777,10 @@ class ChatToolTurn:
                     continue
                 if err_class == "transient" and attempt < max_attempts - 1:
                     GLOBAL_TELEMETRY.record("transient_model_retry", detail=f"attempt={attempt + 1}")
-                    time.sleep(min(0.35, 0.15 * (attempt + 1)))
+                    if not self._sleep_interruptible(min(0.35, 0.15 * (attempt + 1)), started=started):
+                        if self._is_aborted():
+                            return None, cur_messages, tools_disabled, None
+                        break
                     continue
                 break
 
@@ -534,6 +810,7 @@ class ChatToolTurn:
         total_out = 0
         last_meta: dict[str, Any] = {}
         final_content = ""
+        aborted = False
         board_cursor = 0
         has_run_code_tool = (
             any(t.name == "run_code" for t in self.manifest.tools)
@@ -545,6 +822,8 @@ class ChatToolTurn:
         tools_disabled_by_fallback = False
         failed_tools: set[str] = set()
         call_signatures: dict[str, int] = {}
+        seen_tool_call_ids: set[str] = set()
+        admitted_names = self._admitted_tool_names()
         active_board = _delegation.current_board()
         owns_board = active_board is None
         board = active_board or _delegation.AgentProgressBoard()
@@ -568,9 +847,10 @@ class ChatToolTurn:
             )
             try:
                 while calls < self.budget.max_model_calls:
-                    if self.is_aborted is not None and self.is_aborted():
+                    if self._is_aborted():
+                        aborted = True
                         break
-                    if (time.monotonic() - started) >= self.budget.wall_seconds:
+                    if self._wall_exceeded(started):
                         break
                     calls += 1
                     step_tools = (
@@ -588,6 +868,9 @@ class ChatToolTurn:
                     if newly_disabled:
                         tools_disabled_by_fallback = True
                     if step is None:
+                        if self._is_aborted():
+                            aborted = True
+                            break
                         if step_exc is not None and not self.records:
                             raise step_exc
                         if step_exc is not None and self.records:
@@ -603,18 +886,20 @@ class ChatToolTurn:
                     message = step.get("message") if isinstance(step, Mapping) else {}
                     if not isinstance(message, Mapping):
                         message = {}
-                    usage = step.get("usage") if isinstance(step, Mapping) else None
-                    if isinstance(usage, Mapping):
-                        total_in += int(usage.get("tokens_in") or 0)
-                        total_out += int(usage.get("tokens_out") or 0)
-                    meta = step.get("meta") if isinstance(step, Mapping) else None
-                    if isinstance(meta, Mapping):
-                        last_meta = dict(meta)
+                    if isinstance(step, Mapping):
+                        step_in, step_out = _extract_step_usage(step)
+                        total_in += step_in
+                        total_out += step_out
+                        meta = step.get("meta")
+                        if isinstance(meta, Mapping):
+                            last_meta = dict(meta)
 
                     tool_calls = message.get("tool_calls")
-                    content = str(message.get("content") or step.get("content") or "")
+                    content = str(message.get("content") or (step.get("content") if isinstance(step, Mapping) else "") or "")
                     thinking = compact_text(
-                        message.get("thinking") or step.get("thinking") or extract_thinking_summary(content),
+                        message.get("thinking")
+                        or (step.get("thinking") if isinstance(step, Mapping) else "")
+                        or extract_thinking_summary(content),
                         limit=280,
                     )
                     if thinking:
@@ -633,6 +918,8 @@ class ChatToolTurn:
                                 has_run_code_tool
                                 and not auto_verify_blocked
                                 and not self.client_handoffs
+                                and not self._is_aborted()
+                                and not self._wall_exceeded(started)
                                 and calls < self.budget.max_model_calls
                             )
                             else None
@@ -665,8 +952,12 @@ class ChatToolTurn:
                                             },
                                         },
                                         run_count=run_count,
+                                        started=started,
                                     )
                                     last_rec = self.records[-1] if len(self.records) > prior_len else None
+                                    if last_rec is not None and last_rec.status == "aborted":
+                                        aborted = True
+                                        break
                                     if last_rec is not None and last_rec.status == "ok":
                                         verified_code_hashes.add(digest)
                                     elif last_rec is not None and last_rec.status in _NON_RETRYABLE_VERIFY_STATUSES:
@@ -686,69 +977,111 @@ class ChatToolTurn:
                         final_content = content
                         break
 
-                    assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
-                    assistant_msg["tool_calls"] = list(tool_calls)
-                    messages.append(assistant_msg)
+                    batch_has_any_id = any(
+                        isinstance(item, Mapping) and item.get("id") is not None
+                        for item in tool_calls
+                    )
+                    max_step_calls = max(1, int(self.budget.max_tool_calls_per_step))
+                    processed_calls: list[dict[str, Any]] = []
+                    tool_messages: list[dict[str, Any]] = []
                     stopped_early = False
-                    for raw_call in tool_calls:
-                        if self.is_aborted is not None and self.is_aborted():
+
+                    for idx, raw_call in enumerate(tool_calls):
+                        if self._is_aborted():
+                            aborted = True
                             stopped_early = True
                             break
-                        if (time.monotonic() - started) >= self.budget.wall_seconds:
+                        if self._wall_exceeded(started):
                             stopped_early = True
                             break
-                        tool_name = str(
-                            ((raw_call.get("function") or {}) if isinstance(raw_call, Mapping) else {}).get("name") or ""
-                        ).strip().lstrip("/")
-                        raw_call_id = (
-                            str(raw_call.get("id") or "").strip()
-                            if isinstance(raw_call, Mapping)
-                            else ""
+                        norm_call, norm_call_id, raw_tool_name = _normalize_tool_call_entry(
+                            raw_call,
+                            round_index=calls,
+                            call_index=idx,
+                            seen_ids=seen_tool_call_ids,
+                            force_id=batch_has_any_id,
                         )
-                        if tool_calls_total >= self.budget.max_tool_calls:
-                            msg = (
-                                f"ERROR: HOST POLICY: chat turn tool-call budget reached "
-                                f"({self.budget.max_tool_calls} tool calls per turn). Summarize with existing results."
-                            )
-                            backend = self.backend.backend_for(tool_name) if tool_name else "host"
-                            self.records.append(ChatToolRecord("", tool_name, "budget_exceeded", backend, reason=msg[:200]))
-                            budget_msg: dict[str, Any] = {"role": "tool", "name": tool_name, "content": msg}
-                            if raw_call_id:
-                                budget_msg["tool_call_id"] = raw_call_id
-                            messages.append(budget_msg)
+                        resolved_name, _, _ = resolve_tool_name(raw_tool_name, admitted_names)
+                        tool_label = resolved_name or raw_tool_name
+                        if tool_calls_total >= self.budget.max_tool_calls or len(processed_calls) >= max_step_calls:
+                            if tool_calls_total >= self.budget.max_tool_calls:
+                                msg = (
+                                    f"ERROR: HOST POLICY: chat turn tool-call budget reached "
+                                    f"({self.budget.max_tool_calls} tool calls per turn). Summarize with existing results."
+                                )
+                            else:
+                                msg = (
+                                    f"ERROR: HOST POLICY: per-step tool-call batch limit reached "
+                                    f"({max_step_calls} tool calls per step). Summarize with existing results."
+                                )
+                            backend = self.backend.backend_for(tool_label) if tool_label else "host"
+                            self.records.append(ChatToolRecord("", tool_label, "budget_exceeded", backend, reason=msg[:200]))
+                            budget_msg: dict[str, Any] = {"role": "tool", "name": tool_label, "content": msg}
+                            if norm_call_id:
+                                budget_msg["tool_call_id"] = norm_call_id
+                            processed_calls.append(norm_call)
+                            tool_messages.append(budget_msg)
                             break
                         tool_calls_total += 1
                         prior_len = len(self.records)
-                        raw_fn_sig = raw_call.get("function") if isinstance(raw_call, Mapping) else {}
-                        sig_args = parse_tool_arguments(raw_fn_sig.get("arguments")) if isinstance(raw_fn_sig, Mapping) else {}
-                        sig_key = f"{tool_name}:{json.dumps(sig_args, sort_keys=True, default=str)[:400]}"
+                        norm_fn = norm_call.get("function")
+                        sig_args, _, sig_err = (
+                            validate_tool_arguments(
+                                norm_fn.get("arguments"),
+                                max_chars=self.budget.max_argument_chars,
+                                max_depth=self.budget.max_argument_depth,
+                            )
+                            if isinstance(norm_fn, Mapping)
+                            else ({}, False, "malformed")
+                        )
+                        sig_key = (
+                            _safe_signature_key(tool_label, sig_args)
+                            if not sig_err
+                            else f"{tool_label}:<invalid:{sig_err[:80]}>"
+                        )
                         call_signatures[sig_key] = call_signatures.get(sig_key, 0) + 1
                         obs, run_count = self._run_tool_call(
-                            raw_call, run_count=run_count, failed_tools=failed_tools,
+                            norm_call,
+                            run_count=run_count,
+                            failed_tools=failed_tools,
+                            started=started,
                         )
-                        if call_signatures[sig_key] >= 2 and "[RECOVERY HINT]" not in obs:
-                            GLOBAL_TELEMETRY.record("repeated_tool_loop_hint", tool=tool_name)
+                        latest_rec = self.records[-1] if len(self.records) > prior_len else None
+                        if latest_rec is not None and latest_rec.status == "aborted":
+                            aborted = True
+                            stopped_early = True
+                        if not aborted and call_signatures[sig_key] >= 2 and "[RECOVERY HINT]" not in obs:
+                            GLOBAL_TELEMETRY.record("repeated_tool_loop_hint", tool=tool_label)
                             obs = obs + format_fallback_hint(
-                                tool_name,
+                                tool_label,
                                 obs[:240],
-                                available_tools=self._admitted_tool_names(),
-                                tried_tools=failed_tools | {tool_name},
+                                available_tools=admitted_names,
+                                tried_tools=failed_tools | {tool_label},
                                 repeated=True,
                             )
-                        if tool_name == "run_code" and len(self.records) > prior_len:
-                            rec = self.records[-1]
-                            if rec.status == "ok":
-                                raw_fn = raw_call.get("function") if isinstance(raw_call, Mapping) else None
-                                raw_args = parse_tool_arguments(raw_fn.get("arguments")) if isinstance(raw_fn, Mapping) else {}
-                                ran_code = str(raw_args.get("code") or "")
+                        if tool_label == "run_code" and latest_rec is not None:
+                            if latest_rec.status == "ok":
+                                ran_code = str(sig_args.get("code") or "") if not sig_err else ""
                                 if ran_code:
                                     verified_code_hashes.add(_code_digest(ran_code))
-                            elif rec.status in _NON_RETRYABLE_VERIFY_STATUSES:
+                            elif latest_rec.status in _NON_RETRYABLE_VERIFY_STATUSES:
                                 auto_verify_blocked = True
-                        tool_msg: dict[str, Any] = {"role": "tool", "name": tool_name, "content": obs}
-                        if raw_call_id:
-                            tool_msg["tool_call_id"] = raw_call_id
-                        messages.append(tool_msg)
+                        tool_msg: dict[str, Any] = {"role": "tool", "name": tool_label, "content": obs}
+                        if norm_call_id:
+                            tool_msg["tool_call_id"] = norm_call_id
+                        processed_calls.append(norm_call)
+                        tool_messages.append(tool_msg)
+                        if stopped_early:
+                            break
+
+                    if processed_calls:
+                        assistant_msg: dict[str, Any] = {
+                            "role": "assistant",
+                            "content": content,
+                            "tool_calls": processed_calls,
+                        }
+                        messages.append(assistant_msg)
+                        messages.extend(tool_messages)
                     if stopped_early:
                         break
                     digest, board_cursor = _delegation.unseen_peer_board_digest(board_cursor)
@@ -757,18 +1090,33 @@ class ChatToolTurn:
                 else:
                     final_content = final_content or "Reached the per-turn tool-call limit before completing a final reply."
 
-                if not final_content.strip():
-                    final_content = "Turn ended without a final assistant answer."
-                final_content = guard_chat_turn_hallucinations(final_content, self.records)
-                _delegation.emit_agent_event(
-                    phase="completed",
-                    step=calls,
-                    max_steps=self.budget.max_model_calls,
-                    ok=True,
-                    elapsed_ms=int((time.monotonic() - started) * 1000),
-                    summary=compact_text(final_content, limit=180),
-                    model=str(last_meta.get("model") or ""),
-                )
+                if aborted:
+                    last_meta = dict(last_meta)
+                    last_meta["aborted"] = True
+                    if not final_content.strip():
+                        final_content = "Turn cancelled before completion."
+                    _delegation.emit_agent_event(
+                        phase="failed",
+                        step=calls,
+                        max_steps=self.budget.max_model_calls,
+                        ok=False,
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                        summary=compact_text(final_content, limit=180),
+                        model=str(last_meta.get("model") or ""),
+                    )
+                else:
+                    if not final_content.strip():
+                        final_content = "Turn ended without a final assistant answer."
+                    final_content = guard_chat_turn_hallucinations(final_content, self.records)
+                    _delegation.emit_agent_event(
+                        phase="completed",
+                        step=calls,
+                        max_steps=self.budget.max_model_calls,
+                        ok=True,
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                        summary=compact_text(final_content, limit=180),
+                        model=str(last_meta.get("model") or ""),
+                    )
             finally:
                 if unsub_agent is not None:
                     unsub_agent()
@@ -778,7 +1126,15 @@ class ChatToolTurn:
             content=final_content,
             records=tuple(self.records),
             model_calls=calls,
-            usage={"tokens_in": total_in, "tokens_out": total_out, "token_source": "chat_tool_loop"},
+            usage={
+                "tokens_in": total_in,
+                "tokens_out": total_out,
+                "total_tokens": total_in + total_out,
+                "prompt_tokens": total_in,
+                "completion_tokens": total_out,
+                "rounds": calls,
+                "token_source": "chat_tool_loop",
+            },
             response_meta=last_meta,
         )
 
