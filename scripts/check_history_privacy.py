@@ -23,7 +23,12 @@ import time
 from pathlib import Path
 
 
-MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+# Bounds memory against a runaway or hostile repository, not normal growth.
+# The full raw inventory of origin/main was 13.2 MB on 2026-11-26 and grew
+# about 5.6 MB in the month before; a developer clone's `log --all` (every
+# local branch) was already 19.7 MB. 16 MiB made the gate fail on clones and,
+# within weeks, on CI too, so the bound is sized for years of growth instead.
+MAX_OUTPUT_BYTES = 256 * 1024 * 1024
 GIT_TIMEOUT_SECONDS = 30
 # How much of git's own stderr may be quoted back in an error. Bounded so a
 # failing git cannot pump unbounded text into an operator-facing report.

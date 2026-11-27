@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 
-def help_advertised_tools(help_text) -> tuple:
+def help_advertised_tools(help_text: object) -> tuple[str, ...]:
     """Tool names an agent help block advertises, one per '- name: {...}' line."""
     names = []
     for line in str(help_text or "").splitlines():

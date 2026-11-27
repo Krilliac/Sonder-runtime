@@ -191,9 +191,9 @@ def test_formatter_in_the_live_checkout_does_not_run_unattended(checkout, no_chi
     result = harness_tools.lint_run(str(checkout.repo), tool="ruff", path="proj", fix=True)
     _refused(result)
     assert no_child == []
-    # Control: a check-only formatter pass changes nothing and still runs.
-    assert harness_tools.format_code(str(checkout.repo), tool="ruff", path="proj", check_only=True)["ok"] is True
-    assert len(no_child) == 1
+    # A check-only formatter pass loads project config and writes caches, so it is refused too.
+    _refused(harness_tools.format_code(str(checkout.repo), tool="ruff", path="proj", check_only=True))
+    assert no_child == []
 
 
 def test_the_live_checkout_is_refused_before_any_git_runs(checkout, monkeypatch, tmp_path):
