@@ -12,6 +12,7 @@ prints blob contents.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable, Iterator
 import json
 import os
 import re
@@ -19,16 +20,26 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
+from typing import Protocol
 
 
-# Bounds memory against a runaway or hostile repository, not normal growth.
-# The full raw inventory of origin/main was 13.2 MB on 2026-11-26 and grew
-# about 5.6 MB in the month before; a developer clone's `log --all` (every
-# local branch) was already 19.7 MB. 16 MiB made the gate fail on clones and,
-# within weeks, on CI too, so the bound is sized for years of growth instead.
+# Bounds total streamed inventory against a runaway or hostile repository, not
+# normal growth.  The full raw inventory of origin/main was 12.6 MiB on
+# 2026-11-26 (3,501 commits, ~98k raw entries) and a developer clone's
+# `log --all` across 1,388 refs was 18.9 MiB (6,418 commits, ~148k raw entries).
+# Because the inventory is streamed in bounded chunks directly into evaluation,
+# raising the total stream ceiling to 256 MiB provides years of headroom while
+# keeping Python heap usage O(1).
 MAX_OUTPUT_BYTES = 256 * 1024 * 1024
+STREAM_CHUNK_BYTES = 64 * 1024
+# Maximum bytes buffered for a single NUL-delimited header or path token.
+# Prevents a hostile repository omitting NUL separators from growing RAM.
+MAX_RECORD_BYTES = 64 * 1024
+# Bounds captured stderr temp-file growth on a failing or hostile git process.
+MAX_STDERR_BYTES = 1024 * 1024
 GIT_TIMEOUT_SECONDS = 30
 # How much of git's own stderr may be quoted back in an error. Bounded so a
 # failing git cannot pump unbounded text into an operator-facing report.
@@ -95,6 +106,11 @@ class HistoryPrivacyError(RuntimeError):
     """History could not be inspected completely and safely."""
 
 
+class _ErrorStream(Protocol):
+    def seek(self, offset: int, whence: int = 0, /) -> int: ...
+    def read(self, size: int = -1, /) -> bytes: ...
+
+
 def _is_sensitive_path(path: str) -> bool:
     normalized = path.replace("\\", "/").strip("/")
     lowered = normalized.casefold()
@@ -104,34 +120,63 @@ def _is_sensitive_path(path: str) -> bool:
     return "personal-lora/" in lowered and lowered.endswith(".safetensors")
 
 
-def _parse_raw_changes(output: bytes) -> list[tuple[str, str]]:
-    objects: list[tuple[str, str]] = []
-    fields = output.split(b"\0")
-    index = 0
-    while index < len(fields):
-        header = fields[index].lstrip(b"\r\n")
-        index += 1
-        if not header:
+def _iter_raw_changes(
+    chunks: Iterable[bytes],
+    *,
+    max_record_bytes: int = MAX_RECORD_BYTES,
+) -> Iterator[tuple[str, str]]:
+    """Incrementally parse NUL-delimited ``git log --raw -m -z`` chunks."""
+    pending = b""
+    pending_match: re.Match[bytes] | None = None
+    for chunk in chunks:
+        if not chunk:
             continue
-        match = _RAW_CHANGE.fullmatch(header)
-        if match is None or index >= len(fields):
-            raise HistoryPrivacyError("Git history inventory is malformed")
-        raw_path = fields[index]
-        index += 1
-        try:
-            path = raw_path.decode("utf-8", "strict")
-        except UnicodeDecodeError as exc:
-            raise HistoryPrivacyError("Git history path is not UTF-8") from exc
-        if not path or "\0" in path:
-            raise HistoryPrivacyError("Git history path is malformed")
-        zero = b"0" * len(match.group(3))
-        for object_id in (match.group(3), match.group(4)):
-            if object_id != zero:
-                objects.append((object_id.decode("ascii"), path))
-    return objects
+        buf = pending + chunk
+        pos = 0
+        while True:
+            nul = buf.find(b"\0", pos)
+            if nul == -1:
+                break
+            field = buf[pos:nul]
+            pos = nul + 1
+            if len(field) > max_record_bytes:
+                raise HistoryPrivacyError(
+                    "Git history inventory record exceeds the safety limit"
+                )
+            if pending_match is None:
+                header = field.lstrip(b"\r\n")
+                if not header:
+                    continue
+                match = _RAW_CHANGE.fullmatch(header)
+                if match is None:
+                    raise HistoryPrivacyError("Git history inventory is malformed")
+                pending_match = match
+            else:
+                try:
+                    path = field.decode("utf-8", "strict")
+                except UnicodeDecodeError as exc:
+                    raise HistoryPrivacyError("Git history path is not UTF-8") from exc
+                if not path or "\0" in path:
+                    raise HistoryPrivacyError("Git history path is malformed")
+                zero = b"0" * len(pending_match.group(3))
+                for object_id in (pending_match.group(3), pending_match.group(4)):
+                    if object_id != zero:
+                        yield (object_id.decode("ascii"), path)
+                pending_match = None
+        pending = buf[pos:]
+        if len(pending) > max_record_bytes:
+            raise HistoryPrivacyError(
+                "Git history inventory record exceeds the safety limit"
+            )
+    if pending_match is not None or pending.lstrip(b"\r\n"):
+        raise HistoryPrivacyError("Git history inventory is malformed")
 
 
-def _git_objects(repo: Path) -> list[tuple[str, str]]:
+def _parse_raw_changes(output: bytes) -> list[tuple[str, str]]:
+    return list(_iter_raw_changes((output,)))
+
+
+def _iter_git_objects(repo: Path) -> Iterator[tuple[str, str]]:
     executable = shutil.which("git")
     if not executable:
         raise HistoryPrivacyError("Git executable is unavailable")
@@ -153,7 +198,7 @@ def _git_objects(repo: Path) -> list[tuple[str, str]]:
     })
     inspection_deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
 
-    def _git_reason(errors) -> str:
+    def _git_reason(errors: _ErrorStream) -> str:
         """A trimmed, single-line quote of git's own complaint, or ''.
 
         Bounded and newline-free on purpose: this string is surfaced in a JSON
@@ -174,17 +219,17 @@ def _git_objects(repo: Path) -> list[tuple[str, str]]:
         with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
             try:
                 process = subprocess.Popen(
-                [
-                    executable, "-c", "safe.directory=%s" % repo,
-                    "--no-pager", "--no-replace-objects", "-C",
-                    str(repo), *arguments,
-                ],
-                cwd=repo,
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                stdout=output,
-                stderr=errors,
-            )
+                    [
+                        executable, "-c", "safe.directory=%s" % repo,
+                        "--no-pager", "--no-replace-objects", "-C",
+                        str(repo), *arguments,
+                    ],
+                    cwd=repo,
+                    env=environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=errors,
+                )
             except OSError as exc:
                 raise HistoryPrivacyError(
                     "Git history inspection failed: %s" % exc
@@ -227,6 +272,108 @@ def _git_objects(repo: Path) -> list[tuple[str, str]]:
             output.seek(0)
             return output.read()
 
+    def stream_git_chunks(*arguments: str) -> Iterator[bytes]:
+        remaining = inspection_deadline - time.monotonic()
+        if remaining <= 0:
+            raise HistoryPrivacyError("Git history inspection timed out")
+        git_subcommand = "log" if "log" in arguments else arguments[0]
+        with tempfile.TemporaryFile() as errors:
+            try:
+                process = subprocess.Popen(
+                    [
+                        executable, "-c", "safe.directory=%s" % repo,
+                        "--no-pager", "--no-replace-objects", "-C",
+                        str(repo), *arguments,
+                    ],
+                    cwd=repo,
+                    env=environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=errors,
+                )
+            except OSError as exc:
+                raise HistoryPrivacyError(
+                    "Git history inspection failed: %s" % exc
+                ) from exc
+
+            timed_out = threading.Event()
+
+            def _kill_on_timeout() -> None:
+                timed_out.set()
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+
+            timer = threading.Timer(remaining, _kill_on_timeout)
+            timer.daemon = True
+            timer.start()
+            aborted = True
+            total_bytes = 0
+            try:
+                stdout = process.stdout
+                if stdout is None:
+                    raise HistoryPrivacyError("Git history stream is unavailable")
+                read_chunk = getattr(stdout, "read1", stdout.read)
+                chunk_size = min(STREAM_CHUNK_BYTES, max(1, MAX_OUTPUT_BYTES + 1))
+                while True:
+                    chunk = read_chunk(chunk_size)
+                    if timed_out.is_set() or time.monotonic() >= inspection_deadline:
+                        raise HistoryPrivacyError("Git history inspection timed out")
+                    if os.fstat(errors.fileno()).st_size > MAX_STDERR_BYTES:
+                        raise HistoryPrivacyError(
+                            "Git history stderr exceeds the safety limit"
+                        )
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_OUTPUT_BYTES:
+                        raise HistoryPrivacyError(
+                            "Git history inventory exceeds the safety limit"
+                        )
+                    yield chunk
+                aborted = False
+            finally:
+                try:
+                    if process.stdout is not None:
+                        try:
+                            process.stdout.close()
+                        except OSError:
+                            pass
+                    if aborted:
+                        if process.returncode is None:
+                            try:
+                                process.kill()
+                            except OSError:
+                                pass
+                        process.wait()
+                    else:
+                        wait_remaining = max(0.0, inspection_deadline - time.monotonic())
+                        try:
+                            process.wait(timeout=wait_remaining)
+                        except subprocess.TimeoutExpired:
+                            timed_out.set()
+                            try:
+                                process.kill()
+                            except OSError:
+                                pass
+                            process.wait()
+                finally:
+                    timer.cancel()
+
+            if timed_out.is_set() or time.monotonic() >= inspection_deadline:
+                raise HistoryPrivacyError("Git history inspection timed out")
+            if process.returncode != 0:
+                reason = _git_reason(errors)
+                raise HistoryPrivacyError(
+                    "Git history inspection failed (git %s exited %d)%s"
+                    % (
+                        git_subcommand,
+                        process.returncode,
+                        ": " + reason if reason else "",
+                    )
+                )
+
     top_level_raw = run_git("rev-parse", "--show-toplevel")
     try:
         top_level = Path(top_level_raw.decode("utf-8", "strict").strip()).resolve(
@@ -257,14 +404,19 @@ def _git_objects(repo: Path) -> list[tuple[str, str]]:
     except OSError as exc:
         raise HistoryPrivacyError("Git graft state could not be inspected") from exc
 
-    output = run_git(
-        "-c", "core.quotePath=false", "log", "--all", "--raw",
-        "-m", "--format=format:", "--no-renames", "--no-abbrev", "-z",
+    return _iter_raw_changes(
+        stream_git_chunks(
+            "-c", "core.quotePath=false", "log", "--all", "--raw",
+            "-m", "--format=format:", "--no-renames", "--no-abbrev", "-z",
+        )
     )
-    return _parse_raw_changes(output)
 
 
-def evaluate(objects: list[tuple[str, str]]) -> dict[str, object]:
+def _git_objects(repo: Path) -> list[tuple[str, str]]:
+    return list(_iter_git_objects(repo))
+
+
+def evaluate(objects: Iterable[tuple[str, str]]) -> dict[str, object]:
     flagged = {
         (object_id, path)
         for object_id, path in objects
@@ -297,7 +449,7 @@ def inspect(repo: Path) -> dict[str, object]:
     if not (resolved / ".git").exists():
         # Worktrees use a .git file, ordinary repositories use a directory.
         raise HistoryPrivacyError("repository root does not contain Git metadata")
-    return evaluate(_git_objects(resolved))
+    return evaluate(_iter_git_objects(resolved))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -329,10 +481,11 @@ def main(argv: list[str] | None = None) -> int:
             )
     else:
         print("Git history privacy: FAILED", file=sys.stderr)
+        unexpected_rows = report.get("unexpected")
         if report.get("error"):
             print(report["error"], file=sys.stderr)
-        elif report.get("unexpected"):
-            for row in report["unexpected"]:
+        elif isinstance(unexpected_rows, list) and unexpected_rows:
+            for row in unexpected_rows:
                 print(
                     "unexpected sensitive object %s %s"
                     % (row["object_id"], json.dumps(row["path"])),
