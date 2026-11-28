@@ -6092,7 +6092,7 @@ def _agent_lane_context():
     context = local_owner_context(
         correlation_id="lane-" + os.urandom(16).hex(), source="mcp",
         workspace_roots=tuple(Path(r) for r in file_ops.lane_grant_roots(application.config.state.workspace_roots)),
-        remote_ollama_allowed=bool(getattr(getattr(application.config, "ollama", None), "allow_remote", False)), timeout_seconds=60.0,
+        remote_ollama_allowed=bool(getattr(getattr(application.config, "inference", None), "allow_remote", False) or getattr(getattr(application.config, "ollama", None), "allow_remote", False)), timeout_seconds=60.0,
     )
     return application, context
 

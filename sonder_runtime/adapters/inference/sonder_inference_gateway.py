@@ -1295,6 +1295,11 @@ def si_auth_headers(
     Never attaches the primary Sonder Inference bearer token to pool workers,
     dedicated embedding hosts, or any URL carrying userinfo, a path, a query,
     or a fragment.
+
+    ``configured_origin`` skips the typed-endpoint, environment, and ready-file
+    lookup and compares ``target_origin`` directly against that normalized
+    origin. Callers MUST pass only a trusted, config-derived SI origin (such as
+    ``config.inference.url``), never a worker URL or untrusted request target.
     """
     if not isinstance(target_origin, str):
         return {}

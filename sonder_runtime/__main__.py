@@ -388,7 +388,7 @@ def _run_preflight(config, *, check_ollama=True, ollama_timeout=5.0):
     )
 
 
-def _configure_typed_inference_endpoint(config) -> None:
+def _configure_typed_inference_endpoint(config, *, bind_ca_bundle: bool = True) -> None:
     """Bind the typed Sonder Inference origin and optional CA bundle defensively."""
     from sonder_runtime.adapters.inference import ollama_endpoint
 
@@ -405,8 +405,9 @@ def _configure_typed_inference_endpoint(config) -> None:
         )
     if inf_url:
         ollama_endpoint.configure_typed_endpoint(inf_url)
-    ca_bundle = getattr(inf, "ca_bundle", "") or getattr(oll, "ca_bundle", "")
-    ollama_endpoint.configure_typed_ca_bundle(ca_bundle)
+    if bind_ca_bundle:
+        ca_bundle = getattr(inf, "ca_bundle", "") or getattr(oll, "ca_bundle", "")
+        ollama_endpoint.configure_typed_ca_bundle(ca_bundle)
 
 
 def cmd_preflight(args) -> int:
@@ -415,7 +416,7 @@ def cmd_preflight(args) -> int:
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    _configure_typed_inference_endpoint(config)
+    _configure_typed_inference_endpoint(config, bind_ca_bundle=False)
     report = _run_preflight(
         config, check_ollama=not args.skip_ollama
     )
@@ -436,7 +437,7 @@ def cmd_doctor(args) -> int:
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    _configure_typed_inference_endpoint(config)
+    _configure_typed_inference_endpoint(config, bind_ca_bundle=False)
     checks = sonder_doctor.default_checks()
     replacements = dict(sonder_doctor.storage_checks(
         config, throughput=args.storage_probe,

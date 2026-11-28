@@ -77,7 +77,8 @@ class OllamaConformanceProbe:
             if remaining <= 0:
                 raise TimeoutError("Ollama conformance wall budget exhausted")
             sent = ticket.payload  # the decided body (INHERIT_PINNED names the window)
-            if sent is not None and path == "/v1/chat/completions":
+            is_chat = path == "/v1/chat/completions"
+            if sent is not None and is_chat:
                 from sonder_runtime.adapters.inference.si_chat_codec import to_openai_chat_payload
 
                 wire_payload: Mapping[str, object] = to_openai_chat_payload(sent)
@@ -88,7 +89,7 @@ class OllamaConformanceProbe:
             body = None if wire_payload is None else json.dumps(wire_payload, separators=(",", ":")).encode()
             headers: dict[str, str] = {"Content-Type": "application/json"} if body is not None else {}
             headers.update(si_auth_headers(self.base_url))
-            if path == "/v1/chat/completions":
+            if is_chat:
                 headers["X-Sonder-Local-Only"] = "1"
             request = urllib.request.Request(
                 self.base_url + path, data=body,
@@ -102,7 +103,7 @@ class OllamaConformanceProbe:
         value = json.loads(raw.decode("utf-8"))
         if not isinstance(value, dict):
             raise ValueError("Ollama response must be an object")
-        if path == "/v1/chat/completions":
+        if is_chat:
             from sonder_runtime.adapters.inference.si_chat_codec import from_openai_chat_response
 
             value = from_openai_chat_response(value)

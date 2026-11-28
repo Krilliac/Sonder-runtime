@@ -633,7 +633,10 @@ def _check_ollama_residency(*, timeout: float = 5.0, config=None) -> dict:
         request = urllib.request.Request(
             health_url, headers=si_auth_headers(url, configured_origin=url), method="GET",
         )
-        allow_remote = getattr(getattr(config, "inference", None), "allow_remote", False) is True
+        allow_remote = (
+            getattr(getattr(config, "inference", None), "allow_remote", False) is True
+            or getattr(getattr(config, "ollama", None), "allow_remote", False) is True
+        )
         with ollama_endpoint.open_url(
             request, timeout=timeout, allow_remote=allow_remote,
         ) as response:

@@ -129,10 +129,10 @@ def inherited_remote_consent(own: bool, admin: bool, application_provider) -> bo
     if own or not admin:
         return bool(own)
     config = getattr(application_provider(), "config", None)
-    inference = getattr(config, "inference", None)
-    if inference is not None:
-        return bool(getattr(inference, "allow_remote", False))
-    return bool(getattr(getattr(config, "ollama", None), "allow_remote", False))
+    return bool(
+        getattr(getattr(config, "inference", None), "allow_remote", False)
+        or getattr(getattr(config, "ollama", None), "allow_remote", False)
+    )
 
 
 def reply_receipt_fields(reply) -> dict:

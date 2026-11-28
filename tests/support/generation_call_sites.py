@@ -1171,7 +1171,7 @@ _ENTRIES = [
     ("sonder_runtime/adapters/inference/ollama_conformance.py", "OllamaConformanceProbe._chat",
      "/v1/chat/completions", 1, TEXT, _PROBE),
     ("sonder_runtime/adapters/inference/ollama_conformance.py", "OllamaConformanceProbe._request",
-     "/v1/chat/completions", 2, TEXT, _PROBE),
+     "/v1/chat/completions", 1, TEXT, _PROBE),
     ("sonder_runtime/adapters/inference/ollama_vision.py", "OllamaVisionGateway.analyze",
      "/v1/chat/completions", 1, TEXT, "image description"),
     ("sonder_runtime/adapters/inference/openai_compat_gateway.py", "OpenAICompatibleGateway._post",

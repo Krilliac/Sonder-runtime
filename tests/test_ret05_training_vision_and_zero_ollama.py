@@ -1323,7 +1323,13 @@ def test_startup_timeout_real_unset_fallback_and_agent_lane_inference_allow_remo
     else:
         raise AssertionError("[ollama].startup_timeout_seconds = 0 must fail validation")
 
-    # 4. Agent-lane remote permission honors [inference].allow_remote = true even when [ollama].allow_remote = false.
+    # 4. Agent-lane, orchestration_commands, preflight, doctor residency, and MCP lane context all honor OR(inference.allow_remote, ollama.allow_remote).
+    import server as srv
+    import sonder_doctor
+    from sonder_runtime.adapters import preflight as preflight_adapter
+    from sonder_runtime.adapters.inference import ollama_endpoint
+    from sonder_runtime.interfaces import orchestration_commands
+    from sonder_runtime.interfaces.repl.facades.agent_lanes import LaneConsoleFacade
     from sonder_runtime.interfaces.standalone_agent_lanes import StandaloneLaneController
 
     ws = tmp_path / "ws"
@@ -1339,3 +1345,132 @@ def test_startup_timeout_real_unset_fallback_and_agent_lane_inference_allow_remo
     )
     ctrl._initialize()
     assert ctrl._context is not None and ctrl._context.remote_ollama_allowed is True
+
+    # LaneConsoleFacade (agent_lanes.py) passes remote_ollama_allowed=True when only [inference].allow_remote=True.
+    captured_lane_ctx = []
+    fake_service = SimpleNamespace(
+        read_view=lambda context, **_kw: captured_lane_ctx.append(context) or {"lanes": [], "has_more": False},
+    )
+    facade = LaneConsoleFacade(
+        lambda: SimpleNamespace(config=lane_cfg, agent_lanes=lambda: fake_service),
+        approve=lambda *a, **k: False,
+    )
+    facade.run("list")
+    assert captured_lane_ctx and captured_lane_ctx[0].remote_ollama_allowed is True
+
+    # orchestration_commands.inherited_remote_consent honors EITHER [inference].allow_remote or [ollama].allow_remote.
+    legacy_remote_cfg = sonder_config.SonderConfig(
+        state=sonder_config.StateConfig(home=str(tmp_path / "st4")),
+        inference=sonder_config.InferenceConfig(url="https://192.0.2.50:8443", allow_remote=False),
+        ollama=sonder_config.OllamaConfig(allow_remote=True),
+    )
+    assert orchestration_commands.inherited_remote_consent(
+        False, True, lambda: SimpleNamespace(config=lane_cfg),
+    ) is True
+    assert orchestration_commands.inherited_remote_consent(
+        False, True, lambda: SimpleNamespace(config=legacy_remote_cfg),
+    ) is True
+
+    # --set ollama.startup_timeout_seconds override fallback also works without magic 60 sentinel.
+    cfg_set = sonder_config.load_config(
+        None, env={}, overrides={"ollama.startup_timeout_seconds": "90"},
+    )
+    assert cfg_set.inference.startup_timeout_seconds == 90
+
+    # preflight._check_inference and sonder_doctor._check_ollama_residency pass allow_remote=True when only [ollama].allow_remote=True.
+    seen_allow_remote: list[bool | None] = []
+
+    class _ReadyResp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1): return b'{"status":"ready","models":[{"id":"m","state":"resident"}]}'
+
+    orig_open = ollama_endpoint.open_url
+    try:
+        ollama_endpoint.open_url = lambda req, timeout=5.0, allow_remote=None: (  # type: ignore[assignment]
+            seen_allow_remote.append(allow_remote) or _ReadyResp()
+        )
+        assert preflight_adapter._check_inference(legacy_remote_cfg).ok is True
+        assert sonder_doctor._check_ollama_residency(config=legacy_remote_cfg)["status"] == "ok"
+        assert seen_allow_remote == [True, True]
+    finally:
+        ollama_endpoint.open_url = orig_open  # type: ignore[assignment]
+
+    # server._agent_lane_context honors [inference].allow_remote=True even when [ollama].allow_remote=False.
+    orig_app_fn = srv._application
+    try:
+        srv._application = lambda: SimpleNamespace(config=lane_cfg)
+        _app, mcp_ctx = srv._agent_lane_context()
+        assert mcp_ctx.remote_ollama_allowed is True
+    finally:
+        srv._application = orig_app_fn
+
+
+def test_preflight_and_doctor_report_invalid_inference_ca_bundle_without_crashing(tmp_path, monkeypatch, capsys):
+    """Round 7 (BLOCKING 1): invalid [inference].ca_bundle is reported as a check failure by cmd_preflight and cmd_doctor, never crashing with ValueError."""
+    import sonder_doctor
+    from sonder_runtime import __main__ as cli_main
+    from sonder_runtime.adapters.inference import ollama_endpoint
+    from sonder_runtime.platform import config as sonder_config
+
+    missing_ca = tmp_path / "does_not_exist_ca.pem"
+    toml_path = tmp_path / "bad_ca.toml"
+    toml_path.write_text(
+        "[state]\n"
+        f'home = "{(tmp_path / "st_ca").as_posix()}"\n'
+        "[inference]\n"
+        'url = "https://192.0.2.50:8443"\n'
+        "allow_remote = true\n"
+        f'ca_bundle = "{missing_ca.as_posix()}"\n',
+        encoding="utf-8",
+    )
+    cfg = sonder_config.load_config(toml_path, env={})
+    monkeypatch.setattr(cli_main, "_load_config", lambda _args: cfg)
+    monkeypatch.setattr(
+        ollama_endpoint,
+        "open_url",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("network blocked in test")),
+    )
+
+    try:
+        # 1. cmd_preflight reports inference_ca_bundle check failure instead of raising ValueError.
+        ollama_endpoint.reset_typed_endpoint()
+        ollama_endpoint.configure_typed_ca_bundle(None)
+        capsys.readouterr()
+        rc_pre = cli_main.cmd_preflight(SimpleNamespace(
+            config=str(toml_path), secrets=None, set=None, skip_ollama=False, json=True,
+        ))
+        pre_report = json.loads(capsys.readouterr().out)
+        ca_checks = [c for c in pre_report.get("checks", []) if c.get("name") == "inference_ca_bundle"]
+        assert rc_pre in (0, 1)
+        assert ca_checks and ca_checks[0]["ok"] is False
+        assert "existing absolute file" in ca_checks[0]["detail"]
+
+        # 2. cmd_doctor reports CA bundle error inside the ollama check instead of raising ValueError.
+        ollama_endpoint.reset_typed_endpoint()
+        ollama_endpoint.configure_typed_ca_bundle(None)
+        monkeypatch.setattr(
+            sonder_doctor,
+            "default_checks",
+            lambda: [("ollama", sonder_doctor._check_ollama)],
+        )
+        capsys.readouterr()
+        rc_doc = cli_main.cmd_doctor(SimpleNamespace(
+            config=str(toml_path), secrets=None, set=None,
+            skip_ollama=False, skip_inference=True, storage_probe=False,
+            json=True, alert=False,
+        ))
+        doc_report = json.loads(capsys.readouterr().out)
+        assert rc_doc == 1
+        checks = doc_report["checks"]
+        ollama_entry = (
+            checks["ollama"]
+            if isinstance(checks, dict)
+            else next(c for c in checks if c.get("name") == "ollama")
+        )
+        assert ollama_entry["status"] == "fail"
+        assert "existing absolute file" in ollama_entry["detail"]
+    finally:
+        ollama_endpoint.configure_typed_ca_bundle(None)
+        ollama_endpoint.reset_typed_endpoint()
