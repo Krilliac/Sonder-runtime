@@ -60,7 +60,8 @@ variables are listed in the
   starts (`start-rpc-sharded.ps1 -Action Start` and
   `require_cross_host_split_policy`), `SONDER_RPC_LINK_CIDR` is **required**
   with prefix `/24` or narrower (recommended `/30`), and every peer must sit
-  inside it (a LAN or VPN address outside the link is refused).
+  inside it (a LAN or VPN address outside the link is refused). When set, it
+  also pins the worker's bind address to the link.
 - **Cross-host split policy (FED-05).** `start-rpc-sharded.ps1 -Action Start`
   enforces layer split only (`-SplitMode layer`), speculative decoding enabled
   (`-SpecType ngram-mod` default; `none`/`off` refused), local output-head

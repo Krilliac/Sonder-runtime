@@ -57,7 +57,8 @@ is clean.
 The checker is intentionally bounded and content-free:
 
 - Git commands have a 30-second total inspection deadline.
-- Git inventory output is capped at 16 MiB.
+- Git inventory output is streamed in bounded chunks (64 KiB max record buffer)
+  and capped at 256 MiB total so memory stays constant as history grows.
 - At most 400 bytes of one-line Git stderr are surfaced for diagnostics.
 - The checkout must contain complete, non-shallow history; blob filtering is
   allowed because the checker reads object IDs and NUL-delimited paths only.

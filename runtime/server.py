@@ -10438,8 +10438,8 @@ def permission_mode(mode: str = "", explain: bool = False) -> str:
 
     Elevation is a separate axis no mode grants; see permission_policy.
     Raising the mode above manual needs an attended caller (the console's
-    /mode, or an administrator's POST /v1/permission-mode); from here an
-    unattended client may only lower it or return from plan to manual.
+    /mode); neither this tool nor POST /v1/permission-mode (with or without
+    credentials) can raise it, only lower it or return from plan to manual.
     """
     _maybe_live_reload()
     started = time.time()
@@ -16574,8 +16574,8 @@ def _agent_tool_help(
             project_bound=project_bound, allow_web=allow_web, allow_location=allow_location,
         ) or _role_tool_policy.agent_refusal(name):
             return True
-        decision = permission_modes.decide(name, interactive=False, record=False)
-        return not decision.allowed and decision.source in ("mode", "rule")
+        decision = permission_modes.decide(name, interactive=False, record=False, rule_lookup=lambda _t: None)
+        return not decision.allowed and decision.source == "mode"
 
     return build_agent_tool_help(
         help_text, generated_lines=generated, advertised_names=advertised,

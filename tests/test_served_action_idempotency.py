@@ -346,23 +346,23 @@ def test_permission_mode_retry_runs_once_and_binds_requested_mode(monkeypatch):
     )
     monkeypatch.setattr(
         serve.permission_modes,
-        "set_global_mode",
+        "set_mode_without_escalation",
         lambda wanted: calls.append(wanted),
     )
-    monkeypatch.setattr(server, "permission_mode_data", lambda: {"mode": "auto"})
+    monkeypatch.setattr(server, "permission_mode_data", lambda: {"mode": "plan"})
 
     # A context as ``_auth_context`` builds it: the handler reads its ``mode``
     # (local-open, or a context naming none, may not raise the mode at all).
     auth_ctx = {**_account("alice"), "mode": "account"}
     for _ in range(2):
         serve.Handler._handle_permission_mode_post(
-            handler, {"mode": "auto"}, context=auth_ctx,
+            handler, {"mode": "plan"}, context=auth_ctx,
         )
     serve.Handler._handle_permission_mode_post(
         handler, {"mode": "manual"}, context=auth_ctx,
     )
-    assert calls == ["auto"]
-    assert sent[:2] == [({"mode": "auto", "can_bypass": True}, 200)] * 2
+    assert calls == ["plan"]
+    assert sent[:2] == [({"mode": "plan", "can_bypass": False}, 200)] * 2
     payload, status = sent[2]
     assert status == 422
     assert payload["error"]["code"] == "IDEMPOTENCY_KEY_REUSED"
@@ -378,14 +378,14 @@ def test_permission_mode_refusal_is_not_reported_as_success(monkeypatch, tmp_pat
         headers={"Idempotency-Key": "mode-restart"},
         _send_json_payload=lambda payload, status=200, headers=None: sent.append((payload, status)),
     )
-    monkeypatch.setattr(serve.permission_modes, "set_global_mode", lambda wanted: calls.append(wanted))
-    monkeypatch.setattr(server, "permission_mode_data", lambda: {"mode": "auto"})
+    monkeypatch.setattr(serve.permission_modes, "set_mode_without_escalation", lambda wanted: calls.append(wanted))
+    monkeypatch.setattr(server, "permission_mode_data", lambda: {"mode": "plan"})
     context = {**_account("alice"), "mode": "account"}
-    serve.Handler._handle_permission_mode_post(handler, {"mode": "auto"}, context=context)
+    serve.Handler._handle_permission_mode_post(handler, {"mode": "plan"}, context=context)
     sonder_lifecycle.reset_for_tests()  # a new server process
-    serve.Handler._handle_permission_mode_post(handler, {"mode": "auto"}, context=context)
-    assert calls == ["auto"]
-    assert sent[0] == ({"mode": "auto", "can_bypass": True}, 200)
+    serve.Handler._handle_permission_mode_post(handler, {"mode": "plan"}, context=context)
+    assert calls == ["plan"]
+    assert sent[0] == ({"mode": "plan", "can_bypass": False}, 200)
     payload, status = sent[1]
     assert status == 409
     assert payload["error"]["code"] == "IDEMPOTENT_ACTION_COMPLETED"
