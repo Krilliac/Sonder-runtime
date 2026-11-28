@@ -229,8 +229,8 @@ switch ($Action) {
         }
 
         $splitPolicy = Assert-RpcSplitPolicy -SplitMode $SplitMode -SpecType $SpecType -TensorSplit $TensorSplit -PeerCount $validatedPeers.Count -Devices $Devices
-        $maxRttMsValue = ConvertTo-RpcMaxRttMs -Value $MaxRttMs
         $dedicatedLink = Assert-RpcDedicatedLink -Link $rpcLink -PeerHosts @($validatedPeers | ForEach-Object { $_.Host })
+        $maxRttMsValue = ConvertTo-RpcMaxRttMs -Value $MaxRttMs
 
         $peerRtts = @()
         foreach ($peer in $validatedPeers) {

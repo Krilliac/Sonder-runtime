@@ -317,34 +317,36 @@ def check_cross_host_split_policy(
     errors.extend(link_errors)
 
     rtts: list[RpcPeerRttMeasurement] = []
-    for peer in config.rpc_peers:
-        try:
-            validate_host_on_link(peer.host, resolved_link, label="RPC peer host")
-        except RpcShardingConfigError as exc:
-            errors.append(str(exc))
-            continue
-        rtt = measure_rpc_peer_rtt(
-            peer,
-            samples=active_policy.rtt_samples,
-            timeout=active_policy.probe_timeout_seconds,
-            connect_fn=connect_fn,
-            clock=clock,
-        )
-        rtts.append(rtt)
-        if not rtt.reachable or rtt.median_ms is None:
-            errors.append(
-                f"RPC peer {peer.address} failed RTT probe ({rtt.error or 'unreachable'})"
+    skip_rtt_probes = resolved_link is None and active_policy.require_dedicated_link
+    if not skip_rtt_probes:
+        for peer in config.rpc_peers:
+            try:
+                validate_host_on_link(peer.host, resolved_link, label="RPC peer host")
+            except RpcShardingConfigError as exc:
+                errors.append(str(exc))
+                continue
+            rtt = measure_rpc_peer_rtt(
+                peer,
+                samples=active_policy.rtt_samples,
+                timeout=active_policy.probe_timeout_seconds,
+                connect_fn=connect_fn,
+                clock=clock,
             )
-        elif rtt.median_ms > active_policy.max_rtt_ms:
-            errors.append(
-                f"RPC peer {peer.address} measured median RTT {rtt.median_ms:.3f} ms exceeds "
-                f"policy ceiling {active_policy.max_rtt_ms:.3f} ms"
-            )
-        elif rtt.median_ms > active_policy.warn_rtt_ms:
-            warnings.append(
-                f"RPC peer {peer.address} median RTT {rtt.median_ms:.3f} ms exceeds "
-                f"direct-link target {active_policy.warn_rtt_ms:.3f} ms"
-            )
+            rtts.append(rtt)
+            if not rtt.reachable or rtt.median_ms is None:
+                errors.append(
+                    f"RPC peer {peer.address} failed RTT probe ({rtt.error or 'unreachable'})"
+                )
+            elif rtt.median_ms > active_policy.max_rtt_ms:
+                errors.append(
+                    f"RPC peer {peer.address} measured median RTT {rtt.median_ms:.3f} ms exceeds "
+                    f"policy ceiling {active_policy.max_rtt_ms:.3f} ms"
+                )
+            elif rtt.median_ms > active_policy.warn_rtt_ms:
+                warnings.append(
+                    f"RPC peer {peer.address} median RTT {rtt.median_ms:.3f} ms exceeds "
+                    f"direct-link target {active_policy.warn_rtt_ms:.3f} ms"
+                )
 
     log_verdict: SplitLoadLogVerdict | None = None
     if load_log is not None:

@@ -108,10 +108,10 @@ def validate_split_spec_type(spec_type: object) -> str:
 def validate_split_device_order(devices: Sequence[str]) -> tuple[str, ...]:
     """Validate an explicit ``--device`` order so logits/output head stay local.
 
-    In llama.cpp v1.0.0, ``LLAMA_SPLIT_MODE_LAYER`` assigns the output head
-    (``n_layer_all``) to the last device with positive weight. Every ``RPC*``
-    device must therefore precede all local GPU devices, and at least one local
-    device must appear last.
+    In llama.cpp v1.0.0, ``LLAMA_SPLIT_MODE_LAYER`` assigns ``output.weight``
+    via ``std::upper_bound`` over cumulative ``tensor_split`` fractions against
+    ``n_layer / (n_layer + 1)``. Every ``RPC*`` device must therefore precede
+    all local GPU devices, and at least one local device must appear last.
     """
     if isinstance(devices, (str, bytes)):
         raise ValueError("devices must be a sequence of device names, not a string")

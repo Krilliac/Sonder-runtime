@@ -529,7 +529,25 @@ function Assert-RpcSplitPolicy(
         throw "Unsupported cross-host RPC spec_type '$SpecType'; allowed: $($script:RpcAllowedSplitSpecTypes -join ', ')."
     }
 
-    $cleanDevices = @($Devices | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    # Under `powershell -File ... -Devices CUDA0,RPC0`, PowerShell passes a
+    # comma-separated list as a single string element in [string[]]$Devices.
+    # Split every element on ',' and validate each token (matching Python's
+    # _DEVICE_TOKEN_RE) before enforcing RPC-before-local ordering.
+    $cleanDevices = @()
+    foreach ($rawDeviceEntry in @($Devices)) {
+        $entryText = [string]$rawDeviceEntry
+        if (-not $entryText.Trim()) { continue }
+        foreach ($part in $entryText.Split(',')) {
+            $token = $part.Trim()
+            if (-not $token -or $token -notmatch '^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63}$') {
+                throw "Invalid cross-host RPC device token '$part' in '$rawDeviceEntry'."
+            }
+            if ($cleanDevices -contains $token) {
+                throw "Duplicate device '$token' in cross-host RPC device list."
+            }
+            $cleanDevices += $token
+        }
+    }
     if ($cleanDevices.Count -gt 0) {
         $lastDev = $cleanDevices[$cleanDevices.Count - 1]
         if ($lastDev.ToUpperInvariant().StartsWith('RPC')) {

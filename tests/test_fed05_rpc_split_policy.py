@@ -293,6 +293,9 @@ def test_sharded_llama_server_config_enforces_layer_split_spec_and_local_output(
         ("--override-tensor", "output.weight=RPC0"),
         ("-ot", "output.weight=RPC0"),
         ("--spec-draft-n-max", "0"),
+        ("--draft-max", "0"),
+        ("--draft", "0"),
+        ("--draft-n", "0"),
     ):
         with pytest.raises(RpcClusterConfigError, match="extra_args"):
             ShardedLlamaServerConfig(model_path="model.gguf", rpc_peers=peers, extra_args=extra)
@@ -374,16 +377,21 @@ def test_measure_rpc_peer_rtt_and_require_split_policy() -> None:
             clock=clock_slow,
         )
 
-    # Missing dedicated link CIDR is refused fail-closed!
-    connect_fast3, clock_fast3 = _fake_clock_connector([0.15, 0.18, 0.20])
+    # Missing dedicated link CIDR is refused fail-closed without wasting TCP RTT probes!
+    probe_calls: list[tuple[str, int]] = []
+
+    def _counting_connect(addr: tuple[str, int], timeout: float) -> None:
+        probe_calls.append(addr)
+
     with pytest.raises(RpcShardingConfigError, match=ENV_RPC_LINK_CIDR):
         require_cross_host_split_policy(
             cfg,
             env={},
             policy=CrossHostSplitPolicy(rtt_samples=3),
-            connect_fn=connect_fast3,
-            clock=clock_fast3,
+            connect_fn=_counting_connect,
+            clock=clock_fast2,
         )
+    assert probe_calls == []
 
     # Off-link peer is refused fail-closed!
     off_link_cfg = ShardedLlamaServerConfig(
@@ -394,8 +402,8 @@ def test_measure_rpc_peer_rtt_and_require_split_policy() -> None:
     bad_report = check_cross_host_split_policy(
         off_link_cfg,
         env={ENV_RPC_LINK_CIDR: LINK_CIDR},
-        connect_fn=connect_fast3,
-        clock=clock_fast3,
+        connect_fn=_counting_connect,
+        clock=clock_fast2,
     )
     assert bad_report.ok is False
     assert any("private link" in err or "not on" in err for err in bad_report.errors)
@@ -420,12 +428,16 @@ def test_powershell_rpc_split_policy_helpers(shell: str, tmp_path: Path) -> None
     assert res.returncode == 0, res.stderr
     assert "OK:10.77.0.0/30:layer:ngram-mod" in res.stdout
 
-    # Refuses -sm tensor, -SpecType none, trailing 0 weight, unset or broad /16 /8 CIDR, bad MaxRttMs.
+    # Refuses -sm tensor, -SpecType none, trailing 0 weight, comma-packed bad -Devices,
+    # invalid device tokens, unset or broad /16 /8 CIDR, bad MaxRttMs.
     for bad_line in (
         "Assert-RpcSplitPolicy -SplitMode 'tensor' -SpecType 'ngram-mod' -TensorSplit '1,1' -PeerCount 1",
         "Assert-RpcSplitPolicy -SplitMode 'row' -SpecType 'ngram-mod' -TensorSplit '1,1' -PeerCount 1",
         "Assert-RpcSplitPolicy -SplitMode 'layer' -SpecType 'none' -TensorSplit '1,1' -PeerCount 1",
         "Assert-RpcSplitPolicy -SplitMode 'layer' -SpecType 'ngram-mod' -TensorSplit '1,0' -PeerCount 1",
+        "Assert-RpcSplitPolicy -SplitMode 'layer' -SpecType 'ngram-mod' -Devices @('CUDA0,RPC0') -PeerCount 1",
+        "Assert-RpcSplitPolicy -SplitMode 'layer' -SpecType 'ngram-mod' -Devices @('RPC0;bad,CUDA0') -PeerCount 1",
+        "Assert-RpcSplitPolicy -SplitMode 'layer' -SpecType 'ngram-mod' -Devices @('RPC0,RPC0,CUDA0') -PeerCount 1",
         "Assert-RpcDedicatedLink -LinkCidr '' -PeerHosts @('10.77.0.2')",
         "Assert-RpcDedicatedLink -LinkCidr '10.77.0.0/16' -PeerHosts @('10.77.0.2')",
         "Assert-RpcDedicatedLink -LinkCidr '10.0.0.0/8' -PeerHosts @('10.77.0.2')",
@@ -582,6 +594,47 @@ def test_powershell_measure_rpc_peer_rtt_and_sharded_start_requires_link_cidr(
     )
     assert bad_rtt_res.returncode != 0
     assert "SONDER_RPC_MAX_RTT_MS" in (bad_rtt_res.stderr + bad_rtt_res.stdout)
+
+    # 4. -File invocation passes comma-separated -Devices as ONE string element:
+    #    -Devices CUDA0,RPC0 MUST be refused; -Devices RPC0,CUDA0 MUST pass device validation
+    #    (and /24 + /30 CIDRs pass Assert-RpcDedicatedLink on the real Start path before failing
+    #    on the intentionally out-of-range SONDER_RPC_MAX_RTT_MS=250).
+    for valid_cidr in ("10.77.0.0/24", LINK_CIDR):
+        bad_dev_env = dict(os.environ)
+        bad_dev_env["LOCALAPPDATA"] = str(tmp_path / "localappdata")
+        bad_dev_env.update({
+            "SONDER_RPC_PEERS": WORKER_ON_LINK,
+            "SONDER_RPC_LINK_CIDR": valid_cidr,
+            "SONDER_RPC_MAX_RTT_MS": "250",
+        })
+        bad_dev_res = subprocess.run(
+            [
+                shell, "-NoProfile", "-File", str(SHARDED_PS1),
+                "-Action", "Start",
+                "-RpcPeers", WORKER_ON_LINK,
+                "-Devices", "CUDA0,RPC0",
+                "-ModelPath", str(fake_model),
+                "-InstallDir", str(fake_install),
+            ],
+            capture_output=True, text=True, timeout=60, env=bad_dev_env,
+        )
+        assert bad_dev_res.returncode != 0
+        assert "places remote device 'RPC0' last" in (bad_dev_res.stderr + bad_dev_res.stdout)
+
+        good_dev_res = subprocess.run(
+            [
+                shell, "-NoProfile", "-File", str(SHARDED_PS1),
+                "-Action", "Start",
+                "-RpcPeers", WORKER_ON_LINK,
+                "-Devices", "RPC0,CUDA0",
+                "-ModelPath", str(fake_model),
+                "-InstallDir", str(fake_install),
+            ],
+            capture_output=True, text=True, timeout=60, env=bad_dev_env,
+        )
+        assert good_dev_res.returncode != 0
+        # Reached SONDER_RPC_MAX_RTT_MS check => both -Devices RPC0,CUDA0 AND the /24 or /30 CIDR passed!
+        assert "SONDER_RPC_MAX_RTT_MS" in (good_dev_res.stderr + good_dev_res.stdout)
 
 
 def test_start_rpc_sharded_script_wires_fed05_split_policy_on_fed02_interfaces() -> None:
