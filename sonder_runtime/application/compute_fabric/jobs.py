@@ -495,6 +495,7 @@ class RemoteJobReceipt:
     output_preview: str = ""
     output_watermark: int = 0
     output_truncated: bool = False
+    artifact_error: str = ""
 
     def __post_init__(self) -> None:
         for value, label in (
@@ -1525,7 +1526,17 @@ class ComputeJobWorker:
         terminal = receipt.state in {"succeeded", "failed", "cancelled", "interrupted"}
         try:
             receipt = self._project_output(receipt)
-            receipt = self._collect_artifacts(receipt)
+            try:
+                receipt = self._collect_artifacts(receipt)
+            except (InvalidInput, ArtifactSpoolError, OSError) as exc:
+                if not terminal:
+                    raise
+                logger.error(
+                    f"compute job artifact collection failed: remote_job_id={remote_job_id!r}, error={exc}"
+                )
+                receipt = replace(
+                    receipt, artifact_error=str(exc)[:512] or type(exc).__name__
+                )
         finally:
             if terminal:
                 self._cleanup_input_stage(remote_job_id)
@@ -1713,6 +1724,9 @@ class ComputeJobWorker:
         receipt = self.status(remote_job_id)
         if not isinstance(reason, str) or not reason.strip() or len(reason) > 512:
             raise InvalidInput("cancellation reason must be non-empty and bounded")
+        if receipt.state in {"succeeded", "failed"}:
+            logger.info(f"compute job already terminal; cancel ignored: remote_job_id={remote_job_id!r}, state={receipt.state!r}")
+            return receipt
         result = self._provider.cancel(remote_job_id, reason=reason)
         cleanup_completed = bool(getattr(result, "cleanup_completed", False))
         if isinstance(result, Mapping):

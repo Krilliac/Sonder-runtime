@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import shutil
+import sys
 import time
 
 
@@ -68,6 +69,22 @@ def regular_file_bytes(directory: Path) -> int:
     return total
 
 
+def _make_writable_and_retry(function, path, _error) -> None:
+    """rmtree error handler: read-only entries (0o400 stages) block deletion on Windows."""
+    try:
+        os.chmod(path, 0o700)
+        function(path)
+    except OSError:
+        pass
+
+
+def _rmtree_best_effort(path: Path) -> None:
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_make_writable_and_retry)
+    else:
+        shutil.rmtree(path, onerror=_make_writable_and_retry)
+
+
 def reap_stale_directories(root: Path, *, max_age_seconds: float) -> int:
     """Remove child directories untouched for longer than ``max_age_seconds``.
 
@@ -86,7 +103,7 @@ def reap_stale_directories(root: Path, *, max_age_seconds: float) -> int:
             and entry.stat(follow_symlinks=False).st_mtime < cutoff
         ]
     for path in stale:
-        shutil.rmtree(path, ignore_errors=True)
+        _rmtree_best_effort(path)
         removed += 0 if path.exists() else 1
     return removed
 
