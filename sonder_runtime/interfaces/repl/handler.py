@@ -39,7 +39,7 @@ class ReplHandler:
 
         try:
             if cmd == "recall" and self._recall is not None:
-                task = parts[1] if len(parts) > 1 else ""
+                task = " ".join(parts[1:])
                 results = self._recall.recall(task, k=2)
                 output = "\n".join(results) if results else "(no results)"
                 out.write(output + "\n")
