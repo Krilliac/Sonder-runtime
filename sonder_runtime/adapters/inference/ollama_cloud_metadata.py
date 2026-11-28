@@ -70,13 +70,11 @@ class OllamaCloudMetadata:
         self._pull_timeout = pull_timeout
 
     def _request(self, path: str, body: dict[str, Any] | None) -> urllib.request.Request:
-        from sonder_runtime.adapters.inference.sonder_inference_gateway import resolve_api_key
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
 
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers: dict[str, str] = {} if body is None else {"Content-Type": "application/json"}
-        api_key = resolve_api_key()
-        if api_key:
-            headers["Authorization"] = "Bearer " + api_key
+        headers.update(si_auth_headers(self._origin))
         return urllib.request.Request(
             self._origin + path, data=data, headers=headers,
             method="GET" if body is None else "POST",

@@ -83,10 +83,16 @@ class OllamaConformanceProbe:
                 wire_payload: Mapping[str, object] = to_openai_chat_payload(sent)
             else:
                 wire_payload = sent  # type: ignore[assignment]
+            from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
+
             body = None if wire_payload is None else json.dumps(wire_payload, separators=(",", ":")).encode()
+            headers: dict[str, str] = {"Content-Type": "application/json"} if body is not None else {}
+            headers.update(si_auth_headers(self.base_url))
+            if path == "/v1/chat/completions":
+                headers["X-Sonder-Local-Only"] = "1"
             request = urllib.request.Request(
                 self.base_url + path, data=body,
-                headers={"Content-Type": "application/json"} if body is not None else {},
+                headers=headers,
                 method="POST" if body is not None else "GET",
             )
             with open_url(request, timeout=min(timeout, remaining), allow_remote=False) as response:

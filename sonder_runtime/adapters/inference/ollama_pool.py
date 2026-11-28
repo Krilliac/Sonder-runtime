@@ -538,12 +538,9 @@ def admitted_get(pool, origin: str, path: str, *, timeout: float):
     Yields the open response; the admission (a PROBE slot for a loopback
     origin) is held until the caller has read it and leaves the block.
     """
-    from sonder_runtime.adapters.inference.sonder_inference_gateway import resolve_api_key
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
 
-    headers: dict[str, str] = {}
-    api_key = resolve_api_key()
-    if api_key:
-        headers["Authorization"] = "Bearer " + api_key
+    headers = si_auth_headers(origin)
     with admitted(pool, path, None, origin, deadline=time.monotonic() + timeout):
         with pool.open_url(urllib.request.Request(origin + path, headers=headers), timeout=timeout) as response:
             yield response
@@ -1360,11 +1357,9 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
         transport = open_url or ollama_endpoint.open_url
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers = {"Content-Type": "application/json"} if data is not None else {}
-        from sonder_runtime.adapters.inference.sonder_inference_gateway import resolve_api_key
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
 
-        api_key = resolve_api_key()
-        if api_key:
-            headers["Authorization"] = "Bearer " + api_key
+        headers.update(si_auth_headers(origin))
         request = urllib.request.Request(origin + path, data=data, headers=headers, method=method)
         with transport(
             request,

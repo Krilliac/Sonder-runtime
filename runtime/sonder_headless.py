@@ -383,12 +383,12 @@ def _si_origin() -> str:
 def ollama_models() -> set[str] | None:
     """Return models listed by Sonder Inference ``/v1/models``, or None when unavailable."""
     try:
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
+
         origin = _si_origin()
-        headers: dict[str, str] = {}
-        api_key = os.environ.get("SONDER_INFERENCE_API_KEY", "").strip()
-        if api_key:
-            headers["Authorization"] = "Bearer " + api_key
-        request = urllib.request.Request(origin + "/v1/models", headers=headers, method="GET")
+        request = urllib.request.Request(
+            origin + "/v1/models", headers=si_auth_headers(origin), method="GET",
+        )
         with ollama_endpoint.open_url(request, timeout=8) as response:
             raw = response.read(_MAX_OLLAMA_TAGS_BYTES + 1)
         if len(raw) > _MAX_OLLAMA_TAGS_BYTES:
@@ -412,13 +412,11 @@ def ollama_models() -> set[str] | None:
 def ollama_ok() -> bool:
     """Return True when Sonder Inference ``/v1/sonder/health`` reports ready."""
     try:
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
+
         origin = _si_origin()
-        headers: dict[str, str] = {}
-        api_key = os.environ.get("SONDER_INFERENCE_API_KEY", "").strip()
-        if api_key:
-            headers["Authorization"] = "Bearer " + api_key
         request = urllib.request.Request(
-            origin + "/v1/sonder/health", headers=headers, method="GET",
+            origin + "/v1/sonder/health", headers=si_auth_headers(origin), method="GET",
         )
         with ollama_endpoint.open_url(request, timeout=5) as response:
             raw = response.read(_MAX_OLLAMA_TAGS_BYTES + 1)

@@ -554,7 +554,7 @@ def _check_ollama_workers(*, timeout: float = 5.0, config=None) -> dict:
             from urllib.parse import urlsplit
             from sonder_runtime.adapters.inference import ollama_endpoint
             from sonder_runtime.adapters.inference.sonder_inference_gateway import (
-                resolve_api_key,
+                si_auth_headers,
             )
         except Exception as exc:  # pragma: no cover - import guard
             return _skip("Sonder Inference transport unavailable (%s)" % exc)
@@ -563,10 +563,6 @@ def _check_ollama_workers(*, timeout: float = 5.0, config=None) -> dict:
             getattr(getattr(cfg, "inference", None), "allow_remote", False) is True
             or getattr(getattr(cfg, "ollama", None), "allow_remote", False) is True
         )
-        headers: dict[str, str] = {}
-        api_key = resolve_api_key()
-        if api_key:
-            headers["Authorization"] = "Bearer " + api_key
         up: list[str] = []
         down: list[str] = []
         for origin in static_workers:
@@ -576,7 +572,9 @@ def _check_ollama_workers(*, timeout: float = 5.0, config=None) -> dict:
                 continue
             try:
                 request = urllib.request.Request(
-                    origin.rstrip("/") + "/v1/sonder/health", headers=headers, method="GET",
+                    origin.rstrip("/") + "/v1/sonder/health",
+                    headers=si_auth_headers(origin),
+                    method="GET",
                 )
                 with ollama_endpoint.open_url(
                     request, timeout=timeout, allow_remote=allow_remote,

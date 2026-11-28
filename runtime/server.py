@@ -5373,11 +5373,8 @@ def _post(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("Sonder Inference worker pool request timeout expired")
-            from sonder_runtime.adapters.inference.sonder_inference_gateway import resolve_api_key
-            headers = {"Content-Type": "application/json"}
-            api_key = resolve_api_key()
-            if api_key:
-                headers["Authorization"] = "Bearer " + api_key
+            from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
+            headers = {"Content-Type": "application/json", **si_auth_headers(origin)}
             if local_only or (is_inference_path and not cloud_consented):
                 headers["X-Sonder-Local-Only"] = "1"
             req = urllib.request.Request(f"{origin}{path}", data=wire_bytes, headers=headers)

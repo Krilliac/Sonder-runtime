@@ -1284,6 +1284,57 @@ def resolve_api_key(env: Mapping[str, str] | None = None) -> str:
     return ""
 
 
+def si_auth_headers(
+    target_origin: str,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return ``Authorization: Bearer ...`` ONLY when ``target_origin`` equals the configured SI origin.
+
+    Never attaches the primary Sonder Inference bearer token to pool workers,
+    dedicated embedding hosts, or any URL carrying userinfo, a path, a query,
+    or a fragment.
+    """
+    if not isinstance(target_origin, str):
+        return {}
+    raw_target = target_origin.strip()
+    if not raw_target:
+        return {}
+    try:
+        parsed = urlsplit(raw_target)
+        _ = parsed.port
+    except ValueError:
+        return {}
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        return {}
+    import sonder_runtime.adapters.inference.ollama_endpoint as _ollama_endpoint
+    import sonder_runtime.domain.ollama_policy as _ollama_policy
+
+    try:
+        target = _ollama_policy.normalize(raw_target).rstrip("/")
+        if env is None:
+            configured = _ollama_endpoint.normalize().rstrip("/")
+        else:
+            base_url = str(env.get(ENV_BASE_URL, "") or "").strip()
+            if not base_url:
+                ready_file = str(env.get(ENV_READY_FILE, "") or "").strip()
+                base_url = read_ready_file(ready_file) if ready_file else DEFAULT_BASE_URL
+            configured = _ollama_policy.normalize(base_url).rstrip("/")
+    except (ValueError, SonderError):
+        return {}
+    if target != configured:
+        return {}
+    api_key = resolve_api_key(env)
+    return {"Authorization": "Bearer " + api_key} if api_key else {}
+
+
 def config_from_env(env: Mapping[str, str] | None = None) -> SonderInferenceConfig:
     """Resolve settings lazily from the environment (never at import)."""
     source = os.environ if env is None else env
@@ -4026,6 +4077,8 @@ __all__ = [
     "parse_private_workers",
     "read_ready_file",
     "rerank_supported",
+    "resolve_api_key",
+    "si_auth_headers",
     "structured_output_supported",
     "trust_scope",
 ]

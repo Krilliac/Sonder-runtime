@@ -512,7 +512,50 @@ def test_scheduled_refresh_and_capabilities_ignore_ollama_host_and_bind_inferenc
     assert seen_urls == ["http://127.0.0.1:11437/v1/models"]
     assert all("11434" not in u for u in seen_urls)
     assert seen_auth == ["Bearer si-secret-token-only-for-si"]
-    assert callable(cloud_model_refresh_schedule.start_scheduled_refresh)
+
+    # Drive the real scheduled refresh loop with OLLAMA_HOST=11434 set; verify zero requests to :11434.
+    import threading
+    from sonder_runtime.adapters import cloud_model_refresh
+
+    seen_urls.clear()
+    seen_auth.clear()
+    monkeypatch.setattr(cloud_model_refresh_schedule, "FIRST_DELAY_SECONDS", 0)
+    monkeypatch.setattr(cloud_model_refresh_schedule, "RECHECK_SECONDS", None)
+    monkeypatch.setattr(
+        cloud_model_refresh,
+        "OllamaCloudMetadata",
+        lambda origin, **kw: OllamaCloudMetadata(origin, opener=fake_open, **kw),
+    )
+    monkeypatch.setattr(
+        cloud_model_refresh.catalog_client,
+        "fetch_catalog",
+        lambda *a, **k: cloud_model_refresh.catalog_client.CatalogSnapshot(families={}, refreshed=()),
+    )
+    captured_loop: dict[str, object] = {}
+
+    class _SyncThread:
+        def __init__(self, *, target, kwargs, daemon=True, name=""):
+            captured_loop["target"] = target
+            captured_loop["kwargs"] = kwargs
+        def start(self):
+            captured_loop["target"](**captured_loop["kwargs"])
+
+    started = cloud_model_refresh_schedule.start_scheduled_refresh(
+        origin=cfg.inference.url,
+        thread_factory=_SyncThread,
+        home=tmp_path / "sched_home",
+        env={
+            "SONDER_CLOUD_MODEL_REFRESH": "1",
+            "OLLAMA_HOST": "http://127.0.0.1:11434",
+            "SONDER_INFERENCE_BASE_URL": "http://127.0.0.1:11437",
+            "SONDER_INFERENCE_API_KEY": "si-secret-token-only-for-si",
+        },
+        stop=threading.Event(),
+    )
+    assert started is True
+    assert seen_urls and all(u.startswith("http://127.0.0.1:11437/") for u in seen_urls)
+    assert all("11434" not in u for u in seen_urls)
+    assert all(a == "Bearer si-secret-token-only-for-si" for a in seen_auth)
 
 
 def test_reasoning_continuation_and_single_send_enforce_local_only_cloud_fence(monkeypatch):
@@ -714,3 +757,270 @@ def test_api_key_file_reaches_legacy_server_post_and_get_and_startup_timeout_wir
     })
     assert ok_local is True
     assert seen[0][1].get("Authorization") == "Bearer legacy-si-file-token"
+
+
+def test_primary_si_bearer_never_sent_to_pool_workers(tmp_path, monkeypatch):
+    """SECURITY (Round 4 S1): primary SI bearer goes ONLY to exact configured SI origin, never to pool workers."""
+    import server as srv
+    import sonder_doctor
+    from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+    from sonder_runtime.adapters.inference.ollama_cloud_metadata import OllamaCloudMetadata
+    from sonder_runtime.platform.config import InferenceConfig, OllamaConfig, SonderConfig, StateConfig
+
+    key_file = tmp_path / "primary_si.key"
+    key_file.write_text("primary-si-secret-token\n", encoding="utf-8")
+    monkeypatch.delenv("SONDER_INFERENCE_API_KEY", raising=False)
+    monkeypatch.setenv("SONDER_INFERENCE_API_KEY_FILE", str(key_file))
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://127.0.0.1:11437")
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_INFERENCE", "1")
+    ollama_endpoint.configure_typed_endpoint("http://127.0.0.1:11437")
+
+    primary = "http://127.0.0.1:11437"
+    loopback_worker = "http://127.0.0.1:11500"
+    remote_worker = "https://192.0.2.50:8443"
+
+    seen: list[tuple[str, dict[str, str]]] = []
+
+    class _Resp:
+        status = 200
+        def __init__(self, body: dict):
+            self._raw = json.dumps(body).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1): return self._raw
+
+    def fake_open(req, timeout=5.0, allow_remote=None):
+        seen.append((req.full_url, dict(req.header_items())))
+        if req.full_url.endswith("/v1/sonder/health"):
+            return _Resp({"status": "ready", "version": "1.0.0", "models": [{"id": "m", "state": "loaded"}]})
+        if req.full_url.endswith("/v1/models"):
+            return _Resp({"object": "list", "data": [{"id": "m"}]})
+        return _Resp({
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        })
+
+    try:
+        prober = ollama_pool._default_capability_prober(allow_remote=True, open_url=fake_open)
+        pool = ollama_pool.OllamaWorkerPool(
+            primary,
+            (loopback_worker, remote_worker),
+            allow_remote=True,
+            capability_prober=prober,
+        )
+        monkeypatch.setattr(pool, "open_url", fake_open)
+
+        # 1. admitted_get: primary gets bearer; loopback worker & remote worker get NONE.
+        seen.clear()
+        with ollama_pool.admitted_get(pool, primary, "/v1/models", timeout=2.0):
+            pass
+        with ollama_pool.admitted_get(pool, loopback_worker, "/v1/models", timeout=2.0):
+            pass
+        with ollama_pool.admitted_get(pool, remote_worker, "/v1/models", timeout=2.0):
+            pass
+        assert seen[0][1].get("Authorization") == "Bearer primary-si-secret-token"
+        assert "Authorization" not in seen[1][1]
+        assert "Authorization" not in seen[2][1]
+
+        # 2. capability prober read(): primary gets bearer; loopback worker & remote worker get NONE.
+        seen.clear()
+        prober(primary)
+        prober(loopback_worker)
+        prober(remote_worker)
+        for url, hdrs in seen:
+            if url.startswith(primary + "/"):
+                assert hdrs.get("Authorization") == "Bearer primary-si-secret-token"
+            else:
+                assert "Authorization" not in hdrs, f"leaked primary SI key to worker {url}"
+
+        # 3. server._post send(origin): primary gets bearer; pinned loopback/remote workers get NONE.
+        pool.refresh_capabilities()
+        seen.clear()
+        monkeypatch.setattr(srv, "OLLAMA_POOL", pool)
+        monkeypatch.setattr(srv, "BASE", primary)
+        monkeypatch.setattr(srv, "dispatch_provider", lambda provider, path, body, transport: transport())
+        srv._post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "hi"}]})
+        for worker in (loopback_worker, remote_worker):
+            token = srv._PINNED_OLLAMA_ORIGIN.set(worker)
+            try:
+                srv._post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "hi"}]})
+            finally:
+                srv._PINNED_OLLAMA_ORIGIN.reset(token)
+        post_calls = [(u, h) for u, h in seen if u.endswith("/v1/chat/completions")]
+        assert len(post_calls) == 3
+        assert post_calls[0][0].startswith(primary + "/") and post_calls[0][1].get("Authorization") == "Bearer primary-si-secret-token"
+        assert post_calls[1][0].startswith(loopback_worker + "/") and "Authorization" not in post_calls[1][1]
+        assert post_calls[2][0].startswith(remote_worker + "/") and "Authorization" not in post_calls[2][1]
+        for url, hdrs in seen:
+            if not url.startswith(primary + "/"):
+                assert "Authorization" not in hdrs, f"_post path leaked primary SI key to worker {url}"
+
+        # 4. sonder_doctor._check_ollama_workers: loopback & remote workers get NONE.
+        seen.clear()
+        monkeypatch.setattr(ollama_endpoint, "open_url", fake_open)
+        cfg = SonderConfig(
+            state=StateConfig(home=str(tmp_path)),
+            inference=InferenceConfig(url=primary, allow_remote=True),
+            ollama=OllamaConfig(url=primary, allow_remote=True, workers=(loopback_worker, remote_worker)),
+        )
+        doctor_res = sonder_doctor._check_ollama_workers(config=cfg)
+        assert doctor_res["status"] == "ok"
+        assert len(seen) == 2
+        for url, hdrs in seen:
+            assert "Authorization" not in hdrs, f"doctor leaked primary SI key to worker {url}"
+
+        # 5. OllamaCloudMetadata defense in depth: non-SI origin gets NONE.
+        seen.clear()
+        assert OllamaCloudMetadata(loopback_worker, opener=fake_open).tags() == ()
+        assert len(seen) == 1 and "Authorization" not in seen[0][1]
+
+        # 6. si_auth_headers rejects userinfo, path, query, fragment, and mismatched port/host.
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
+
+        assert si_auth_headers(primary) == {"Authorization": "Bearer primary-si-secret-token"}
+        assert si_auth_headers(primary + "/") == {"Authorization": "Bearer primary-si-secret-token"}
+        for hostile in (
+            loopback_worker,
+            remote_worker,
+            "http://user@127.0.0.1:11437",
+            "http://user:pass@127.0.0.1:11437",
+            "http://127.0.0.1:11437/v1",
+            "http://127.0.0.1:11437?k=v",
+            "http://127.0.0.1:11437#frag",
+            "ftp://127.0.0.1:11437",
+            "",
+        ):
+            assert si_auth_headers(hostile) == {}, f"unexpected auth header for {hostile!r}"
+    finally:
+        ollama_endpoint.configure_typed_endpoint(None)
+
+
+def test_inference_allow_remote_satisfies_worker_and_ollama_url_gates(tmp_path):
+    """Round 4 (R2): [inference].allow_remote = true satisfies [ollama].workers and [ollama].url gates."""
+    from sonder_runtime.platform.config import ConfigError, load_config
+
+    workers_toml = tmp_path / "workers.toml"
+    workers_toml.write_text(
+        "[inference]\n"
+        "allow_remote = true\n"
+        "[ollama]\n"
+        'workers = ["https://192.0.2.50:443"]\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(workers_toml, env={})
+    assert cfg.inference.allow_remote is True
+    assert cfg.ollama.workers == ("https://192.0.2.50:443",)
+
+    url_toml = tmp_path / "url.toml"
+    url_toml.write_text(
+        "[inference]\n"
+        "allow_remote = true\n"
+        "[ollama]\n"
+        'url = "https://192.0.2.50:443"\n',
+        encoding="utf-8",
+    )
+    cfg2 = load_config(url_toml, env={})
+    assert cfg2.ollama.url == "https://192.0.2.50:443"
+
+    refused_toml = tmp_path / "refused.toml"
+    refused_toml.write_text(
+        "[inference]\n"
+        "allow_remote = false\n"
+        "[ollama]\n"
+        'workers = ["https://192.0.2.50:443"]\n',
+        encoding="utf-8",
+    )
+    try:
+        load_config(refused_toml, env={})
+    except ConfigError as exc:
+        assert "remote-Ollama consent gate" in str(exc)
+    else:
+        raise AssertionError("remote workers without allow_remote must fail closed")
+
+    # Worker duplicating [inference].url is also rejected as a primary duplicate.
+    dup_inf_toml = tmp_path / "dup_inf.toml"
+    dup_inf_toml.write_text(
+        "[inference]\n"
+        'url = "http://127.0.0.1:11437"\n'
+        "[ollama]\n"
+        'workers = ["http://127.0.0.1:11437"]\n',
+        encoding="utf-8",
+    )
+    try:
+        load_config(dup_inf_toml, env={})
+    except ConfigError as exc:
+        assert "duplicates primary" in str(exc)
+    else:
+        raise AssertionError("worker duplicating [inference].url must fail validation")
+
+
+def test_ollama_conformance_and_headless_use_origin_gated_api_key_file_and_local_only(tmp_path, monkeypatch):
+    """Round 4 (R3): ollama_conformance and sonder_headless honor api_key_file via origin-gated helper; conformance sends X-Sonder-Local-Only."""
+    import sonder_headless
+    from sonder_runtime.adapters.inference import ollama_conformance, ollama_endpoint
+
+    key_file = tmp_path / "r3_si.key"
+    key_file.write_text("r3-file-secret-key\n", encoding="utf-8")
+    monkeypatch.delenv("SONDER_INFERENCE_API_KEY", raising=False)
+    monkeypatch.setenv("SONDER_INFERENCE_API_KEY_FILE", str(key_file))
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://127.0.0.1:11437")
+    ollama_endpoint.configure_typed_endpoint("http://127.0.0.1:11437")
+
+    seen: list[tuple[str, dict[str, str]]] = []
+
+    class _Resp:
+        status = 200
+        def __init__(self, body: dict):
+            self._raw = json.dumps(body).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1): return self._raw
+
+    def fake_open(req, timeout=5.0, allow_remote=None):
+        seen.append((req.full_url, dict(req.header_items())))
+        if req.full_url.endswith("/v1/sonder/health"):
+            return _Resp({"status": "ready"})
+        if req.full_url.endswith("/v1/models"):
+            return _Resp({"object": "list", "data": [{"id": "qwen3.8:27b"}]})
+        return _Resp({
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        })
+
+    try:
+        monkeypatch.setattr(ollama_conformance, "open_url", fake_open)
+        monkeypatch.setattr(ollama_endpoint, "open_url", fake_open)
+
+        # 1. Conformance probe against configured SI origin: sends api_key_file bearer AND X-Sonder-Local-Only: 1.
+        probe_si = ollama_conformance.OllamaConformanceProbe("http://127.0.0.1:11437", "qwen3.8:27b")
+        probe_si._deadline = 9e18
+        seen.clear()
+        probe_si._request(
+            "/v1/chat/completions",
+            {"model": "qwen3.8:27b", "messages": [{"role": "user", "content": "hi"}]},
+            timeout=5.0,
+        )
+        assert len(seen) == 1
+        assert seen[0][1].get("Authorization") == "Bearer r3-file-secret-key"
+        assert seen[0][1].get("X-sonder-local-only") == "1"
+
+        # 2. Conformance probe against a different loopback port: NO Authorization, still X-Sonder-Local-Only: 1.
+        probe_other = ollama_conformance.OllamaConformanceProbe("http://127.0.0.1:11500", "qwen3.8:27b")
+        probe_other._deadline = 9e18
+        seen.clear()
+        probe_other._request(
+            "/v1/chat/completions",
+            {"model": "qwen3.8:27b", "messages": [{"role": "user", "content": "hi"}]},
+            timeout=5.0,
+        )
+        assert len(seen) == 1
+        assert "Authorization" not in seen[0][1]
+        assert seen[0][1].get("X-sonder-local-only") == "1"
+
+        # 3. sonder_headless ollama_models() and ollama_ok(): both honor api_key_file via origin-gated helper.
+        seen.clear()
+        assert sonder_headless.ollama_models() == {"qwen3.8:27b"}
+        assert sonder_headless.ollama_ok() is True
+        assert len(seen) == 2
+        assert seen[0][1].get("Authorization") == "Bearer r3-file-secret-key"
+        assert seen[1][1].get("Authorization") == "Bearer r3-file-secret-key"
+    finally:
+        ollama_endpoint.configure_typed_endpoint(None)

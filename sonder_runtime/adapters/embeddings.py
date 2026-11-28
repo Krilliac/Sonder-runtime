@@ -222,17 +222,9 @@ def _extract_si_model_digest(payload: object) -> str:
 
 def _si_auth_headers(target_origin: str) -> dict[str, str]:
     """Attach the SI bearer token only when ``target_origin`` equals the configured SI origin."""
-    try:
-        configured = ollama_endpoint.normalize().rstrip("/")
-        target = ollama_endpoint.normalize(target_origin).rstrip("/")
-    except ValueError:
-        return {}
-    if target != configured:
-        return {}
-    from sonder_runtime.adapters.inference.sonder_inference_gateway import resolve_api_key
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
 
-    api_key = resolve_api_key()
-    return {"Authorization": "Bearer " + api_key} if api_key else {}
+    return si_auth_headers(target_origin)
 
 
 def serving_model_revision(model=None, base=None, timeout=0.5):

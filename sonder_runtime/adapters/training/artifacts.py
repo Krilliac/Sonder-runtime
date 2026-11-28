@@ -234,12 +234,13 @@ def _execute_si_lora_alias_command(
     sub = str(command[1]).strip().lower()
     opener = si_opener or ollama_endpoint.open_url
     origin = _si_lora_origin(si_origin)
-    from sonder_runtime.adapters.inference.sonder_inference_gateway import resolve_api_key
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
 
-    headers: dict[str, str] = {"Accept": "application/json", "X-Sonder-Local-Only": "1"}
-    api_key = resolve_api_key()
-    if api_key:
-        headers["Authorization"] = "Bearer " + api_key
+    headers: dict[str, str] = {
+        "Accept": "application/json",
+        "X-Sonder-Local-Only": "1",
+        **si_auth_headers(origin),
+    }
 
     def _call(method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, str]:
         data = None if body is None else json.dumps(body).encode("utf-8")

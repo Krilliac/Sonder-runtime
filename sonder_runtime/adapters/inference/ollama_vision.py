@@ -146,7 +146,7 @@ class OllamaVisionGateway:
 
     @staticmethod
     def _post(url: str, payload: dict, timeout: float | None) -> dict:
-        from sonder_runtime.adapters.inference.sonder_inference_gateway import resolve_api_key
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
 
         limit = RESPONSE_BODY_LIMIT
         budget = timeout or _configured_request_timeout
@@ -155,10 +155,8 @@ class OllamaVisionGateway:
             headers = {
                 "Content-Type": "application/json",
                 "X-Sonder-Local-Only": "1",
+                **si_auth_headers(origin),
             }
-            api_key = resolve_api_key()
-            if api_key:
-                headers["Authorization"] = "Bearer " + api_key
             with gpu_admission.process_service().admit(
                 path, payload, origin=origin,
                 deadline=time.monotonic() + budget,
