@@ -43,6 +43,8 @@ import json
 import os
 import platform
 import re
+import secrets
+import stat
 import subprocess
 import time
 import unicodedata
@@ -953,7 +955,10 @@ def fetch_artifact(
     max_bytes = int(_clamp(max_mb, 1, MAX_MB_CEILING, DEFAULT_MAX_MB) * 1024 * 1024)
     timeout = _clamp(timeout, 1.0, MAX_TIMEOUT, DEFAULT_TIMEOUT)
 
-    resolved = file_ops.resolve_path(
+    # Every path derived below is written, replaced or deleted, so the
+    # destination must not be spelled through a symlink or junction: a
+    # following resolve would aim those writes at the link's target.
+    resolved = file_ops.resolve_mutation_path(
         str(dest), extra_roots=extra_roots, bypass=bypass,
     )
     part = _part_path(resolved, url)
@@ -1088,6 +1093,67 @@ def _discard(part):
         pass
 
 
+_BINARY = getattr(os, "O_BINARY", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+# O_NOFOLLOW does not exist on Windows, where O_CREAT|O_EXCL also follows a
+# dangling link; there the unlink-before-create and the lstat/fstat identity
+# checks in _open_staging are what keep bytes from going through a link.
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY | _CLOEXEC | _NOFOLLOW
+_RESUME_FLAGS = os.O_RDWR | _BINARY | _CLOEXEC | _NOFOLLOW
+# Descriptor primitives are bound once here so code that swaps this module's
+# ``os`` to fake the platform name (tests do) does not change how staging and
+# sidecar files are opened.
+_os_open = os.open
+_os_fdopen = os.fdopen
+_os_fstat = os.fstat
+_os_lstat = os.lstat
+_os_close = os.close
+
+
+def _same_file(left, right):
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _open_staging(part, append):
+    """Open the staging file for writing without ever writing through a link.
+
+    A fresh download removes whatever sits at the (predictable) staging name
+    and creates a new file exclusively; a resume reopens only a regular file.
+    Either way the open descriptor must still be the regular, non-link file
+    named *part* before a single byte is written.
+    """
+    part = Path(part)
+    before = None
+    if append:
+        before = _os_lstat(part)
+        if not stat.S_ISREG(before.st_mode) or file_ops.is_reparse_point(part):
+            raise PermissionError(
+                f"refusing to resume onto a staging path that is not a regular file: {part}"
+            )
+        fd = _os_open(part, _RESUME_FLAGS)
+        mode = "r+b"
+    else:
+        if part.is_symlink() or part.exists():
+            _discard(part)
+        fd = _os_open(part, _CREATE_FLAGS, 0o666)
+        mode = "wb"
+    try:
+        opened = _os_fstat(fd)
+        named = _os_lstat(part)
+        if (not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(named.st_mode)
+                or file_ops.is_reparse_point(part)
+                or not _same_file(opened, named)
+                or (before is not None and not _same_file(before, opened))):
+            raise PermissionError(
+                f"staging path changed to a link or non-file while opening: {part}"
+            )
+        return _os_fdopen(fd, mode)
+    except BaseException:
+        _os_close(fd)
+        raise
+
+
 def _download(url, part, *, max_bytes, timeout, resume, expect_type, dest_name):
     """Stream one URL into *part*, recording the redirect chain as it goes."""
     part = Path(part)
@@ -1098,14 +1164,16 @@ def _download(url, part, *, max_bytes, timeout, resume, expect_type, dest_name):
     binary_expected = bool(wanted) and not set(wanted) & _TEXTY_TYPES
 
     offset = 0
-    if resume and (part.exists() or part.is_symlink()):
-        if part.is_symlink():
+    # The staging name is predictable from dest and URL, so a symlink or
+    # junction planted there is removed (the link, never its target) whatever
+    # resume says; only a regular file is ever resumed.
+    if file_ops.is_reparse_point(part):
+        _discard(part)
+    if resume and part.is_file() and not file_ops.is_reparse_point(part):
+        offset = part.stat().st_size
+        if offset >= max_bytes:
+            offset = 0
             _discard(part)
-        else:
-            offset = part.stat().st_size
-            if offset >= max_bytes:
-                offset = 0
-                _discard(part)
 
     deadline = time.monotonic() + float(timeout)
     response = None
@@ -1283,10 +1351,9 @@ def _download(url, part, *, max_bytes, timeout, resume, expect_type, dest_name):
         digest = hashlib.sha256()
         written = 0
         received = 0
-        mode = "r+b" if append else "wb"
         try:
             part.parent.mkdir(parents=True, exist_ok=True)
-            with open(part, mode) as handle:
+            with _open_staging(part, append) as handle:
                 if append:
                     handle.seek(0)
                     while True:
@@ -1410,12 +1477,21 @@ def _write_provenance(dest, result, *, reused=False):
         "revalidated_existing_file": bool(reused),
         "checks": result.get("checks", []),
     }
+    payload = (json.dumps(record, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    # Written to a fresh exclusive temp file and renamed over the sidecar: the
+    # rename replaces a link planted at the sidecar name instead of writing
+    # through it, and a reader never sees a half-written record.
+    temp = sidecar.with_name(f".{sidecar.name}.{secrets.token_hex(8)}.tmp")
     try:
-        sidecar.write_text(
-            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8",
-        )
+        fd = _os_open(temp, _CREATE_FLAGS, 0o666)
     except OSError:
         return sidecar
+    try:
+        with _os_fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        os.replace(temp, sidecar)
+    except OSError:
+        _discard(temp)
     return sidecar
 
 
