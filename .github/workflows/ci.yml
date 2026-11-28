@@ -330,6 +330,7 @@ jobs:
           tests/test_start_selfmod_launcher.py
           tests/test_command_recovery.py
           tests/test_curriculum_store_durability.py
+          tests/test_safe_update.py
           tests/test_fleet_store.py
           tests/test_adaptive_concurrency.py
           tests/test_fleet_stall_diagnostics.py
