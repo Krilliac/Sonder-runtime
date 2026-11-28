@@ -113,7 +113,7 @@ def test_local_open_http_can_still_revoke_a_console_approval(gate, monkeypatch):
 def test_saved_local_open_scope_above_manual_loads_and_resolves_as_manual(
         gate, monkeypatch, tmp_path, scopes, auth):
     state = tmp_path / "permission_mode.json"
-    state.write_text(json.dumps({"mode": "manual", "scopes": {**scopes, "api-key|s-9": "auto"}}),
+    state.write_text(json.dumps({"mode": "auto", "scopes": {**scopes, "api-key|s-9": "acceptEdits"}}),
                      encoding="utf-8")
     pm._reset_for_tests()
     _auth(monkeypatch, auth)
@@ -124,18 +124,19 @@ def test_saved_local_open_scope_above_manual_loads_and_resolves_as_manual(
             assert REFUSED in _chat(port, _line(marker), session)
             assert not marker.exists()
     assert all(v == pm.MANUAL for k, v in pm._SCOPED_MODES.items()
-               if k.split("|", 1)[0].strip().lower() == "local-open")
-    assert pm._SCOPED_MODES["api-key|s-9"] == pm.AUTO
+               if pm._scope_key_is_local_open(k))
+    assert pm._SCOPED_MODES[pm._scope_key("api-key", "s-9")] == pm.ACCEPT_EDITS
     with pm.mode_scope("api-key", "s-9"):
-        assert pm.current_mode() == pm.AUTO
+        assert pm.current_mode() == pm.ACCEPT_EDITS
     with pm._LOCK:
-        pm._SCOPED_MODES["local-open|"] = pm.AUTO
+        pm._SCOPED_MODES[pm._scope_key("local-open", "")] = pm.AUTO
     with pm.mode_scope("local-open", "x"):
         assert pm.current_mode() == pm.MANUAL
-    pm.set_mode(pm.MANUAL)
+    with pm.mode_scope("api-key", "s-9"):
+        pm.set_mode(pm.ACCEPT_EDITS)  # a scoped write saves every scope
     saved = json.loads(state.read_text(encoding="utf-8"))
-    assert saved["scopes"]["local-open|"] == pm.MANUAL
-    assert saved["scopes"]["api-key|s-9"] == pm.AUTO
+    assert saved["scopes"][pm._scope_key("local-open", "")] == pm.MANUAL
+    assert saved["scopes"][pm._scope_key("api-key", "s-9")] == pm.ACCEPT_EDITS
 
 
 @pytest.mark.parametrize("console_mode", ["acceptEdits", "auto", "bypass"])

@@ -8,7 +8,11 @@
   worker addresses must be literal IPv4 addresses inside 10.0.0.0/8,
   172.16.0.0/12, 192.168.0.0/16 or 169.254.0.0/16; hostnames, IPv6, loopback,
   0.0.0.0 and public addresses are refused; every peer uses the one configured
-  RPC port. Keep the two implementations in step.
+  RPC port. When SONDER_RPC_LINK_CIDR names the private link, every address must
+  also sit inside it. SONDER_RPC_PROTO_MAJOR pins the llama.cpp RPC protocol
+  major every worker must report over HELLO (Assert-RpcProtocolLockstep, mirror
+  of check_rpc_lockstep in adapters/inference/rpc_cluster.py). Keep the two
+  implementations in step.
 #>
 
 $script:RpcDefaultPort = 50052
@@ -68,7 +72,66 @@ function ConvertTo-RpcPeer([string]$Entry, [int]$Port) {
     return [pscustomobject]@{ Host = $hostAddress; Port = $Port; Address = "${hostAddress}:$Port" }
 }
 
-function ConvertTo-RpcPeerList([string[]]$Entries, [int]$Port) {
+function ConvertTo-RpcIPv4Value([string]$Address) {
+    $b = [System.Net.IPAddress]::Parse($Address).GetAddressBytes()
+    return ([long]$b[0] * 16777216) + ([long]$b[1] * 65536) + ([long]$b[2] * 256) + [long]$b[3]
+}
+
+function ConvertTo-RpcLinkNetwork([string]$Cidr) {
+    # Mirrors parse_link_network: blank means no link restriction; otherwise a
+    # strict IPv4 network (no host bits) wholly inside one allowed private range.
+    $text = ([string]$Cidr).Trim()
+    if (-not $text) { return $null }
+    if ($text -notmatch '^([0-9.]+)/([0-9]{1,2})$') {
+        throw "SONDER_RPC_LINK_CIDR must be an IPv4 network such as 10.77.0.0/30 with no host bits set, got '$Cidr'."
+    }
+    $prefix = [int]$Matches[2]
+    $baseText = $Matches[1]
+    if ($prefix -gt 32) {
+        throw "SONDER_RPC_LINK_CIDR prefix must be between 0 and 32, got '$Cidr'."
+    }
+    $base = ConvertTo-RpcPrivateIPv4 -Address $baseText -Label 'SONDER_RPC_LINK_CIDR network'
+    $first = [int]([System.Net.IPAddress]::Parse($base).GetAddressBytes()[0])
+    $minPrefix = if ($first -eq 10) { 8 } elseif ($first -eq 172) { 12 } else { 16 }
+    if ($prefix -lt $minPrefix) {
+        throw "SONDER_RPC_LINK_CIDR $text is not inside a private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) or link-local (169.254.0.0/16) range."
+    }
+    $size = [long]1 -shl (32 - $prefix)
+    $value = ConvertTo-RpcIPv4Value $base
+    if (($value % $size) -ne 0) {
+        throw "SONDER_RPC_LINK_CIDR must be an IPv4 network such as 10.77.0.0/30 with no host bits set, got '$Cidr'."
+    }
+    return [pscustomobject]@{ Base = $value; Size = $size; Text = "$base/$prefix" }
+}
+
+function Test-RpcAddressOnLink([string]$Address, $Link) {
+    if ($null -eq $Link) { return $true }
+    $value = ConvertTo-RpcIPv4Value $Address
+    return ($value -ge $Link.Base -and $value -lt ($Link.Base + $Link.Size))
+}
+
+function Assert-RpcAddressOnLink([string]$Address, $Link, [string]$Label) {
+    if (-not (Test-RpcAddressOnLink -Address $Address -Link $Link)) {
+        throw "$Label $Address is not on the configured private link $($Link.Text) (SONDER_RPC_LINK_CIDR)."
+    }
+    return $Address
+}
+
+function ConvertTo-RpcProtoMajor([string]$Value) {
+    # Mirrors parse_rpc_proto_major: blank means no pinned major.
+    $text = ([string]$Value).Trim()
+    if (-not $text) { return $null }
+    if ($text -notmatch '^[0-9]{1,3}$') {
+        throw "SONDER_RPC_PROTO_MAJOR must be a decimal llama.cpp RPC protocol major version, got '$Value'."
+    }
+    $major = [int]$text
+    if ($major -lt 1 -or $major -gt 255) {
+        throw "SONDER_RPC_PROTO_MAJOR must be between 1 and 255, got $major."
+    }
+    return $major
+}
+
+function ConvertTo-RpcPeerList([string[]]$Entries, [int]$Port, $Link = $null) {
     $tokens = @($Entries | ForEach-Object { ([string]$_).Replace(';', ',').Split(',') } |
         ForEach-Object { $_.Trim() } | Where-Object { $_ })
     if ($tokens.Count -gt $script:RpcMaxPeers) {
@@ -77,6 +140,7 @@ function ConvertTo-RpcPeerList([string[]]$Entries, [int]$Port) {
     $peers = @()
     foreach ($token in $tokens) {
         $peer = ConvertTo-RpcPeer -Entry $token -Port $Port
+        $null = Assert-RpcAddressOnLink -Address $peer.Host -Link $Link -Label 'RPC peer host'
         if (-not ($peers | Where-Object { $_.Address -eq $peer.Address })) {
             $peers += $peer
         }
@@ -103,6 +167,134 @@ function Test-RpcTcpReachable([string]$TargetHost, [int]$TargetPort, [int]$Timeo
     }
     finally {
         $client.Close()
+    }
+}
+
+function Read-RpcExact($Stream, [int]$Count) {
+    $buffer = New-Object byte[] $Count
+    $offset = 0
+    while ($offset -lt $Count) {
+        $read = $Stream.Read($buffer, $offset, $Count - $offset)
+        if ($read -le 0) { throw 'rpc-server closed the connection during HELLO.' }
+        $offset += $read
+    }
+    return ,$buffer
+}
+
+function Get-RpcProtocolVersion([string]$TargetHost, [int]$TargetPort, [int]$TimeoutMs = 3000) {
+    # One llama.cpp RPC HELLO (ggml-rpc.cpp, protocol 7.x at b11195 through 10.x at
+    # v1.1.0): send cmd 14, uint64 LE size 24 and 24 zero conn_caps (plain TCP), read
+    # uint64 LE size then major, minor, patch. rpc-server serves one client at a
+    # time, so call this before llama-server connects, never against a live split.
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $async = $client.BeginConnect($TargetHost, $TargetPort, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) {
+            throw "no connection within $TimeoutMs ms"
+        }
+        $client.EndConnect($async)
+        $client.ReceiveTimeout = $TimeoutMs
+        $client.SendTimeout = $TimeoutMs
+        $stream = $client.GetStream()
+        $request = New-Object byte[] 33
+        $request[0] = 14
+        $request[1] = 24
+        $stream.Write($request, 0, $request.Length)
+        $stream.Flush()
+        $header = Read-RpcExact $stream 8
+        $size = [BitConverter]::ToUInt64($header, 0)
+        if ($size -lt 3 -or $size -gt 4096) {
+            throw "HELLO reply of $size bytes; it is not a compatible llama.cpp rpc-server"
+        }
+        $reply = Read-RpcExact $stream ([int]$size)
+        return [pscustomobject]@{
+            Major = [int]$reply[0]
+            Minor = [int]$reply[1]
+            Patch = [int]$reply[2]
+            Text  = "$([int]$reply[0]).$([int]$reply[1]).$([int]$reply[2])"
+        }
+    }
+    finally {
+        $client.Close()
+    }
+}
+
+function Assert-RpcProtocolLockstep($Peers, $ExpectedMajor = $null, [int]$TimeoutMs = 3000) {
+    # Mirrors check_rpc_lockstep: every peer must answer HELLO, and every major must
+    # equal $ExpectedMajor (when pinned) or each other. Returns one record per peer.
+    $records = @()
+    $errors = @()
+    foreach ($peer in @($Peers)) {
+        try {
+            $version = Get-RpcProtocolVersion -TargetHost $peer.Host -TargetPort $peer.Port -TimeoutMs $TimeoutMs
+            $records += [pscustomobject]@{ endpoint = $peer.Address; rpcProtocol = $version.Text; rpcProtoMajor = $version.Major }
+        }
+        catch {
+            $detail = $_.Exception.Message
+            $records += [pscustomobject]@{ endpoint = $peer.Address; rpcProtocol = $null; rpcProtoMajor = $null }
+            $errors += "RPC peer $($peer.Address) did not answer the RPC HELLO ($detail); start rpc-server there, check the firewall, or stop the llama-server that already holds it."
+        }
+    }
+    $answered = @($records | Where-Object { $null -ne $_.rpcProtoMajor })
+    if ($null -ne $ExpectedMajor) {
+        foreach ($r in $answered) {
+            if ($r.rpcProtoMajor -ne [int]$ExpectedMajor) {
+                $errors += "RPC protocol mismatch: $($r.endpoint) speaks llama.cpp RPC protocol $($r.rpcProtocol) (major $($r.rpcProtoMajor)) but SONDER_RPC_PROTO_MAJOR=$ExpectedMajor; run the same llama.cpp release on every node of the split."
+            }
+        }
+    }
+    elseif (@($answered | Select-Object -ExpandProperty rpcProtoMajor -Unique).Count -gt 1) {
+        $listing = (@($answered | ForEach-Object { "$($_.endpoint)=$($_.rpcProtocol)" })) -join ', '
+        $errors += "RPC protocol mismatch between workers ($listing); run the same llama.cpp release on every node of the split."
+    }
+    if ($errors.Count -gt 0) {
+        throw ("Cross-host RPC split refused:`n" + ((@($errors | ForEach-Object { "- $_" })) -join "`n"))
+    }
+    return $records
+}
+
+function ConvertFrom-RpcLlamaVersionText([string]$Text) {
+    # Mirrors parse_llama_build: 'version: <v> (build <n>, commit <hash>)', or the
+    # older 'version: <n> (<hash>)'. Returns 'b<n>-<hash>' or $null.
+    $raw = [string]$Text
+    $m = [regex]::Match($raw, '\(build ([0-9]{1,9}), commit ([0-9A-Za-z]{1,64})\)')
+    if (-not $m.Success) {
+        $m = [regex]::Match($raw, '(?m)^version:\s*([0-9]{1,9})\s*\(([0-9A-Za-z]{1,64})\)')
+    }
+    if (-not $m.Success) { return $null }
+    return "b$([long]$m.Groups[1].Value)-$($m.Groups[2].Value)"
+}
+
+function Get-RpcLlamaBuild([string]$ExePath, [int]$TimeoutMs = 15000) {
+    # The llama.cpp build of a binary from `<exe> --version`; $null when the binary
+    # is missing, hangs past $TimeoutMs or prints no build line.
+    if (-not $ExePath -or -not (Test-Path -LiteralPath $ExePath -PathType Leaf)) { return $null }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $ExePath
+    $psi.Arguments = '--version'
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $true
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+    }
+    catch {
+        return $null
+    }
+    try {
+        $proc.StandardInput.Close()
+        $outTask = $proc.StandardOutput.ReadToEndAsync()
+        $errTask = $proc.StandardError.ReadToEndAsync()
+        if (-not $proc.WaitForExit($TimeoutMs)) {
+            try { $proc.Kill() } catch { }
+            return $null
+        }
+        return (ConvertFrom-RpcLlamaVersionText ($outTask.Result + "`n" + $errTask.Result))
+    }
+    finally {
+        $proc.Dispose()
     }
 }
 
@@ -272,4 +464,217 @@ function Test-RpcOwnedProcess([int]$ProcessId, [string]$ExePath, [string]$Starte
 function Get-RpcProcessStartUtc([int]$ProcessId) {
     $proc = Get-Process -Id $ProcessId -ErrorAction Stop
     return $proc.StartTime.ToUniversalTime().ToString('o')
+}
+
+$script:RpcAllowedSplitSpecTypes = @(
+    'ngram-mod', 'ngram-simple', 'ngram-map-k', 'ngram-map-k4v', 'ngram-cache',
+    'draft-simple', 'draft-eagle3', 'draft-mtp', 'draft-dflash', 'draft-dspark'
+)
+
+function Assert-RpcDedicatedLink(
+    [string]$LinkCidr = '',
+    [string[]]$PeerHosts = @(),
+    [int]$MinPrefixLength = 24,
+    $Link = $null
+) {
+    # Builds on FED-02's ConvertTo-RpcLinkNetwork and Assert-RpcAddressOnLink
+    # (which leave SONDER_RPC_LINK_CIDR optional with 0..32 prefixes on the base
+    # allowlist) and adds only the FED-05 cross-host split requirement:
+    # non-empty dedicated link with prefix length >= $MinPrefixLength (default /24).
+    $resolvedLink = if ($null -ne $Link) { $Link } else { ConvertTo-RpcLinkNetwork $LinkCidr }
+    if ($null -eq $resolvedLink) {
+        throw 'SONDER_RPC_LINK_CIDR / -RpcLinkCidr must name a dedicated private IPv4 subnet (e.g. 10.77.0.0/30) before enabling a cross-host RPC split.'
+    }
+    $parts = ([string]$resolvedLink.Text).Split('/')
+    $netText = $parts[0]
+    $prefix = [int]$parts[1]
+    if ($prefix -lt $MinPrefixLength -or $prefix -gt 32) {
+        throw "Dedicated RPC link CIDR '$($resolvedLink.Text)' (/$prefix) must have prefix length in $MinPrefixLength..32 (e.g. /30)."
+    }
+    foreach ($peerHost in $PeerHosts) {
+        $cleanPeer = ConvertTo-RpcPrivateIPv4 -Address $peerHost -Label 'RPC peer host'
+        $null = Assert-RpcAddressOnLink -Address $cleanPeer -Link $resolvedLink -Label 'RPC peer host'
+    }
+    return [pscustomobject]@{
+        Cidr         = $resolvedLink.Text
+        Network      = $netText
+        PrefixLength = $prefix
+        Link         = $resolvedLink
+    }
+}
+
+function Assert-RpcSplitPolicy(
+    [string]$SplitMode = 'layer',
+    [string]$SpecType = 'ngram-mod',
+    [string]$TensorSplit = '',
+    [int]$PeerCount = 1,
+    [string[]]$Devices = @()
+) {
+    $mode = ([string]$SplitMode).Trim().ToLowerInvariant()
+    if ($mode -eq 'tensor') {
+        throw "Cross-host RPC split_mode='tensor' is refused: tensor parallelism over Ethernet is latency-floored; use 'layer' only."
+    }
+    if ($mode -eq 'row') {
+        throw "Cross-host RPC split_mode='row' is refused: row split was removed from CUDA (#24216); use 'layer' only."
+    }
+    if ($mode -ne 'layer') {
+        throw "Cross-host RPC split_mode must be 'layer' only, got '$SplitMode'."
+    }
+
+    $spec = ([string]$SpecType).Trim().ToLowerInvariant()
+    if (-not $spec -or $spec -eq 'none' -or $spec -eq 'off') {
+        throw "Cross-host RPC split requires speculative decoding enabled (e.g. 'ngram-mod'); got '$SpecType'."
+    }
+    if ($script:RpcAllowedSplitSpecTypes -notcontains $spec) {
+        throw "Unsupported cross-host RPC spec_type '$SpecType'; allowed: $($script:RpcAllowedSplitSpecTypes -join ', ')."
+    }
+
+    # Under `powershell -File ... -Devices CUDA0,RPC0`, PowerShell passes a
+    # comma-separated list as a single string element in [string[]]$Devices.
+    # Split every element on ',' and validate each token (matching Python's
+    # _DEVICE_TOKEN_RE) before enforcing RPC-before-local ordering.
+    $cleanDevices = @()
+    foreach ($rawDeviceEntry in @($Devices)) {
+        $entryText = [string]$rawDeviceEntry
+        if (-not $entryText.Trim()) { continue }
+        foreach ($part in $entryText.Split(',')) {
+            $token = $part.Trim()
+            if (-not $token -or $token -notmatch '^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63}$') {
+                throw "Invalid cross-host RPC device token '$part' in '$rawDeviceEntry'."
+            }
+            if ($cleanDevices -contains $token) {
+                throw "Duplicate device '$token' in cross-host RPC device list."
+            }
+            $cleanDevices += $token
+        }
+    }
+    if ($cleanDevices.Count -gt 0) {
+        $lastDev = $cleanDevices[$cleanDevices.Count - 1]
+        if ($lastDev.ToUpperInvariant().StartsWith('RPC')) {
+            throw "Cross-host RPC device order places remote device '$lastDev' last, which pushes the output head/logits over Ethernet."
+        }
+        $seenLocal = $false
+        foreach ($dev in $cleanDevices) {
+            if ($dev.ToUpperInvariant().StartsWith('RPC')) {
+                if ($seenLocal) {
+                    throw "Cross-host RPC device order places local device before RPC device '$dev'; RPC devices must precede local GPUs."
+                }
+            }
+            else {
+                $seenLocal = $true
+            }
+        }
+        if (-not $seenLocal) {
+            throw 'Cross-host RPC device list must include at least one local GPU.'
+        }
+    }
+
+    $cleanSplit = ([string]$TensorSplit).Trim()
+    if ($cleanSplit) {
+        $parts = @($cleanSplit.Split(',') | ForEach-Object { $_.Trim() })
+        if ($parts.Count -lt ($PeerCount + 1)) {
+            throw "TensorSplit '$TensorSplit' requires at least $($PeerCount + 1) weights (RPC peers + local GPU)."
+        }
+        $weights = @()
+        $sum = 0.0
+        foreach ($p in $parts) {
+            $val = 0.0
+            if (-not [double]::TryParse($p, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$val) -or
+                [double]::IsNaN($val) -or [double]::IsInfinity($val) -or $val -lt 0.0) {
+                throw "Invalid TensorSplit weight '$p' in '$TensorSplit'."
+            }
+            $weights += $val
+            $sum += $val
+        }
+        if ($sum -le 0.0) {
+            throw "TensorSplit '$TensorSplit' must have a positive sum."
+        }
+        if ($weights[$weights.Count - 1] -le 0.0) {
+            throw "TensorSplit '$TensorSplit' gives the trailing local device weight 0; local weight must be > 0 so output head/logits stay local."
+        }
+    }
+
+    return [pscustomobject]@{
+        splitMode   = $mode
+        specType    = $spec
+        tensorSplit = $cleanSplit
+        devices     = $cleanDevices
+    }
+}
+
+$script:RpcDefaultMaxRttMs = 2.0
+$script:RpcMaxConfiguredRttMs = 100.0
+
+function ConvertTo-RpcMaxRttMs([string]$Value) {
+    $text = ([string]$Value).Trim()
+    if (-not $text) {
+        return [double]$script:RpcDefaultMaxRttMs
+    }
+    $parsed = 0.0
+    if (-not [double]::TryParse(
+            $text,
+            [System.Globalization.NumberStyles]::Float,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [ref]$parsed
+        ) -or [double]::IsNaN($parsed) -or [double]::IsInfinity($parsed)) {
+        throw "SONDER_RPC_MAX_RTT_MS / -MaxRttMs must be a positive finite number (ms), got '$Value'."
+    }
+    if ($parsed -le 0.0 -or $parsed -gt $script:RpcMaxConfiguredRttMs) {
+        throw "SONDER_RPC_MAX_RTT_MS / -MaxRttMs must be in (0, $($script:RpcMaxConfiguredRttMs)], got '$Value'."
+    }
+    return $parsed
+}
+
+function Measure-RpcPeerRtt(
+    [string]$TargetHost,
+    [int]$TargetPort,
+    [int]$Samples = 5,
+    [double]$MaxRttMs = 2.0,
+    [int]$TimeoutMs = 1500
+) {
+    if ($Samples -lt 1 -or $Samples -gt 20) {
+        throw "RttSamples must be in 1..20, got $Samples."
+    }
+    if ([double]::IsNaN($MaxRttMs) -or [double]::IsInfinity($MaxRttMs) -or $MaxRttMs -le 0.0 -or $MaxRttMs -gt $script:RpcMaxConfiguredRttMs) {
+        throw "MaxRttMs must be in (0, $($script:RpcMaxConfiguredRttMs)], got $MaxRttMs."
+    }
+    $measured = @()
+    for ($i = 0; $i -lt $Samples; $i++) {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $async = $null
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            $async = $client.BeginConnect($TargetHost, $TargetPort, $null, $null)
+            if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) {
+                throw "RPC peer ${TargetHost}:$TargetPort timed out during RTT probe."
+            }
+            $client.EndConnect($async)
+            $sw.Stop()
+            $measured += [math]::Round($sw.Elapsed.TotalMilliseconds, 4)
+        }
+        finally {
+            if ($null -ne $async -and $null -ne $async.AsyncWaitHandle) {
+                $async.AsyncWaitHandle.Dispose()
+            }
+            $client.Close()
+        }
+    }
+    $sorted = @($measured | Sort-Object)
+    $mid = [int][math]::Floor($sorted.Count / 2)
+    $medianMs = if (($sorted.Count % 2) -eq 1) {
+        [double]$sorted[$mid]
+    }
+    else {
+        [math]::Round(([double]$sorted[$mid - 1] + [double]$sorted[$mid]) / 2.0, 4)
+    }
+    if ($medianMs -gt $MaxRttMs) {
+        throw "RPC peer ${TargetHost}:$TargetPort median RTT ${medianMs}ms exceeds MaxRttMs=${MaxRttMs}ms."
+    }
+    return [pscustomobject]@{
+        endpoint  = "${TargetHost}:$TargetPort"
+        samplesMs = $measured
+        minMs     = $sorted[0]
+        medianMs  = $medianMs
+        maxMs     = $sorted[$sorted.Count - 1]
+    }
 }

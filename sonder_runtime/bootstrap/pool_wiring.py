@@ -98,6 +98,14 @@ def merge_pool_unified_status(
     # Partial pages must never materialize unrequested workers or exceed the page cap.
     if page.get("complete") is False:
         return page
+    workers = page.get("workers")
+    expected_count = page.get("worker_count")
+    if (
+        isinstance(expected_count, int)
+        and not isinstance(expected_count, bool)
+        and (not isinstance(workers, list) or len(workers) != expected_count)
+    ):
+        return page
     extra = pool_unified_status(pool, gateway)
     if not extra:
         return page

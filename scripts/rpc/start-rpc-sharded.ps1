@@ -11,7 +11,13 @@
 
   Workers come only from -RpcPeers or SONDER_RPC_PEERS (no default): each must
   be a literal private (RFC 1918) or link-local IPv4 address on the one
-  configured RPC port (-RpcPort or SONDER_RPC_PORT, default 50052).
+  configured RPC port (-RpcPort or SONDER_RPC_PORT, default 50052), and inside
+  the private link when -RpcLinkCidr or SONDER_RPC_LINK_CIDR names one.
+
+  Before launching, Start sends one llama.cpp RPC HELLO to every worker and
+  refuses the split unless every worker reports the same protocol major, and
+  the pinned one when -RpcProtoMajor or SONDER_RPC_PROTO_MAJOR is set. The
+  state file records each worker's protocol and this machine's llama.cpp build.
 .EXAMPLE
   powershell -NoProfile -File .\start-rpc-sharded.ps1 -Action Start -RpcPeers <worker-ip> -ModelPath <path-to-model.gguf>
 #>
@@ -28,6 +34,13 @@ param(
     [int]$Port = 11438,
     [string[]]$RpcPeers = @(),
     [string]$RpcPort = $env:SONDER_RPC_PORT,
+    [string]$RpcLinkCidr = $env:SONDER_RPC_LINK_CIDR,
+    [string]$RpcProtoMajor = $env:SONDER_RPC_PROTO_MAJOR,
+    [string]$SplitMode = 'layer',
+    [string]$SpecType = 'ngram-mod',
+    [string[]]$Devices = @(),
+    [string]$MaxRttMs = $env:SONDER_RPC_MAX_RTT_MS,
+    [int]$RttSamples = 5,
     [int]$CtxSize = 8192,
     [int]$GpuLayers = 999,
     [ValidatePattern('^([0-9.]+(,[0-9.]+)*)?$')]
@@ -97,7 +110,9 @@ function Get-ServerHealth([string]$BaseUrl) {
 $loopbackHost = Assert-LoopbackHost $BindHost
 $rpcPortValue = if (([string]$RpcPort).Trim()) { ConvertTo-RpcPort -Value $RpcPort -Label 'RpcPort' } else { $script:RpcDefaultPort }
 $peerEntries = if ($RpcPeers.Count -gt 0) { $RpcPeers } else { @([string]$env:SONDER_RPC_PEERS) }
-$validatedPeers = @(ConvertTo-RpcPeerList -Entries $peerEntries -Port $rpcPortValue)
+$rpcLink = ConvertTo-RpcLinkNetwork $RpcLinkCidr
+$expectedProtoMajor = ConvertTo-RpcProtoMajor $RpcProtoMajor
+$validatedPeers = @(ConvertTo-RpcPeerList -Entries $peerEntries -Port $rpcPortValue -Link $rpcLink)
 if ($validatedPeers.Count -eq 0) {
     throw 'No RPC peers configured: pass -RpcPeers <worker-ip> or set SONDER_RPC_PEERS. Sharding stays off until one is configured.'
 }
@@ -213,10 +228,16 @@ switch ($Action) {
             throw "llama-server.exe not found under '$InstallDir'."
         }
 
+        $splitPolicy = Assert-RpcSplitPolicy -SplitMode $SplitMode -SpecType $SpecType -TensorSplit $TensorSplit -PeerCount $validatedPeers.Count -Devices $Devices
+        $dedicatedLink = Assert-RpcDedicatedLink -Link $rpcLink -PeerHosts @($validatedPeers | ForEach-Object { $_.Host })
+        $maxRttMsValue = ConvertTo-RpcMaxRttMs -Value $MaxRttMs
+
+        $peerRtts = @()
         foreach ($peer in $validatedPeers) {
             if (-not (Test-RpcTcpReachable -TargetHost $peer.Host -TargetPort $peer.Port)) {
                 throw "RPC peer $($peer.Address) is unreachable. Start rpc-server on that worker first (start-rpc-worker.ps1 -Action Start)."
             }
+            $peerRtts += (Measure-RpcPeerRtt -TargetHost $peer.Host -TargetPort $peer.Port -Samples $RttSamples -MaxRttMs $maxRttMsValue)
         }
 
         $existing = Get-CurrentState
@@ -229,6 +250,11 @@ switch ($Action) {
                 throw "Port $Port on $loopbackHost is already held by another process."
             }
 
+            # Version lockstep before the split is enabled: rpc-server is still idle
+            # here, so the HELLO probe gets an answer instead of waiting in its queue.
+            $rpcNodes = @(Assert-RpcProtocolLockstep -Peers $validatedPeers -ExpectedMajor $expectedProtoMajor)
+            $llamaBuild = Get-RpcLlamaBuild -ExePath $llamaExe
+
             $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
             $stdout = $null
             $stderr = Join-Path $logDir "llama-rpc-$stamp.log"
@@ -240,6 +266,8 @@ switch ($Action) {
                 '--host', $loopbackHost,
                 '--port', [string]$Port,
                 '--rpc', $rpcArg,
+                '--split-mode', $splitPolicy.splitMode,
+                '--spec-type', $splitPolicy.specType,
                 '--ctx-size', [string]$CtxSize,
                 '--n-gpu-layers', [string]$GpuLayers,
                 '--flash-attn', $FlashAttn,
@@ -250,6 +278,9 @@ switch ($Action) {
                 '--no-webui',
                 '--log-file', $stderr
             )
+            if ($splitPolicy.devices.Count -gt 0) {
+                $serverArgs += @('--device', ($splitPolicy.devices -join ','))
+            }
             if ($TensorSplit.Trim()) {
                 $serverArgs += @('--tensor-split', $TensorSplit.Trim())
             }
@@ -289,8 +320,17 @@ switch ($Action) {
                 baseUrl    = $baseUrl
                 modelPath  = $ModelPath
                 alias      = $Alias
-                rpcPeers   = @($validatedPeers | ForEach-Object { $_.Address })
-                args       = $serverArgs
+                rpcPeers    = @($validatedPeers | ForEach-Object { $_.Address })
+                rpcNodes    = $rpcNodes
+                llamaBuild  = $llamaBuild
+                splitPolicy = [ordered]@{
+                    splitMode = $splitPolicy.splitMode
+                    specType  = $splitPolicy.specType
+                    linkCidr  = $dedicatedLink.Cidr
+                    maxRttMs  = $maxRttMsValue
+                    peerRtts  = $peerRtts
+                }
+                args        = $serverArgs
                 stdout     = $stdout
                 stderr     = $stderr
                 startedAt  = (Get-Date).ToString('o')

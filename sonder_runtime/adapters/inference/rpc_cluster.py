@@ -14,12 +14,15 @@ explicit arguments; nothing here names a particular machine.
 """
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import logging
 import os
 import re
 import socket
+import struct
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -30,11 +33,21 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from sonder_runtime.adapters.provider_bindings import TIER_PROVIDER_ENV
+from sonder_runtime.domain.routing.rpc_split_policy import (
+    DEFAULT_SPLIT_MODE,
+    DEFAULT_SPLIT_SPEC_TYPE,
+    validate_split_device_order,
+    validate_split_mode,
+    validate_split_spec_type,
+    validate_split_tensor_weights,
+)
 from sonder_runtime.platform.rpc_sharding_config import (
     DEFAULT_RPC_PORT,
     MAX_RPC_PEERS,
+    RPC_LINK_CIDR_ENV,
     RPC_PEERS_ENV,
     RPC_PORT_ENV,
+    RPC_PROTO_MAJOR_ENV,
     RpcShardingConfigError,
     parse_peer_allowlist,
     parse_peer_entry,
@@ -64,8 +77,26 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _VALID_KV_TYPES = frozenset({"f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"})
 _VALID_FLASH_ATTN = frozenset({"on", "off", "auto"})
 # Options the launcher owns. Letting extra_args repeat them could move the
-# listener off loopback or point --rpc at an address the allowlist refused.
-_RESERVED_SERVER_OPTIONS = frozenset({"--host", "--port", "--rpc"})
+# listener off loopback, point --rpc at an address the allowlist refused, or
+# bypass the FED-05 layer-split / local-output-head / speculation policy.
+_RESERVED_SERVER_OPTIONS = frozenset({
+    "--host",
+    "--port",
+    "--rpc",
+    "--split-mode",
+    "-sm",
+    "--spec-type",
+    "--spec-draft-n-max",
+    "--draft-max",
+    "--draft",
+    "--draft-n",
+    "--device",
+    "-dev",
+    "--tensor-split",
+    "-ts",
+    "--override-tensor",
+    "-ot",
+})
 _MAX_HEALTH_BYTES = 1_048_576
 _MAX_PROFILES_BYTES = 262_144
 _PROFILE_FIELDS = frozenset({"worker_device", "tensor_split", "ctx_size", "n_gpu_layers", "notes"})
@@ -173,11 +204,18 @@ def _validate_loopback_base_url(base_url: str) -> str:
 
 @dataclass(frozen=True)
 class RpcShardingSettings:
-    """The active sharding configuration: allowlisted workers and the loopback server URL."""
+    """The active sharding configuration: allowlisted workers and the loopback server URL.
+
+    ``link_network`` is the configured private link (``SONDER_RPC_LINK_CIDR``)
+    and ``proto_major`` the pinned RPC protocol major (``SONDER_RPC_PROTO_MAJOR``);
+    both are ``None`` when unset.
+    """
 
     peers: tuple[RpcPeerEndpoint, ...]
     rpc_port: int
     server_url: str
+    link_network: ipaddress.IPv4Network | None = None
+    proto_major: int | None = None
 
 
 def rpc_sharding_settings_from_env(
@@ -202,6 +240,8 @@ def rpc_sharding_settings_from_env(
         peers=tuple(RpcPeerEndpoint(host=host, port=port) for host, port in allowlist.peers),
         rpc_port=allowlist.port,
         server_url=_validate_loopback_base_url(base_url),
+        link_network=allowlist.link_network,
+        proto_major=allowlist.proto_major,
     )
 
 
@@ -376,6 +416,9 @@ class ShardedLlamaServerConfig:
     ctx_size: int = DEFAULT_CTX_SIZE
     n_gpu_layers: int = DEFAULT_GPU_LAYERS
     tensor_split: str = ""
+    split_mode: str = DEFAULT_SPLIT_MODE
+    spec_type: str = DEFAULT_SPLIT_SPEC_TYPE
+    devices: tuple[str, ...] = ()
     flash_attn: str = DEFAULT_FLASH_ATTN
     cache_type_k: str = DEFAULT_KV_CACHE_TYPE
     cache_type_v: str = DEFAULT_KV_CACHE_TYPE
@@ -397,11 +440,24 @@ class ShardedLlamaServerConfig:
             raise RpcClusterConfigError("rpc_peers must contain RpcPeerEndpoint values")
         if len({peer.port for peer in peers}) != 1:
             raise RpcClusterConfigError("every RPC peer must use the one configured RPC port")
-        object.__setattr__(self, "rpc_peers", _coerce_peers(peers, port=peers[0].port))
+        coerced_peers = _coerce_peers(peers, port=peers[0].port)
+        object.__setattr__(self, "rpc_peers", coerced_peers)
         _validate_int(self.ctx_size, label="ctx_size", minimum=128)
         _validate_int(self.n_gpu_layers, label="n_gpu_layers", minimum=0)
         _validate_int(self.parallel, label="parallel", minimum=1)
-        object.__setattr__(self, "tensor_split", validate_tensor_split(self.tensor_split))
+        try:
+            validated_split = validate_split_tensor_weights(
+                self.tensor_split, peer_count=len(coerced_peers)
+            )
+            validated_mode = validate_split_mode(self.split_mode)
+            validated_spec = validate_split_spec_type(self.spec_type)
+            validated_devices = validate_split_device_order(self.devices)
+        except ValueError as exc:
+            raise RpcClusterConfigError(str(exc)) from exc
+        object.__setattr__(self, "tensor_split", validated_split)
+        object.__setattr__(self, "split_mode", validated_mode)
+        object.__setattr__(self, "spec_type", validated_spec)
+        object.__setattr__(self, "devices", validated_devices)
         fa = str(self.flash_attn or "").strip().lower()
         if fa not in _VALID_FLASH_ATTN:
             raise RpcClusterConfigError(
@@ -420,7 +476,8 @@ class ShardedLlamaServerConfig:
             option = item.split("=", 1)[0].strip().lower()
             if option in _RESERVED_SERVER_OPTIONS:
                 raise RpcClusterConfigError(
-                    f"extra_args must not set {option}; host, port and RPC peers are validated fields"
+                    f"extra_args must not set {option}; host, port, RPC peers, split_mode, "
+                    "spec_type, devices, tensor_split and tensor-override options are policy-controlled"
                 )
         object.__setattr__(self, "extra_args", extras)
 
@@ -442,6 +499,10 @@ class ShardedLlamaServerConfig:
             str(self.port),
             "--rpc",
             rpc_arg,
+            "--split-mode",
+            self.split_mode,
+            "--spec-type",
+            self.spec_type,
             "--ctx-size",
             str(self.ctx_size),
             "--n-gpu-layers",
@@ -455,6 +516,8 @@ class ShardedLlamaServerConfig:
             "--parallel",
             str(self.parallel),
         ]
+        if self.devices:
+            args.extend(["--device", ",".join(self.devices)])
         if self.tensor_split:
             args.extend(["--tensor-split", self.tensor_split])
         if self.no_webui:
@@ -537,6 +600,287 @@ def probe_rpc_peer(
     )
 
 
+# llama.cpp RPC HELLO, as implemented in ggml/src/ggml-rpc/ggml-rpc.cpp from the
+# b11195 pin (protocol 7.0.0) through v1.0.0 (10.0.0) and v1.1.0 (10.0.2):
+#   request : | cmd (1 byte, RPC_CMD_HELLO = 14) | size (uint64 LE) | conn_caps[24] |
+#   response: | size (uint64 LE) | major | minor | patch | flags | conn_caps[24] |
+# All-zero conn_caps advertise plain TCP, so the server never tries an RDMA
+# upgrade. HELLO must be the first command on a connection; a server whose HELLO
+# request has a different size closes the socket instead of replying, which the
+# probe reports as an unanswered HELLO.
+_RPC_CMD_HELLO = 14
+_RPC_CONN_CAPS_SIZE = 24
+_RPC_HELLO_REQUEST = (
+    bytes([_RPC_CMD_HELLO]) + struct.pack("<Q", _RPC_CONN_CAPS_SIZE) + bytes(_RPC_CONN_CAPS_SIZE)
+)
+_RPC_HELLO_MIN_REPLY = 3
+_RPC_HELLO_MAX_REPLY = 4096
+_LLAMA_BUILD_RE = re.compile(r"\(build (\d{1,9}), commit ([0-9A-Za-z]{1,64})\)")
+_LLAMA_BUILD_LEGACY_RE = re.compile(r"^version:\s*(\d{1,9})\s*\(([0-9A-Za-z]{1,64})\)", re.MULTILINE)
+_MAX_VERSION_OUTPUT = 65_536
+
+
+@dataclass(frozen=True)
+class RpcProtocolVersion:
+    """The llama.cpp RPC protocol version an ``rpc-server`` reports in its HELLO reply."""
+
+    major: int
+    minor: int
+    patch: int
+
+    def __str__(self) -> str:
+        return f"{self.major}.{self.minor}.{self.patch}"
+
+
+# Returns a connected socket-like object with sendall(), recv() and close().
+RpcSocketFactory = Callable[[tuple[str, int], float], Any]
+
+
+def _default_rpc_socket(address: tuple[str, int], timeout: float) -> socket.socket:
+    sock = socket.create_connection(address, timeout=timeout)
+    sock.settimeout(timeout)
+    return sock
+
+
+def _recv_exact(sock: Any, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining > 0:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise ConnectionError("rpc-server closed the connection during HELLO")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def read_rpc_protocol_version(
+    peer: RpcPeerEndpoint | str,
+    *,
+    port: int = DEFAULT_RPC_PORT,
+    timeout: float = 3.0,
+    connect_fn: RpcSocketFactory | None = None,
+) -> RpcProtocolVersion:
+    """Send one RPC HELLO to an allowlisted worker and return its protocol version.
+
+    Raises ``OSError`` (including ``ConnectionError`` and ``TimeoutError``) when
+    the worker is unreachable, closes the connection or times out, and
+    ``RpcClusterConfigError`` when the reply is malformed. The connection is
+    closed before returning.
+
+    ``rpc-server`` serves one client at a time, so while a ``llama-server`` holds
+    its connection this probe waits in the accept queue until ``timeout``. Run
+    it before the sharded server starts, not against a live split.
+    """
+    resolved = peer if isinstance(peer, RpcPeerEndpoint) else RpcPeerEndpoint.parse(peer, port=port)
+    connector: RpcSocketFactory = _default_rpc_socket if connect_fn is None else connect_fn
+    sock = connector((resolved.host, resolved.port), float(timeout))
+    try:
+        sock.sendall(_RPC_HELLO_REQUEST)
+        (reply_size,) = struct.unpack("<Q", _recv_exact(sock, 8))
+        if not _RPC_HELLO_MIN_REPLY <= reply_size <= _RPC_HELLO_MAX_REPLY:
+            raise RpcClusterConfigError(
+                f"RPC peer {resolved.address} sent a HELLO reply of {reply_size} bytes; "
+                "it is not a compatible llama.cpp rpc-server"
+            )
+        reply = _recv_exact(sock, int(reply_size))
+    finally:
+        sock.close()
+    return RpcProtocolVersion(major=reply[0], minor=reply[1], patch=reply[2])
+
+
+@dataclass(frozen=True)
+class RpcNodeRecord:
+    """Node inventory entry for one host in a cross-host split.
+
+    ``role`` is ``"main"`` (the machine running ``llama-server --rpc``) or
+    ``"worker"`` (an ``rpc-server``). ``protocol`` is what the worker reported
+    over HELLO (``None`` for the main node, which has no RPC listener).
+    ``llama_cpp_build`` is the ``b<number>-<commit>`` build when known: the main
+    node's comes from ``llama-server --version``; ``rpc-server`` cannot report
+    its build over the wire, so a worker's stays ``None``.
+    """
+
+    endpoint: str
+    role: str
+    reachable: bool
+    protocol: RpcProtocolVersion | None = None
+    llama_cpp_build: str | None = None
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "endpoint": self.endpoint,
+            "role": self.role,
+            "reachable": self.reachable,
+            "rpc_protocol": str(self.protocol) if self.protocol is not None else None,
+            "rpc_proto_major": self.protocol.major if self.protocol is not None else None,
+            "llama_cpp_build": self.llama_cpp_build,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True)
+class RpcLockstepReport:
+    """Result of the RPC version-lockstep check across every node of a split."""
+
+    nodes: tuple[RpcNodeRecord, ...]
+    expected_major: int | None
+    errors: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "expected_rpc_proto_major": self.expected_major,
+            "errors": list(self.errors),
+            "nodes": [node.to_dict() for node in self.nodes],
+        }
+
+
+def parse_llama_build(text: str) -> str | None:
+    """Return ``b<number>-<commit>`` from ``llama-server --version`` output, else ``None``.
+
+    Current llama.cpp prints ``version: <v> (build <n>, commit <hash>)``; older
+    builds printed ``version: <n> (<hash>)``. Both forms are accepted.
+    """
+    raw = str(text or "")[:_MAX_VERSION_OUTPUT]
+    match = _LLAMA_BUILD_RE.search(raw) or _LLAMA_BUILD_LEGACY_RE.search(raw)
+    if match is None:
+        return None
+    return f"b{int(match.group(1))}-{match.group(2)}"
+
+
+VersionRunner = Callable[[Sequence[str], float], str]
+
+
+def _default_version_runner(argv: Sequence[str], timeout: float) -> str:
+    completed = subprocess.run(
+        list(argv),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+        stdin=subprocess.DEVNULL,
+    )
+    return f"{completed.stdout or ''}\n{completed.stderr or ''}"
+
+
+def local_llama_build(
+    install_dir: Path | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    timeout: float = 15.0,
+    run_fn: VersionRunner | None = None,
+) -> str | None:
+    """The main node's llama.cpp build from ``llama-server --version`` in the RPC folder.
+
+    Returns ``None`` when the binary is missing, does not finish within
+    ``timeout``, or prints no recognisable build line.
+    """
+    binary = discover_rpc_binaries(install_dir, env=env)["llama_server"]
+    if binary is None:
+        return None
+    runner = _default_version_runner if run_fn is None else run_fn
+    try:
+        output = runner([str(binary), "--version"], float(timeout))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return parse_llama_build(output)
+
+
+def check_rpc_lockstep(
+    peers: Sequence[RpcPeerEndpoint | str],
+    *,
+    port: int = DEFAULT_RPC_PORT,
+    expected_major: int | None = None,
+    main_build: str | None = None,
+    timeout: float = 3.0,
+    connect_fn: RpcSocketFactory | None = None,
+) -> RpcLockstepReport:
+    """HELLO every worker and check that the whole split speaks one RPC protocol major.
+
+    Fails (non-empty ``errors``) when a worker is unreachable or sends a
+    malformed reply, when workers disagree on the major version, or when any
+    worker's major differs from ``expected_major``. llama.cpp's own client also
+    refuses a server whose minor version is newer than its own; that finer check
+    stays with llama-server because the runtime cannot read the client's minor.
+    """
+    resolved = _coerce_peers(peers, port=port)
+    nodes: list[RpcNodeRecord] = [
+        RpcNodeRecord(endpoint="local", role="main", reachable=True, llama_cpp_build=main_build)
+    ]
+    errors: list[str] = []
+    for peer in resolved:
+        try:
+            version = read_rpc_protocol_version(peer, timeout=timeout, connect_fn=connect_fn)
+        except RpcClusterConfigError as exc:
+            nodes.append(RpcNodeRecord(endpoint=peer.address, role="worker", reachable=True, error=str(exc)))
+            errors.append(str(exc))
+            continue
+        except OSError as exc:
+            detail = str(exc) or type(exc).__name__
+            nodes.append(RpcNodeRecord(endpoint=peer.address, role="worker", reachable=False, error=detail))
+            errors.append(
+                f"RPC peer {peer.address} did not answer the RPC HELLO ({detail}); start rpc-server "
+                "there, check the firewall, or stop the llama-server that already holds it"
+            )
+            continue
+        nodes.append(RpcNodeRecord(endpoint=peer.address, role="worker", reachable=True, protocol=version))
+
+    versions = [(node.endpoint, node.protocol) for node in nodes if node.protocol is not None]
+    if expected_major is not None:
+        for endpoint, version in versions:
+            if version.major != expected_major:
+                errors.append(
+                    f"RPC protocol mismatch: {endpoint} speaks llama.cpp RPC protocol {version} "
+                    f"(major {version.major}) but {RPC_PROTO_MAJOR_ENV}={expected_major}; run the "
+                    "same llama.cpp release on every node of the split"
+                )
+    else:
+        majors = sorted({version.major for _endpoint, version in versions})
+        if len(majors) > 1:
+            listing = ", ".join(f"{endpoint}={version}" for endpoint, version in versions)
+            errors.append(
+                f"RPC protocol mismatch between workers ({listing}); run the same llama.cpp "
+                "release on every node of the split"
+            )
+    return RpcLockstepReport(nodes=tuple(nodes), expected_major=expected_major, errors=tuple(errors))
+
+
+def require_rpc_lockstep(
+    settings: RpcShardingSettings,
+    *,
+    main_build: str | None = None,
+    timeout: float = 3.0,
+    connect_fn: RpcSocketFactory | None = None,
+) -> RpcLockstepReport:
+    """Run :func:`check_rpc_lockstep` for ``settings``; raise on any failure.
+
+    Call this before enabling a cross-host split. ``RpcClusterConfigError``
+    carries every failure, one per line, so the operator sees all mismatched
+    nodes at once.
+    """
+    report = check_rpc_lockstep(
+        settings.peers,
+        port=settings.rpc_port,
+        expected_major=settings.proto_major,
+        main_build=main_build,
+        timeout=timeout,
+        connect_fn=connect_fn,
+    )
+    if not report.ok:
+        raise RpcClusterConfigError(
+            "cross-host RPC split refused:\n" + "\n".join(f"- {error}" for error in report.errors)
+        )
+    return report
+
+
 def probe_sharded_server(
     base_url: str = f"http://{DEFAULT_SERVER_HOST}:{DEFAULT_SERVER_PORT}",
     *,
@@ -610,15 +954,18 @@ def probe_configured_sharded_server(
     return probe_sharded_server(settings.server_url, timeout=timeout, get_fn=get_fn)
 
 
+_PROBE_ERRORS = (OSError, ValueError, http.client.HTTPException, RecursionError)
+
+
 def run_sharded_backend_probe(
     env: Mapping[str, str],
     *,
     get_fn: HttpGetProbe | None = None,
 ) -> ShardedServerHealth | None:
-    """Probe the configured sharded server once and log one line. Never raises."""
+    """Probe the configured sharded server once and log one line."""
     try:
         health = probe_configured_sharded_server(env, get_fn=get_fn)
-    except Exception as exc:
+    except _PROBE_ERRORS as exc:
         _logger.warning("RPC sharded backend probe failed (%s)", type(exc).__name__)
         return None
     if health is None:
@@ -632,6 +979,19 @@ def run_sharded_backend_probe(
         health.error or "-",
     )
     return health
+
+
+def _run_sharded_backend_probe_background(
+    env: Mapping[str, str],
+    *,
+    get_fn: HttpGetProbe | None = None,
+) -> ShardedServerHealth | None:
+    """Keep daemon probe thread failures out of stderr without hiding bugs cleanly."""
+    try:
+        return run_sharded_backend_probe(env, get_fn=get_fn)
+    except Exception:
+        _logger.exception("RPC sharded backend probe raised unexpected error")
+        return None
 
 
 def start_sharded_backend_probe(
@@ -650,7 +1010,7 @@ def start_sharded_backend_probe(
         return False
     try:
         thread = thread_factory(
-            target=run_sharded_backend_probe, args=(snapshot,),
+            target=_run_sharded_backend_probe_background, args=(snapshot,),
             name="sonder-rpc-probe", daemon=True,
         )
         thread.start()
@@ -807,26 +1167,36 @@ __all__ = [
     "DEFAULT_SERVER_PORT",
     "OPENAI_BASE_URL_ENV",
     "RPC_INSTALL_DIR_ENV",
+    "RPC_LINK_CIDR_ENV",
     "RPC_PEERS_ENV",
     "RPC_PORT_ENV",
     "RPC_PROFILES_FILE_ENV",
+    "RPC_PROTO_MAJOR_ENV",
     "RpcClusterConfigError",
     "RpcHardwareProfile",
+    "RpcLockstepReport",
+    "RpcNodeRecord",
     "RpcPeerEndpoint",
     "RpcPeerHealth",
+    "RpcProtocolVersion",
     "RpcShardingSettings",
     "RpcWorkerServerConfig",
     "ShardedLlamaServerConfig",
     "ShardedServerHealth",
+    "check_rpc_lockstep",
     "default_profiles_path",
     "default_rpc_install_dir",
     "discover_rpc_binaries",
     "get_hardware_profile",
     "load_hardware_profiles",
+    "local_llama_build",
+    "parse_llama_build",
     "parse_rpc_peers",
     "probe_configured_sharded_server",
     "probe_rpc_peer",
     "probe_sharded_server",
+    "read_rpc_protocol_version",
+    "require_rpc_lockstep",
     "resolve_ollama_gguf_blob",
     "rpc_sharding_settings_from_env",
     "run_sharded_backend_probe",

@@ -65,10 +65,12 @@ def _owner_of(principal: str) -> str:
 def test_scoped_bypass_is_not_saved_and_does_not_survive_a_restart(_isolated_mode_state):
     state_file = _isolated_mode_state
     with pm.mode_scope("account:bob", ""):
-        pm.set_mode(pm.BYPASS)
+        with pm.attended_mode_change(), pm.attended_bypass_confirm():
+            pm.set_mode(pm.BYPASS)
         assert pm.current_mode() == pm.BYPASS
     with pm.mode_scope("api-key", "s1"):
-        pm.set_mode(pm.BYPASS)
+        with pm.attended_mode_change(), pm.attended_bypass_confirm():
+            pm.set_mode(pm.BYPASS)
     with pm.mode_scope("local-open", "s1"):
         with pytest.raises(ValueError):
             pm.set_mode(pm.BYPASS)
@@ -102,9 +104,10 @@ def test_non_bypass_scopes_still_persist_next_to_an_in_memory_bypass(_isolated_m
     with pm.mode_scope("account:carol", "s"):
         pm.set_mode(pm.PLAN)
     with pm.mode_scope("account:bob", "s"):
-        pm.set_mode(pm.BYPASS)
+        with pm.attended_mode_change(), pm.attended_bypass_confirm():
+            pm.set_mode(pm.BYPASS)
     saved = json.loads(state_file.read_text(encoding="utf-8"))
-    assert saved["scopes"] == {"account:carol|s": pm.PLAN}
+    assert saved["scopes"] == {pm._scope_key("account:carol", "s"): pm.PLAN}
     # In memory the bypass scope still holds for this process.
     with pm.mode_scope("account:bob", "s"):
         assert pm.current_mode() == pm.BYPASS
@@ -168,7 +171,8 @@ def test_http_non_bypass_mode_change_is_process_global():
 
 def test_http_global_change_is_a_safety_stop_for_scoped_bypass():
     with pm.mode_scope("account:bob", "s1"):
-        pm.set_mode(pm.BYPASS)
+        with pm.attended_mode_change(), pm.attended_bypass_confirm():
+            pm.set_mode(pm.BYPASS)
     with pm.mode_scope("account:admin", "mine"):
         pm.set_mode(pm.AUTO)
     payload, status = _post_mode({"mode": "manual"}, headers={"X-Sonder-Session": "mine"})
@@ -179,15 +183,26 @@ def test_http_global_change_is_a_safety_stop_for_scoped_bypass():
         assert pm.current_mode() == pm.MANUAL
 
 
-def test_http_bypass_stays_scoped_to_the_callers_session():
+def test_http_bypass_is_refused_and_writes_no_scope():
     payload, status = _post_mode(
         {"mode": "bypass", "confirm_bypass": True}, headers={"X-Sonder-Session": "chat-1"},
     )
-    assert status == 200 and payload["mode"] == pm.BYPASS
+    assert status == 403 and payload["code"] == "BYPASS_REQUIRES_CONSOLE"
     assert pm.current_mode() == pm.DEFAULT_MODE
-    with pm.mode_scope("account:admin", "chat-2"):
-        assert pm.current_mode() == pm.DEFAULT_MODE
     with pm.mode_scope("account:admin", "chat-1"):
+        assert pm.current_mode() == pm.DEFAULT_MODE
+    assert pm._SCOPED_MODES == {}
+
+
+def test_bypass_scope_not_entered_at_the_console_is_capped_by_the_global_mode():
+    pm.set_mode(pm.PLAN)
+    with pm._LOCK:
+        pm._SCOPED_MODES[pm._scope_key("account:bob", "s1")] = pm.BYPASS
+    with pm.mode_scope("account:bob", "s1"):
+        assert pm.current_mode() == pm.PLAN
+    with pm.mode_scope("account:bob", "s1"):
+        with pm.attended_mode_change(), pm.attended_bypass_confirm():
+            pm.set_mode(pm.BYPASS)  # console entry: the one exempt route
         assert pm.current_mode() == pm.BYPASS
 
 

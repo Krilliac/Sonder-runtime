@@ -467,6 +467,9 @@ loads.
 |---|---|---|
 | `SONDER_RPC_PEERS` | unset (off) | Worker allowlist: comma- or semicolon-separated `ip` or `ip:port`, at most 16. Each must be a literal IPv4 address in `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` or `169.254.0.0/16`; hostnames, IPv6, loopback, `0.0.0.0` and public or documentation addresses fail startup with an error naming the entry. When set, `SONDER_OPENAI_BASE_URL` must be an `http(s)` loopback URL, and `sonder serve` probes that server once in the background after it starts listening and logs the result. |
 | `SONDER_RPC_PORT` | `50052` | The one RPC port every worker uses. An entry without `:port` gets it; an entry naming another port fails startup. Validated even when sharding is off. |
+| `SONDER_RPC_LINK_CIDR` | unset (base allowlist: no restriction; cross-host `Start`: **required**, `>= /24`) | The dedicated private link itself, an IPv4 network such as `10.77.0.0/30` inside one of the allowlist ranges (no host bits set). On the base allowlist (`rpc_peer_allowlist`, `Env`/`Status`/`Health`/`Stop`), unset means no restriction and prefixes `0..32` are accepted; when set, every `SONDER_RPC_PEERS` entry, worker bind address, and `-AllowedPeer` must sit inside it. Cross-host split launch (`start-rpc-sharded.ps1 -Action Start` and `require_cross_host_split_policy`) **requires** `SONDER_RPC_LINK_CIDR` with prefix `/24` or narrower and fails closed when unset or wider. Validated even when sharding is off. |
+| `SONDER_RPC_MAX_RTT_MS` | `2.0` | Cross-host split RTT ceiling in milliseconds (`(0, 100]`), enforced by both `start-rpc-sharded.ps1 -Action Start` (`-MaxRttMs`) and `adapters.inference.rpc_split_policy.parse_max_rtt_ms`. Launch fails closed when a worker's measured median TCP connect RTT exceeds this ceiling or the value is out of range. |
+| `SONDER_RPC_PROTO_MAJOR` | unset (workers must agree) | The llama.cpp RPC protocol major (`RPC_PROTO_MAJOR_VERSION`: 7 at b11195, 10 at v1.0.0 and v1.1.0) every worker must report. `start-rpc-sharded.ps1 -Action Start` and `rpc_cluster.require_rpc_lockstep` send one RPC HELLO to each worker before the split starts and refuse it when a worker does not answer, workers disagree, or a worker differs from this pin. Validated even when sharding is off. |
 | `SONDER_OPENAI_BASE_URL`, `SONDER_OPENAI_MODEL` | unset | Point the `openai-compatible` provider at the sharded server (`http://127.0.0.1:11438` and the launcher's `-Alias`, default `sonder-rpc`). |
 | `SONDER_<TIER>_PROVIDER` | `ollama` | `openai-compatible` routes a tier to the sharded server; `rpc-sharded` and `distributed-rpc` are aliases for it. |
 | `SONDER_RPC_INSTALL_DIR` | `%LOCALAPPDATA%\sonder\llama-rpc` | Folder holding `llama-server` and `rpc-server` (scripts and `discover_rpc_binaries`). |
@@ -954,6 +957,41 @@ can change any file their program writes; they are execution-risk tools
 (`permission_modes.risk_of`), gated as such, not by these path checks. The
 shipped-file pin is what keeps the floor in force when such a write succeeds,
 for the life of the process.
+
+Two of those tools have a read-only form that runs no repository code.
+`format_code` with `check_only` reads no project configuration. Prettier never
+runs through npx: Sonder runs the absolute Prettier named by
+`SONDER_PRETTIER_EXE` (else the one on PATH) only when that file is outside the
+project and every authorized root and `--version` reports 3 or newer, with
+`--no-config --no-editorconfig`, an empty ignore file (so `.prettierignore` and
+`.gitignore` do not apply), a temp working folder outside the root and no
+`NODE_*` or `npm_config_*` variables. Ruff runs with `--isolated --no-cache` and
+Black with an empty `--config`, both from Sonder's own interpreter (or a copy on
+PATH outside every root). Biome, `dotnet format` and `cargo fmt` are refused in
+check mode. For pip, `dependency_update` without packages and
+`dependency_audit` parse every line of `requirements.txt` and its `-r`/`-c`
+includes as strict PEP 508 and hand pip or pip-audit a sanitized flat copy in a
+temp folder outside the root, never the repository's file. URLs, local archive
+names (with or without extras and markers), paths, editables, index and
+find-links overrides and every option other than `--hash`, `--require-hashes`,
+`--pre`, `--prefer-binary` and `--only-binary` are refused.
+
+Check-mode bare tool names (gofmt, clang-format, dart, pip-audit, and Ruff or
+Black when not in Sonder's interpreter) are never looked up through the current
+folder: Sonder searches only absolute PATH folders outside the project and every
+authorized root, and starts the tool with a PATH limited to those folders and
+`NoDefaultCurrentDirectoryInExePath=1`. A `.bat` or `.cmd` shim is refused
+(cmd.exe would resolve the commands it calls from the project folder; install
+the tool as a real executable). Prettier's shim is the exception because it runs
+from a temp folder with that same filtered environment. That environment also
+drops every `PYTHON*` variable and the Node and Dart VM options, sets
+`PYTHONNOUSERSITE=1` and `PYTHONSAFEPATH=1`, and pins `ComSpec` to the system
+`cmd.exe`, so a trusted Python console-script launcher cannot import a project
+`sitecustomize.py` through `PYTHONPATH`. Known limit: a real
+executable started in the project folder (gofmt, clang-format, dart) can still
+load a DLL placed there by the Windows loader's own search order; Sonder does
+not yet run those from a temp folder, because that would rewrite their output
+paths.
 
 The shipped file also holds `restricted_tool_ceiling` (the only tools any
 profile may ever grant: `text_search`, `repository_symbol_index`,
@@ -1520,6 +1558,7 @@ procedure: [runbook](../runbooks/sonder-inference.md)):
 | `SONDER_INFERENCE_STREAM_IDLE_TIMEOUT_SECONDS` | `0` (off) | Streaming only: abort when no bytes (keep-alive comments count) arrive for this long once the response has started; `0`-`86400`. Inside the total timeout above. Off by default because a long prefill can legitimately be silent. The error names the idle timeout and the elapsed seconds. |
 | `SONDER_INFERENCE_STREAM_FIRST_CONTENT_TIMEOUT_SECONDS` | `0` (off) | Streaming only: abort when no content, reasoning or tool-call delta has arrived this long after the request started (empty keep-alive deltas do not count); `0`-`86400`. Pair a long `SONDER_INFERENCE_TIMEOUT_SECONDS` with these for a slow large model that must still fail fast when it stalls. The `openai_compatible` provider reads `SONDER_OPENAI_STREAM_IDLE_TIMEOUT_SECONDS` and `SONDER_OPENAI_STREAM_FIRST_CONTENT_TIMEOUT_SECONDS` (same meaning); it streams only when the caller streams. The idle clock resets per complete line received, so one line trickling in for longer than the limit counts as idle. If the endpoint answers a stream request with a single JSON body, the idle limit bounds the whole body read after the headers, and the first-content limit then acts as a cap on time-to-headers. Streamed turns on `openai_compatible` tiers now send `"stream": true` and `stream_options: {"include_usage": true}`; an endpoint that rejects either field fails with "endpoint rejected request (HTTP 400)". |
 | `SONDER_INFERENCE_HEALTH_TTL_SECONDS` | `5` | health-cache lifetime |
+| `SONDER_NODE_HEALTH_BASELINES` | unset | Optional JSON object mapping inference endpoint URLs to per-node health-gate baselines (`baseline_tg_tps`, `baseline_pp_tps`, `expected_pcie_width`, `expected_pcie_gen`, `spec_bandwidth_gbps`, `max_baseline_context_tokens`) for `SonderInferenceGateway`'s per-node health gate (FED-03). Malformed JSON or invalid fields log a warning and are ignored at gateway construction. |
 | `SONDER_INFERENCE_FALLBACK` | `none` | `ollama` sends requests Inference never received to local Ollama once, and serves schema/tool/image chat steps (which Inference v1 cannot carry) on local Ollama |
 
 Provider bindings apply to every model call that selects a tier. This includes
