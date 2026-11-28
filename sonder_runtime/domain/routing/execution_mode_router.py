@@ -128,10 +128,32 @@ _LOG_LINE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r'^\s*(?:\d{1,3}\.){3}\d{1,3}\s+.*"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+/\S*\s+HTTP/\d'
     ),
-    re.compile(
-        r'^\s*\{.*"(?:level|severity|timestamp|ts|logger|msg|message|event)"\s*:.*\}\s*$'
-    ),
+    # Structured JSON/NDJSON records are matched by _is_json_log_record() with
+    # string tests plus this unanchored key search. The former single regex
+    # ``^\s*\{.*"(?:...)"\s*:.*\}\s*$`` was O(n^2) on one long line holding
+    # many keys and no closing brace (ReDoS on unbounded prompt lines).
 )
+
+_JSON_LOG_KEY_PATTERN = re.compile(
+    r'"(?:level|severity|timestamp|ts|logger|msg|message|event)"\s*:'
+)
+
+# _LOG_LINE_PATTERNS are only evaluated on this many leading characters of a
+# line. They are all ``^``-anchored and identify a log line by its prefix;
+# capping the scanned text bounds per-line regex work regardless of how the
+# engine backtracks on pathological input.
+_LOG_LINE_SCAN_CHARS = 4096
+
+# score_difficulty() bounds its work on huge prompts (chat bodies may be up to
+# 16 MiB). Segmentation sees only whole lines from the first and last
+# _SCORE_SEGMENT_WINDOW_CHARS of the prompt; the difficulty regexes see only the
+# first and last _SCORE_INSTRUCTION_WINDOW_CHARS of the resulting instruction
+# text. Every length threshold used for scoring is far below these windows, so
+# prompts under 2 * window are scored exactly as before.
+_SCORE_SEGMENT_WINDOW_CHARS = 32 * 1024
+_SCORE_INSTRUCTION_WINDOW_CHARS = 32 * 1024
+# Line boundaries recognised by str.splitlines().
+_LINE_BREAK_CHARS = ("\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
 
 _TRACEBACK_HEADER_PATTERN = re.compile(r"^\s*Traceback \(most recent call last\):\s*$")
 _TRACEBACK_FRAME_PATTERN = re.compile(r'^\s*File "[^"]+", line \d+')
@@ -464,14 +486,28 @@ def check_execution_mode(raw: Any) -> ExecutionModeRequest | None:
     return "agent"
 
 
-def _is_log_line(line: str) -> bool:
-    if not line.strip():
+def _is_json_log_record(stripped: str) -> bool:
+    r"""Linear-time equivalent of ``^\s*\{.*"(?:key)"\s*:.*\}\s*$`` on a stripped line."""
+    if len(stripped) < 2 or stripped[0] != "{" or stripped[-1] != "}":
         return False
+    if "\n" in stripped:
+        # ``.`` never crossed a newline in the original pattern.
+        return False
+    # The key must start after the opening brace and end before the closing one.
+    return _JSON_LOG_KEY_PATTERN.search(stripped, 1, len(stripped) - 1) is not None
+
+
+def _is_log_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    head = line[:_LOG_LINE_SCAN_CHARS]
     for pattern in _LOG_LINE_PATTERNS:
-        if pattern.search(line):
+        if pattern.search(head):
             return True
+    if _is_json_log_record(stripped):
+        return True
     if len(line) >= 500:
-        stripped = line.strip()
         if (stripped.startswith("{") and stripped.endswith("}")) or (
             stripped.startswith("[") and stripped.endswith("]")
         ):
@@ -561,6 +597,34 @@ def _strip_unfenced_logs(lines: Sequence[str]) -> tuple[list[str], int, int]:
     return kept, blocks, chars
 
 
+def _bound_text_for_segmentation(text: str) -> str:
+    """Keep whole lines from the head and tail windows of *text*, dropping the middle.
+
+    A line straddling a window edge is kept whole so a single huge pasted blob
+    is still classified as one line; per-line checks are linear in line length,
+    while the per-line overhead is what grows with the line count.
+    """
+    window = _SCORE_SEGMENT_WINDOW_CHARS
+    if len(text) <= 2 * window:
+        return text
+    head_breaks = [pos for pos in (text.find(sep, window) for sep in _LINE_BREAK_CHARS) if pos >= 0]
+    if not head_breaks:
+        return text
+    head_end = min(head_breaks)
+    tail_start = max(text.rfind(sep, 0, len(text) - window) for sep in _LINE_BREAK_CHARS) + 1
+    if tail_start <= head_end:
+        return text
+    return text[:head_end] + "\n" + text[tail_start:]
+
+
+def _bound_instruction_for_scoring(instruction: str) -> str:
+    """Keep the head and tail windows of the instruction prose for regex scoring."""
+    window = _SCORE_INSTRUCTION_WINDOW_CHARS
+    if len(instruction) <= 2 * window:
+        return instruction
+    return instruction[:window] + "\n" + instruction[-window:]
+
+
 def _segment_prompt(text: str) -> _PromptSegments:
     """Separate user instruction prose from fenced payloads and pasted logs."""
     lines = text.splitlines()
@@ -645,8 +709,8 @@ def score_difficulty(
         return "quick", 0.0, ("empty_prompt",), "prose", False
 
     depth = max(0, int(conversation_depth)) if not isinstance(conversation_depth, bool) else 0
-    segments = _segment_prompt(text)
-    instruction = segments.instruction_text
+    segments = _segment_prompt(_bound_text_for_segmentation(text))
+    instruction = _bound_instruction_for_scoring(segments.instruction_text)
 
     # Raw pasted log or raw code block with zero surrounding instruction:
     # keep in standard single-model execution instead of falsely escalating.
