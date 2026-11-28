@@ -392,7 +392,6 @@ class NodeHealthVerdict:
 @dataclass
 class _NodeRecord:
     device_health: DeviceTelemetryHealth | None = None
-    device_observed_at: float = 0.0
     tg_ewma: float | None = None
     pp_ewma: float | None = None
     last_active_bytes: int | None = None
@@ -450,6 +449,15 @@ class NodeHealthGate:
             self._records.move_to_end(clean)
         return rec
 
+    def has_device_observation(self, endpoint: str) -> bool:
+        """True when ``endpoint`` already holds a recorded device-telemetry observation."""
+        clean = str(endpoint or "").strip().rstrip("/")
+        if not clean:
+            return False
+        with self._lock:
+            rec = self._records.get(clean)
+            return rec is not None and rec.device_health is not None
+
     def observe_device_telemetry(
         self,
         endpoint: str,
@@ -475,7 +483,6 @@ class NodeHealthGate:
                 vram_evicted=vram_evicted,
                 host_spill_bytes=host_spill_bytes,
             )
-            rec.device_observed_at = now
             return self._verdict_locked(clean, rec, baseline, now=now)
 
     def observe_inference(

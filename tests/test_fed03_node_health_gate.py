@@ -668,21 +668,25 @@ def test_gateway_routes_away_from_worker_reporting_si_gpu_memory_spill(ca_bundle
     assert status[PRIMARY]["state"] == NODE_STATE_HEALTHY
 
 
-def test_gateway_routes_away_on_threshold_breach_and_vram_evicted_and_ignores_unsupported(
+def test_gateway_trusts_si_spilled_false_on_uma_and_degrades_on_vram_evicted(
     ca_bundle: str,
 ) -> None:
-    # 1. status=='ok' with (shared_bytes - shared_baseline_bytes) > spill_threshold_bytes even if spilled omitted/False
-    threshold_breach = [{
+    # 1. UMA / hybrid dGPU+iGPU node: SI reports status=='ok' with large shared_bytes
+    #    and spilled:False. The gateway must trust SI's authoritative spilled:False
+    #    and keep the node HEALTHY and routable (no shared_bytes recompute override).
+    uma_backend = [{
         "name": "llamacpp",
         "runtime": {
             "gpu_memory": {
                 "probe": "win32_pdh",
                 "status": "ok",
-                "dedicated_bytes": 15 * GIB,
-                "shared_bytes": 512 * 1024 * 1024,
-                "shared_baseline_bytes": 128 * 1024 * 1024,
+                "dedicated_bytes": 512 * 1024 * 1024,
+                "shared_bytes": 8 * GIB,
+                "peak_shared_bytes": 8 * GIB,
+                "shared_baseline_bytes": 0,
                 "spill_threshold_bytes": 256 * 1024 * 1024,
                 "spilled": False,
+                "samples": 4,
             },
         },
     }]
@@ -706,8 +710,8 @@ def test_gateway_routes_away_on_threshold_breach_and_vram_evicted_and_ignores_un
                 backends=unsupported_probe,
             ),
             WORKER: _health_doc(
-                gpus=[_nat08_gpu_json(name="AMD Radeon RX 9060 XT")],
-                backends=threshold_breach,
+                gpus=[_nat08_gpu_json(name="AMD Radeon 780M Graphics", is_uma=True, rebar=None)],
+                backends=uma_backend,
             ),
         },
     )
@@ -717,16 +721,16 @@ def test_gateway_routes_away_on_threshold_breach_and_vram_evicted_and_ignores_un
         env=_gateway_env(ca_bundle),
         wall_clock=lambda: datetime(2026, 11, 27, tzinfo=timezone.utc),
     )
-    ctx = local_owner_context(correlation_id="fed03-spill-thresh", source="mcp", timeout_seconds=30.0)
-    for prompt in ("a", "b"):
+    ctx = local_owner_context(correlation_id="fed03-uma-spilled-false", source="mcp", timeout_seconds=30.0)
+    for prompt in ("a", "b", "c", "d"):
         gw.generate(ModelRequest(prompt=prompt, tier="fast"), ctx)
-    assert hosts.posts == [PRIMARY, PRIMARY]
+    assert WORKER in hosts.posts
     status = gw.node_health_status()
-    assert status[WORKER]["state"] == NODE_STATE_DEGRADED
-    assert "host_spill_detected" in status[WORKER]["reasons"]
+    assert status[WORKER]["state"] == NODE_STATE_HEALTHY
+    assert "host_spill_detected" not in status[WORKER]["reasons"]
     assert status[PRIMARY]["state"] == NODE_STATE_HEALTHY
 
-    # 2. residency.vram_evicted == True degrades even without spill.
+    # 2. residency.vram_evicted == True degrades even when spilled is False.
     evicted_backend = [{
         "name": "llamacpp",
         "runtime": {
@@ -757,6 +761,35 @@ def test_gateway_routes_away_on_threshold_breach_and_vram_evicted_and_ignores_un
         gw2.generate(ModelRequest(prompt=prompt, tier="fast"), ctx)
     assert hosts2.posts == [PRIMARY, PRIMARY]
     assert "vram_evicted" in gw2.node_health_status()[WORKER]["reasons"]
+
+    # 3. Recovery when gpus[] is empty: once a later health snapshot clears spilled:True,
+    #    the gateway re-observes the clean snapshot instead of leaving the node stuck DEGRADED.
+    clock = [100.0]
+    hosts3 = _DualHost(
+        health={
+            PRIMARY: _health_doc(gpus=[_nat08_gpu_json(name="NVIDIA GeForce RTX 5070 Ti")]),
+            WORKER: _health_doc(
+                gpus=[],
+                backends=[{"name": "llamacpp", "runtime": {"gpu_memory": {"status": "ok", "spilled": True}}}],
+            ),
+        },
+    )
+    gw3 = SonderInferenceGateway(
+        transport=hosts3.post,
+        get_transport=hosts3.get,
+        env=_gateway_env(ca_bundle),
+        monotonic=lambda: clock[0],
+        wall_clock=lambda: datetime(2026, 11, 27, tzinfo=timezone.utc),
+    )
+    gw3.generate(ModelRequest(prompt="a", tier="fast"), ctx)
+    assert gw3.node_health_status()[WORKER]["state"] == NODE_STATE_DEGRADED
+    hosts3.health[WORKER] = _health_doc(
+        gpus=[],
+        backends=[{"name": "llamacpp", "runtime": {"gpu_memory": {"status": "ok", "spilled": False}}}],
+    )
+    clock[0] += 60.0
+    gw3.generate(ModelRequest(prompt="b", tier="fast"), ctx)
+    assert gw3.node_health_status()[WORKER]["state"] == NODE_STATE_HEALTHY
 
 
 def test_gateway_routes_away_after_sustained_throughput_drop_via_real_generate_responses(

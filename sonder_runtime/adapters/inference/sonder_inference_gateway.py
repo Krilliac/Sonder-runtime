@@ -1296,11 +1296,13 @@ def parse_node_health_baselines(raw: str) -> dict[str, NodeHealthBaseline]:
 def _extract_runtime_gpu_memory_signals(
     document: Mapping[str, object] | None,
 ) -> tuple[bool, bool]:
-    """Read SI's ``backends[].runtime.gpu_memory`` spill and VRAM-eviction signals.
+    """Read SI's authoritative ``backends[].runtime.gpu_memory`` spill and eviction flags.
 
     Matches Sonder-Inference ``src/backends/backend.cpp`` ``to_json(GpuMemoryStatus)``:
-    ``status``, ``shared_bytes``, ``shared_baseline_bytes``, ``spill_threshold_bytes``,
-    ``spilled`` (bool), and ``residency.vram_evicted`` (bool).
+    trusts SI's ``spilled`` boolean and ``residency.vram_evicted`` boolean directly
+    without re-deriving spill from raw ``shared_bytes`` (SI deliberately reports
+    ``spilled: false`` in UMA mode, hybrid dGPU+iGPU pools, and CPU-only runs even
+    when raw ``shared_bytes`` is large).
     """
     if not isinstance(document, Mapping):
         return False, False
@@ -1320,20 +1322,6 @@ def _extract_runtime_gpu_memory_signals(
             continue
         if gpu_mem.get("spilled") is True:
             spilled = True
-        if gpu_mem.get("status") == "ok":
-            shared = gpu_mem.get("shared_bytes")
-            baseline = gpu_mem.get("shared_baseline_bytes")
-            threshold = gpu_mem.get("spill_threshold_bytes")
-            if (
-                type(shared) is int
-                and type(baseline) is int
-                and type(threshold) is int
-                and shared >= 0
-                and baseline >= 0
-                and threshold > 0
-                and (shared - baseline) > threshold
-            ):
-                spilled = True
         residency = gpu_mem.get("residency")
         if isinstance(residency, Mapping) and residency.get("vram_evicted") is True:
             vram_evicted = True
@@ -1632,7 +1620,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         self._request_ewma_ms: dict[str, float] = {}
         self._locality_table = PrefixLocalityTable(max_entries=locality_max_entries)
         self._last_routing_decision: dict[str, object] | None = None
-        self._observed_health_snaps: dict[str, int] = {}
+        self._observed_health_snaps: dict[str, HealthSnapshot] = {}
         if node_health_gate is not None:
             self._node_health_gate = node_health_gate
         else:
@@ -1667,14 +1655,18 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
     ) -> None:
         if snapshot is None or snapshot.document is None:
             return
-        snap_id = id(snapshot)
         with self._lock:
-            if self._observed_health_snaps.get(endpoint_key) == snap_id:
+            if self._observed_health_snaps.get(endpoint_key) is snapshot:
                 return
-            self._observed_health_snaps[endpoint_key] = snap_id
+            self._observed_health_snaps[endpoint_key] = snapshot
         gpus = parse_health_gpus(snapshot.document)
         host_spilled, vram_evicted = _extract_runtime_gpu_memory_signals(snapshot.document)
-        if gpus or host_spilled or vram_evicted:
+        if (
+            gpus
+            or host_spilled
+            or vram_evicted
+            or self._node_health_gate.has_device_observation(endpoint_key)
+        ):
             self._node_health_gate.observe_device_telemetry(
                 endpoint_key,
                 gpus,
