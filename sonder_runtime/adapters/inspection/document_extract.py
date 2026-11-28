@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 from html.parser import HTMLParser
 from pathlib import Path
+import posixpath
 import re
 import xml.etree.ElementTree as ET
 import zipfile
@@ -60,6 +61,12 @@ _XML_NS_X = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 _XML_NS_DC = "{http://purl.org/dc/elements/1.1/}"
 _XML_NS_CP = "{http://schemas.openxmlformats.org/package/2006/metadata/core-properties}"
 _XML_NS_DCTERMS = "{http://purl.org/dc/terms/}"
+_XML_NS_R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_XML_NS_PKG_REL = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+_XLSX_WORKBOOK_RELS = "xl/_rels/workbook.xml.rels"
+_XLSX_WORKSHEET_RE = re.compile(r"xl/worksheets/[^/]+\.xml")
+_XLSX_NUMBERED_WORKSHEET_RE = re.compile(r"xl/worksheets/sheet\d+\.xml")
+_XLSX_MAX_SHEETS = 20
 
 
 class DocumentExtractError(ValueError):
@@ -113,6 +120,30 @@ def _resolve_target(
             "document exceeds maximum size ceiling (%d > %d bytes)" % (size, MAX_FILE_BYTES)
         )
     return target
+
+
+def _join_capped(parts: Any, limit: int, sep: str = "") -> tuple[str, bool]:
+    """Join string ``parts`` with ``sep`` into at most ``limit`` characters.
+
+    Stops consuming ``parts`` once the limit is reached, so an oversized input
+    never materialises a joined string larger than ``limit``. Returns the text
+    and whether anything was cut.
+    """
+    pieces: list[str] = []
+    total = 0
+    for part in parts:
+        if not part and not sep:
+            continue
+        extra = len(sep) if pieces else 0
+        room = limit - total - extra
+        if room <= 0:
+            return sep.join(pieces), True
+        piece = part[:room]
+        pieces.append(piece)
+        total += extra + len(piece)
+        if len(piece) < len(part):
+            return sep.join(pieces), True
+    return sep.join(pieces), False
 
 
 def _safe_xml_frombytes(raw: bytes) -> ET.Element:
@@ -193,25 +224,46 @@ def _extract_docx(target: Path, max_chars: int, max_items: int) -> dict[str, Any
     headings: list[str] = []
     tables: list[list[list[str]]] = []
     truncated = False
+    # Running character budgets: paragraph text and table cell text each stop
+    # being collected once ``max_chars`` characters have been gathered.
+    para_chars = 0
+    table_chars = 0
+    para_budget_spent = False
+    table_budget_spent = False
 
     body = root.find(f"{_XML_NS_W}body")
     children = list(body) if body is not None else list(root)
     for child in children:
+        if para_budget_spent and table_budget_spent:
+            truncated = True
+            break
         if child.tag == f"{_XML_NS_W}p":
+            if para_budget_spent:
+                continue
             if len(paragraphs) >= max_items:
                 truncated = True
                 continue
-            texts = [t.text for t in child.iter(f"{_XML_NS_W}t") if t.text]
-            line = "".join(texts).strip()
+            if para_chars >= max_chars:
+                para_budget_spent = True
+                truncated = True
+                continue
+            line, cut = _join_capped(
+                (t.text for t in child.iter(f"{_XML_NS_W}t") if t.text), max_chars
+            )
+            line = line.strip()
             if not line:
                 continue
+            truncated = truncated or cut
             paragraphs.append(line)
+            para_chars += len(line) + (1 if len(paragraphs) > 1 else 0)
             p_style = child.find(f"{_XML_NS_W}pPr/{_XML_NS_W}pStyle")
             if p_style is not None:
                 val = str(p_style.attrib.get(f"{_XML_NS_W}val", ""))
                 if val.lower().startswith("heading") or val.lower() == "title":
                     headings.append(line)
         elif child.tag == f"{_XML_NS_W}tbl":
+            if table_budget_spent:
+                continue
             if len(tables) >= max(20, max_items // 5):
                 truncated = True
                 continue
@@ -222,12 +274,22 @@ def _extract_docx(target: Path, max_chars: int, max_items: int) -> dict[str, Any
                     break
                 row_cells: list[str] = []
                 for tc in tr.findall(f"{_XML_NS_W}tc"):
-                    cell_text = "".join(
-                        t.text for t in tc.iter(f"{_XML_NS_W}t") if t.text
-                    ).strip()
+                    if table_chars >= max_chars:
+                        table_budget_spent = True
+                        truncated = True
+                        break
+                    cell_text, cut = _join_capped(
+                        (t.text for t in tc.iter(f"{_XML_NS_W}t") if t.text),
+                        max_chars - table_chars,
+                    )
+                    cell_text = cell_text.strip()
+                    truncated = truncated or cut
+                    table_chars += len(cell_text)
                     row_cells.append(cell_text)
                 if any(row_cells):
                     rows.append(row_cells)
+                if table_budget_spent:
+                    break
             if rows:
                 tables.append(rows)
 
@@ -257,6 +319,63 @@ def _col_ref_to_index(cell_ref: str) -> int:
     return max(0, col - 1)
 
 
+def _resolve_workbook_rel_target(target: str) -> str:
+    """Resolve a ``xl/_rels/workbook.xml.rels`` Target to a ZIP member name."""
+    path = target[1:] if target.startswith("/") else "xl/" + target
+    return posixpath.normpath(path)
+
+
+def _xlsx_sheet_entries(
+    zf: zipfile.ZipFile,
+    names: set[str],
+    budget: list[int],
+    workbook_sheets: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Return ``(sheet name, worksheet member)`` pairs in workbook order.
+
+    Pairing follows the OOXML relationship from each ``<sheet r:id>`` to its
+    worksheet part. Worksheet files no sheet references are appended under their
+    file stem. Without a usable rels part, numbered worksheet files are paired
+    with workbook sheet names by position in numeric (not lexicographic) order.
+    """
+    numbered = sorted(
+        (n for n in names if _XLSX_NUMBERED_WORKSHEET_RE.fullmatch(n)),
+        key=_slide_sort_key,
+    )
+    rel_targets: dict[str, str] = {}
+    if _XLSX_WORKBOOK_RELS in names:
+        rels_root = _safe_xml_frombytes(_read_zip_member(zf, _XLSX_WORKBOOK_RELS, budget))
+        for rel in rels_root.iter(f"{_XML_NS_PKG_REL}Relationship"):
+            if str(rel.attrib.get("TargetMode", "")).lower() == "external":
+                continue
+            rel_id = rel.attrib.get("Id", "")
+            rel_target = rel.attrib.get("Target", "")
+            if rel_id and rel_target:
+                rel_targets[rel_id] = _resolve_workbook_rel_target(rel_target)
+
+    entries: list[tuple[str, str]] = []
+    used: set[str] = set()
+    for sheet_name, rel_id in workbook_sheets:
+        member = rel_targets.get(rel_id)
+        if (
+            member
+            and member in names
+            and member not in used
+            and _XLSX_WORKSHEET_RE.fullmatch(member)
+        ):
+            entries.append((sheet_name, member))
+            used.add(member)
+    if not entries:
+        return [
+            (workbook_sheets[i][0] if i < len(workbook_sheets) else Path(member).stem, member)
+            for i, member in enumerate(numbered)
+        ]
+    for member in numbered:
+        if member not in used:
+            entries.append((Path(member).stem, member))
+    return entries
+
+
 def _extract_xlsx(target: Path, max_chars: int, max_items: int) -> dict[str, Any]:
     budget = [MAX_DECOMPRESSED_BYTES]
     with _open_ooxml(target) as zf:
@@ -266,29 +385,40 @@ def _extract_xlsx(target: Path, max_chars: int, max_items: int) -> dict[str, Any
         if "xl/sharedStrings.xml" in names:
             ss_root = _safe_xml_frombytes(_read_zip_member(zf, "xl/sharedStrings.xml", budget))
             for si in ss_root.findall(f"{_XML_NS_X}si"):
-                shared_strings.append("".join(t.text for t in si.iter(f"{_XML_NS_X}t") if t.text))
+                # Per-string cap: no cell can ever expand past the caller's budget.
+                shared_strings.append(
+                    _join_capped(
+                        (t.text for t in si.iter(f"{_XML_NS_X}t") if t.text), max_chars
+                    )[0]
+                )
 
-        sheet_names: list[str] = []
+        workbook_sheets: list[tuple[str, str]] = []
         if "xl/workbook.xml" in names:
             wb_root = _safe_xml_frombytes(_read_zip_member(zf, "xl/workbook.xml", budget))
             for sheet_el in wb_root.iter(f"{_XML_NS_X}sheet"):
                 nm = sheet_el.attrib.get("name", "")
                 if nm:
-                    sheet_names.append(nm)
+                    workbook_sheets.append(
+                        (nm[:max_chars], sheet_el.attrib.get(f"{_XML_NS_R}id", ""))
+                    )
 
-        sheet_files = sorted(
-            n for n in names
-            if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n)
-        )
-        if not sheet_files:
+        sheet_entries = _xlsx_sheet_entries(zf, names, budget, workbook_sheets)
+        if not sheet_entries:
             raise DocumentExtractError("XLSX archive has no worksheets")
 
         sheets_out: list[dict[str, Any]] = []
         text_lines: list[str] = []
         truncated = False
-        for idx, sf in enumerate(sheet_files[:20]):
+        # Running character budget over the joined ``text``: row building stops
+        # as soon as it is spent instead of truncating after the full walk.
+        text_chars = 0
+        budget_spent = False
+        for s_name, sf in sheet_entries[:_XLSX_MAX_SHEETS]:
+            if text_chars >= max_chars:
+                budget_spent = True
+                break
             s_root = _safe_xml_frombytes(_read_zip_member(zf, sf, budget))
-            s_name = sheet_names[idx] if idx < len(sheet_names) else Path(sf).stem
+            prefix = f"[{s_name}] "
             rows_out: list[list[str]] = []
             sheet_data = s_root.find(f"{_XML_NS_X}sheetData")
             if sheet_data is not None:
@@ -296,13 +426,22 @@ def _extract_xlsx(target: Path, max_chars: int, max_items: int) -> dict[str, Any
                     if len(rows_out) >= max_items:
                         truncated = True
                         break
+                    if text_chars >= max_chars:
+                        budget_spent = True
+                        break
+                    # Upper bound on this row's line: newline + prefix + per-cell
+                    # value and " | " separator.
+                    row_cost = (1 if text_lines else 0) + len(prefix)
                     cells_by_idx: dict[int, str] = {}
                     for c_el in row_el.findall(f"{_XML_NS_X}c"):
                         c_ref = c_el.attrib.get("r", "")
                         c_type = c_el.attrib.get("t", "")
                         val = ""
                         if c_type == "inlineStr":
-                            val = "".join(t.text for t in c_el.iter(f"{_XML_NS_X}t") if t.text)
+                            val = _join_capped(
+                                (t.text for t in c_el.iter(f"{_XML_NS_X}t") if t.text),
+                                max_chars,
+                            )[0]
                         else:
                             v_el = c_el.find(f"{_XML_NS_X}v")
                             raw_v = v_el.text if (v_el is not None and v_el.text is not None) else ""
@@ -313,19 +452,29 @@ def _extract_xlsx(target: Path, max_chars: int, max_items: int) -> dict[str, Any
                                 val = "TRUE" if raw_v == "1" else "FALSE"
                             else:
                                 val = raw_v
+                        val = val[:max_chars]
                         col_i = _col_ref_to_index(c_ref) if c_ref else len(cells_by_idx)
                         cells_by_idx[col_i] = val
+                        row_cost += len(val) + 3
+                        if text_chars + row_cost > max_chars:
+                            # Remaining cells of this row cannot fit the budget.
+                            truncated = True
+                            break
                     if cells_by_idx:
                         width = min(max(cells_by_idx) + 1, 100)
                         row_vals = [cells_by_idx.get(i, "") for i in range(width)]
                         rows_out.append(row_vals)
-                        text_lines.append(f"[{s_name}] " + " | ".join(row_vals))
+                        line = prefix + " | ".join(row_vals)
+                        text_chars += len(line) + (1 if text_lines else 0)
+                        text_lines.append(line)
             sheets_out.append({
                 "name": s_name,
                 "row_count": len(rows_out),
                 "rows": rows_out[:50],
             })
-        if len(sheet_files) > 20:
+            if budget_spent:
+                break
+        if budget_spent or len(sheet_entries) > _XLSX_MAX_SHEETS:
             truncated = True
 
     full_text = "\n".join(text_lines)
@@ -334,7 +483,7 @@ def _extract_xlsx(target: Path, max_chars: int, max_items: int) -> dict[str, Any
         truncated = True
     return {
         "metadata": metadata,
-        "sheet_count": len(sheet_files),
+        "sheet_count": len(sheet_entries),
         "sheets": sheets_out,
         "text": full_text,
         "truncated": truncated,
@@ -361,31 +510,61 @@ def _extract_pptx(target: Path, max_chars: int, max_items: int) -> dict[str, Any
         slides_out: list[dict[str, Any]] = []
         text_lines: list[str] = []
         truncated = len(slide_files) > max_items
+        # Running character budgets: slide text stops slide building once spent;
+        # speaker notes have their own budget of the same size.
+        text_chars = 0
+        notes_chars = 0
         for idx, sf in enumerate(slide_files[:max_items], 1):
+            if text_chars >= max_chars:
+                truncated = True
+                break
             s_root = _safe_xml_frombytes(_read_zip_member(zf, sf, budget))
-            chunks = [
-                t.text.strip()
-                for t in s_root.iter(f"{_XML_NS_A}t")
-                if t.text and t.text.strip()
-            ]
+            chunks: list[str] = []
+            chunk_chars = 0
+            for t in s_root.iter(f"{_XML_NS_A}t"):
+                piece = t.text.strip() if t.text else ""
+                if not piece:
+                    continue
+                room = max_chars - chunk_chars
+                if room <= 0:
+                    truncated = True
+                    break
+                if len(piece) > room:
+                    piece = piece[:room]
+                    truncated = True
+                chunks.append(piece)
+                chunk_chars += len(piece)
             notes_path = f"ppt/notesSlides/notesSlide{idx}.xml"
             notes = ""
             if notes_path in names:
-                n_root = _safe_xml_frombytes(_read_zip_member(zf, notes_path, budget))
-                notes = " ".join(
-                    t.text.strip()
-                    for t in n_root.iter(f"{_XML_NS_A}t")
-                    if t.text and t.text.strip()
-                )
+                if notes_chars >= max_chars:
+                    truncated = True
+                else:
+                    n_root = _safe_xml_frombytes(_read_zip_member(zf, notes_path, budget))
+                    notes, cut = _join_capped(
+                        (
+                            t.text.strip()
+                            for t in n_root.iter(f"{_XML_NS_A}t")
+                            if t.text and t.text.strip()
+                        ),
+                        max_chars - notes_chars,
+                        " ",
+                    )
+                    notes_chars += len(notes)
+                    truncated = truncated or cut
             title = chunks[0] if chunks else ""
-            body_text = "\n".join(chunks[1:]) if len(chunks) > 1 else ""
+            body_text = (
+                _join_capped(chunks[1:], max_chars, "\n")[0] if len(chunks) > 1 else ""
+            )
             slides_out.append({
                 "index": idx,
                 "title": title,
                 "text": body_text,
                 "notes": notes,
             })
-            text_lines.append(f"Slide {idx}: " + " | ".join(chunks))
+            line = f"Slide {idx}: " + " | ".join(chunks)
+            text_chars += len(line) + (1 if text_lines else 0)
+            text_lines.append(line)
 
     full_text = "\n".join(text_lines)
     if len(full_text) > max_chars:
