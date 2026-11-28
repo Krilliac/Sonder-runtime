@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -619,8 +620,9 @@ def test_terminal_input_stage_is_released_when_artifact_collection_fails(
     monkeypatch.setattr(worker, "_collect_artifacts", lambda _receipt: (_ for _ in ()).throw(
         InvalidInput("artifact collection failed")
     ))
-    with pytest.raises(InvalidInput, match="artifact collection failed"):
-        worker.status(started.remote_job_id)
+    receipt = worker.status(started.remote_job_id)
+    assert receipt.state == "succeeded"
+    assert receipt.artifact_error == "artifact collection failed"
     assert not any(path.is_dir() for path in stage_root.iterdir())
 
 
@@ -800,7 +802,7 @@ def test_worker_status_refreshes_terminal_state_and_cancel_reports_cleanup_truth
     )
     started = worker.submit(_envelope())
     assert worker.status(started.remote_job_id).state == "succeeded"
-    assert worker.cancel(started.remote_job_id, reason="done").state == "cancelled"
+    assert worker.cancel(started.remote_job_id, reason="done").state == "succeeded"
 
 
 def test_worker_status_projects_bounded_output_preview_and_watermark(
@@ -922,8 +924,9 @@ def test_artifact_spool_quota_preserves_first_receipt_and_denies_next(
     first = worker.submit(_envelope())
     assert worker.status(first.remote_job_id).artifacts[0].size_bytes == 8
     second = worker.submit(_envelope(idempotency_key="idem-2"))
-    with pytest.raises(InvalidInput, match="artifact spool.*limit"):
-        worker.status(second.remote_job_id)
+    degraded = worker.status(second.remote_job_id)
+    assert degraded.state == "succeeded"
+    assert re.search("artifact spool.*limit", degraded.artifact_error)
     assert worker.read_artifact(first.remote_job_id, "report.json").content == b"abcdefgh"
 
 
@@ -954,8 +957,9 @@ def test_artifact_quota_retry_discards_partial_snapshots(tmp_path: Path) -> None
         min_disk_headroom_bytes=1,
     )
     started = worker.submit(_envelope())
-    with pytest.raises(InvalidInput, match="artifact.*limit"):
-        worker.status(started.remote_job_id)
+    degraded = worker.status(started.remote_job_id)
+    assert degraded.state == "succeeded"
+    assert re.search("artifact.*limit", degraded.artifact_error)
     stage = worker._artifact_root.path / hashlib.sha256(
         started.remote_job_id.encode("utf-8")
     ).hexdigest()
@@ -1390,8 +1394,10 @@ def test_worker_rejects_artifact_handle_opened_outside_workspace_after_path_race
     monkeypatch.setattr(Path, "stat", raced_stat)
     monkeypatch.setattr(jobs_module, "_open_regular_file", raced_open_regular)
 
-    with pytest.raises(InvalidInput, match="workspace"):
-        worker.status(started.remote_job_id)
+    degraded = worker.status(started.remote_job_id)
+    assert degraded.state == "succeeded"
+    assert re.search("workspace", degraded.artifact_error)
+    assert degraded.artifacts == ()
 
 
 def _completed_provider() -> CapturingProvider:
@@ -1497,8 +1503,9 @@ def test_worker_refuses_artifact_larger_than_transport_limit(tmp_path: Path) -> 
     )
     started = worker.submit(_envelope())
 
-    with pytest.raises(InvalidInput, match="transport limit"):
-        worker.status(started.remote_job_id)
+    degraded = worker.status(started.remote_job_id)
+    assert degraded.state == "succeeded"
+    assert re.search("transport limit", degraded.artifact_error)
 
 
 def test_worker_never_publishes_digest_from_mutating_artifact(
@@ -1546,8 +1553,10 @@ def test_worker_never_publishes_digest_from_mutating_artifact(
 
     monkeypatch.setattr(jobs_module.hashlib, "sha256", MutatingDigest)
 
-    with pytest.raises(InvalidInput, match="changed while hashing"):
-        worker.status(started.remote_job_id)
+    degraded = worker.status(started.remote_job_id)
+    assert degraded.state == "succeeded"
+    assert re.search("changed while hashing", degraded.artifact_error)
+    assert degraded.artifacts == ()
 
 
 def test_input_stage_cleanup_uses_python311_compatible_onerror(tmp_path: Path, monkeypatch) -> None:

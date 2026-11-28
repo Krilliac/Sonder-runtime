@@ -69,11 +69,13 @@ _JOB_RECEIPT_FIELDS = {
     "output_preview",
     "output_watermark",
     "output_truncated",
+    "artifact_error",
 }
 _JOB_RECEIPT_REQUIRED_FIELDS = _JOB_RECEIPT_FIELDS - {
     "output_preview",
     "output_watermark",
     "output_truncated",
+    "artifact_error",
 }
 _ARTIFACT_FIELDS = {"name", "size_bytes", "mime_type", "sha256"}
 
@@ -246,6 +248,7 @@ def job_receipt_to_wire(receipt: RemoteJobReceipt) -> dict[str, Any]:
         "output_preview": receipt.output_preview,
         "output_watermark": receipt.output_watermark,
         "output_truncated": receipt.output_truncated,
+        "artifact_error": receipt.artifact_error,
     }
 
 
@@ -277,6 +280,7 @@ def job_receipt_from_wire(payload: Mapping[str, Any]) -> RemoteJobReceipt:
             output_preview=payload.get("output_preview", ""),
             output_watermark=payload.get("output_watermark", 0),
             output_truncated=payload.get("output_truncated", False),
+            artifact_error=payload.get("artifact_error", ""),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"compute job receipt is invalid: {exc}") from exc
