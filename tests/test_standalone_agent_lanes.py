@@ -16,6 +16,7 @@ def app_for(env):
         agent_lanes=lambda: service,
         config=SimpleNamespace(
             state=SimpleNamespace(workspace_roots=(str(root),)),
+            inference=SimpleNamespace(allow_remote=False),
             ollama=SimpleNamespace(allow_remote=False),
         ),
     )

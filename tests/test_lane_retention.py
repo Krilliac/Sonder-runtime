@@ -151,6 +151,7 @@ def test_archive_is_available_through_http_and_repl_surfaces(env):
         agent_lanes=lambda: service,
         config=SimpleNamespace(
             state=SimpleNamespace(workspace_roots=(str(root.parent),)),
+            inference=SimpleNamespace(allow_remote=False),
             ollama=SimpleNamespace(allow_remote=False),
         ),
     )
