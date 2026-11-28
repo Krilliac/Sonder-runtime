@@ -1384,9 +1384,7 @@ def get() -> RuntimeLifecycle:
             if config is None:
                 _instance = RuntimeLifecycle()
             else:
-                inf_startup = getattr(getattr(config, "inference", None), "startup_timeout_seconds", 60)
-                ollama_startup = getattr(getattr(config, "ollama", None), "startup_timeout_seconds", 60)
-                startup_timeout = inf_startup if inf_startup != 60 else ollama_startup
+                startup_timeout = config.inference.startup_timeout_seconds
                 _instance = RuntimeLifecycle(
                     deployment_status=DeploymentStatus(
                         profile=config.deployment.profile,

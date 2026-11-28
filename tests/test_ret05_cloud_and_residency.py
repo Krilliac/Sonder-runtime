@@ -233,9 +233,17 @@ def test_si_v1_models_envelope_parsed_by_catalog_inventory_and_pool():
                         "warnings": [],
                     },
                     "profile": {
+                        "name": "qwen3.6:35b",
+                        "backend": "llamacpp",
                         "context_length": 32768,
                         "configured_context_length": 65536,
-                        "capabilities": ["chat", "completion"],
+                        "parallel": 1,
+                        "cache_type_k": "q8_0",
+                        "cache_type_v": "q8_0",
+                        "flash_attn": "on",
+                        "capabilities": ["speculative"],
+                        "upstream_capabilities": ["tools", "speculative"],
+                        "speculative_types": ["ngram-mod"],
                     },
                 },
             },
@@ -243,13 +251,17 @@ def test_si_v1_models_envelope_parsed_by_catalog_inventory_and_pool():
                 "id": "nomic-embed-text:latest",
                 "object": "model",
                 "owned_by": "sonder-inference",
+                "capabilities": ["embedding"],
                 "sonder": {
                     "backend": "llamacpp",
                     "default": False,
                     "synthetic": False,
                     "profile": {
+                        "name": "nomic-embed-text:latest",
+                        "backend": "llamacpp",
                         "context_length": 2048,
-                        "capabilities": ["embedding"],
+                        "capabilities": [],
+                        "upstream_capabilities": [],
                     },
                 },
             },
@@ -271,8 +283,11 @@ def test_si_v1_models_envelope_parsed_by_catalog_inventory_and_pool():
                         },
                     },
                     "profile": {
+                        "name": "tiny-chat:latest",
+                        "backend": "llamacpp",
                         "context_length": 512,
-                        "capabilities": ["chat", "completion"],
+                        "capabilities": [],
+                        "upstream_capabilities": [],
                     },
                 },
             },
@@ -343,7 +358,7 @@ def test_si_v1_models_envelope_parsed_by_catalog_inventory_and_pool():
 
 
 def test_server_chat_model_unfit_reason_rejects_embedding_only_si_model(monkeypatch):
-    """Round 3: runtime/server.py _CHAT_FITNESS unwraps /v1/models data[] and rejects unfit models."""
+    """Round 4 (R1): _CHAT_FITNESS keeps SI ['speculative'] profiles fit and rejects tiny-context/embedding-only models."""
     import server as srv
 
     si_models = {
@@ -353,9 +368,16 @@ def test_server_chat_model_unfit_reason_rejects_embedding_only_si_model(monkeypa
                 "id": "nomic-embed-text:latest",
                 "object": "model",
                 "owned_by": "sonder-inference",
+                "capabilities": ["embedding"],
                 "sonder": {
                     "backend": "llamacpp",
-                    "profile": {"context_length": 2048, "capabilities": ["embedding"]},
+                    "profile": {
+                        "name": "nomic-embed-text:latest",
+                        "backend": "llamacpp",
+                        "context_length": 2048,
+                        "capabilities": [],
+                        "upstream_capabilities": [],
+                    },
                 },
             },
             {
@@ -365,7 +387,30 @@ def test_server_chat_model_unfit_reason_rejects_embedding_only_si_model(monkeypa
                 "sonder": {
                     "backend": "llamacpp",
                     "runtime": {"context": {"fitted_ctx": 32768}},
-                    "profile": {"context_length": 32768, "capabilities": ["chat", "completion"]},
+                    "profile": {
+                        "name": "qwen3.8:27b",
+                        "backend": "llamacpp",
+                        "context_length": 32768,
+                        "capabilities": ["speculative"],
+                        "upstream_capabilities": ["tools", "speculative"],
+                        "speculative_types": ["ngram-mod"],
+                    },
+                },
+            },
+            {
+                "id": "tiny-model:latest",
+                "object": "model",
+                "owned_by": "sonder-inference",
+                "sonder": {
+                    "backend": "llamacpp",
+                    "runtime": {"context": {"fitted_ctx": 512}},
+                    "profile": {
+                        "name": "tiny-model:latest",
+                        "backend": "llamacpp",
+                        "context_length": 512,
+                        "capabilities": [],
+                        "upstream_capabilities": [],
+                    },
                 },
             },
         ],
@@ -373,10 +418,11 @@ def test_server_chat_model_unfit_reason_rejects_embedding_only_si_model(monkeypa
     monkeypatch.setattr(srv, "_get", lambda path, **_kw: si_models if path == "/v1/models" else {})
     srv._CHAT_FITNESS._cache.clear()
     try:
-        reason = srv.chat_model_unfit_reason("nomic-embed-text:latest")
-        assert reason, "embedding-only model must be refused for chat"
-        assert "embedding" in reason.lower()
         assert srv.chat_model_unfit_reason("qwen3.8:27b") == ""
+        reason = srv.chat_model_unfit_reason("nomic-embed-text:latest")
+        assert reason and "embedding" in reason.lower()
+        tiny_reason = srv.chat_model_unfit_reason("tiny-model:latest")
+        assert tiny_reason and "minimum" in tiny_reason.lower()
     finally:
         srv._CHAT_FITNESS._cache.clear()
 

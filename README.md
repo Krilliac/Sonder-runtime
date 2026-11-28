@@ -185,9 +185,10 @@ before enabling remote access. The runtime enforces the following:
   only through a TLS reverse proxy
   ([secure remote access](docs/runbooks/secure-remote-access.md),
   [security model](docs/wiki/09-security-model.md#network-posture)).
-- **Cloud off by default.** Hosted/cloud tiers and non-loopback Ollama each
+- **Cloud off by default.** Hosted/cloud tiers and non-loopback inference each
   need their own explicit opt-in (`SONDER_ALLOW_CLOUD`,
-  `SONDER_ALLOW_REMOTE_OLLAMA`); see
+  `SONDER_ALLOW_REMOTE_INFERENCE`, with `SONDER_ALLOW_REMOTE_OLLAMA` accepted
+  as a deprecated alias); see
   [security model](docs/wiki/09-security-model.md#network-posture).
 - **Approvals.** Permission modes `plan`, `manual` (default), `acceptEdits`,
   and `auto` control when tool calls need approval. Tools classed `dangerous`

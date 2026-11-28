@@ -25,6 +25,7 @@ from sonder_runtime.domain.chat_tools import (
 )
 from sonder_runtime.domain import public_policy as _public_policy
 from sonder_runtime.domain.cloud_access import LEGACY_ERROR_PREFIX
+from sonder_runtime.domain.common.errors import DependencyUnavailable
 from sonder_runtime.domain.client_tools import (
     CLIENT_DELEGATABLE_TOOLS,
     CLIENT_DELEGATABLE_TOOL_DEFINITIONS,
@@ -364,7 +365,7 @@ def _model_supports_tools(server: Any, model: str) -> bool:
         return True
     try:
         pool = getattr(server, "OLLAMA_POOL", None)
-    except Exception:
+    except DependencyUnavailable:
         pool = None
     cached_verdict = _pool_cached_tool_support(pool, candidates, keys)
     if cached_verdict is not None:
@@ -381,7 +382,7 @@ def _model_supports_tools(server: Any, model: str) -> bool:
     try:
         records_fn = getattr(server, "_runtime_installed_model_records", None)
         has_cap_fn = getattr(server, "_runtime_model_has_capability", None)
-    except Exception:
+    except DependencyUnavailable:
         return False
     if not callable(records_fn) or not callable(has_cap_fn):
         return False

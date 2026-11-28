@@ -57,7 +57,7 @@ def extract_si_context_length(sonder_meta: Mapping[str, Any]) -> int | None:
         configured_profile = _parse_strict_int(raw_profile.get("configured_context_length"))
         if configured_profile is not None:
             return configured_profile
-    return _parse_strict_int(sonder_meta.get("context_length"))
+    return None
 
 
 def parse_model_metadata(
@@ -86,8 +86,6 @@ def parse_model_metadata(
     detail_block: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
     parameter_size: object = profile_meta.get("parameter_size")
     if parameter_size is None:
-        parameter_size = sonder_meta.get("parameter_size")
-    if parameter_size is None:
         parameter_size = detail_block.get("parameter_size")
     if parameter_size is None:
         count = info.get("general.parameter_count")
@@ -96,14 +94,19 @@ def parse_model_metadata(
     geometry = _kv_budget.geometry_from_model_info(info)
     declared = (
         extract_si_context_length(sonder_meta)
-        or _parse_strict_int(sonder_meta.get("num_ctx"))
         or declared_context.declared_from_show(matched)
     )
     return context_length, parameter_size, geometry, declared
 
 
 def extract_chat_fitness_payload(details: object, model: str) -> dict[str, Any]:
-    """Select one model's row from ``/v1/models`` and normalize SI fields for ``chat_model_fitness``."""
+    """Select one model's row from ``/v1/models`` and normalize SI fields for ``chat_model_fitness``.
+
+    Note: real Sonder Inference ``sonder.profile.capabilities`` only carries
+    profile-level flags (such as ``["speculative"]`` or ``[]``), not chat vs.
+    embedding capabilities, so it is intentionally NOT mapped onto fitness
+    ``capabilities``.
+    """
     key = str(model or "").strip().casefold()
     matched = _select_model_row(details, key) if key else None
     if matched is None:
@@ -113,22 +116,6 @@ def extract_chat_fitness_payload(details: object, model: str) -> dict[str, Any]:
     sonder_meta: dict[str, Any] = raw_sonder if isinstance(raw_sonder, dict) else {}
     raw_profile = sonder_meta.get("profile")
     profile_meta: dict[str, Any] = raw_profile if isinstance(raw_profile, dict) else {}
-
-    if "capabilities" not in out:
-        caps = profile_meta.get("capabilities")
-        if caps is None:
-            caps = sonder_meta.get("capabilities")
-        if isinstance(caps, (list, tuple, set, frozenset)):
-            out["capabilities"] = list(caps)
-        else:
-            role = str(
-                profile_meta.get("role")
-                or profile_meta.get("kind")
-                or profile_meta.get("task")
-                or ""
-            ).strip().casefold()
-            if role in {"embedding", "embeddings", "embed"} or profile_meta.get("embedding_only") is True:
-                out["capabilities"] = ["embedding"]
 
     si_ctx = extract_si_context_length(sonder_meta)
     if si_ctx is not None:

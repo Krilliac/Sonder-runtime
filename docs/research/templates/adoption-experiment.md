@@ -57,7 +57,7 @@ Constraints that terminate the experiment regardless of results. Defaults for
 every experiment (extend, never trim):
 
 - No new network egress without an existing consent gate
-  (`SONDER_ALLOW_CLOUD`, `SONDER_ALLOW_REMOTE_OLLAMA`).
+  (`SONDER_ALLOW_CLOUD`, `SONDER_ALLOW_REMOTE_INFERENCE`).
 - No writes to selfmod-protected control-plane files (`selfmod.protected_paths()`).
 - No new third-party runtime dependency without a separate dependency decision.
 - No weakening of a deny-by-default path (`tool_contract.SYSTEM_OPERATION_UNBOUND`,

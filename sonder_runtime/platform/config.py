@@ -2358,6 +2358,8 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                 f"[ollama].trusted_origins entry invalid CIDR: {cidr!r}"
             )
 
+    effective_remote_allowed = config.inference.allow_remote or config.ollama.allow_remote
+
     try:
         parts = urlsplit(config.ollama.url)
         ollama_port = parts.port
@@ -2372,7 +2374,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[ollama].url must include an explicit port")
     elif parts.path not in ("", "/") or parts.query or parts.fragment:
         errors.append("[ollama].url must be an origin without a path, query, or fragment")
-    elif not config.ollama.allow_remote and not _is_loopback_host(parts.hostname):
+    elif not effective_remote_allowed and not _is_loopback_host(parts.hostname):
         errors.append(
             f"[ollama].url host {parts.hostname!r} is not loopback and "
             "allow_remote is false (remote-Ollama consent gate)"
@@ -2425,6 +2427,10 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                         errors.append("[ollama].ca_bundle must name an existing regular file")
 
     canonical_primary = _canonical_ollama_origin(config.ollama.url)
+    canonical_inference = _canonical_ollama_origin(config.inference.url)
+    primary_origins = {
+        origin for origin in (canonical_primary, canonical_inference) if origin is not None
+    }
     canonical_workers: list[str] = []
     for worker in config.ollama.workers:
         try:
@@ -2453,7 +2459,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             )
             continue
         if not _is_loopback_host(worker_parts.hostname):
-            if not config.ollama.allow_remote:
+            if not effective_remote_allowed:
                 errors.append(
                     "[ollama].workers remote entries require the remote-Ollama consent gate"
                 )
@@ -2463,11 +2469,12 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         if canonical_worker is not None:
             canonical_workers.append(canonical_worker)
 
+    roster_primary = canonical_inference or canonical_primary
     canonical_origins = (
-        {canonical_primary} if canonical_primary is not None else set()
+        {roster_primary} if roster_primary is not None else set()
     )
     for canonical_worker in canonical_workers:
-        if canonical_worker == canonical_primary:
+        if canonical_worker in primary_origins:
             errors.append(
                 "[ollama].workers contains a worker that duplicates primary "
                 "after canonical normalization"
