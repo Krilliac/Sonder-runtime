@@ -224,6 +224,9 @@ class ImageHardeningTests(unittest.TestCase):
         class _TargetHandler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
                 target_hits.append(self.path)
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(b"{}")
@@ -243,9 +246,17 @@ class ImageHardeningTests(unittest.TestCase):
 
         class _RedirectHandler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
+                # Drain the request body before replying. Closing with unread request
+                # bytes makes Windows reset the socket, and the client then raised
+                # ConnectionAbortedError (WinError 10053) instead of the HTTPError
+                # this test asserts, under load.
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
                 code = 307 if self.path.endswith("307") else 302
                 self.send_response(code)
                 self.send_header("Location", f"http://127.0.0.1:{target_port}/secret")
+                self.send_header("Content-Length", "0")
                 self.end_headers()
 
             def log_message(self, *_a):
