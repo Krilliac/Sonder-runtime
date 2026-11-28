@@ -57,6 +57,9 @@ def _strip_one_fence(value: str) -> str:
     if not match:
         return value
     body = match.group("body")
+    # More than one fence line means several blocks, not one outer fence.
+    if any(line.lstrip().startswith("```") for line in body.splitlines()):
+        return value
     # A nested fenced payload is usually intentional source content.  Keeping
     # the outer spelling makes repeated normalization idempotent and prevents
     # a second pass from consuming another meaningful fence.
