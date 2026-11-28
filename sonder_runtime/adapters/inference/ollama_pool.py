@@ -538,8 +538,11 @@ def admitted_get(pool, origin: str, path: str, *, timeout: float):
     Yields the open response; the admission (a PROBE slot for a loopback
     origin) is held until the caller has read it and leaves the block.
     """
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
+
+    headers = si_auth_headers(origin)
     with admitted(pool, path, None, origin, deadline=time.monotonic() + timeout):
-        with pool.open_url(urllib.request.Request(origin + path), timeout=timeout) as response:
+        with pool.open_url(urllib.request.Request(origin + path, headers=headers), timeout=timeout) as response:
             yield response
 
 
@@ -775,7 +778,7 @@ def validate_worker_origin(
         logger.debug(f"origin {normalized!r} is remote, checking policy")
         if not allow_remote:
             raise ValueError(
-                "remote worker endpoints require SONDER_ALLOW_REMOTE_OLLAMA=1"
+                "remote worker endpoints require SONDER_ALLOW_REMOTE_INFERENCE=1"
             )
         if parsed.scheme.casefold() != "https":
             raise ValueError("remote worker endpoints must use https")
@@ -1109,10 +1112,15 @@ def _worker_id(origin: str) -> str:
 
 def _model_names(payload) -> tuple[str, ...]:
     names = []
-    for row in (payload or {}).get("models") or ():
+    rows = (
+        payload.get("data")
+        if isinstance(payload, Mapping) and isinstance(payload.get("data"), list)
+        else (payload.get("models") if isinstance(payload, Mapping) else None)
+    )
+    for row in rows or ():
         if not isinstance(row, dict):
             continue
-        name = str(row.get("name") or row.get("model") or "").strip()
+        name = str(row.get("id") or row.get("name") or row.get("model") or "").strip()
         if name and len(name) <= 256:
             names.append(name)
         if len(names) >= _MAX_MODELS_PER_WORKER:
@@ -1221,23 +1229,74 @@ def _parse_show_context_length(show_payload: Mapping[str, Any]) -> int | None:
     return None
 
 
+def _unwrap_model_list_entry(
+    model_name: str, payload: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    """When ``payload`` is a ``/v1/models`` list envelope, select the matching row."""
+    if not isinstance(payload, Mapping):
+        return None
+    rows = payload.get("data")
+    if not isinstance(rows, list):
+        return payload
+    target = str(model_name or "").strip().casefold()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        row_id = str(row.get("id") or row.get("name") or row.get("model") or "").strip().casefold()
+        if row_id == target:
+            return row
+    return {}
+
+
+def _parse_si_sonder_context_length(entry: Mapping[str, Any] | None) -> int | None:
+    if not isinstance(entry, Mapping):
+        return None
+    sonder_meta = entry.get("sonder")
+    if not isinstance(sonder_meta, Mapping):
+        return None
+    runtime_meta = sonder_meta.get("runtime")
+    if isinstance(runtime_meta, Mapping):
+        runtime_ctx = runtime_meta.get("context")
+        if isinstance(runtime_ctx, Mapping):
+            for field_name in ("fitted_ctx", "configured_ctx"):
+                parsed = _positive_int_value(runtime_ctx.get(field_name))
+                if parsed is not None:
+                    return parsed
+    profile_meta = sonder_meta.get("profile")
+    if isinstance(profile_meta, Mapping):
+        for field_name in ("context_length", "configured_context_length"):
+            parsed = _positive_int_value(profile_meta.get(field_name))
+            if parsed is not None:
+                return parsed
+    return _positive_int_value(sonder_meta.get("context_length"))
+
+
 def _extract_show_metadata(
     model_name: str,
     tag_entry: Mapping[str, Any] | None,
     show_payload: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
+    resolved_show = _unwrap_model_list_entry(model_name, show_payload)
     details = {}
     if isinstance(tag_entry, Mapping) and isinstance(tag_entry.get("details"), Mapping):
         details.update(tag_entry["details"])
-    if isinstance(show_payload, Mapping) and isinstance(show_payload.get("details"), Mapping):
-        details.update(show_payload["details"])
-    model_info = show_payload.get("model_info") if isinstance(show_payload, Mapping) else None
-    capabilities_raw = show_payload.get("capabilities") if isinstance(show_payload, Mapping) else None
+    if isinstance(resolved_show, Mapping) and isinstance(resolved_show.get("details"), Mapping):
+        details.update(resolved_show["details"])
+    model_info = resolved_show.get("model_info") if isinstance(resolved_show, Mapping) else None
+    capabilities_raw = resolved_show.get("capabilities") if isinstance(resolved_show, Mapping) else None
+    if capabilities_raw is None and isinstance(tag_entry, Mapping):
+        capabilities_raw = tag_entry.get("capabilities")
     capabilities = tuple(
         sorted({str(item).strip().casefold() for item in capabilities_raw if str(item).strip()})
     ) if isinstance(capabilities_raw, (list, tuple, set, frozenset)) else ()
-    supports_tools: bool | None = ("tools" in capabilities) if capabilities else None
-    context_length = _parse_show_context_length(show_payload) if isinstance(show_payload, Mapping) else None
+    supports_tools: bool | None = (
+        ("tools" in capabilities or "tool_calling" in capabilities) if capabilities else None
+    )
+    context_length = (
+        _parse_show_context_length(resolved_show) if isinstance(resolved_show, Mapping) else None
+    )
+    if context_length is None:
+        context_length = _parse_si_sonder_context_length(resolved_show) or _parse_si_sonder_context_length(tag_entry)
     parameter_billions = _parse_billions(details.get("parameter_size"))
     active_billions = _parse_moe_active_billions(model_name, details, model_info)
     meta: dict[str, Any] = {}
@@ -1298,6 +1357,9 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
         transport = open_url or ollama_endpoint.open_url
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers = {"Content-Type": "application/json"} if data is not None else {}
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
+
+        headers.update(si_auth_headers(origin))
         request = urllib.request.Request(origin + path, data=data, headers=headers, method=method)
         with transport(
             request,
@@ -1337,7 +1399,7 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
         show_payload: dict | None = None
         try:
             show_payload = read(
-                origin, "/api/show", method="POST", body={"model": model_name},
+                origin, "/v1/models", method="GET",
                 request_timeout=show_timeout,
             )
         except Exception:
@@ -1437,46 +1499,46 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
 
     def probe(origin: str) -> dict:
         try:
-            version = read(origin, "/api/version")
+            version = read(origin, "/v1/sonder/health")
         except urllib.error.HTTPError as error:
-            # Older compatible Ollama builds may lack the informational
-            # version route. Model inventory is the load-bearing capability.
             if int(error.code or 0) != 404:
                 raise
             version = {"version": "unknown"}
-        tags = read(origin, "/api/tags")
+        tags = read(origin, "/v1/models")
         models = _model_names(tags)
         tag_entries: dict[str, Mapping[str, Any]] = {}
-        raw_tags = tags.get("models") if isinstance(tags, Mapping) else None
+        raw_tags = (tags.get("data") or tags.get("models")) if isinstance(tags, Mapping) else None
         if isinstance(raw_tags, list):
             for entry in raw_tags:
                 if isinstance(entry, Mapping):
-                    name = str(entry.get("name") or entry.get("model") or "").strip()
+                    name = str(entry.get("id") or entry.get("name") or entry.get("model") or "").strip()
                     if name and name not in tag_entries:
                         tag_entries[name] = entry
 
-        ps_payload: Mapping[str, Any] | None = None
-        try:
-            ps_payload = read(origin, "/api/ps")
-        except Exception:
-            ps_payload = None
+        ps_payload: Mapping[str, Any] | None = version if isinstance(version, Mapping) else None
 
         loaded_models: list[str] = []
-        ps_contexts: dict[str, int] = {}
         if isinstance(ps_payload, Mapping):
             ps_rows = ps_payload.get("models")
             if isinstance(ps_rows, list):
                 for row in ps_rows:
                     if not isinstance(row, Mapping):
                         continue
-                    name = str(row.get("name") or row.get("model") or "").strip()[:256]
+                    is_resident = (
+                        row.get("resident") is True
+                        or str(row.get("state") or "").strip().lower() == "resident"
+                    )
+                    if not is_resident:
+                        continue
+                    name = str(row.get("id") or row.get("name") or row.get("model") or "").strip()[:256]
                     if name:
                         loaded_models.append(name)
-                        ctx = _positive_int_value(row.get("context_length"))
-                        if ctx is not None:
-                            ps_contexts[name] = ctx
 
-        model_contexts: dict[str, int] = dict(ps_contexts)
+        model_contexts: dict[str, int] = {}
+        for name, tag_entry in tag_entries.items():
+            tag_ctx = _parse_si_sonder_context_length(tag_entry)
+            if tag_ctx is not None:
+                model_contexts[name] = tag_ctx
         supports_tools: dict[str, bool] = {}
         model_active_billions: dict[str, float] = {}
         model_metadata: dict[str, dict[str, Any]] = {}
@@ -1501,9 +1563,8 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
             )
             if meta:
                 model_metadata[name] = meta
-            # Loaded models keep the runtime context from /api/ps; the
-            # trained maximum from /api/show only fills models not loaded.
-            if name not in ps_contexts and isinstance(meta.get("context_length"), int):
+            # Prefer runtime/profile context from /v1/models; cached detail fills gaps.
+            if name not in model_contexts and isinstance(meta.get("context_length"), int):
                 model_contexts[name] = meta["context_length"]
             if isinstance(meta.get("supports_tools"), bool):
                 supports_tools[name] = meta["supports_tools"]
@@ -2063,17 +2124,17 @@ class OllamaWorkerPool:
         if acquire is None:
             return lambda: None
         try:
-            return acquire("/api/tags", origin=origin)
+            return acquire("/v1/models", origin=origin)
         except gpu_admission_module.GpuAdmissionRefused as refused:
             raise CapabilityProbeDeferred(
                 "capability probe deferred: %s" % refused.refusal.reason.value) from None
 
     def _show_probe_permit(self, origin: str) -> Callable[[], None]:
-        """Take the PROBE admission for one background /api/show metadata fetch."""
+        """Take the PROBE admission for one background SI metadata fetch."""
         acquire = getattr(self.gpu_admission, "acquire_probe", None)
         if acquire is None:
             return lambda: None
-        return acquire("/api/show", origin=origin)
+        return acquire("/v1/models", origin=origin)
 
     @staticmethod
     def _retryable(error: BaseException) -> bool:
@@ -2825,7 +2886,7 @@ class OllamaWorkerPool:
         for endpoint in endpoints:
             try:
                 rows = model_inventory.inventory_rows(
-                    fetch_tags(endpoint.origin), "/api/tags"
+                    fetch_tags(endpoint.origin), "/v1/models"
                 )
                 names = [row.get("name") or row.get("model") for row in rows]
                 self.note_models(endpoint.origin, names)
@@ -5155,9 +5216,8 @@ def from_environment(primary_origin: str, environment=None) -> OllamaWorkerPool:
         worker_origins = parse_worker_origins(
             env.get("SONDER_OLLAMA_WORKERS"), max_workers=max_workers,
         )
-        allow_remote = str(env.get("SONDER_ALLOW_REMOTE_OLLAMA", "")).strip().lower() in {
-            "1", "true", "yes", "on",
-        }
+        from sonder_runtime.domain import ollama_policy as _ollama_policy
+        allow_remote = _ollama_policy.remote_allowed(env)
         raw_trusted = env.get("SONDER_TRUSTED_ORIGINS", "")
         trusted_origins = tuple(
             v.strip() for v in raw_trusted.replace(";", ",").split(",") if v.strip()

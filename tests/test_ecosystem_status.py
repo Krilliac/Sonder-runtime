@@ -16,17 +16,15 @@ STATUS_KEYS = {
 }
 
 
-def _bindings(default="openai_compatible", embedding="ollama"):
-    tiers = {"fast": "ollama", "general": default, "code": default,
-             "reasoning": default, "vision": "ollama"}
-    if {default, embedding} <= {"ollama", "openai_compatible"}:
+def _bindings(default="openai_compatible", embedding="sonder_inference"):
+    tiers = {"fast": "sonder_inference", "general": default, "code": default,
+             "reasoning": default, "vision": "sonder_inference"}
+    if {default, embedding} <= {"sonder_inference", "openai_compatible"}:
         return ProviderBindings(
             default_generation_provider=default,
             tier_providers=tiers,
             embedding_provider=embedding,
         )
-    # Provider ids this branch does not know yet (sonder_inference arrives
-    # with the provider lane) are read through the same duck-typed surface.
     return SimpleNamespace(
         default_generation_provider=default,
         tier_providers=tiers,
@@ -98,7 +96,7 @@ def test_document_matches_contract_section_9_key_for_key():
         "security", "creative", "draft",
     }
     assert providers["fallbacks"] == {}
-    assert set(providers["status"]) == {"sonder_inference", "ollama"}
+    assert set(providers["status"]) == {"sonder_inference"}
     assert set(providers["status"]["sonder_inference"]) == STATUS_KEYS
     observatory = document["observatory"]
     assert set(observatory) == {"export_enabled", "runtime_stream", "stats", "cors_origins",
@@ -125,7 +123,7 @@ def test_gateway_without_provider_status_reports_unknown():
     document = _build(_bindings(), SimpleNamespace())
     assert document["providers"]["status"] == {
         "openai_compatible": {"provider": "openai_compatible", "state": "unknown"},
-        "ollama": {"provider": "ollama", "state": "unknown"},
+        "sonder_inference": {"provider": "sonder_inference", "state": "unknown"},
     }
     assert document["observatory"]["connect_urls"] == ["http://127.0.0.1:18435"]
 
@@ -137,7 +135,7 @@ def test_providers_missing_from_the_report_are_unknown_and_bad_states_are_normal
     status = _build(_bindings(), gateway)["providers"]["status"]
     assert status["openai_compatible"]["state"] == "unknown"
     assert status["openai_compatible"]["provider"] == "openai_compatible"
-    assert status["ollama"] == {"provider": "ollama", "state": "unknown"}
+    assert status["sonder_inference"] == {"provider": "sonder_inference", "state": "unknown"}
 
 
 def test_a_failing_status_surface_is_reported_not_raised():
@@ -145,17 +143,15 @@ def test_a_failing_status_surface_is_reported_not_raised():
         raise RuntimeError("boom")
 
     status = _build(_bindings(), SimpleNamespace(provider_status=broken))["providers"]["status"]
-    assert status["ollama"]["state"] == "unknown"
-    assert "RuntimeError" in status["ollama"]["detail"]
+    assert status["sonder_inference"]["state"] == "unknown"
+    assert "RuntimeError" in status["sonder_inference"]["detail"]
 
 
 def test_warnings_cover_embedding_origins_and_legacy_surfaces():
     document = _build(_bindings("sonder_inference", embedding="sonder_inference"),
                       SimpleNamespace(), origins=())
     warnings = " | ".join(document["observatory"]["warnings"])
-    assert "SONDER_EMBEDDING_PROVIDER=ollama" in warnings
     assert "SONDER_OBSERVATORY_ORIGINS" in warnings
-    assert "agents, autopilot, fleet" in warnings
 
 
 def test_disabled_export_without_a_status_surface_is_not_found():
@@ -196,6 +192,4 @@ def test_a_global_origin_does_not_hide_the_missing_observatory_origin():
 
 def test_bound_provider_warning_names_remaining_ollama_contracts():
     warnings = " | ".join(_build(_bindings(), SimpleNamespace())["observatory"]["warnings"])
-    for surface in ("exact model pins", "strict sonder alias", "fanout", "image/schema", "single-send canaries"):
-        assert surface in warnings
     assert "still use Ollama" not in warnings

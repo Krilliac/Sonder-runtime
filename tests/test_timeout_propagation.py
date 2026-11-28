@@ -9,6 +9,9 @@ def _capture_posts(monkeypatch, seen):
     timeout, 300s cache) also goes through _post when its cache is cold, which
     made bare timeout-list assertions depend on which test ran first.
     """
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._tier_generation, "scope", lambda *a, **k: server.contextlib.nullcontext())
     monkeypatch.setattr(
         server,
         "_post",
@@ -18,7 +21,7 @@ def _capture_posts(monkeypatch, seen):
 
 
 def _chat_timeouts(seen):
-    return [timeout for path, timeout in seen if path == "/api/chat"]
+    return [timeout for path, timeout in seen if path in ("/api/chat", "/v1/chat/completions")]
 
 
 def test_make_generate_propagates_timeout(monkeypatch):

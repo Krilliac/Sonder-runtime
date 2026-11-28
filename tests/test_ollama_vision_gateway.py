@@ -36,8 +36,13 @@ def test_ollama_vision_gateway_sends_bounded_image_payload(monkeypatch):
         local_owner_context(correlation_id="ollama-vision"),
     )
     assert result.text == "looks local"
+    assert seen["url"].endswith("/v1/chat/completions")
     assert seen["payload"]["model"] == "llava-local"
-    assert base64.b64decode(seen["payload"]["messages"][1]["images"][0]) == b"pixels"
+    content = seen["payload"]["messages"][1]["content"]
+    image_part = next(part for part in content if part.get("type") == "image_url")
+    data_uri = image_part["image_url"]["url"]
+    assert data_uri.startswith("data:image/png;base64,")
+    assert base64.b64decode(data_uri.split(",", 1)[1]) == b"pixels"
 
 
 def test_ollama_vision_gateway_refuses_remote_endpoint(monkeypatch):

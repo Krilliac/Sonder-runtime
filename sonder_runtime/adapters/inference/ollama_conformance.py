@@ -77,10 +77,23 @@ class OllamaConformanceProbe:
             if remaining <= 0:
                 raise TimeoutError("Ollama conformance wall budget exhausted")
             sent = ticket.payload  # the decided body (INHERIT_PINNED names the window)
-            body = None if sent is None else json.dumps(sent, separators=(",", ":")).encode()
+            is_chat = path == "/v1/chat/completions"
+            if sent is not None and is_chat:
+                from sonder_runtime.adapters.inference.si_chat_codec import to_openai_chat_payload
+
+                wire_payload: Mapping[str, object] = to_openai_chat_payload(sent)
+            else:
+                wire_payload = sent  # type: ignore[assignment]
+            from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
+
+            body = None if wire_payload is None else json.dumps(wire_payload, separators=(",", ":")).encode()
+            headers: dict[str, str] = {"Content-Type": "application/json"} if body is not None else {}
+            headers.update(si_auth_headers(self.base_url))
+            if is_chat:
+                headers["X-Sonder-Local-Only"] = "1"
             request = urllib.request.Request(
                 self.base_url + path, data=body,
-                headers={"Content-Type": "application/json"} if body is not None else {},
+                headers=headers,
                 method="POST" if body is not None else "GET",
             )
             with open_url(request, timeout=min(timeout, remaining), allow_remote=False) as response:
@@ -90,53 +103,33 @@ class OllamaConformanceProbe:
         value = json.loads(raw.decode("utf-8"))
         if not isinstance(value, dict):
             raise ValueError("Ollama response must be an object")
+        if is_chat:
+            from sonder_runtime.adapters.inference.si_chat_codec import from_openai_chat_response
+
+            value = from_openai_chat_response(value)
         return value
 
     def read_identity(self) -> BackendIdentity:
-        """Read and validate the host identity surrounding a probe battery."""
+        """Read and validate Sonder Inference host identity via ``/v1/sonder/identity``."""
+        import urllib.parse
+
         if not self._running:
             self._deadline = time.monotonic() + 5.0
-        version = self._request("/api/version", None, timeout=5)
-        tags = self._request("/api/tags", None, timeout=5)
-        rows = tags.get("models")
-        row = next((item for item in rows or () if isinstance(item, dict)
-                    and _tagged(str(item.get("name") or item.get("model") or ""))
-                    == _tagged(self.model)), None)
-        if row is None:
-            raise ValueError("Ollama model is absent from /api/tags")
-        digest = str(row.get("digest") or "")
-        if digest.startswith("sha256:"):
-            digest = digest[7:]
-        if len(digest) != 64 or any(c not in "0123456789abcdefABCDEF" for c in digest):
-            raise ValueError("Ollama model digest is not a SHA-256 value")
-        show = self._request("/api/show", {"name": self.model}, timeout=5)
-        details = show.get("details") if isinstance(show.get("details"), dict) else {}
-        info = show.get("model_info") if isinstance(show.get("model_info"), dict) else {}
-        template = show.get("template") or ""
-        tokenizer = info.get("general.architecture") or details.get("family") or self.model
-        contexts = [value for key, value in info.items() if key.endswith(".context_length")
-                    and type(value) is int and value > 0]
-        if not contexts:
-            raise ValueError("Ollama identity lacks advertised context metadata")
-        context = min(contexts)
-        version_value = str(version.get("version") or "").strip()
-        quantization = str(details.get("quantization_level") or details.get("quantization") or "").strip()
-        if not version_value or not quantization:
-            raise ValueError("Ollama identity lacks measured version or quantization")
-        # Ollama does not expose a physical device identifier in /api/show.
-        # Bind to this host and endpoint, without claiming GPU/CPU attestation.
-        hardware = "host-origin:" + _digest((platform.node(), platform.machine(), self.base_url))
-        advertised_context = max(1, context)
-        if self.context_tokens > advertised_context:
-            raise ValueError("requested probe context exceeds Ollama model context")
+        query = "/v1/sonder/identity?model=" + urllib.parse.quote(self.model, safe="")
+        payload = self._request(query, None, timeout=5)
+        raw = payload.get("backend_identity")
+        if not isinstance(raw, dict):
+            raise ValueError("Sonder Inference identity is unavailable for model %r" % self.model)
         return BackendIdentity(
-            backend="ollama", model=self.model, model_digest=digest.lower(),
-            quantization=quantization, backend_version=version_value,
-            tokenizer_digest=_digest(("ollama-tokenizer-binding:", digest, tokenizer)),
-            template_digest=_digest(template),
-            # Evidence is bound to the context actually sent in every request,
-            # while the model metadata remains an admission upper bound.
-            context_tokens=self.context_tokens, hardware=hardware,
+            backend=str(raw.get("backend") or "llamacpp"),
+            model=self.model,
+            model_digest=str(raw.get("model_digest") or "").lower(),
+            quantization=str(raw.get("quantization") or ""),
+            backend_version=str(raw.get("backend_version") or ""),
+            tokenizer_digest=str(raw.get("tokenizer_digest") or ""),
+            template_digest=str(raw.get("template_digest") or ""),
+            context_tokens=int(raw.get("context_tokens") or self.context_tokens),
+            hardware=str(raw.get("hardware") or ("host-origin:" + _digest((platform.node(), platform.machine(), self.base_url)))),
         )
 
     @staticmethod
@@ -167,7 +160,7 @@ class OllamaConformanceProbe:
                    "options": {"temperature": 0, "num_ctx": self.context_tokens,
                                "num_predict": 128}}
         payload.update(options)
-        response = self._request("/api/chat", payload, timeout=max(0.1, self._deadline - time.monotonic()))
+        response = self._request("/v1/chat/completions", payload, timeout=max(0.1, self._deadline - time.monotonic()))
         if not isinstance(response.get("model"), str) or _tagged(response["model"]) != _tagged(self.model):
             raise ValueError("Ollama response model mismatch")
         self._check_identity()
@@ -253,7 +246,7 @@ class OllamaConformanceProbe:
                                         cases=PROTOCOL_CASES,
                                         propagate=(gpu_admission.GpuAdmissionRefused,))
         self._check_identity()
-        return BackendConformanceRecord("ollama", self.model, protocol.checked_at,
+        return BackendConformanceRecord(self._identity.backend, self.model, protocol.checked_at,
                                         (chat, *protocol.results), probe_version=3,
                                         synthetic=False, identity=self._identity)
 

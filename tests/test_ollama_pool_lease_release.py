@@ -355,7 +355,7 @@ class _LocalCall:
         deadline = time.monotonic() + budget
 
         def sender(origin):
-            with ollama_pool.admitted(pool, "/api/chat", body, origin, deadline=deadline):
+            with ollama_pool.admitted(pool, "/v1/chat/completions", body, origin, deadline=deadline):
                 self.transport.append((origin, _primary(pool).inflight))
                 return {"ok": True}
 
@@ -529,7 +529,7 @@ def test_on_queue_runs_once_and_a_failing_callback_does_not_break_admission(tmp_
         raise RuntimeError("callback failure")
 
     admitted = []
-    with service.admit("/api/chat", _local_body(), origin=PRIMARY,
+    with service.admit("/v1/chat/completions", _local_body(), origin=PRIMARY,
                        deadline=time.monotonic() + 20, on_queue=on_queue):
         admitted.append(True)
     assert admitted == [True]

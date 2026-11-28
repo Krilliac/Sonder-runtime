@@ -168,7 +168,7 @@ def test_production_entry_points_keep_accepting_legitimate_origins(value, origin
     remote = (value, origin) in _LEGIT_REMOTE
     environment = {"SONDER_ALLOW_REMOTE_OLLAMA": "1"} if remote else {}
     assert ollama_endpoint.configured_origin(value, allow_remote=remote) == origin
-    assert ollama_endpoint.client_environment(dict(environment, OLLAMA_HOST=value))["OLLAMA_HOST"] == origin
+    assert ollama_endpoint.client_environment(dict(environment, SONDER_INFERENCE_BASE_URL=value))["SONDER_INFERENCE_BASE_URL"] == origin
     assert ollama_pool.validate_worker_origin(value, allow_remote=remote) == origin
     assert ollama_pool.from_environment(value, dict(environment)).configured_origins == (origin,)
     if origin != "http://127.0.0.1:11434":

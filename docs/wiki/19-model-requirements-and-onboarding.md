@@ -307,8 +307,10 @@ Sizing guidance per VRAM band lives in the
 Two independent consent gates, neither on by default (full description:
 [Model Tiers & Gateway](08-model-tiers-and-gateway.md#remote--cloud-opt-in)):
 
-- **Remote Ollama** — a non-loopback `OLLAMA_HOST` is rejected unless
-  `SONDER_ALLOW_REMOTE_OLLAMA=1`, and a remote endpoint must use `https`.
+- **Remote inference** — a non-loopback `[inference].url` /
+  `SONDER_INFERENCE_BASE_URL` (or worker) is rejected unless
+  `SONDER_ALLOW_REMOTE_INFERENCE=1` (`SONDER_ALLOW_REMOTE_OLLAMA=1` is a
+  deprecated alias), and a remote endpoint must use `https`.
   Setup, including fronting Ollama with a Caddy reverse proxy:
   [remote-ollama-caddy](../runbooks/remote-ollama-caddy.md#coordinator-settings).
 - **Hosted cloud tiers** — `cloud-code` and `cloud-general` run on Ollama's

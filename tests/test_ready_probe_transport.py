@@ -30,7 +30,7 @@ def _recording_server(seen: list[str]) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             seen.append(self.path)
-            body = b'{"models": []}'
+            body = b'{"status": "ready", "models": []}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -64,7 +64,7 @@ def runtime_lifecycle(tmp_path, monkeypatch):
 def _ollama_state(instance) -> DependencyState:
     return next(
         dep.state for dep in instance.tracker.snapshot().dependencies
-        if dep.name == "ollama"
+        if dep.name in ("inference", "sonder_inference", "sonder-inference", "ollama")
     )
 
 
@@ -75,7 +75,7 @@ def test_ready_probe_ignores_environment_proxies(runtime_lifecycle, monkeypatch)
     proxy = _recording_server(proxy_seen)
     try:
         monkeypatch.setenv(
-            "OLLAMA_HOST", f"http://127.0.0.1:{ollama.server_address[1]}"
+            "SONDER_INFERENCE_BASE_URL", f"http://127.0.0.1:{ollama.server_address[1]}"
         )
         proxy_url = f"http://127.0.0.1:{proxy.server_address[1]}"
         monkeypatch.setenv("HTTP_PROXY", proxy_url)
@@ -92,7 +92,7 @@ def test_ready_probe_ignores_environment_proxies(runtime_lifecycle, monkeypatch)
             server.server_close()
 
     assert proxy_seen == []
-    assert ollama_seen == ["/api/tags"]
+    assert ollama_seen == ["/v1/sonder/health"]
     assert _ollama_state(runtime_lifecycle) is DependencyState.READY
 
 
@@ -132,7 +132,7 @@ def test_ready_probe_targets_the_typed_endpoint_not_ollama_host(
 
     assert bypassed == []
     assert decoy_seen == []
-    assert typed_seen == ["/api/tags"]
+    assert typed_seen == ["/v1/sonder/health"]
     assert healthy is True
     assert _ollama_state(runtime_lifecycle) is DependencyState.READY
 
@@ -157,9 +157,9 @@ def test_ready_probe_verifies_https_with_the_configured_ca_bundle(
 ):
     bundle = tmp_path / "ollama-ca.pem"
     bundle.write_text("placeholder", encoding="ascii")
-    origin = "https://ollama.example.test:11434"
-    monkeypatch.setenv("OLLAMA_HOST", origin)
-    monkeypatch.setenv(ollama_endpoint.REMOTE_OPT_IN, "1")
+    origin = "https://ollama.example.test:11437"
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", origin)
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_INFERENCE", "1")
     monkeypatch.delenv("SONDER_OLLAMA_CA_BUNDLE", raising=False)
 
     contexts: list[dict] = []
@@ -170,6 +170,9 @@ def test_ready_probe_verifies_https_with_the_configured_ca_bundle(
 
     class Response:
         status = 200
+
+        def read(self, *_args):
+            return b'{"status": "ready"}'
 
         def __enter__(self):
             return self
@@ -208,7 +211,7 @@ def test_ready_probe_verifies_https_with_the_configured_ca_bundle(
     assert healthy is True
     # Only the configured bundle anchors trust for the probe.
     assert contexts == [{"cafile": str(bundle)}]
-    assert opened == [(origin + "/api/tags", 2)]
+    assert opened == [(origin + "/v1/sonder/health", 2)]
     # The probe's opener carries the no-proxy handler and the bundle context.
     (handlers,) = handlers_seen
     assert ollama_endpoint._PROXY_HANDLER in handlers

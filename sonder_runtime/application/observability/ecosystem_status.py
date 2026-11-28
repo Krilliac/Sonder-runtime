@@ -324,11 +324,6 @@ def ecosystem_warnings(
     """
     warnings: list[str] = []
     dedicated = list(observatory_origins if dedicated_origins is None else dedicated_origins)
-    if projection.get("embedding_provider") == "sonder_inference":
-        warnings.append(
-            "embedding_provider is sonder_inference, which does not serve "
-            "embeddings; set SONDER_EMBEDDING_PROVIDER=ollama"
-        )
     if export_enabled and not dedicated:
         if observatory_origins:
             warnings.append(
@@ -354,15 +349,6 @@ def ecosystem_warnings(
                 "provider %s is synthetic (mock backend): output is not a "
                 "quality or performance signal" % name
             )
-    generation = [projection.get("default_generation_provider"),
-                  *dict(projection.get("tier_providers") or {}).values()]
-    if any(name and name != "ollama" for name in generation):
-        warnings.append(
-            "provider bindings apply to tier-based chat, agents, autopilot, fleet "
-            "and helpers; exact model pins, the strict sonder alias and durable "
-            "fanout remain Ollama routes. Native image/schema requests and sealed "
-            "single-send canaries require Ollama-bound tiers"
-        )
     return warnings
 
 

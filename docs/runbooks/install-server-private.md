@@ -241,11 +241,12 @@ Sonder needs a local Ollama and a base model aliased to `sonder:latest`.
 1. Install and start Ollama from its own documentation (<https://ollama.com>);
    Sonder does not install it. The unit orders itself after `ollama.service`
    (`After=` in `packaging/systemd/sonder.service`).
-2. Unless you deliberately consent to a remote Ollama, it must be the loopback
-   one: `OLLAMA_HOST` unset or `127.0.0.1:11434`. A non-loopback `OLLAMA_HOST`
-   is blocked without remote consent (`SONDER_ALLOW_REMOTE_OLLAMA`,
-   `domain/ollama_policy.py:17`; applied in
-   `adapters/inference/ollama_endpoint.py:206-216`) and `setup_alias.py` then
+2. Unless you deliberately consent to a remote inference host, it must be the
+   loopback one: `[inference].url` / `SONDER_INFERENCE_BASE_URL` unset or
+   `127.0.0.1:11437`. A non-loopback inference endpoint is blocked without
+   remote consent (`SONDER_ALLOW_REMOTE_INFERENCE`; `SONDER_ALLOW_REMOTE_OLLAMA`
+   is a deprecated alias with a warning, `domain/ollama_policy.py`; applied in
+   `adapters/inference/ollama_endpoint.py`) and `setup_alias.py` then
    exits 4. `sudo` normally resets the environment, so a shell-level
    `OLLAMA_HOST` rarely reaches `sudo -u sonder` anyway. For a remote worker
    see [Remote Ollama behind Caddy](remote-ollama-caddy.md).

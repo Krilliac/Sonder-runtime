@@ -20,9 +20,9 @@ def test_a_mismatch_logs_one_error_and_counts(monkeypatch, tmp_path, caplog):
     pool = wire(monkeypatch, server, fake, service)
     caplog.set_level(logging.DEBUG)
 
-    server._post("/api/chat", chat_body(16384))
-    server._post("/api/chat", chat_body(8192))
-    server._post("/api/chat", chat_body(8192))
+    server._post("/v1/chat/completions", chat_body(16384))
+    server._post("/v1/chat/completions", chat_body(8192))
+    server._post("/v1/chat/completions", chat_body(8192))
 
     assert len(_records(caplog, logging.ERROR, "num_ctx mismatch")) == 1
     assert metrics.mismatches == 1
@@ -36,8 +36,8 @@ def test_a_server_that_omits_context_length_is_unverifiable_once(monkeypatch, tm
     wire(monkeypatch, server, fake, make_service(tmp_path, fake))
     caplog.set_level(logging.DEBUG)
 
-    server._post("/api/chat", chat_body(16384))
-    server._post("/api/chat", chat_body(16384))
+    server._post("/v1/chat/completions", chat_body(16384))
+    server._post("/v1/chat/completions", chat_body(16384))
 
     assert _records(caplog, logging.ERROR, "num_ctx mismatch") == []
     assert len(_records(caplog, logging.INFO, "unverifiable")) == 1
@@ -49,7 +49,7 @@ def test_a_matching_window_is_silent(monkeypatch, tmp_path, caplog):
     wire(monkeypatch, server, fake, make_service(tmp_path, fake, metrics=metrics))
     caplog.set_level(logging.DEBUG)
 
-    server._post("/api/chat", chat_body(16384))
+    server._post("/v1/chat/completions", chat_body(16384))
 
     assert _records(caplog, logging.ERROR, "num_ctx mismatch") == []
     assert metrics.mismatches == 0
@@ -62,7 +62,7 @@ def test_the_check_runs_on_the_first_load_even_inside_the_interval(monkeypatch, 
     wire(monkeypatch, server, fake, service)
     caplog.set_level(logging.DEBUG)
 
-    server._post("/api/chat", chat_body(16384))
+    server._post("/v1/chat/completions", chat_body(16384))
 
     assert len(_records(caplog, logging.ERROR, "num_ctx mismatch")) == 1
 
@@ -78,7 +78,7 @@ def test_mismatch_logging_stays_bounded_once_the_tuple_set_is_full(monkeypatch, 
 
     for model, effective in ((MODEL, 8192), ("other:1b", 4096), ("third:1b", 2048)):
         fake.ps_context_override[model] = effective
-        server._post("/api/chat", chat_body(16384, model=model))
+        server._post("/v1/chat/completions", chat_body(16384, model=model))
 
     # The first tuple fills the bound; later mismatches are neither logged nor counted.
     assert len(_records(caplog, logging.ERROR, "num_ctx mismatch")) == 1

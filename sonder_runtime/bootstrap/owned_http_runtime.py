@@ -60,7 +60,6 @@ def _run(root, namespace, job_id, workspace):
 
     from ..platform.config import SonderConfig, Secrets
     from ..adapters.filesystem.atomic_json import write_json_atomic
-    from ..adapters.inference import ollama_endpoint
 
     config = SonderConfig()
     config = replace(
@@ -71,13 +70,12 @@ def _run(root, namespace, job_id, workspace):
         state=replace(
             config.state, home=str(root / "state"), workspace_roots=(str(workspace),)
         ),
-        ollama=replace(config.ollama, url=f"http://127.0.0.1:{selected['port']}"),
+        inference=replace(config.inference, url=f"http://127.0.0.1:{selected['port']}"),
         secrets=Secrets(api_key=secrets.token_hex(32)),
         private_source_paths=(str(root),),
     )
     # This endpoint belongs to this disposable runtime; no installed model
     # service, configured remote worker or model call is contacted.
-    ollama_endpoint.configure_typed_endpoint(config.ollama.url)
     from ..platform import paths
 
     paths.configure_home(config.state.home)
@@ -89,9 +87,10 @@ def _run(root, namespace, job_id, workspace):
             "SONDER_PORT": str(selected["port"]),
             "SONDER_AUTH_MODE": "api-key",
             "SONDER_API_KEY": config.secrets.api_key,
-            "OLLAMA_HOST": config.ollama.url,
-            "SONDER_OLLAMA_WORKERS": "",
-            "SONDER_ALLOW_REMOTE_OLLAMA": "0",
+            "SONDER_INFERENCE_BASE_URL": config.inference.url,
+            "SONDER_INFERENCE_PRIVATE_WORKERS": "",
+            "SONDER_ALLOW_REMOTE_INFERENCE": "0",
+            "SONDER_ALLOW_CLOUD": "0",
         }
     )
     from ..adapters.persistence import migrations

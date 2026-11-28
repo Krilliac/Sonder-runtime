@@ -127,7 +127,7 @@ def fetch_ps_for_origin(
     admitted_get_fn: Callable[..., Any],
     read_bytes_fn: Callable[[Any], bytes],
 ) -> dict[str, Any]:
-    """Fetch ``/api/ps`` from ``origin`` (primary uses caller's ``_get`` hook)."""
+    """Fetch SI ``/v1/sonder/health`` residency from ``origin`` (primary uses caller hook)."""
     norm_origin = str(origin or "").strip().rstrip("/")
     norm_primary = str(primary_origin or "").strip().rstrip("/")
     if not norm_origin or norm_origin.casefold() == norm_primary.casefold():
@@ -136,7 +136,7 @@ def fetch_ps_for_origin(
     if pool is None or not callable(getattr(pool, "open_url", None)):
         return {}
     try:
-        with admitted_get_fn(pool, norm_origin, "/api/ps", timeout=5) as resp:
+        with admitted_get_fn(pool, norm_origin, "/v1/sonder/health", timeout=5) as resp:
             parsed = json.loads(read_bytes_fn(resp).decode("utf-8"))
             return dict(parsed) if isinstance(parsed, dict) else {}
     except Exception:
@@ -366,12 +366,8 @@ def execute_ensemble_poll(
         return {"failure": (tier, model, "empty response")}
 
     def unload_member(origin: str, model: str) -> None:
-        try:
-            pin = pin_origin_fn(origin) if pool_enabled and not origin.startswith("provider:") else contextlib.nullcontext()
-            with pin:
-                post_fn("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
-        except Exception:
-            pass
+        # Sonder Inference manages residency via --max-resident-models / --model-idle-ttl.
+        return None
 
     outcomes = run_ensemble_groups(
         groups, ask_member=ask_member, unload_member=unload_member,

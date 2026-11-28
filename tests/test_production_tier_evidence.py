@@ -257,7 +257,7 @@ def test_non_ollama_tiers_do_not_inherit_local_model_failure(monkeypatch, tmp_pa
     router, store = _production_router(monkeypatch, tmp_path)
     store.save(_record("coder:latest", (BackendCapability.STRUCTURED, False)))
     monkeypatch.setattr(production_tier_router, "provider_bindings_from_env", lambda: SimpleNamespace(
-        tier_providers={"code": "sonder_inference"}, default_generation_provider="ollama",
+        tier_providers={"code": "openrouter"}, default_generation_provider="sonder_inference",
     ))
     result = router.route("refactor this loop", tier_models=TIERS, request_payload={"format": "json"})
     assert result["tier"] == "code" and router._test_identity_calls == []

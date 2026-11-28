@@ -155,7 +155,7 @@ import sqlite_mutate as sqlite_mutate_module
 import symbol_index
 import git_history
 import sonder_runtime.adapters.archive_create as archive_create_tool
-from sonder_runtime.platform import context_policy, declared_context, model_context_memory
+from sonder_runtime.platform import context_policy, model_context_memory
 import command_registry
 import adaptive_training
 import selfmod
@@ -760,8 +760,8 @@ def _valid_tier_names():
 
 
 def _discovery_tags(host_only=False):
-    """Known-model catalog: the pool's union, or this host's when ``host_only`` (pooled read if it is down)."""
-    return _pool_discovery_tags(OLLAMA_POOL, lambda: _get("/api/tags"), lambda o: _pool_member_tags(
+    """Known-model catalog from Sonder Inference /v1/models."""
+    return _pool_discovery_tags(OLLAMA_POOL, lambda: _get("/v1/models"), lambda o: _pool_member_tags(
         o, timeout=_PIN_CATALOG_TIMEOUT_SECONDS), host_origin=BASE if host_only else None)
 
 
@@ -1316,7 +1316,6 @@ from sonder_runtime.adapters.runtime_readiness_formatting import (
 )
 from sonder_runtime.adapters.goal_formatting import format_goal as _format_goal
 from sonder_runtime.adapters.inference.residency_feedback import ResidencyFeedback as _ResidencyFeedback, record_dispatched_context as _record_residency_dispatch
-from sonder_runtime.domain import kv_budget as _kv_budget
 from sonder_runtime.adapters.learning_tier_formatting import (
     format_learning_tiers,
 )
@@ -1699,15 +1698,15 @@ def _should_learn(tier, learn):
 
 def resolve_sonder_model(strict=False):
     try:
-        payload = _get("/api/tags")
+        payload = _get("/v1/models")
     except Exception:
         payload = {}
-    models = payload.get("models") if isinstance(payload, dict) else None
+    models = (payload.get("data") or payload.get("models")) if isinstance(payload, dict) else None
     if isinstance(models, list):
         for model in models:
             if not isinstance(model, dict):
                 continue
-            name = str(model.get("name") or model.get("model") or "").strip()
+            name = str(model.get("id") or model.get("name") or model.get("model") or "").strip()
             if name.casefold() == SONDER_STABLE_ALIAS:
                 return SONDER_STABLE_ALIAS
     return None if strict else LOCAL_CODE_MODEL
@@ -1740,31 +1739,15 @@ _MODEL_PROMPT_IDENTITY_CACHE_LOCK = threading.Lock()
 
 
 def _ollama_model_tag_metadata(model):
-    """Return the selected tag's digest/revision, or ``None`` if unproven."""
-    payload = _get("/api/tags")
-    rows = payload.get("models") if isinstance(payload, dict) else None
-    if not isinstance(rows, list):
+    """Return the selected SI model's digest/revision from /v1/sonder/identity, or None."""
+    payload = _get("/v1/sonder/identity?model=" + urllib.parse.quote(str(model or ""), safe=""))
+    ident = payload.get("backend_identity") if isinstance(payload, dict) else None
+    if not isinstance(ident, dict):
         return None
-    wanted = str(model or "").strip().casefold()
-    match = None
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("name") or row.get("model") or "").strip()
-        if name.casefold() != wanted:
-            continue
-        digest = row.get("digest")
-        modified_at = row.get("modified_at")
-        if (
-            match is not None
-            or not isinstance(digest, str)
-            or re.fullmatch(r"[0-9a-fA-F]{64}", digest.strip()) is None
-            or not isinstance(modified_at, str)
-            or not modified_at.strip()
-        ):
-            return None
-        match = digest.strip().lower(), modified_at.strip()
-    return match
+    digest = str(ident.get("model_digest") or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        return None
+    return digest, str(ident.get("template_digest") or digest)
 
 
 def _model_prompt_identity(model):
@@ -1802,24 +1785,19 @@ def _model_prompt_identity(model):
     try:
         before = _ollama_model_tag_metadata(model)
         if before is None:
-            raise ValueError("selected Ollama tag lacks a stable digest/revision")
-        details = _post("/api/show", {"model": model, "name": model}, timeout=30)
-        info = details.get("model_info") if isinstance(details, dict) else {}
-        info = info if isinstance(info, dict) else {}
-        tokenizer_value = info.get("tokenizer.ggml.model")
-        template_value = details.get("template") if isinstance(details, dict) else None
-        show_modified_at = details.get("modified_at") if isinstance(details, dict) else None
-        if not isinstance(show_modified_at, str) or show_modified_at.strip() != before[1]:
-            raise ValueError("Ollama tag/show revision mismatch")
+            raise ValueError("selected SI model lacks a stable digest/revision")
+        details = _get("/v1/sonder/identity?model=" + urllib.parse.quote(str(model or ""), safe=""))
+        ident = details.get("backend_identity") if isinstance(details, dict) else None
+        ident = ident if isinstance(ident, dict) else {}
+        tokenizer_value = ident.get("tokenizer_digest")
+        template_value = ident.get("template_digest")
         after = _ollama_model_tag_metadata(model)
         if after != before:
-            raise ValueError("Ollama tag changed during prompt identity probe")
+            raise ValueError("SI model identity changed during prompt identity probe")
         if isinstance(tokenizer_value, str) and tokenizer_value.strip():
             tokenizer = tokenizer_value.strip()
         if isinstance(template_value, str) and template_value.strip():
-            template_identity = "ollama-template-sha256:" + hashlib.sha256(
-                template_value.encode("utf-8")
-            ).hexdigest() + ";ollama-model-sha256:" + before[0]
+            template_identity = "si-template-sha256:" + template_value.strip() + ";si-model-sha256:" + before[0]
     except Exception:
         tokenizer = template_identity = None
     if not (tokenizer and template_identity):
@@ -1847,35 +1825,28 @@ def _model_context_metadata(model):
     context_length = parameter_size = None
     declared = False  # stays False unless the whole probe parses
     try:
-        details = _post("/api/show", {"model": model, "name": model}, timeout=30)
-        info = details.get("model_info") if isinstance(details, dict) else {}
-        info = info if isinstance(info, dict) else {}
-        for name, value in info.items():
-            if str(name).casefold().endswith("context_length"):
-                context_length = context_policy.parse_strict(value)
-                if context_length:
-                    break
-        detail_block = details.get("details") if isinstance(details, dict) else {}
-        detail_block = detail_block if isinstance(detail_block, dict) else {}
-        parameter_size = detail_block.get("parameter_size")
-        if parameter_size is None:
-            count = info.get("general.parameter_count")
-            if count:
-                parameter_size = float(count) / 1_000_000_000.0
+        try:
+            details = _get("/v1/models", model=model)
+        except TypeError:
+            details = _get("/v1/models")
+        from sonder_runtime.adapters.inference.model_context_probe import parse_model_metadata
+        context_length, parameter_size, geometry, declared = parse_model_metadata(details, key)
         with _MODEL_CONTEXT_CACHE_LOCK:
-            _MODEL_GEOMETRY_CACHE[key] = _kv_budget.geometry_from_model_info(info)
-        declared = declared_context.declared_from_show(details)
+            _MODEL_GEOMETRY_CACHE[key] = geometry
     except Exception:
-        # Metadata is an optimization and cannot make an otherwise valid model
-        # unavailable. The deterministic context-policy fallback remains safe.
         pass
     with _MODEL_CONTEXT_CACHE_LOCK:
         _MODEL_CONTEXT_CACHE[key] = (now, None, None) if declared is False else (now, context_length, parameter_size)
     return _MODEL_CONTEXT_MEMORY.settle(model, declared, context_length, parameter_size)
 
 
+def _chat_fitness_probe(model):
+    from sonder_runtime.adapters.inference.model_context_probe import extract_chat_fitness_payload
+    return extract_chat_fitness_payload(_discovery_tags(True), model)
+
+
 _CHAT_FITNESS = _chat_model_fitness.ChatModelFitness(
-    lambda model: _post("/api/show", {"model": model, "name": model}, timeout=10),
+    _chat_fitness_probe,
     vision_only_model_families=lambda: _model_list_consumers.values()["vision_only_model_families"],
 )
 
@@ -1899,12 +1870,12 @@ def _residency_feedback():
     with _RESIDENCY_FEEDBACK_LOCK:
         if _RESIDENCY_FEEDBACK is None or _RESIDENCY_FEEDBACK.origin != primary.casefold():
             _RESIDENCY_FEEDBACK = _ResidencyFeedback(
-                lambda: _get("/api/ps"),
+                lambda: _get("/v1/sonder/health"),
                 minimum_context=context_policy.MIN_CONTEXT,
                 origin=primary,
                 fetch_ps_for_origin=lambda o: _pool_wiring.fetch_ps_for_origin(
                     OLLAMA_POOL, o, primary_origin=BASE,
-                    get_primary_ps=lambda: _get("/api/ps"),
+                    get_primary_ps=lambda: _get("/v1/sonder/health"),
                     admitted_get_fn=ollama_pool.admitted_get,
                     read_bytes_fn=_read_ollama_response_bytes,
                 ),
@@ -1974,12 +1945,9 @@ def _make_generate(
             total_tokens=reasoning_total_tokens,
         )
     if not cloud and (num_ctx is None or int(num_ctx or 0) <= 0):
-        # /api/show is an Ollama probe.  A non-Ollama rung requests the
-        # runtime's default window instead of probing a model it never uses.
-        num_ctx = (
-            _auto_model_context(model)
-            if _provider_bridge.active_rung() is None else None
-        )
+        # A bridged rung dispatches through its typed gateway and uses the
+        # provider's default window unless the caller explicitly sized num_ctx.
+        num_ctx = _auto_model_context(model) if _provider_bridge.active_rung() is None else None
 
     def gen(prompt, history=None):
         gen.last_usage = {}
@@ -4761,6 +4729,8 @@ def _post_model(
         post_kwargs = {}
         if local_only:
             post_kwargs["local_only"] = True
+        if _callable_accepts_keyword(_post, "cloud_allowed"):
+            post_kwargs["cloud_allowed"] = bool(cloud)
         if idempotent and _callable_accepts_keyword(_post, "idempotent"):
             # Preserve compatibility with narrow test doubles and legacy
             # callers while forwarding the explicit replay-safety contract to
@@ -5038,6 +5008,12 @@ def _chat_request(
         if tool_choice is not None:
             payload["tool_choice"] = tool_choice
     _tool_lane_guard.require_generation(model, rung=bridged_rung, text_only=text_only, payload=payload)  # deny list unless text-only
+    if (
+        bridged_rung is not None
+        and bridged_rung.provider == "sonder_inference"
+        and (reasoning_continuation or single_send)
+    ):
+        bridged_rung = None
     base_loopback = ollama_endpoint.is_loopback(BASE)
     rerouted = None if bridged_rung is None else _legacy_chat_bridge.ollama_only_reroute(  # a step Inference cannot carry
         _application().model_gateway, payload, bridged_rung, model=model, graph=_APP_GRAPH,
@@ -5101,7 +5077,7 @@ def _chat_request(
         ):
             payload["think"] = True
     out, attempts = _post_model(
-        "/api/chat",
+        "/v1/chat/completions",
         payload,
         model=model,
         cloud=cloud,
@@ -5111,6 +5087,8 @@ def _chat_request(
         local_only=local_only,
         single_send=single_send,
     )
+    from sonder_runtime.adapters.inference import si_chat_codec as _si_codec
+    out = _si_codec.from_openai_chat_response(out)
     _model_pace.observe(model, out, local=not (cloud or _is_cloud_model_name(model)))
     if not isinstance(out, dict):
         raise ModelCallError(
@@ -5352,11 +5330,26 @@ def _post(
     *,
     local_only: bool = False,
     idempotent: bool = False,
+    cloud_allowed: bool | None = None,
 ) -> dict:
     _require_ollama_endpoint()
     data = json.dumps(payload).encode("utf-8")
     request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     deadline = time.monotonic() + request_timeout
+    model_hint = payload.get("model") if isinstance(payload, dict) else None
+    is_inference_path = path in {"/v1/chat/completions", "/v1/completions"}
+    cloud_consented = (
+        not local_only
+        and (
+            (cloud_allowed is True and _cloud_allowed_policy(os.environ))
+            or (
+                cloud_allowed is None
+                and bool(model_hint)
+                and _is_cloud_model_name(model_hint)
+                and _cloud_allowed_policy(os.environ)
+            )
+        )
+    )
 
     def send(origin):
         effective_payload, stripped = _pool_wiring.strip_default_num_thread_for_remote(
@@ -5366,38 +5359,52 @@ def _post(
         # Once per selected pool worker, inside all payload transformations and
         # local retries; admission may queue, or serve the model's pinned num_ctx.
         with ollama_pool.admitted(OLLAMA_POOL, path, effective_payload, origin, deadline=deadline) as ticket:
+            from sonder_runtime.adapters.inference import si_chat_codec as _si_codec
             body = ticket.body(send_data)
+            wire_obj = json.loads(body)
+            if path == "/v1/chat/completions":
+                wire_obj = _si_codec.to_openai_chat_payload(wire_obj)
+                wire_bytes = json.dumps(wire_obj).encode("utf-8")
+            elif path == "/v1/completions":
+                wire_obj = _si_codec.to_openai_completion_payload(wire_obj)
+                wire_bytes = json.dumps(wire_obj).encode("utf-8")
+            else:
+                wire_bytes = body
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError("Ollama worker pool request timeout expired")
-            req = urllib.request.Request(
-                f"{origin}{path}", data=body,
-                headers={"Content-Type": "application/json"},
-            )
+                raise TimeoutError("Sonder Inference worker pool request timeout expired")
+            from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
+            headers = {"Content-Type": "application/json", **si_auth_headers(origin)}
+            if local_only or (is_inference_path and not cloud_consented):
+                headers["X-Sonder-Local-Only"] = "1"
+            req = urllib.request.Request(f"{origin}{path}", data=wire_bytes, headers=headers)
             def transport():
-                if path in {"/api/chat", "/api/generate"}:
+                if path in {"/v1/chat/completions", "/v1/completions"}:
                     from sonder_runtime.application.agents.delegation_runtime import note_agent_execution as _note_exec; _note_exec(origin=origin)
                 with OLLAMA_POOL.open_url(req, timeout=remaining) as resp:
                     _record_residency_dispatch(
-                        path, json.loads(body), _residency_feedback, _is_cloud_model_name,
+                        path, json.loads(wire_bytes.decode("utf-8")), _residency_feedback, _is_cloud_model_name,
                         origin=origin if getattr(OLLAMA_POOL, "enabled", False) else None,
                     )
-                    raw = _read_ollama_response_bytes(resp)
-                    return json.loads(raw.decode("utf-8"))
+                    parsed = json.loads(_read_ollama_response_bytes(resp).decode("utf-8"))
+                    if path == "/v1/chat/completions":
+                        return _si_codec.from_openai_chat_response(parsed)
+                    if path == "/v1/completions":
+                        return _si_codec.from_openai_completion_response(parsed)
+                    return parsed
 
-            if path in {"/api/chat", "/api/generate"}:  # metadata probes are not inference
-                return dispatch_provider("ollama", path, json.loads(body), transport)
+            if path in {"/v1/chat/completions", "/v1/completions"}:  # metadata probes are not inference
+                return dispatch_provider("sonder-inference", path, wire_obj, transport)
             return transport()
 
     if local_only and not ollama_endpoint.is_loopback(BASE):
         raise ollama_pool.WorkerPoolUnavailable("local-only inference requires a loopback primary")
-    model_hint = payload.get("model") if isinstance(payload, dict) else None
     pinned_origin = _PINNED_OLLAMA_ORIGIN.get()
     if pinned_origin and not local_only:
         return OLLAMA_POOL.request_primary(send, model=model_hint, payload=payload, origin=pinned_origin)
     if local_only or not OLLAMA_POOL.enabled:
         return OLLAMA_POOL.request_primary(send, model=model_hint, payload=payload, origin=BASE)
-    if path in {"/api/chat", "/api/generate"}:  # never fail behind our own prewarm
+    if is_inference_path:  # never fail behind our own prewarm
         prewarm_gate.await_prewarm(model_hint, min(request_timeout, _PREWARM_LOAD_TIMEOUT))
     return OLLAMA_POOL.request(send, model=model_hint, idempotent=idempotent, payload=payload)
 
@@ -5423,7 +5430,7 @@ def prewarm_model(tier: str = "", *, announce: bool = False) -> bool:
     if cloud or not model or tier_label in (None, "cloud-disabled"):
         return False
     try:
-        if _bridge_provider_for_tier(tier_label) is not None:
+        if _bridge_provider_for_tier(tier_label) not in (None, "sonder_inference"):
             # The tier is served by another provider; loading its Ollama model
             # would be wasted work (and a probe of an Ollama that may be absent).
             return False
@@ -5455,11 +5462,11 @@ def prewarm_model(tier: str = "", *, announce: bool = False) -> bool:
     return True
 
 
-def _get(path: str) -> dict:
-    """Fetch a bounded JSON control-plane response from Ollama.
+def _get(path: str, *, model: str | None = None) -> dict:
+    """Fetch a bounded JSON control-plane response from Sonder Inference.
 
     Discovery and residency checks use GET, but they still cross the configured
-    Ollama trust boundary (which may be an explicitly approved remote endpoint).
+    inference trust boundary (which may be an explicitly approved remote endpoint).
     Keep their response budget identical to model POST responses so a malformed
     catalog cannot make a chat request allocate an unbounded body before model
     selection or prewarm has a chance to fail safely.
@@ -5472,7 +5479,7 @@ def _get(path: str) -> dict:
             return json.loads(raw.decode("utf-8"))
 
     return (
-        OLLAMA_POOL.request(send, idempotent=True)
+        OLLAMA_POOL.request(send, model=model, idempotent=True)
         if OLLAMA_POOL.enabled else OLLAMA_POOL.request_primary(send, origin=BASE)
     )
 
@@ -5690,17 +5697,17 @@ def _offload_tier_impl(
             "configuration",
             "unknown tier '%s'. Valid tiers: %s." % (tier, _valid_tier_names()),
         )
-    provider = _bridge_provider_for_tier(tier)
+    cloud = _is_cloud_tier(tier, model)
+    provider = None if cloud else _bridge_provider_for_tier(tier)
     if fleet_synthesis:
         num_predict = _fleet_synthesis.json_num_predict(num_predict, bridged=provider == "sonder_inference")
-    cloud = provider is None and _is_cloud_tier(tier, model)
     if cloud and not _cloud_allowed_policy(os.environ):
         raise ModelCallError(
             "configuration",
             _cloud_disabled_message().removeprefix("ERROR: "),
             cloud=True,
         )
-    if not cloud and provider is None and (num_ctx is None or int(num_ctx or 0) <= 0):
+    if not cloud and provider in (None, "sonder_inference") and (num_ctx is None or int(num_ctx or 0) <= 0):
         num_ctx = _auto_model_context(model)
 
     if not _should_learn(tier, learn):
@@ -6085,7 +6092,7 @@ def _agent_lane_context():
     context = local_owner_context(
         correlation_id="lane-" + os.urandom(16).hex(), source="mcp",
         workspace_roots=tuple(Path(r) for r in file_ops.lane_grant_roots(application.config.state.workspace_roots)),
-        remote_ollama_allowed=bool(getattr(getattr(application.config, "ollama", None), "allow_remote", False)), timeout_seconds=60.0,
+        remote_ollama_allowed=bool(getattr(getattr(application.config, "inference", None), "allow_remote", False) or getattr(getattr(application.config, "ollama", None), "allow_remote", False)), timeout_seconds=60.0,
     )
     return application, context
 
@@ -6594,7 +6601,7 @@ def _sonder_impl_serialized(
         provider = provider.provider if provider is not None else None
         ctx = pinned_ctx
         if ctx is None:
-            ctx = None if provider else 0 if rung.cloud else _auto_model_context(rung.model)
+            ctx = None if (provider and provider != "sonder_inference") else 0 if rung.cloud else _auto_model_context(rung.model)
         resolved_persona = personas.resolve(persona, prompt=prompt, tier=rung.tier)
         return (  # a reference-lookup model gets no Sonder system prompt (its Modelfile rules stay), only the caller's
             _reference_lookup_lanes.system_for(rung.model, _build_system(system, trace, resolved_persona, model=rung.model, cloud=rung.cloud, provider=provider), system),
@@ -6698,9 +6705,11 @@ def _sonder_impl_serialized(
             error,
             **_ollama_error_endpoint(),
         )
-    except urllib.error.URLError as e:  # a pool refusal is not "Ollama is down"
-        return ollama_pool.pool_refusal_reply(e) or ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
-                "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
+    except urllib.error.URLError as e:  # a pool refusal is not "Sonder Inference is down"
+        return ollama_pool.pool_refusal_reply(e) or (
+            "ERROR contacting Sonder Inference at %s: %s. Is Sonder Inference "
+            "running? (`sonder-infer serve`)" % (_ollama_display(), e)
+        )
     finally:
         rung_scope.close()
         conn.close()
@@ -7027,9 +7036,9 @@ def _answer_with_history_impl(
             req_ctx = (
                 pinned_ctx if pinned_ctx is not None
                 else 0 if cloud
-                # No Ollama context probe for a model a non-Ollama rung never
-                # loads; _make_generate requests the default window instead.
-                else None if bridged_provider is not None
+                # External hosted/non-SI rungs use the provider's default window;
+                # local Sonder Inference rungs size context from model metadata.
+                else None if (bridged_provider is not None and bridged_provider != "sonder_inference")
                 else _auto_model_context(model)
             )
             req_ctx = _overflow_route.rung_started(rung, overflow, req_ctx, pinned_ctx)
@@ -7083,7 +7092,7 @@ def _answer_with_history_impl(
                     model_revision = (
                         _cache_model_revision(model)
                         if not cloud and endpoint_is_local
-                        and bridged_provider is None else ""
+                        and bridged_provider in (None, "sonder_inference") else ""
                     )
                     if model_revision and not _reference_lookup_lanes.lookup_turn(model) and request_cache.eligible(  # a lookup turn is never cached
                         scope=cache_scope, cloud=cloud, temperature=temperature,
@@ -7179,9 +7188,11 @@ def _answer_with_history_impl(
             error,
             **_ollama_error_endpoint(),
         )
-    except urllib.error.URLError as e:  # a pool refusal is not "Ollama is down"
-        return ollama_pool.pool_refusal_reply(e) or ("ERROR contacting Ollama at %s: %s. Is the Ollama server "
-                "running? (the tray app / `ollama serve`)" % (_ollama_display(), e))
+    except urllib.error.URLError as e:  # a pool refusal is not "Sonder Inference is down"
+        return ollama_pool.pool_refusal_reply(e) or (
+            "ERROR contacting Sonder Inference at %s: %s. Is Sonder Inference "
+            "running? (`sonder-infer serve`)" % (_ollama_display(), e)
+        )
     finally:
         rung_scope.close()
         conn.close()
@@ -13979,8 +13990,8 @@ def _vision_local_target() -> str:
     endpoint is not an acceptable fallback.  The runtime policy owns the tier
     binding; callers cannot turn a free-form model string into a backend target.
     """
-    if _bridge_provider_for_tier("vision") is not None:
-        raise ModelCallError("unsupported_feature", "image analysis is only available on Ollama-bound vision tiers", status=400, attempts=0)
+    if _bridge_provider_for_tier("vision") not in (None, "sonder_inference"):
+        raise ModelCallError("unsupported_feature", "image analysis is only available on local Sonder Inference vision tiers", status=400, attempts=0)
     if not ollama_endpoint.is_loopback(BASE):
         raise ModelCallError(
             "configuration",
@@ -18539,7 +18550,7 @@ def _agent_turn(
     # the generator actually uses. Pin it for this turn rather than observing
     # one window and silently dispatching with another after metadata refresh.
     agent_num_ctx = (
-        _auto_model_context(model) if pre_model_context is not None and not cloud and provider is None else 0
+        _auto_model_context(model) if pre_model_context is not None and not cloud and provider in (None, "sonder_inference") else 0
     )
     cloud_budget_state = (
         {"spent": 0, "total": _CLOUD_AGENT_OUTPUT_BUDGET}
@@ -20706,7 +20717,7 @@ def _route_work_request(
 
 
 def _pool_member_tags(origin: str, timeout: float = 15) -> dict:
-    with ollama_pool.admitted_get(OLLAMA_POOL, origin, "/api/tags", timeout=timeout) as resp:
+    with ollama_pool.admitted_get(OLLAMA_POOL, origin, "/v1/models", timeout=timeout) as resp:
         return json.loads(_read_ollama_response_bytes(resp).decode("utf-8"))
 
 
@@ -20717,7 +20728,7 @@ _POOL_PIN_CATALOG = PoolCatalogCache()
 def _pin_endpoint_record(selector):
     """Pin lookup tier one: the single pooled read (workers are the next tier)."""
     wanted = str(selector or "").strip().casefold()
-    return _resolve_catalog_record(wanted, _catalog_records(_get("/api/tags"))) if wanted else None
+    return _resolve_catalog_record(wanted, _catalog_records(_get("/v1/models"))) if wanted else None
 
 
 def _resolve_model_pin(selector):
@@ -20733,7 +20744,7 @@ def _runtime_installed_model_records() -> tuple[tuple[str, dict], ...]:
     """One catalog snapshot for policy validation: every pool member's models."""
     if OLLAMA_POOL.enabled:
         return _installed_catalog_records(OLLAMA_POOL.catalog_union(_pool_member_tags))
-    return _installed_catalog_records(_get("/api/tags"))
+    return _installed_catalog_records(_get("/v1/models"))
 
 
 def _runtime_installed_models() -> set[str]:
@@ -20763,10 +20774,23 @@ def _runtime_model_has_capability(model: str, capability: str, records) -> bool:
     if not selected or _is_cloud_model_name(selected):
         return False
     try:
-        details = _post("/api/show", {"model": selected, "name": selected}, timeout=30)
+        details = _get("/v1/models")
     except ModelCallError:
         return False
-    return isinstance(details, dict) and wanted in _fanout_capabilities(details)
+    if not isinstance(details, dict):
+        return False
+    rows = details.get("data") if isinstance(details.get("data"), list) else details.get("models")
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_id = str(row.get("id") or row.get("name") or row.get("model") or "").strip()
+            if row_id and _runtime_model_is_installed(selected, (row_id,)):
+                sonder_meta = row.get("sonder") if isinstance(row.get("sonder"), dict) else {}
+                caps = _fanout_capabilities(row) | _fanout_capabilities(sonder_meta)
+                if caps:
+                    return wanted in caps
+    return wanted in _fanout_capabilities(details)
 
 
 def runtime_policy_data() -> dict:
@@ -21125,9 +21149,9 @@ def self_heal_repair(apply: bool = False) -> str:
 
 def _diagnostics_ollama_model_lines() -> list[str]:
     return _ollama_reporting.model_inventory_lines(
-        OLLAMA_POOL, get_tags=lambda: _get("/api/tags"), member_tags=_pool_member_tags,
+        OLLAMA_POOL, get_tags=lambda: _get("/v1/models"), member_tags=_pool_member_tags,
         require_endpoint=_require_ollama_endpoint,
-        names=lambda payload: _inventory_model_names(_inventory_rows_policy(payload, "/api/tags")))
+        names=lambda payload: _inventory_model_names(_inventory_rows_policy(payload, "/v1/models")))
 
 
 @mcp.tool()
@@ -21561,13 +21585,11 @@ def _fanout_plan(scope, *, profile="", include_unhealthy=False):
         # snapshot.  Fail closed rather than degrading into an all-local
         # fanout that can unexpectedly load models into an active GPU.
         try:
-            rows = _get("/api/ps").get("models", [])
+            health = _get("/v1/sonder/health")
+            rows = health.get("models") if isinstance(health, dict) else None
             if not isinstance(rows, list):
-                raise ValueError("invalid Ollama /api/ps response")
-            resident = {
-                str(row.get("name") or "").strip().casefold()
-                for row in rows if isinstance(row, dict) and str(row.get("name") or "").strip()
-            }
+                raise ValueError("invalid Sonder Inference health response")
+            resident = ollama_lifecycle.resident_models(health)
         except Exception:
             return {"scope": scope, "selected": [], "skipped": []}, ModelCallError(
                 "configuration", "could not verify loaded local models for fanout"
@@ -21634,10 +21656,7 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers, profile
         raise _fanout_no_eligible_models_error(plan, scope)
     resident_snapshot_known = False
     try:
-        resident_before = [
-            str(row.get("name")) for row in _get("/api/ps").get("models", [])
-            if row.get("name")
-        ]
+        resident_before = sorted(ollama_lifecycle.resident_models(_get("/v1/sonder/health")))
         resident_snapshot_known = True
     except Exception:
         # An unavailable snapshot is not evidence that no model was resident.
@@ -21678,7 +21697,7 @@ def _fanout_start(prompt, scope, *, cap, request_timeout, cloud_workers, profile
 def _fanout_dispatch_residency_reason(limits, model):
     """Return a no-load fence refusal for a selected resident-only target."""
     return _dispatch_residency_reason_policy(
-        limits, model, fetch_resident=lambda: _get("/api/ps"),
+        limits, model, fetch_resident=lambda: _get("/v1/sonder/health"),
     )
 
 
@@ -21763,12 +21782,18 @@ def _fanout_synthesis_model(selector):
         # the selected *local* model only, after the loopback guard, rather
         # than treating absent tag metadata as proof it cannot generate.
         try:
-            details = _post("/api/show", {"model": model, "name": model}, timeout=30)
+            details = _get("/v1/models")
         except ModelCallError as exc:
             raise ModelCallError(
                 "configuration", "could not verify synth_model generative capability"
             ) from exc
-        if not isinstance(details, dict) or not _fanout_declares_generative_capability(details):
+        resolved_details = details
+        if isinstance(details, dict) and not _fanout_declares_generative_capability(details):
+            for _row_name, _row in _installed_catalog_records(details):
+                if _runtime_model_is_installed(model, (_row_name,)):
+                    resolved_details = _row
+                    break
+        if not isinstance(resolved_details, dict) or not _fanout_declares_generative_capability(resolved_details):
             raise ModelCallError("configuration", "synth_model must declare a generative chat capability")
     return model
 
@@ -21816,10 +21841,12 @@ def _fanout_synthesis_generate(model, source_bundle):
         "keep_alive": _keep_alive_for(model),
     }
     out, _attempts = _post_model(
-        "/api/chat", payload, model=model, cloud=False,
+        "/v1/chat/completions", payload, model=model, cloud=False,
         timeout=FANOUT_SYNTHESIS_TIMEOUT_SECONDS, idempotent=True,
         local_only=True,
     )
+    from sonder_runtime.adapters.inference import si_chat_codec as _si_codec
+    out = _si_codec.from_openai_chat_response(out)
     if not isinstance(out, dict):
         raise ModelCallError("protocol", "local synthesis model returned a non-JSON response")
     message = out.get("message")
@@ -21869,8 +21896,6 @@ def _execute_fanout_run(run_id):
                                        failure_class="configuration")
         return _fanout_receipt(run_id)
 
-    resident_at_start = {name.casefold() for name in limits["resident_before"]}
-    resident_snapshot_known = limits["resident_snapshot_known"]
     cloud_usage = {"tokens_in": 0, "tokens_out": 0}
     # This execution can resume a durable run containing terminal rows from
     # earlier workers. Keep activity scoped to the rows this worker actually
@@ -21957,13 +21982,7 @@ def _execute_fanout_run(run_id):
                 )
             return row, "failed", "", _fanout_safe_error(caught, question), int((time.monotonic() - started) * 1000), exc, metadata or {}
         finally:
-            if (
-                resident_snapshot_known
-                and not _is_cloud_model_name(model)
-                and model.casefold() not in resident_at_start
-            ):
-                with contextlib.suppress(Exception):
-                    _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+            pass
 
     def persist(result):
         nonlocal cloud_attempts
@@ -22344,7 +22363,7 @@ def _ensemble_targets(tiers: str = ""):
         if model in seen_models:
             continue
         seen_models.add(model)
-        targets.append((label if _bridge_provider_for_tier(label) else tier, model))
+        targets.append((label if _bridge_provider_for_tier(label) is not None else tier, model))
     return targets[:ENSEMBLE_MAX_MODELS], unknown
 
 
@@ -22458,7 +22477,7 @@ def ensemble_answer(
     except (TypeError, ValueError):
         requested_ctx = 0
     poll_num_ctx = max(1024, requested_ctx) if requested_ctx > 0 else 0
-    lookup = _reference_lookup_multi.ensemble(prompt, mode, targets, num_predict, functools.partial(_make_tier_generate, text_only=True), lambda tier, model: poll_num_ctx or (0 if _is_cloud_tier(tier, model) or _bridge_provider_for_tier(tier) else _auto_model_context(model)))
+    lookup = _reference_lookup_multi.ensemble(prompt, mode, targets, num_predict, functools.partial(_make_tier_generate, text_only=True), lambda tier, model: poll_num_ctx or (0 if _is_cloud_tier(tier, model) or _bridge_provider_for_tier(tier) not in (None, "sonder_inference") else _auto_model_context(model)))
     answers, failures = _pool_wiring.execute_ensemble_poll(
         targets=targets, pool=OLLAMA_POOL, default_origin=BASE, is_cloud_fn=_is_cloud_tier,
         bridge_provider_fn=_bridge_provider_for_tier, pin_origin_fn=_pinned_ollama_origin, lookup=lookup,
@@ -22509,7 +22528,7 @@ def ensemble_answer(
     )
     try:
         synth_num_ctx = poll_num_ctx or (
-            0 if _is_cloud_model_name(synth_model) or _bridge_provider_for_tier(synth_label)
+            0 if _is_cloud_model_name(synth_model) or _bridge_provider_for_tier(synth_label) not in (None, "sonder_inference")
             else _auto_model_context(synth_model)
         )
         gen = _make_tier_generate(
@@ -23037,16 +23056,14 @@ def _codegen_critic_generation(prompt: str, *, tier: str, model: str,
     cloud = _is_cloud_tier(tier, model)
     gen = _make_tier_generate(
         tier, model, "", 0.2, max(64, min(int(num_predict), 512)),
-        0 if cloud or _bridge_provider_for_tier(tier) else num_ctx if num_ctx is not None else _auto_model_context(model),
+        0 if cloud or _bridge_provider_for_tier(tier) not in (None, "sonder_inference") else num_ctx if num_ctx is not None else _auto_model_context(model),
         cloud=cloud, think=False if single_send else None,
         single_send=single_send, timeout=timeout,
     )
     try:
         return gen(prompt)
     finally:
-        if not cloud and _bridge_provider_for_tier(tier) is None:
-            with contextlib.suppress(Exception):
-                _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+        pass
 
 
 def _codegen_pinned_generation(prompt: str, *, model: str,
@@ -23057,23 +23074,14 @@ def _codegen_pinned_generation(prompt: str, *, model: str,
         model, "", 0.2, max(64, num_predict), num_ctx,
         think=False, single_send=True, timeout=timeout,
     )
-    try:
-        return gen(prompt)
-    finally:
-        with contextlib.suppress(Exception):
-            _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+    return gen(prompt)
 
 
 def _codegen_observed_generation(prompt: str, *, model: str, tier: str,
                                  num_predict: int, num_ctx: int) -> str:
     """Keep a typed provider result when durable memory refs entered a prompt."""
     gen = _make_tier_generate(tier, model, "", 0.2, max(64, num_predict), num_ctx)
-    try:
-        return gen(prompt)
-    finally:
-        if _bridge_provider_for_tier(tier) is None:
-            with contextlib.suppress(Exception):
-                _post("/api/generate", {"model": model, "keep_alive": 0}, timeout=30)
+    return gen(prompt)
 
 
 @mcp.tool()
@@ -23184,8 +23192,8 @@ def codegen_build_loop(
         rollout_selected=strategy_rollout.selected,
     )
     active_operation = plan.active_operation
-    if active_operation and any(_bridge_provider_for_tier(tier) for tier, _model in explicit_targets[:2]):
-        return "codegen canary unavailable: sealed single-send canaries require Ollama-bound tiers"
+    if active_operation and any(_bridge_provider_for_tier(tier) not in (None, "sonder_inference") for tier, _model in explicit_targets[:2]):
+        return "codegen canary unavailable: sealed single-send canaries require local Sonder Inference tiers"
     # A previous selected operation may have left uncertain project effects.
     # Read its sealed guard even after an operator changes rollout to off.
     try:
@@ -23299,7 +23307,7 @@ def codegen_build_loop(
         auto_model_context=_auto_model_context,
         is_local_ollama_route=lambda m_tier, m_model: (
             not _is_cloud_tier(m_tier, m_model)
-            and _bridge_provider_for_tier(m_tier) is None
+            and _bridge_provider_for_tier(m_tier) in (None, "sonder_inference")
         ),
         local_num_ctx=lambda m_model: int(_platform_local_model_options(
             0.2, max(64, num_predict), _auto_model_context(m_model),
@@ -23483,37 +23491,19 @@ def unload(tier: str = "all") -> str:
             "ERROR: unload deferred while %d fleet model call(s) are active; "
             "cancel/wait for master_status() to reach zero, then retry."
         ) % active
-    requested = []
+    requested = list(targets)
     errors = []
-    for model in targets:
-        try:
-            response = _post("/api/generate", {"model": model, "keep_alive": 0})
-            if isinstance(response, dict) and response.get("error"):
-                errors.append("%s: %s" % (
-                    model, _safe_model_error_detail(response.get("error"), limit=200),
-                ))
-            else:
-                requested.append(model)
-        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-            errors.append("%s: %s" % (model, _transport_error_detail(exc)))
 
     resident = set()
     residency_error = ""
     try:
-        deadline = time.monotonic() + 5.0
-        while True:
-            residency_payload = _get("/api/ps")
-            if (
-                not isinstance(residency_payload, dict)
-                or not isinstance(residency_payload.get("models"), list)
-            ):
-                raise ValueError("invalid Ollama /api/ps response")
-            resident = ollama_lifecycle.resident_models(residency_payload)
-            if not any(model.casefold() in resident for model in requested):
-                break
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(0.25)
+        residency_payload = _get("/v1/sonder/health")
+        if (
+            not isinstance(residency_payload, dict)
+            or not isinstance(residency_payload.get("models"), list)
+        ):
+            raise ValueError("invalid Sonder Inference health response")
+        resident = ollama_lifecycle.resident_models(residency_payload)
     except (ModelCallError, urllib.error.URLError, TimeoutError, ValueError) as exc:
         residency_error = _transport_error_detail(exc)
     remaining = [model for model in requested if model.casefold() in resident]

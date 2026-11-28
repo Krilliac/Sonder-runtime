@@ -24,6 +24,7 @@ from dataclasses import replace
 
 from sonder_runtime.platform.runtime_threads import Thread as owned_runtime_thread
 
+import json
 import logging
 import os
 import socket
@@ -364,7 +365,7 @@ class RuntimeLifecycle:
                 return default
 
         self.tracker = ServiceStateTracker()
-        self.tracker.register_dependency("ollama", required=True)
+        self.tracker.register_dependency("inference", required=True)
         self.admission = RuntimeAdmissionGate()
         self._trace_buffer = _BoundedTraceBuffer()
         self.tracer = BoundedTracer(self._trace_buffer)
@@ -389,8 +390,17 @@ class RuntimeLifecycle:
         self._queue_depth = queue_depth or _env_int("SONDER_QUEUE_DEPTH", 32)
         self._admission_timeout = admission_timeout_seconds
         self._drain_deadline_seconds = drain_deadline_seconds
-        self._ollama_probe_interval = ollama_probe_interval_seconds or 15.0
-        self._ollama_probe_timeout = ollama_probe_timeout_seconds or 5.0
+        env_startup = _env_int("SONDER_INFERENCE_STARTUP_TIMEOUT_SECONDS", 60)
+        self._ollama_probe_interval = (
+            ollama_probe_interval_seconds
+            if ollama_probe_interval_seconds is not None
+            else max(1.0, env_startup / 4)
+        )
+        self._ollama_probe_timeout = (
+            ollama_probe_timeout_seconds
+            if ollama_probe_timeout_seconds is not None
+            else max(1.0, env_startup / 12)
+        )
         self._slots = threading.BoundedSemaphore(self._max_concurrent)
         self._waiters = 0
         self._active_requests = 0
@@ -618,7 +628,7 @@ class RuntimeLifecycle:
             self.tracker.transition(ProcessState.MIGRATING, "legacy start")
             self.tracker.transition(ProcessState.READY, "legacy start adopted")
 
-    def begin_ollama_probe(self, *, interval_seconds: float | None = None) -> None:
+    def begin_inference_probe(self, *, interval_seconds: float | None = None) -> None:
         with self._probe_state_changed:
             if (
                 self._probe_stop.is_set()
@@ -635,10 +645,10 @@ class RuntimeLifecycle:
 
         def probe_loop() -> None:
             while not self._probe_stop.wait(interval):
-                self.probe_ollama_once()
+                self._invoke_probe_once()
 
         try:
-            self.probe_ollama_once()
+            self._invoke_probe_once()
         except BaseException:
             with self._probe_state_changed:
                 self._probe_starting = False
@@ -646,13 +656,10 @@ class RuntimeLifecycle:
             raise
         with self._probe_state_changed:
             try:
-                # A concurrent retirement may have signalled stop while the
-                # first health check was in flight.  Do not publish a stale
-                # background probe after that lifecycle has been replaced.
                 if self._probe_stop.is_set():
                     return
                 thread = owned_runtime_thread(
-                    target=probe_loop, daemon=True, name="sonder-ollama-probe"
+                    target=probe_loop, daemon=True, name="sonder-inference-probe"
                 )
                 self._probe_thread = thread
                 thread.start()
@@ -660,26 +667,60 @@ class RuntimeLifecycle:
                 self._probe_starting = False
                 self._probe_state_changed.notify_all()
 
-    def probe_ollama_once(self, timeout: float | None = None) -> bool:
+    begin_ollama_probe = begin_inference_probe
+
+    def probe_inference_once(self, timeout: float | None = None) -> bool:
         timeout = timeout if timeout is not None else self._ollama_probe_timeout
+        detail = ""
         try:
-            # Same target and transport as every other Ollama call: the typed
-            # endpoint when one is bound (OLLAMA_HOST only as its fallback),
-            # no environment proxies, no redirects, and the configured CA
-            # bundle for HTTPS. A refused endpoint reads as "probe failed".
-            url = ollama_endpoint.configured_origin() + "/api/tags"
+            si_origin = (
+                os.environ.get("SONDER_INFERENCE_BASE_URL", "").strip()
+                or ollama_endpoint.configured_origin()
+            ).rstrip("/")
+            if "://" not in si_origin:
+                si_origin = "http://" + si_origin
+            url = si_origin + "/v1/sonder/health"
+            from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+                si_auth_headers,
+            )
             with ollama_endpoint.open_url(
-                urllib.request.Request(url, method="GET"), timeout=timeout
+                urllib.request.Request(url, headers=si_auth_headers(si_origin), method="GET"),
+                timeout=timeout,
             ) as response:
-                healthy = response.status == 200
+                raw = response.read(262_145)
+                payload = json.loads(raw.decode("utf-8")) if raw else {}
+                state = (
+                    str(payload.get("status") or payload.get("state") or "").strip().lower()
+                    if isinstance(payload, dict) else ""
+                )
+                healthy = response.status == 200 and state == "ready"
+                if not healthy:
+                    detail = f"state={state or 'unknown'}"
         except Exception:
             healthy = False
+            detail = "probe failed"
         self.tracker.set_dependency(
-            "ollama",
+            "inference",
             DependencyState.READY if healthy else DependencyState.UNAVAILABLE,
-            "" if healthy else "probe failed",
+            "" if healthy else (detail or "probe failed"),
         )
         return healthy
+
+    probe_ollama_once = probe_inference_once
+
+    def _invoke_probe_once(self) -> bool:
+        default_fn = _DEFAULT_PROBE_INFERENCE_ONCE
+        if (
+            "probe_inference_once" in self.__dict__
+            or getattr(type(self), "probe_inference_once", None) is not default_fn
+        ):
+            return self.probe_inference_once()
+        if (
+            "probe_ollama_once" in self.__dict__
+            or getattr(type(self), "probe_ollama_once", None) is not default_fn
+        ):
+            return self.probe_ollama_once()
+        return self.probe_inference_once()
 
     def stop_probe(self) -> bool:
         """Signal and bounded-join the probe before retiring this lifecycle."""
@@ -1184,23 +1225,18 @@ class RuntimeLifecycle:
         return {"status": "alive"}
 
     def _ensure_ollama_dependency_probed(self) -> None:
-        """Start or refresh the Ollama probe if readiness is still unknown.
-
-        Live-reload / child re-entry can rebuild the lifecycle singleton without
-        re-running main()'s begin_ollama_probe(), leaving /ready stuck on
-        "required dependency ollama is unknown" while Ollama itself is fine.
-        """
+        """Start or refresh the SI health probe if readiness is still unknown."""
         snapshot = self.tracker.snapshot()
-        ollama = next((dep for dep in snapshot.dependencies if dep.name == "ollama"), None)
-        if ollama is None or ollama.state is not DependencyState.UNKNOWN:
+        dep = next((d for d in snapshot.dependencies if d.name == "inference"), None)
+        if dep is None or dep.state is not DependencyState.UNKNOWN:
             return
-        self.begin_ollama_probe()
+        self.begin_inference_probe()
         still = next(
-            (dep for dep in self.tracker.snapshot().dependencies if dep.name == "ollama"),
+            (d for d in self.tracker.snapshot().dependencies if d.name == "inference"),
             None,
         )
         if still is not None and still.state is DependencyState.UNKNOWN:
-            self.probe_ollama_once()
+            self.probe_inference_once()
 
     def ready_payload(self) -> tuple[int, dict]:
         self.adopt_legacy_start()
@@ -1274,6 +1310,7 @@ class RuntimeLifecycle:
 
 
 # Compatibility name retained for lifecycle callers and tests.
+_DEFAULT_PROBE_INFERENCE_ONCE = RuntimeLifecycle.probe_inference_once
 _state_number = process_state_number
 
 
@@ -1343,7 +1380,7 @@ def get() -> RuntimeLifecycle:
             if config is None:
                 _instance = RuntimeLifecycle()
             else:
-                startup_timeout = config.ollama.startup_timeout_seconds
+                startup_timeout = config.inference.startup_timeout_seconds
                 _instance = RuntimeLifecycle(
                     deployment_status=DeploymentStatus(
                         profile=config.deployment.profile,

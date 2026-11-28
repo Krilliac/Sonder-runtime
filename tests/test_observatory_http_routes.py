@@ -31,7 +31,7 @@ def _application(*, feed=True, max_subscribers=8, gateway=None):
     return SimpleNamespace(
         telemetry=telemetry if feed else None,
         telemetry_feed=producer if feed else None,
-        provider_bindings=ProviderBindings.uniform("ollama"),
+        provider_bindings=ProviderBindings.uniform("sonder_inference"),
         model_gateway=gateway if gateway is not None else SimpleNamespace(),
         producer=producer,
     )
@@ -224,7 +224,7 @@ def test_ecosystem_route_reports_runtime_stream_and_unknown_providers(monkeypatc
     assert document["runtime"]["base_url"] == base
     assert document["observatory"]["runtime_stream"]["sse_url"] == base + "/v1/observability/events"
     assert document["observatory"]["connect_urls"] == [base]
-    assert document["providers"]["status"]["ollama"] == {"provider": "ollama", "state": "unknown"}
+    assert document["providers"]["status"]["sonder_inference"] == {"provider": "sonder_inference", "state": "unknown"}
 
 
 def test_api_key_mode_requires_the_admin_bearer(monkeypatch):
@@ -494,10 +494,10 @@ def test_lifecycle_drain_ends_streams_after_delivering_session_ended(monkeypatch
     from sonder_runtime.platform.shutdown import ShutdownCoordinator
 
     live = _compose_live_telemetry(SonderConfig(), Redactor(),
-                                   ProviderBindings.uniform("ollama"))
+                                   ProviderBindings.uniform("sonder_inference"))
     app = SimpleNamespace(telemetry=live.telemetry, telemetry_feed=live.producer,
                           close_telemetry=live.close, producer=live.producer,
-                          provider_bindings=ProviderBindings.uniform("ollama"),
+                          provider_bindings=ProviderBindings.uniform("sonder_inference"),
                           model_gateway=SimpleNamespace())
     coordinator = ShutdownCoordinator(ServiceStateTracker(), drain_deadline_seconds=1)
     assert ts._register_telemetry_drain(coordinator, app) is True

@@ -18,7 +18,6 @@ import platform
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import engine_bundle
@@ -144,56 +143,37 @@ def ensure_ollama_running(
     *,
     env: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
-    executable = _ollama_executable(ollama)
-    if not executable:
-        return False, "Ollama is not installed, on PATH, or present in an engine bundle."
+    """Verify Sonder Inference reachability via /v1/sonder/health; never spawns local Ollama."""
+    del ollama
+    import json
+    import urllib.error
+    import urllib.request
+
     process_env = dict(os.environ if env is None else env)
     try:
         client_env = ollama_endpoint.client_environment(process_env)
     except ValueError as exc:
-        return False, "Ollama endpoint blocked: %s" % exc
+        return False, "Sonder Inference endpoint blocked: %s" % exc
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
+    from sonder_runtime.domain import ollama_policy
+
+    origin = client_env["SONDER_INFERENCE_BASE_URL"].rstrip("/")
+    headers: dict[str, str] = {"Accept": "application/json", **si_auth_headers(origin, env=process_env)}
+    allow_remote = ollama_policy.remote_allowed(process_env)
     try:
-        probe = subprocess.run(
-            [executable, "list"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=client_env,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"Could not execute Ollama: {exc}"
-    if probe.returncode == 0:
-        return True, "Ollama is already running."
-    if not ollama_endpoint.is_loopback(client_env["OLLAMA_HOST"]):
-        return False, (
-            "Remote Ollama is unavailable; refusing to start a local daemon "
-            "for a remote endpoint."
-        )
-    print("Starting Ollama...")
-    popen_kwargs = {"env": process_env}
-    if os.name == "nt":
-        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    else:
-        popen_kwargs.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        subprocess.Popen([executable, "serve"], **popen_kwargs)
-    except OSError as exc:
-        return False, f"Could not start Ollama: {exc}"
-    for _ in range(30):
-        time.sleep(0.5)
-        try:
-            probe = subprocess.run(
-                [executable, "list"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=client_env,
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if probe.returncode == 0:
-            return True, "Ollama started."
-    return False, "Ollama did not become reachable after startup."
+        req = urllib.request.Request(origin + "/v1/sonder/health", headers=headers, method="GET")
+        with ollama_endpoint.open_url(req, timeout=5, allow_remote=allow_remote) as resp:
+            raw = resp.read(1_048_576)
+        payload = json.loads(raw.decode("utf-8"))
+        state = str(payload.get("status") or payload.get("state") or "").strip().lower() if isinstance(payload, dict) else ""
+        if getattr(resp, "status", 200) == 200 and state == "ready":
+            return True, "Sonder Inference is reachable."
+    except (OSError, TimeoutError, ValueError, urllib.error.URLError):
+        pass
+    return False, (
+        "Sonder Inference is not reachable at %s; start `sonder-infer serve` "
+        "(local Ollama daemon is retired)." % origin
+    )
 
 
 def ensure_python_deps(

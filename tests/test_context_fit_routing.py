@@ -636,11 +636,10 @@ def test_policy_status_lists_tier_context_from_caches_only(policy_file, monkeypa
         lambda *a, **k: pytest.fail("runtime_policy_status must not open a socket"),
     )
     policy = runtime_policy.load(create=True)
-    general = policy["local_models"]["general"]
     text = runtime_policy.format_policy(policy)
     assert "context fit: long-context tier code [from environment]" in text
     assert "code: sonder_inference qwen3.8-27b-q3-100k, context unknown" in text
-    assert "general: ollama %s, context 32768 tokens (tier num_ctx)" % general in text
+    assert "general: sonder_inference" in text
     # Once status or doctor has read the profile, the cached value is shown.
     fake = FakeModels({"data": [PROFILE_100K]})
     SonderInferenceGateway(get_transport=fake.get).model_profiles()

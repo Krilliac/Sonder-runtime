@@ -181,6 +181,7 @@ ENV_EMBED_MODEL = "SONDER_INFERENCE_EMBED_MODEL"
 ENV_RERANK_MODEL = "SONDER_INFERENCE_RERANK_MODEL"
 ENV_TIER_MODELS = "SONDER_INFERENCE_TIER_MODELS"
 ENV_API_KEY = "SONDER_INFERENCE_API_KEY"
+ENV_API_KEY_FILE = "SONDER_INFERENCE_API_KEY_FILE"
 ENV_ALLOW_REMOTE = "SONDER_ALLOW_REMOTE_INFERENCE"
 ENV_READY_FILE = "SONDER_INFERENCE_READY_FILE"
 ENV_TIMEOUT = "SONDER_INFERENCE_TIMEOUT_SECONDS"
@@ -285,6 +286,7 @@ _INTEGER_OPTIONS = frozenset({"top_k", "seed", "repeat_last_n", "num_ctx", "num_
 # format).  OpenAI ``tools``, ``tool_choice``, ``response_format``, ``logprobs``
 # and ``embeddings`` are validated locally and gated on advertised server capability.
 _UNSUPPORTED_OPTIONS = ("format", "functions")
+from .si_chat_codec import _encode_image_content_parts
 
 
 class SonderInferenceUnreachable(DependencyUnavailable):
@@ -1259,6 +1261,110 @@ def _parse_max_inflight(source: Mapping[str, str]) -> int:
     return value
 
 
+_API_KEY_FILE_LIMIT = 4096
+
+
+def _read_api_key_file(raw_path: str) -> str:
+    cleaned = str(raw_path or "").strip()
+    if not cleaned:
+        return ""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+        raise InvalidInput("%s must not contain control characters" % ENV_API_KEY_FILE)
+    path = Path(cleaned).expanduser()
+    if path.is_symlink():
+        raise InvalidInput("%s must not be a symlink" % ENV_API_KEY_FILE)
+    if not path.is_file():
+        raise InvalidInput("%s does not point to a readable file" % ENV_API_KEY_FILE)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise InvalidInput("%s could not be read: %s" % (ENV_API_KEY_FILE, exc)) from None
+    if len(raw) > _API_KEY_FILE_LIMIT:
+        raise InvalidInput("%s exceeds %d bytes" % (ENV_API_KEY_FILE, _API_KEY_FILE_LIMIT))
+    try:
+        text = raw.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise InvalidInput("%s is not valid UTF-8" % ENV_API_KEY_FILE) from exc
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise InvalidInput("%s contains control characters" % ENV_API_KEY_FILE)
+    return text
+
+
+def resolve_api_key(env: Mapping[str, str] | None = None) -> str:
+    """Resolve the Sonder Inference bearer key from ``ENV_API_KEY`` or ``ENV_API_KEY_FILE``."""
+    source = os.environ if env is None else env
+    direct = str(source.get(ENV_API_KEY, "") or "").strip()
+    if direct:
+        return direct
+    key_file = str(source.get(ENV_API_KEY_FILE, "") or "").strip()
+    if key_file:
+        return _read_api_key_file(key_file)
+    return ""
+
+
+def si_auth_headers(
+    target_origin: str,
+    env: Mapping[str, str] | None = None,
+    *,
+    configured_origin: str | None = None,
+) -> dict[str, str]:
+    """Return ``Authorization: Bearer ...`` ONLY when ``target_origin`` equals the configured SI origin.
+
+    Never attaches the primary Sonder Inference bearer token to pool workers,
+    dedicated embedding hosts, or any URL carrying userinfo, a path, a query,
+    or a fragment.
+
+    ``configured_origin`` skips the typed-endpoint, environment, and ready-file
+    lookup and compares ``target_origin`` directly against that normalized
+    origin. Callers MUST pass only a trusted, config-derived SI origin (such as
+    ``config.inference.url``), never a worker URL or untrusted request target.
+    """
+    if not isinstance(target_origin, str):
+        return {}
+    raw_target = target_origin.strip()
+    if not raw_target:
+        return {}
+    try:
+        parsed = urlsplit(raw_target)
+        _ = parsed.port
+    except ValueError:
+        return {}
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        return {}
+    import sonder_runtime.adapters.inference.ollama_endpoint as _ollama_endpoint
+    import sonder_runtime.domain.ollama_policy as _ollama_policy
+
+    try:
+        target = _ollama_policy.normalize(raw_target).rstrip("/")
+        if configured_origin is not None:
+            configured = _ollama_policy.normalize(configured_origin).rstrip("/")
+        else:
+            typed = _ollama_endpoint.configured_typed_endpoint() if env is None else None
+            if typed is not None:
+                configured = _ollama_policy.normalize(typed).rstrip("/")
+            else:
+                source = os.environ if env is None else env
+                base_url = str(source.get(ENV_BASE_URL, "") or "").strip()
+                if not base_url:
+                    ready_file = str(source.get(ENV_READY_FILE, "") or "").strip()
+                    base_url = read_ready_file(ready_file) if ready_file else DEFAULT_BASE_URL
+                configured = _ollama_policy.normalize(base_url).rstrip("/")
+    except (ValueError, SonderError):
+        return {}
+    if target != configured:
+        return {}
+    api_key = resolve_api_key(env)
+    return {"Authorization": "Bearer " + api_key} if api_key else {}
+
+
 def parse_node_health_baselines(raw: str) -> dict[str, NodeHealthBaseline]:
     """Parse ``SONDER_NODE_HEALTH_BASELINES`` JSON mapping endpoint -> baseline spec."""
     text = str(raw or "").strip()
@@ -1353,7 +1459,7 @@ def config_from_env(env: Mapping[str, str] | None = None) -> SonderInferenceConf
         embed_model=str(source.get(ENV_EMBED_MODEL, "") or "").strip(),
         rerank_model=str(source.get(ENV_RERANK_MODEL, "") or "").strip(),
         tier_models=_parse_tier_models(str(source.get(ENV_TIER_MODELS, "") or "")),
-        api_key=str(source.get(ENV_API_KEY, "") or "").strip(),
+        api_key=resolve_api_key(source),
         allow_remote=allow_remote_raw == "1",
         timeout_seconds=_parse_float(source, ENV_TIMEOUT, DEFAULT_TIMEOUT_SECONDS),
         stream_idle_seconds=_parse_float(source, ENV_STREAM_IDLE, DEFAULT_STREAM_IDLE_SECONDS),
@@ -1436,6 +1542,8 @@ def correlation_headers(context: OperationContext) -> dict[str, str]:
         priority = "subagent"
     if priority is not None:
         headers["X-Sonder-Priority"] = priority
+    if not context.cloud_allowed:
+        headers["X-Sonder-Local-Only"] = "1"
     return headers
 
 
@@ -1767,6 +1875,57 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 % settings.display_base_url
             )
 
+    def _is_remote_cloud_model(self, document: Mapping[str, Any] | None, model: str) -> bool:
+        """Return True if SI health/model metadata marks ``model`` or backend as remote/cloud."""
+        from ...domain.model_routing import is_cloud_model_name
+
+        if is_cloud_model_name(model):
+            return True
+        if not isinstance(document, Mapping):
+            return False
+        backend = str(document.get("backend") or "").strip().lower()
+        if backend == "ollama_cloud":
+            return True
+        for row in document.get("models") or ():
+            if not isinstance(row, Mapping):
+                continue
+            row_id = str(row.get("id") or row.get("model") or "").strip()
+            if row_id and row_id != model:
+                continue
+            if row.get("remote") is True:
+                return True
+            row_backend = str(row.get("backend") or row.get("provider") or "").strip().lower()
+            if row_backend == "ollama_cloud":
+                return True
+            sonder_meta = row.get("sonder")
+            if isinstance(sonder_meta, Mapping) and (
+                sonder_meta.get("remote") is True
+                or str(sonder_meta.get("provider") or "").strip().lower() == "ollama_cloud"
+            ):
+                return True
+        return False
+
+    def _enforce_remote_model_consent(
+        self, document: Mapping[str, Any] | None, model: str, context: OperationContext,
+    ) -> None:
+        """Fail closed before send when a loopback SI forwards to a remote cloud provider (RET-02)."""
+        if not self._is_remote_cloud_model(document, model):
+            return
+        if not context.cloud_allowed:
+            raise Forbidden(
+                "model %r is served by a remote cloud provider on Sonder Inference and "
+                "this operation context does not allow cloud prompts" % model
+            )
+        env = os.environ if self._env is None else self._env
+        allow_cloud = str(env.get("SONDER_ALLOW_CLOUD", "") or "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        if not allow_cloud:
+            raise Forbidden(
+                "model %r is served by a remote cloud provider on Sonder Inference; "
+                "set SONDER_ALLOW_CLOUD=1 to opt in" % model
+            )
+
     def select_model(self, request: ModelRequest, settings: SonderInferenceConfig) -> str:
         """Explicit option, else the tier map, else the configured default."""
         explicit = (request.options or {}).get("model")
@@ -1785,9 +1944,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
             settings.display_base_url, _bounded(reason),
         )
         return SonderInferenceUnreachable(
-            "%s; start it with `sonder-infer serve`, or set %s=ollama and restart "
-            "the runtime to send requests it never received to local Ollama"
-            % (summary, ENV_FALLBACK),
+            "%s; start it with `sonder-infer serve`" % summary,
             reason=_bounded(reason), summary=summary, timed_out=timed_out,
         )
 
@@ -2818,11 +2975,27 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                             tool_msg["name"] = raw_name.strip()
                     messages.append(tool_msg)
                 elif "content" in entry:
-                    messages.append({"role": role, "content": entry["content"]})
+                    raw_imgs = entry.get("images")
+                    if raw_imgs:
+                        messages.append({
+                            "role": role,
+                            "content": _encode_image_content_parts(
+                                str(entry["content"]), raw_imgs,
+                            ),
+                        })
+                    else:
+                        messages.append({"role": role, "content": entry["content"]})
             elif isinstance(entry, (list, tuple)) and len(entry) == 2:
                 messages.append({"role": entry[0], "content": entry[1]})
-        if (request.prompt or "") or not (messages and messages[-1].get("role") == "tool"):
-            messages.append({"role": "user", "content": request.prompt})
+        prompt_images = (request.options or {}).get("images")
+        if (request.prompt or "") or prompt_images or not (messages and messages[-1].get("role") == "tool"):
+            if prompt_images:
+                messages.append({
+                    "role": "user",
+                    "content": _encode_image_content_parts(request.prompt or "", prompt_images),
+                })
+            else:
+                messages.append({"role": "user", "content": request.prompt})
         return messages
 
     def _operation_placement_candidates(
@@ -3397,7 +3570,11 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
     def _generate_here(self, request: ModelRequest, context: OperationContext) -> ModelResponse:
         context = self._with_request_cancel_token(request, context)
         self._call.response_meta = {}
-        if not (request.prompt or "").strip() and not self._history_ends_with_tool(request):
+        if (
+            not (request.prompt or "").strip()
+            and not self._history_ends_with_tool(request)
+            and not (request.options or {}).get("images")
+        ):
             raise InvalidInput("model request prompt is empty")
         settings = self.settings()
         cfg = OpenAICompatibleConfig(
@@ -3406,6 +3583,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         self._enforce_consent(cfg, context)
         timeout = self._call_timeout(settings, context)
         options = dict(request.options or {})
+        options.pop("images", None)  # encoded into OpenAI image_url content parts in _build_messages
         think = options.pop("think", None)  # decided after readiness (request_tuning)
         raw_tools = options.pop("tools", None)
         raw_tool_choice = options.pop("tool_choice", None)
@@ -3458,6 +3636,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         with _cancellation_scope(context.cancellation):
             snap = self._require_ready(settings, timeout)
         self._check_liveness(context, phase="before model call")
+        self._enforce_remote_model_consent(snap.document, model, context)
         if uses_native_tools and not native_tools_supported(
             snap.document, model=model, env=self._env,
         ):
@@ -3773,7 +3952,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         if not embeddings_supported(snap.document, model=model):
             raise DependencyUnavailable(
                 "sonder-inference at %s does not advertise embeddings capability for %r; "
-                "set SONDER_EMBEDDING_PROVIDER=ollama" % (settings.display_base_url, model)
+                "configure an embedding model on Sonder Inference" % (settings.display_base_url, model)
             )
         if explicit_model is not None and model != DEFAULT_MODEL and not self._serves(snap, model):
             raise DependencyUnavailable(
@@ -4085,6 +4264,8 @@ __all__ = [
     "parse_private_workers",
     "read_ready_file",
     "rerank_supported",
+    "resolve_api_key",
+    "si_auth_headers",
     "structured_output_supported",
     "trust_scope",
 ]

@@ -1,5 +1,5 @@
-# Modules that pass `mypy --strict` and must keep passing (see scripts/check_typing_ratchet.py).
 # Grow this list; removing a module whose file still exists fails the gate.
+# Modules that pass `mypy --strict` and must keep passing (see scripts/check_typing_ratchet.py).
 sonder_runtime/__init__.py
 sonder_runtime/adapters/__init__.py
 sonder_runtime/adapters/accelerators/__init__.py
@@ -106,6 +106,8 @@ sonder_runtime/adapters/inference/rpc_cluster.py
 sonder_runtime/adapters/inference/rpc_split_policy.py
 sonder_runtime/adapters/inference/runner_footprint.py
 sonder_runtime/adapters/inference/served_tier_models.py
+sonder_runtime/adapters/inference/model_context_probe.py
+sonder_runtime/adapters/inference/si_chat_codec.py
 sonder_runtime/adapters/inference/sonder_inference_probe.py
 sonder_runtime/adapters/inference/sonder_responses_client.py
 sonder_runtime/adapters/inference/startup_prewarm.py

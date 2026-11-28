@@ -26,7 +26,6 @@ def runtime_identity_fields(
         return None
     if not current:
         return None
-    inference = not cloud and provider == "sonder_inference"
     if not cloud and provider == "openrouter":
         return {
             "model": current,
@@ -40,14 +39,9 @@ def runtime_identity_fields(
             "diagnostics": "`python -m sonder_runtime anthropic status` or Sonder's diagnostics",
         }
     where = (
-        "served by Ollama's hosted service, not on this machine"
+        "served by Ollama Cloud through Sonder Inference, not on this machine"
         if cloud else
         "an open-weights model served through Sonder Inference"
-        if inference else
-        "an open-weights model served by Ollama on this machine"
     )
-    diagnostics = (
-        "Sonder Inference's `/v1/sonder/health` or Sonder's diagnostics"
-        if inference else "`ollama ps` or Sonder's diagnostics"
-    )
+    diagnostics = "Sonder Inference's `/v1/sonder/health` or Sonder's diagnostics"
     return {"model": current, "where": where, "diagnostics": diagnostics}

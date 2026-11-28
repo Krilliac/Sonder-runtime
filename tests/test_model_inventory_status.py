@@ -9,7 +9,12 @@ import server
 
 
 def _fake_get(tags=None, ps=None):
-    payloads = {"/api/tags": tags, "/api/ps": ps}
+    payloads = {
+        "/api/tags": tags,
+        "/v1/models": tags,
+        "/api/ps": ps,
+        "/v1/sonder/health": ps,
+    }
 
     def fake(path):
         payload = payloads.get(path)

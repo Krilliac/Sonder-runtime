@@ -120,7 +120,7 @@ def test_interactive_error_panel_adds_a_hint_for_known_failures(
 
     out = capsys.readouterr().out
     assert "hint: " in out
-    assert "make sure it is running" in out
+    assert "sonder-infer serve" in out and "running" in out
 
 
 def test_interactive_error_panel_stays_hint_free_for_unknown_failures(

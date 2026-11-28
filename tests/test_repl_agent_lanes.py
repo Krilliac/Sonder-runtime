@@ -53,6 +53,7 @@ def app_for(env, roots=None):
             state=SimpleNamespace(
                 workspace_roots=roots if roots is not None else (str(env[-1]),)
             ),
+            inference=SimpleNamespace(allow_remote=False),
             ollama=SimpleNamespace(allow_remote=False),
         ),
     )

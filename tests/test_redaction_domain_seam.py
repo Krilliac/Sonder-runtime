@@ -172,7 +172,7 @@ def test_pattern_output_redactor_fails_closed_when_the_walk_fails():
 
 def test_runtime_container_never_composes_the_identity_redactor():
     runtime = build_runtime(
-        RuntimeConfig(profile="workstation-local", model_backend="ollama"),
+        RuntimeConfig(profile="workstation-local", model_backend="sonder-inference"),
         RuntimeCapabilities(),
     )
     composed = runtime.tools.gateway._redactor
@@ -185,7 +185,7 @@ def test_runtime_container_never_composes_the_identity_redactor():
 def test_container_redactor_scrubs_live_secret_env_values(monkeypatch):
     monkeypatch.setenv("SONDER_AUTH_SECRET", "live-secret-material-42")
     runtime = build_runtime(
-        RuntimeConfig(profile="workstation-local", model_backend="ollama"),
+        RuntimeConfig(profile="workstation-local", model_backend="sonder-inference"),
         RuntimeCapabilities(),
     )
     out = runtime.tools.gateway._redactor.redact(

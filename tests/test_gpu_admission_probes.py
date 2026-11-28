@@ -33,7 +33,7 @@ def test_concurrent_probes_never_overlap_and_the_overflow_gets_probe_busy(
 
     def show():
         try:
-            server._post("/api/show", {"model": "m"}, timeout=5)
+            server._post("/v1/sonder/identity", {"model": "m"}, timeout=5)
         except Exception as exc:  # collected for the assertion below
             errors.append(exc)
 
@@ -55,7 +55,7 @@ def test_concurrent_probes_never_overlap_and_the_overflow_gets_probe_busy(
 
     assert fake.max_probe_active == 1
     assert errors == []
-    assert sum(1 for _, path, body in fake.requests if path == "/api/show" and (body or {}).get("model") == "m") == 2
+    assert sum(1 for _, path, body in fake.requests if path == "/v1/sonder/identity" and (body or {}).get("model") == "m") == 2
 
     # With the gate held longer than probe_wait_ms, the next probe is refused.
     fake.show_gate = threading.Event()
@@ -63,7 +63,7 @@ def test_concurrent_probes_never_overlap_and_the_overflow_gets_probe_busy(
     holder.start()
     assert wait_until(lambda: fake.probe_active == 1)
     with pytest.raises(server.ModelCallError) as busy:
-        server._post("/api/show", {"model": "m"}, timeout=5)
+        server._post("/v1/sonder/identity", {"model": "m"}, timeout=5)
     assert busy.value.kind == "admission"
     assert busy.value.refusal.reason.name == "PROBE_BUSY"
     fake.show_gate.set()
@@ -111,7 +111,7 @@ def _probe_slot_held(service, seconds):
     held, done = threading.Event(), threading.Event()
 
     def hold():
-        with service.admit("/api/show", {"model": "m"}, origin=LOCAL):
+        with service.admit("/v1/sonder/identity", {"model": "m"}, origin=LOCAL):
             held.set()
             done.wait(seconds)
 
@@ -163,7 +163,7 @@ def test_remote_origins_skip_the_local_probe_gate(tmp_path):
     with _probe_slot_held(service, 3.0):
         pool.refresh_capabilities(force=True)
         started = time.monotonic()
-        with service.admit("/api/tags", None, origin=REMOTE):
+        with service.admit("/v1/models", None, origin=REMOTE):
             pass
         assert time.monotonic() - started < 0.15
 

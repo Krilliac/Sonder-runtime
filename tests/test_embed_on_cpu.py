@@ -34,9 +34,9 @@ def captured(monkeypatch):
     seen = []
 
     def fake_open(req, timeout=None):
-        if getattr(req, "full_url", "").endswith("/api/embeddings"):
+        if getattr(req, "full_url", "").endswith("/v1/embeddings"):
             seen.append(json.loads(req.data.decode()))
-            return _Resp({"embedding": [0.1] * 768})
+            return _Resp({"data": [{"index": 0, "embedding": [0.1] * 768}]})
         raise OSError("no revision probe in this test")
 
     monkeypatch.setattr(embeddings.ollama_endpoint, "open_url", fake_open)
@@ -50,10 +50,9 @@ def test_the_flag_adds_num_gpu_zero_only_when_opted_in(monkeypatch, captured, va
         monkeypatch.delenv("SONDER_EMBED_ON_CPU", raising=False)
     else:
         monkeypatch.setenv("SONDER_EMBED_ON_CPU", value)
-    embeddings.embed("hello", timeout=5, base="http://127.0.0.1:11434", model="nomic-embed-text:latest")
+    embeddings.embed("hello", timeout=5, base="http://127.0.0.1:11437", model="nomic-embed-text:latest")
     assert captured, "the embed request was made"
     body = captured[-1]
-    assert body["model"] == "nomic-embed-text:latest" and body["prompt"] == "hello"
-    assert (body.get("options") == {"num_gpu": 0}) is on_cpu
-    if not on_cpu:
-        assert "options" not in body
+    assert body["model"] == "nomic-embed-text:latest" and body["input"] == "hello"
+    # Under RET-05 SI manages CPU/GPU placement on the server; OpenAI /v1/embeddings omits Ollama options.
+    assert "options" not in body

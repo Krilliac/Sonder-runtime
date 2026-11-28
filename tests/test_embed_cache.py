@@ -80,10 +80,10 @@ def test_embed_serves_second_call_from_cache(monkeypatch):
 
     def fake_open_url(request, timeout=30, **kwargs):
         url = request if isinstance(request, str) else request.full_url
-        if url.endswith("/api/embeddings"):
+        if url.endswith("/v1/embeddings"):
             calls.append(url)
         return FakeResponse(json.dumps(
-            {"embedding": [0.25, 0.5, 0.25]}
+            {"data": [{"index": 0, "embedding": [0.25, 0.5, 0.25]}]}
         ).encode("utf-8"))
 
     monkeypatch.setattr(e.ollama_endpoint, "open_url", fake_open_url)
@@ -95,7 +95,7 @@ def test_embed_serves_second_call_from_cache(monkeypatch):
 
     first = e.embed("cache integration probe")
     assert first == pytest.approx([0.25, 0.5, 0.25])
-    assert e.provenance(first)["provider"] == "ollama"
+    assert e.provenance(first)["provider"] == "sonder_inference"
     assert len(calls) == 1
 
     second = e.embed("cache integration probe")
@@ -124,4 +124,4 @@ def test_embed_cache_invalidates_on_revision_change(monkeypatch):
     assert e.embed("revision probe") is not None
     revision["value"] = "rev-b"
     assert e.embed("revision probe") is not None
-    assert e.provenance(e._EMBED_STATE.vector)["provider"] == "ollama"
+    assert e.provenance(e._EMBED_STATE.vector)["provider"] == "sonder_inference"

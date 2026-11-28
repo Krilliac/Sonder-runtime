@@ -59,8 +59,8 @@ class OpenAICompatTierModelsTests(unittest.TestCase):
             "SONDER_FAST_PROVIDER": "openai-compatible",
             "SONDER_GENERAL_PROVIDER": "openai-compatible",
             "SONDER_CODE_PROVIDER": "openai-compatible",
-            "SONDER_REASONING_PROVIDER": "ollama",
-            "SONDER_VISION_PROVIDER": "ollama",
+            "SONDER_REASONING_PROVIDER": "sonder-inference",
+            "SONDER_VISION_PROVIDER": "sonder-inference",
             "SONDER_OPENAI_MODEL": "bonsai-27b-pq2",
             "SONDER_OPENAI_TIER_MODELS": "fast=bonsai-9b-mtp,code=bonsai-27b-pq2",
         }

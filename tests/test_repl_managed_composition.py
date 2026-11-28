@@ -19,6 +19,7 @@ def test_composition_registers_selected_session_and_closes_without_bearer(
     monkeypatch.setattr(file_ops, 'workspace_root', lambda: project)
     application = SimpleNamespace(
         config=SimpleNamespace(state=SimpleNamespace(workspace_roots=(project,)),
+                               inference=SimpleNamespace(allow_remote=False),
                                ollama=SimpleNamespace(allow_remote=False)),
         agent_lanes=lambda: lanes[0],
         private_source_paths=(lanes[1].path,),
@@ -160,6 +161,7 @@ def test_explicit_recovery_preserves_original_and_spends_separate_approvals(
     monkeypatch.setattr(file_ops, 'workspace_root', lambda: project)
     application = SimpleNamespace(
         config=SimpleNamespace(state=SimpleNamespace(workspace_roots=(project,)),
+                               inference=SimpleNamespace(allow_remote=False),
                                ollama=SimpleNamespace(allow_remote=False)),
         agent_lanes=lambda: lanes[0])
     ledger = ApprovalLedger(Path(lanes[1].path).parent / 'explicit-approvals.db')

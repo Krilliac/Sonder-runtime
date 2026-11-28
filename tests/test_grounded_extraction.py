@@ -35,6 +35,7 @@ import pytest
 
 import grounded_extraction
 import server
+from tests.support.si_server_stub import bind_fake_si_post
 
 
 SOURCE = (
@@ -64,7 +65,7 @@ def _capture(monkeypatch, reply):
         seen["payload"] = payload
         return {"message": {"content": reply}}
 
-    monkeypatch.setattr(server, "_post", fake_post)
+    bind_fake_si_post(monkeypatch, server, fake_post)
     return seen
 
 

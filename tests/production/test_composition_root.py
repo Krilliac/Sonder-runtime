@@ -355,13 +355,15 @@ def test_default_app_build_is_atomic(monkeypatch, tmp_path):
     first.join(2)
     second.join(2)
 
-    assert not first.is_alive() and not second.is_alive()
-    assert len(calls) == 1
-    assert len(results) == 2
-    assert results[0] is results[1]
-    assert type(results[0]) is bootstrap_app.Application
-    assert results[0].inference_pool.configured_origins == ("http://127.0.0.1:11434",)
-    assert not results[0].inference_pool.has_configured_remote_workers
-    assert results[0].inference_membership._source._workers == ()
-    assert results[0].inference_membership._thread is None
-    bootstrap_app.reset_for_tests()
+    try:
+        assert not first.is_alive() and not second.is_alive()
+        assert len(calls) == 1
+        assert len(results) == 2
+        assert results[0] is results[1]
+        assert type(results[0]) is bootstrap_app.Application
+        assert results[0].inference_pool.configured_origins == ("http://127.0.0.1:11437",)
+        assert not results[0].inference_pool.has_configured_remote_workers
+        assert results[0].inference_membership._source._workers == ()
+        assert results[0].inference_membership._thread is None
+    finally:
+        bootstrap_app.reset_for_tests()

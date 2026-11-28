@@ -13,7 +13,7 @@ def test_offline_missing_model_never_pulls(monkeypatch):
 
     monkeypatch.setattr(setup_alias.subprocess, "run", fake_run)
     assert setup_alias.main(["--offline", "--ollama", "ollama-test"]) == 2
-    assert calls == [["ollama-test", "show", "sized:model"]]
+    assert calls == []  # local `ollama show`/`pull` retired under RET-05
 
 
 def test_default_base_model_uses_live_ram_selection(monkeypatch):
@@ -27,118 +27,45 @@ def test_default_base_model_uses_live_ram_selection(monkeypatch):
     assert setup_alias.default_base_model() == "operator:model"
 
 
-def test_online_pulls_only_missing_models_and_creates_alias(monkeypatch):
+def test_online_pulls_only_missing_models_and_creates_alias(monkeypatch, capsys):
     calls = []
-
-    def fake_run(command, **kwargs):
-        calls.append(command)
-        if command[1:3] == ["show", "base:model"]:
-            return SimpleNamespace(returncode=1, stdout="", stderr="missing")
-        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
-
-    monkeypatch.setattr(setup_alias.subprocess, "run", fake_run)
-    assert setup_alias.main(
-        [
-            "--model",
-            "base:model",
-            "--embed-model",
-            "embed:model",
-            "--ollama",
-            "ollama-test",
-        ]
-    ) == 0
-    verbs = [command[1] for command in calls]
-    assert verbs == ["show", "pull", "show", "create"]
-    assert calls[-1][2] == setup_alias.STABLE_ALIAS == "sonder:latest"
-    assert not any(command[1:3] == ["pull", "embed:model"] for command in calls)
+    monkeypatch.setattr(setup_alias.subprocess, "run", lambda command, **kw: calls.append(command))
+    rc = setup_alias.main(["--model", "base:model", "--embed-model", "embed:model", "--ollama", "ollama-test"])
+    assert rc == 2
+    assert calls == []
+    assert "retired" in capsys.readouterr().out.lower()
 
 
 def test_optional_embedding_failure_does_not_block_base_alias(monkeypatch, capsys):
     calls = []
-
-    def fake_run(command, **kwargs):
-        calls.append(command)
-        if command[1:3] == ["show", "embed:model"]:
-            return SimpleNamespace(returncode=1, stdout="", stderr="missing")
-        if command[1:3] == ["pull", "embed:model"]:
-            return SimpleNamespace(returncode=1, stdout="", stderr="offline")
-        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
-
-    monkeypatch.setattr(setup_alias.subprocess, "run", fake_run)
-
-    assert setup_alias.main([
-        "--model", "base:model", "--embed-model", "embed:model", "--ollama", "ollama-test",
-    ]) == 0
-    assert calls[-1][1:3] == ["create", setup_alias.STABLE_ALIAS]
-    assert "core chat is ready" in capsys.readouterr().out
+    monkeypatch.setattr(setup_alias.subprocess, "run", lambda command, **kw: calls.append(command))
+    rc = setup_alias.main(["--model", "base:model", "--embed-model", "embed:model", "--ollama", "ollama-test"])
+    assert rc == 2 and calls == [] and "retired" in capsys.readouterr().out.lower()
 
 
 def test_optional_embedding_failure_does_not_claim_chat_ready_before_alias(monkeypatch, capsys):
-    def fake_run(command, **_kwargs):
-        if command[1:3] == ["show", "embed:model"]:
-            return SimpleNamespace(returncode=1, stdout="", stderr="missing")
-        if command[1:3] == ["pull", "embed:model"]:
-            return SimpleNamespace(returncode=1, stdout="", stderr="offline")
-        if command[1] == "create":
-            return SimpleNamespace(returncode=1, stdout="", stderr="alias failed")
-        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
-
-    monkeypatch.setattr(setup_alias.subprocess, "run", fake_run)
-
-    assert setup_alias.main([
-        "--model", "base:model", "--embed-model", "embed:model", "--ollama", "ollama-test",
-    ]) == 3
+    monkeypatch.setattr(setup_alias.subprocess, "run", lambda *_a, **_kw: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    assert setup_alias.main(["--model", "base:model", "--embed-model", "embed:model", "--ollama", "ollama-test"]) == 2
     assert "core chat is ready" not in capsys.readouterr().out
 
 
 def test_offline_missing_optional_embedding_still_creates_base_alias(monkeypatch, capsys):
     calls = []
-
-    def fake_run(command, **kwargs):
-        calls.append(command)
-        return SimpleNamespace(
-            returncode=1 if command[1:3] == ["show", "embed:model"] else 0,
-            stdout="ok", stderr="missing",
-        )
-
-    monkeypatch.setattr(setup_alias.subprocess, "run", fake_run)
-
-    assert setup_alias.main([
-        "--offline", "--model", "base:model", "--embed-model", "embed:model", "--ollama", "ollama-test",
-    ]) == 0
-    assert not any(command[1] == "pull" for command in calls)
-    assert calls[-1][1:3] == ["create", setup_alias.STABLE_ALIAS]
-    assert "core chat is ready" in capsys.readouterr().out
+    monkeypatch.setattr(setup_alias.subprocess, "run", lambda command, **kw: calls.append(command))
+    assert setup_alias.main(["--offline", "--model", "base:model", "--embed-model", "embed:model", "--ollama", "ollama-test"]) == 2
+    assert calls == []
 
 
 def test_no_embedding_skips_optional_model_without_discarding_base_alias(monkeypatch, capsys):
     calls = []
-
-    def fake_run(command, **kwargs):
-        calls.append(command)
-        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
-
-    monkeypatch.setattr(setup_alias.subprocess, "run", fake_run)
-
-    assert setup_alias.main([
-        "--model", "base:model", "--embed-model", "embed:model", "--no-embedding",
-        "--ollama", "ollama-test",
-    ]) == 0
-    assert not any("embed:model" in command for command in calls)
-    assert calls[-1][1:3] == ["create", setup_alias.STABLE_ALIAS]
-    assert "embedding: skipped" in capsys.readouterr().out
+    monkeypatch.setattr(setup_alias.subprocess, "run", lambda command, **kw: calls.append(command))
+    assert setup_alias.main(["--model", "base:model", "--embed-model", "embed:model", "--no-embedding", "--ollama", "ollama-test"]) == 2
+    assert calls == []
 
 
-def test_failed_alias_creation_is_reported(monkeypatch):
-    def fake_run(command, **kwargs):
-        return SimpleNamespace(
-            returncode=1 if command[1] == "create" else 0,
-            stdout="",
-            stderr="create failed",
-        )
-
-    monkeypatch.setattr(setup_alias.subprocess, "run", fake_run)
-    assert setup_alias.main(["--offline", "--ollama", "ollama-test"]) == 3
+def test_failed_alias_creation_is_reported(monkeypatch, capsys):
+    assert setup_alias.main(["--offline", "--ollama", "ollama-test"]) == 2
+    assert "retired" in capsys.readouterr().out.lower()
 
 
 def test_system_prompt_uses_exposed_tools_without_inventing_them():
@@ -164,31 +91,22 @@ def test_remote_ollama_is_blocked_before_cli_without_explicit_opt_in(monkeypatch
     assert calls == []
 
 
-def test_remote_ollama_opt_in_allows_cli(monkeypatch):
+def test_remote_ollama_opt_in_allows_cli(monkeypatch, capsys):
     calls = []
-    monkeypatch.setenv("OLLAMA_HOST", "https://models.example.test:11434")
-    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "https://models.example.test:11437")
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_INFERENCE", "1")
+    monkeypatch.setattr(setup_alias.subprocess, "run", lambda command, **kw: calls.append(command))
 
-    def fake_run(command, **kwargs):
-        calls.append(command)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(setup_alias.subprocess, "run", fake_run)
-
-    assert setup_alias.main(["--offline", "--ollama", "ollama-test"]) == 0
-    assert calls
+    assert setup_alias.main(["--offline", "--ollama", "ollama-test"]) == 2
+    assert not any(c and "ollama" in str(c[0]).lower() for c in calls)
+    assert "retired" in capsys.readouterr().out.lower()
 
 
-def test_bind_all_ollama_cli_uses_numeric_loopback(monkeypatch):
-    environments = []
-    monkeypatch.setenv("OLLAMA_HOST", "[::]:11434")
+def test_bind_all_ollama_cli_uses_numeric_loopback(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://[::]:11437")
+    monkeypatch.setattr(setup_alias.subprocess, "run", lambda command, **kw: calls.append(command))
 
-    def fake_run(command, **kwargs):
-        environments.append(kwargs["env"])
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(setup_alias.subprocess, "run", fake_run)
-
-    assert setup_alias.main(["--offline", "--ollama", "ollama-test"]) == 0
-    assert environments
-    assert all(env["OLLAMA_HOST"] == "http://[::1]:11434" for env in environments)
+    assert setup_alias.main(["--offline", "--ollama", "ollama-test"]) == 2
+    assert not any(c and "ollama" in str(c[0]).lower() for c in calls)
+    assert "retired" in capsys.readouterr().out.lower()

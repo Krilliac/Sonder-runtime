@@ -43,28 +43,24 @@ def test_prompt_identity_does_not_cache_positive_metadata(monkeypatch):
         SimpleNamespace(configured_origins=("http://127.0.0.1:11434",)),
     )
     calls = []
-    tag = {"models": [{"name": "model-x", "digest": "a" * 64, "modified_at": "rev-1"}]}
-    show = {
-        "model_info": {"tokenizer.ggml.model": "qwen"},
-        "template": "{{ .Prompt }}",
-        "modified_at": "rev-1",
+    identity_doc = {
+        "backend_identity": {
+            "model_digest": "a" * 64,
+            "tokenizer_digest": "qwen",
+            "template_digest": "tpl-rev-1",
+        }
     }
 
     def get(*_args, **_kwargs):
         calls.append(1)
-        return tag
-
-    def post(*_args, **_kwargs):
-        calls.append(1)
-        return show
+        return identity_doc
 
     monkeypatch.setattr(server, "_get", get)
-    monkeypatch.setattr(server, "_post", post)
     first = server._model_prompt_identity("model-x")
     second = server._model_prompt_identity("model-x")
 
     assert first == second
-    assert first[1].endswith(";ollama-model-sha256:" + "a" * 64)
+    assert first[1].endswith(";si-model-sha256:" + "a" * 64)
     assert len(calls) == 6
 
 
@@ -73,16 +69,18 @@ def test_prompt_identity_changes_when_same_template_tag_digest_changes(monkeypat
     monkeypatch.setattr(
         server, "OLLAMA_POOL", SimpleNamespace(configured_origins=("http://127.0.0.1:11434",))
     )
-    digest = ["a" * 64, "a" * 64, "b" * 64, "b" * 64]
+    digest = ["a" * 64, "a" * 64, "a" * 64, "b" * 64, "b" * 64, "b" * 64]
 
     def get(*_args, **_kwargs):
-        return {"models": [{"name": "model-x", "digest": digest.pop(0), "modified_at": "rev"}]}
-
-    def post(*_args, **_kwargs):
-        return {"model_info": {"tokenizer.ggml.model": "qwen"}, "template": "same", "modified_at": "rev"}
+        return {
+            "backend_identity": {
+                "model_digest": digest.pop(0),
+                "tokenizer_digest": "qwen",
+                "template_digest": "same",
+            }
+        }
 
     monkeypatch.setattr(server, "_get", get)
-    monkeypatch.setattr(server, "_post", post)
     first = server._model_prompt_identity("model-x")
     second = server._model_prompt_identity("model-x")
     assert first[1] != second[1]

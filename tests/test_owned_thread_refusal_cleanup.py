@@ -106,7 +106,7 @@ def test_prewarm_releases_inflight_marker_when_worker_is_refused(monkeypatch):
     assert server.prewarm_model("general") is True
     assert started == [True]
     assert len(posts) == 1
-    assert posts[0][0] == "/api/chat"
+    assert posts[0][0] == "/v1/chat/completions"
     assert posts[0][1]["options"]["num_ctx"] == 8192
     assert posts[0][1]["options"]["num_predict"] == 1
 

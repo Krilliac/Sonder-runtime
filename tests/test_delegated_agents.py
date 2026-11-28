@@ -599,15 +599,15 @@ def test_102_direct_sonder_inference_model_routes_through_provider_dispatch(monk
             "general": "sonder_inference",
             "code": "sonder_inference",
             "reasoning": "sonder_inference",
-            "vision": "ollama",
+            "vision": "sonder_inference",
         },
-        embedding_provider="ollama",
+        embedding_provider="sonder_inference",
     )
     dispatch = ProviderDispatchGateway(
-        providers={"sonder_inference": FakeSonderInferenceGateway(), "ollama": FailingOllamaGateway()},
+        providers={"sonder_inference": FakeSonderInferenceGateway()},
         tier_providers=dict(bindings.tier_providers),
         default_generation_provider="sonder_inference",
-        embedding_provider="ollama",
+        embedding_provider="sonder_inference",
     )
     monkeypatch.setattr(
         server,
@@ -674,15 +674,15 @@ def test_109_blocked_node1_sonder_inference_model_in_bypass_and_text_only(monkey
             "general": "sonder_inference",
             "code": "sonder_inference",
             "reasoning": "sonder_inference",
-            "vision": "ollama",
+            "vision": "sonder_inference",
         },
-        embedding_provider="ollama",
+        embedding_provider="sonder_inference",
     )
     dispatch = ProviderDispatchGateway(
-        providers={"sonder_inference": FakeSonderInferenceGateway(), "ollama": SimpleNamespace()},
+        providers={"sonder_inference": FakeSonderInferenceGateway()},
         tier_providers=dict(bindings.tier_providers),
         default_generation_provider="sonder_inference",
-        embedding_provider="ollama",
+        embedding_provider="sonder_inference",
     )
     monkeypatch.setattr(
         server, "_APP_GRAPH",

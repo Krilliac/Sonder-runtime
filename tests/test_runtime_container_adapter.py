@@ -37,7 +37,7 @@ from sonder_runtime.domain.routing.backend_conformance import (
 )
 
 
-def _config(backend: str = "ollama") -> RuntimeConfig:
+def _config(backend: str = "sonder-inference") -> RuntimeConfig:
     return RuntimeConfig(
         profile="workstation-local",
         model_backend=backend,
@@ -52,8 +52,8 @@ def test_bootstrap_container_preserves_runtime_compatibility_identity():
 def test_runtime_container_selects_ollama_gateway_without_eager_network_io():
     runtime = build_runtime(_config(), RuntimeCapabilities())
     assert isinstance(runtime, Runtime)
-    assert runtime.config.model_backend == "ollama"
-    assert runtime.model_gateway.__class__.__name__ == "OllamaGateway"
+    assert runtime.config.model_backend == "sonder-inference"
+    assert runtime.model_gateway.__class__.__name__ == "SonderInferenceGateway"
 
 
 def test_runtime_container_selects_openai_compatible_gateway():
@@ -64,15 +64,15 @@ def test_runtime_container_selects_openai_compatible_gateway():
 
 def test_runtime_container_composes_configured_mixed_provider_bindings():
     bindings = ProviderBindings(
-        default_generation_provider="ollama",
+        default_generation_provider="sonder_inference",
         tier_providers={
             "fast": "openai_compatible",
             "general": "openai_compatible",
-            "code": "ollama",
-            "reasoning": "ollama",
-            "vision": "ollama",
+            "code": "sonder_inference",
+            "reasoning": "sonder_inference",
+            "vision": "sonder_inference",
         },
-        embedding_provider="ollama",
+        embedding_provider="sonder_inference",
     )
     runtime = build_runtime(
         RuntimeConfig(profile="workstation-local", provider_bindings=bindings),
@@ -106,24 +106,24 @@ def test_opted_in_runtime_gateway_denies_synthetic_and_changed_host_identity_bef
     gateway = Gateway()
     monkeypatch.setattr(factory, "build_model_gateway", lambda bindings: gateway)
     current = {"identity": BackendIdentity(
-        backend="ollama", model="fixture", model_digest="a" * 64,
+        backend="sonder-inference", model="fixture", model_digest="a" * 64,
         quantization="Q4", backend_version="v1", tokenizer_digest="b" * 64,
         template_digest="c" * 64, context_tokens=8192, hardware="cpu-1",
     )}
     evidence = RecentCapabilityEvidence(tmp_path / "capabilities.json")
     evidence.save(BackendConformanceRecord(
-        "ollama", "fixture", 100, (ProbeResult(BackendCapability.CHAT, True, "observed"),),
+        "sonder-inference", "fixture", 100, (ProbeResult(BackendCapability.CHAT, True, "observed"),),
         synthetic=True, identity=current["identity"],
     ))
     runtime = build_runtime(
         _config(), RuntimeCapabilities(), route_evidence=evidence,
         route_identity_for=lambda route: current["identity"],
         route_bindings={
-            LogicalRole.DEFAULT: RoleBinding(LogicalRole.DEFAULT, "ollama", "fixture"),
+            LogicalRole.DEFAULT: RoleBinding(LogicalRole.DEFAULT, "sonder-inference", "fixture"),
         },
         route_health={
-            "ollama": ProviderHealth(
-                "ollama", ProviderState.READY, datetime.now(timezone.utc),
+            "sonder-inference": ProviderHealth(
+                "sonder-inference", ProviderState.READY, datetime.now(timezone.utc),
             ),
         },
     )
@@ -143,8 +143,8 @@ def test_opted_in_runtime_gateway_denies_synthetic_and_changed_host_identity_bef
 def test_opted_in_runtime_refuses_unbound_or_mixed_provider_dispatch(tmp_path):
     evidence = RecentCapabilityEvidence(tmp_path / "evidence.json")
     identity_for = lambda route: None
-    health = {"ollama": ProviderHealth(
-        "ollama", ProviderState.READY, datetime.now(timezone.utc),
+    health = {"sonder-inference": ProviderHealth(
+        "sonder-inference", ProviderState.READY, datetime.now(timezone.utc),
     )}
     bind = lambda name: {LogicalRole.DEFAULT: RoleBinding(
         LogicalRole.DEFAULT, name, "fixture",
@@ -156,16 +156,16 @@ def test_opted_in_runtime_refuses_unbound_or_mixed_provider_dispatch(tmp_path):
             route_health=health,
         )
     mixed = ProviderBindings(
-        default_generation_provider="ollama",
-        tier_providers={tier: "openai_compatible" if tier == "fast" else "ollama"
+        default_generation_provider="sonder_inference",
+        tier_providers={tier: "openai_compatible" if tier == "fast" else "sonder_inference"
                         for tier in ("fast", "general", "code", "reasoning", "vision")},
-        embedding_provider="ollama",
+        embedding_provider="sonder_inference",
     )
     with pytest.raises(ValueError, match="single concrete provider"):
         build_runtime(
             RuntimeConfig(profile="workstation-local", provider_bindings=mixed),
             RuntimeCapabilities(), route_evidence=evidence,
-            route_identity_for=identity_for, route_bindings=bind("ollama"),
+            route_identity_for=identity_for, route_bindings=bind("sonder-inference"),
             route_health=health,
         )
     openai_label = "openai-compatible"
@@ -189,11 +189,8 @@ def test_runtime_container_accepts_sonder_inference_aliases(alias):
 def test_runtime_configuration_captures_the_inference_fallback():
     from sonder_runtime.adapters.runtime_configuration import build_config_from_env
 
-    config = build_config_from_env("local", {
-        "SONDER_MODEL_BACKEND": "sonder-inference",
-        "SONDER_INFERENCE_FALLBACK": "ollama",
-    })
-    assert config.provider_bindings is not None
-    assert dict(config.provider_bindings.fallbacks) == {"sonder_inference": "ollama"}
-    runtime = build_runtime(config, RuntimeCapabilities())
-    assert runtime.model_gateway.__class__.__name__ == "PreSendFallbackGateway"
+    with pytest.raises(ValueError, match="retired"):
+        build_config_from_env("local", {
+            "SONDER_MODEL_BACKEND": "sonder-inference",
+            "SONDER_INFERENCE_FALLBACK": "ollama",
+        })

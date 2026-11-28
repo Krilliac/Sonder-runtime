@@ -388,12 +388,35 @@ def _run_preflight(config, *, check_ollama=True, ollama_timeout=5.0):
     )
 
 
+def _configure_typed_inference_endpoint(config, *, bind_ca_bundle: bool = True) -> None:
+    """Bind the typed Sonder Inference origin and optional CA bundle defensively."""
+    from sonder_runtime.adapters.inference import ollama_endpoint
+
+    inf = getattr(config, "inference", None)
+    oll = getattr(config, "ollama", None)
+    inf_url = getattr(inf, "url", "")
+    oll_url = getattr(oll, "url", "")
+    if oll_url and inf_url and oll_url != inf_url:
+        import logging
+        logging.getLogger("sonder.cli").warning(
+            "Ignoring deprecated [ollama].url (%s); using [inference].url (%s)",
+            oll_url,
+            inf_url,
+        )
+    if inf_url:
+        ollama_endpoint.configure_typed_endpoint(inf_url)
+    if bind_ca_bundle:
+        ca_bundle = getattr(inf, "ca_bundle", "") or getattr(oll, "ca_bundle", "")
+        ollama_endpoint.configure_typed_ca_bundle(ca_bundle)
+
+
 def cmd_preflight(args) -> int:
     try:
         config = _load_config(args)
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    _configure_typed_inference_endpoint(config, bind_ca_bundle=False)
     report = _run_preflight(
         config, check_ollama=not args.skip_ollama
     )
@@ -414,6 +437,7 @@ def cmd_doctor(args) -> int:
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    _configure_typed_inference_endpoint(config, bind_ca_bundle=False)
     checks = sonder_doctor.default_checks()
     replacements = dict(sonder_doctor.storage_checks(
         config, throughput=args.storage_probe,
@@ -435,7 +459,10 @@ def cmd_doctor(args) -> int:
         for name, check in checks
     ]
     if args.skip_ollama:
-        skipped_names = {"ollama", "ollama_workers", "ollama_residency", "embeddings"}
+        skipped_names = {
+            "ollama", "ollama_workers", "ollama_residency", "embeddings",
+            "sonder_inference",
+        }
         checks = [
             (name, check) for name, check in checks if name not in skipped_names
         ]
@@ -1107,8 +1134,13 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     # OLLAMA_HOST remains a legacy compatibility override and is exported only
     # for compatibility subcommands; canonical typed serve uses its bound
     # endpoint directly.
+    if config.ollama.workers:
+        os.environ["SONDER_OLLAMA_WORKERS"] = ",".join(config.ollama.workers)
+    if config.ollama.trusted_origins:
+        os.environ["SONDER_TRUSTED_ORIGINS"] = ",".join(config.ollama.trusted_origins)
+    else:
+        os.environ.setdefault("SONDER_TRUSTED_ORIGINS", "")
     if include_typed_runtime:
-        os.environ["OLLAMA_HOST"] = config.ollama.url
         os.environ["SONDER_OLLAMA_POOL_MAX_WORKERS"] = str(
             config.ollama.worker_pool_max_workers
         )
@@ -1142,11 +1174,40 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
         os.environ["SONDER_OLLAMA_WORKER_PROBE_TIMEOUT_MS"] = str(
             config.ollama.worker_probe_timeout_ms
         )
-    os.environ["SONDER_OLLAMA_WORKERS"] = ",".join(config.ollama.workers)
-    os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
-        "1" if config.ollama.allow_remote else "0"
+    os.environ["SONDER_INFERENCE_BASE_URL"] = config.inference.url
+    if config.inference.ready_file:
+        os.environ["SONDER_INFERENCE_READY_FILE"] = config.inference.ready_file
+    if config.inference.api_key_file:
+        os.environ["SONDER_INFERENCE_API_KEY_FILE"] = config.inference.api_key_file
+    os.environ["SONDER_ALLOW_REMOTE_INFERENCE"] = (
+        "1" if (config.inference.allow_remote or config.ollama.allow_remote) else "0"
     )
-    os.environ["SONDER_TRUSTED_ORIGINS"] = ",".join(config.ollama.trusted_origins)
+    if config.inference.private_workers:
+        os.environ["SONDER_INFERENCE_PRIVATE_WORKERS"] = config.inference.private_workers
+    if config.inference.model:
+        os.environ["SONDER_INFERENCE_MODEL"] = config.inference.model
+    if config.inference.embed_model:
+        os.environ["SONDER_INFERENCE_EMBED_MODEL"] = config.inference.embed_model
+    if config.inference.rerank_model:
+        os.environ["SONDER_INFERENCE_RERANK_MODEL"] = config.inference.rerank_model
+    if config.inference.tier_models:
+        os.environ["SONDER_INFERENCE_TIER_MODELS"] = config.inference.tier_models
+    os.environ["SONDER_INFERENCE_MAX_INFLIGHT"] = str(config.inference.max_inflight)
+    os.environ["SONDER_INFERENCE_TIMEOUT_SECONDS"] = str(
+        config.inference.request_timeout_seconds
+    )
+    os.environ["SONDER_INFERENCE_HEALTH_TTL_SECONDS"] = str(
+        config.inference.health_ttl_seconds
+    )
+    os.environ["SONDER_INFERENCE_HEALTH_TIMEOUT_SECONDS"] = str(
+        config.inference.health_timeout_seconds
+    )
+    os.environ["SONDER_INFERENCE_HEALTH_STALE_SECONDS"] = str(
+        config.inference.health_stale_seconds
+    )
+    os.environ["SONDER_INFERENCE_STARTUP_TIMEOUT_SECONDS"] = str(
+        config.inference.startup_timeout_seconds
+    )
     os.environ["SONDER_ALLOW_CLOUD"] = "1" if config.features.cloud else "0"
     os.environ["SONDER_WEB_TOOLS"] = "1" if config.features.web else "0"
     os.environ["SONDER_LIVE_RELOAD"] = "1" if config.features.live_reload else "0"
@@ -1226,8 +1287,8 @@ def cmd_serve(args) -> int:
     # Export worker config to env early so the pool sees it even if
     # server.py is imported before configure_typed_workers runs.
     os.environ["SONDER_OLLAMA_WORKERS"] = ",".join(config.ollama.workers)
-    os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] = (
-        "1" if config.ollama.allow_remote else "0"
+    os.environ["SONDER_ALLOW_REMOTE_INFERENCE"] = (
+        "1" if (config.inference.allow_remote or config.ollama.allow_remote) else "0"
     )
     os.environ["SONDER_TRUSTED_ORIGINS"] = ",".join(config.ollama.trusted_origins)
     from sonder_runtime.platform.logging import configure_logging
@@ -1236,6 +1297,7 @@ def cmd_serve(args) -> int:
         log_format=config.observability.log_format,
         redactor=_redactor_for_config(config),
     )
+    _configure_typed_inference_endpoint(config)
     if not args.skip_preflight:
         report = _run_preflight(
             config, check_ollama=not args.skip_ollama
@@ -1254,14 +1316,12 @@ def cmd_serve(args) -> int:
     # ownership guard, after migrations have succeeded, so a refused migration
     # cannot leave a live route behind.
     _configure_typed_home(config)
-    from sonder_runtime.adapters.inference import ollama_endpoint
-    ollama_endpoint.configure_typed_endpoint(config.ollama.url)
     from sonder_runtime.adapters import embeddings as sonder_embeddings
-    sonder_embeddings.configure_typed_endpoint(config.ollama.url)
+    sonder_embeddings.configure_typed_endpoint(config.inference.url)
     from sonder_runtime.adapters.inference import ollama_pool
     ollama_pool.configure_typed_workers(
         config.ollama.workers,
-        allow_remote=config.ollama.allow_remote,
+        allow_remote=bool(config.inference.allow_remote or config.ollama.allow_remote),
         trusted_origins=config.ollama.trusted_origins,
         failure_threshold=config.ollama.worker_failure_threshold,
         cooldown_seconds=config.ollama.worker_cooldown_seconds,
@@ -1523,7 +1583,7 @@ def cmd_mcp(args) -> int:
             from sonder_runtime.bootstrap.app import start_inference_membership
             start_inference_membership(application)
             from sonder_runtime.adapters.cloud_model_refresh_schedule import start_scheduled_refresh
-            start_scheduled_refresh(origin=config.ollama.url)
+            start_scheduled_refresh(origin=config.inference.url)
             # run_native_mcp returns the number of frames served, not a
             # status: a session that reached EOF cleanly exits 0.
             if getattr(args, "progressive_tools", False):
@@ -1550,12 +1610,11 @@ def cmd_mcp(args) -> int:
         _stamp_home_before_stores(gate=False)
         from sonder_runtime.bootstrap.app import default_app
         from sonder_runtime.bootstrap.legacy_mcp import configure_legacy_application
-        from sonder_runtime.adapters.inference import ollama_endpoint
-        ollama_endpoint.configure_typed_endpoint(config.ollama.url)
+        _configure_typed_inference_endpoint(config)
         from sonder_runtime.adapters.inference import ollama_pool
         ollama_pool.configure_typed_workers(
             config.ollama.workers,
-            allow_remote=config.ollama.allow_remote,
+            allow_remote=bool(config.inference.allow_remote or config.ollama.allow_remote),
             trusted_origins=config.ollama.trusted_origins,
             failure_threshold=config.ollama.worker_failure_threshold,
             cooldown_seconds=config.ollama.worker_cooldown_seconds,
@@ -1580,7 +1639,7 @@ def cmd_mcp(args) -> int:
         from sonder_runtime.bootstrap.app import start_inference_membership
         start_inference_membership(owned_application)
         from sonder_runtime.adapters.cloud_model_refresh_schedule import start_scheduled_refresh
-        start_scheduled_refresh(origin=config.ollama.url)
+        start_scheduled_refresh(origin=config.inference.url)
 
     from sonder_runtime.adapters.security import unsafe_lab
 
@@ -1880,9 +1939,10 @@ def cmd_capabilities(args) -> int:
     from sonder_runtime.adapters.inference.capability_refresh import refresh_capabilities
 
     config = _load_config(args)
+    _configure_typed_inference_endpoint(config)
     try:
         result = refresh_capabilities(
-            origin=config.ollama.url, home=config.state.home or None,
+            origin=config.inference.url, home=config.state.home or None,
             models=args.model, timeout_seconds=args.timeout,
             context_tokens=args.context_tokens,
         )
@@ -1899,7 +1959,8 @@ def cmd_models(args) -> int:
 
     config = _load_config(args)
     _configure_typed_home(config)
-    return run_cloud_refresh(args, origin=config.ollama.url, home=config.state.home or None)
+    _configure_typed_inference_endpoint(config)
+    return run_cloud_refresh(args, origin=config.inference.url, home=config.state.home or None)
 
 
 def build_parser() -> argparse.ArgumentParser:

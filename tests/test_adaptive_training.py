@@ -22,35 +22,52 @@ SHARED_ALIAS_PATHS = adaptive_training._shared_alias_paths
 
 
 def test_ollama_external_runner_uses_canonical_client_environment(monkeypatch):
-    captured = []
+    import io
+    from sonder_runtime.adapters.training import artifacts as training_artifacts
 
-    def runner(command, **kwargs):
-        captured.append((command, kwargs))
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+    seen_urls = []
 
-    monkeypatch.setenv("OLLAMA_HOST", "0.0.0.0:11434")
-    result = adaptive_training._run_external(
-        runner,
+    def fake_opener(req, timeout=30.0):
+        seen_urls.append(req.full_url)
+        return io.BytesIO(b'{"backend_identity": {"model_digest": "' + b"a" * 64 + b'"}}')
+
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://0.0.0.0:11437")
+    result = training_artifacts.run_external(
+        subprocess.run,
         ["ollama-test", "show", "model"],
         ollama_command=True,
+        si_opener=fake_opener,
         capture_output=True,
     )
 
     assert result.returncode == 0
-    assert captured[0][1]["env"]["OLLAMA_HOST"] == "http://127.0.0.1:11434"
+    assert seen_urls == ["http://127.0.0.1:11437/v1/sonder/identity?model=model"]
+
+    cp_result = training_artifacts.run_external(
+        subprocess.run,
+        ["ollama-test", "cp", "a", "b"],
+        ollama_command=True,
+        si_opener=fake_opener,
+    )
+    assert cp_result.returncode == 1
+    assert "not yet supported by sonder-inference" in cp_result.stderr.lower()
 
 
 def test_ollama_external_runner_blocks_unapproved_remote_before_subprocess(
     monkeypatch,
 ):
+    from sonder_runtime.adapters.training import artifacts as training_artifacts
+
     calls = []
-    monkeypatch.setenv("OLLAMA_HOST", "http://models.example.test:11434")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://models.example.test:11437")
+    monkeypatch.delenv("SONDER_ALLOW_REMOTE_INFERENCE", raising=False)
     monkeypatch.delenv("SONDER_ALLOW_REMOTE_OLLAMA", raising=False)
 
-    result = adaptive_training._run_external(
+    result = training_artifacts.run_external(
         lambda *args, **kwargs: calls.append(1),
         ["ollama-test", "show", "model"],
         ollama_command=True,
+        si_opener=lambda *args, **kwargs: calls.append(1),
     )
 
     assert result.returncode == 125
@@ -60,7 +77,19 @@ def test_ollama_external_runner_blocks_unapproved_remote_before_subprocess(
 
 @pytest.fixture(autouse=True)
 def isolated_sonder_home(monkeypatch, tmp_path):
+    from sonder_runtime.adapters.training import artifacts as training_artifacts
+
     monkeypatch.setenv("SONDER_HOME", str(tmp_path / "sonder-home"))
+    real_run_external = training_artifacts.run_external
+
+    def _state_machine_run_external(runner, command, *, ollama_command=False, **kwargs):
+        # Allow unit tests of the alias deployment journal/rollback state machine
+        # to drive injected fake runners while production run_external stays fail-closed.
+        if ollama_command and runner is not subprocess.run:
+            return runner(command, **kwargs)
+        return real_run_external(runner, command, ollama_command=ollama_command, **kwargs)
+
+    monkeypatch.setattr(adaptive_training, "_run_external", _state_machine_run_external)
     monkeypatch.setattr(
         adaptive_training.promotion_eval,
         "local_model_digest",
@@ -822,7 +851,7 @@ def test_successful_deployment_activates_both_tiers_after_inference(monkeypatch,
     assert ok and "Behavior-validated and deployed" in message
     assert policy["local_models"]["code"] == adaptive_training.PERSONAL_MODEL
     assert policy["local_models"]["general"] == adaptive_training.PERSONAL_MODEL
-    assert ["ollama", "show", "qwen2.5-coder:1.5b"] in calls
+    assert ["sonder-infer-lora-api", "show", "qwen2.5-coder:1.5b"] in calls
     assert any(command[1:3] == ["cp", adaptive_training.PERSONAL_MODEL] for command in calls)
     assert any(
         command[1:2] == ["cp"]
@@ -1658,12 +1687,12 @@ except RuntimeError as exc:
 
 def test_ipv4_and_ipv6_loopback_share_alias_namespace(monkeypatch):
     monkeypatch.setattr(adaptive_training, "_shared_alias_paths", SHARED_ALIAS_PATHS)
-    monkeypatch.setenv("OLLAMA_HOST", "127.0.0.1:11434")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://127.0.0.1:11437")
     ipv4 = adaptive_training._shared_alias_paths()
-    monkeypatch.setenv("OLLAMA_HOST", "[::1]:11434")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://[::1]:11437")
     ipv6 = adaptive_training._shared_alias_paths()
 
-    assert ipv4["origin"] == ipv6["origin"] == "loopback:11434"
+    assert ipv4["origin"] == ipv6["origin"] == "loopback:11437"
     assert ipv4["lock"] == ipv6["lock"]
     assert ipv4["owner"] == ipv6["owner"]
     assert ipv4["transport_origin"] != ipv6["transport_origin"]

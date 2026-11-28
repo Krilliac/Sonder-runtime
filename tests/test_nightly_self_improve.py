@@ -70,6 +70,7 @@ def test_nightly_exports_toml_workers_when_env_blank(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.delenv("SONDER_OLLAMA_WORKERS", raising=False)
+    monkeypatch.delenv("SONDER_ALLOW_REMOTE_INFERENCE", raising=False)
     monkeypatch.delenv("SONDER_ALLOW_REMOTE_OLLAMA", raising=False)
     monkeypatch.delenv("SONDER_TRUSTED_ORIGINS", raising=False)
 
@@ -77,7 +78,7 @@ def test_nightly_exports_toml_workers_when_env_blank(tmp_path, monkeypatch):
 
     assert "SONDER_OLLAMA_WORKERS" in bound
     assert nightly_self_improve.os.environ["SONDER_OLLAMA_WORKERS"] == "https://192.0.2.2:8443"
-    assert nightly_self_improve.os.environ["SONDER_ALLOW_REMOTE_OLLAMA"] == "1"
+    assert nightly_self_improve.os.environ["SONDER_ALLOW_REMOTE_INFERENCE"] == "1"
 
 
 def test_nightly_keeps_explicit_worker_env(tmp_path, monkeypatch):

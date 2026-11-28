@@ -122,13 +122,15 @@ def test_summarizer_survives_gateway_failure(monkeypatch):
 
 def test_bootstrap_graph_exposes_chat_over_gateway():
     from sonder_runtime.bootstrap import app as bootstrap_app
-    from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import SonderInferenceGateway
 
     bootstrap_app.reset_for_tests()
-    application = bootstrap_app.build_application()
-    assert application.chat is not None
-    assert isinstance(application.model_gateway, OllamaGateway)
-    bootstrap_app.reset_for_tests()
+    try:
+        application = bootstrap_app.build_application()
+        assert application.chat is not None
+        assert isinstance(application.model_gateway, SonderInferenceGateway)
+    finally:
+        bootstrap_app.reset_for_tests()
 
 
 def test_gateway_edge_forwards_explicit_num_ctx(monkeypatch):

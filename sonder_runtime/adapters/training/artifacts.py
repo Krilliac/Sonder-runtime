@@ -175,21 +175,165 @@ def bounded_error(exc: BaseException, limit: int = 300) -> str:
     return value[:limit] or type(exc).__name__
 
 
+def _si_lora_origin(explicit_origin: str | None = None) -> str:
+    raw = str(explicit_origin or os.environ.get("SONDER_INFERENCE_BASE_URL", "") or "").strip()
+    if not raw:
+        raw = "http://127.0.0.1:11437"
+    if "://" not in raw:
+        raw = "http://" + raw
+    return raw.rstrip("/")
+
+
+def _valid_si_alias_name(name: str) -> bool:
+    text = str(name or "").strip()
+    if not text or len(text) > 128 or ".." in text or "/" in text or "\\" in text:
+        return False
+    return not any(ord(c) < 32 or ord(c) == 127 or c.isspace() for c in text)
+
+
+def _parse_lora_modelfile(modelfile_path: str) -> tuple[str, list[dict[str, Any]]]:
+    if path_has_control_chars(modelfile_path) or path_uses_symlink(modelfile_path):
+        raise ValueError("modelfile path must not contain control characters or symlinks")
+    path_obj = Path(modelfile_path)
+    if path_obj.stat().st_size > 65_536:
+        raise ValueError("modelfile exceeds 64 KiB limit")
+    base_model = ""
+    adapters: list[dict[str, Any]] = []
+    for raw_line in path_obj.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        upper = line.upper()
+        if upper.startswith("FROM "):
+            base_model = line[5:].strip()
+        elif upper.startswith("ADAPTER "):
+            adapter_path = line[8:].strip()
+            if path_has_control_chars(adapter_path) or ".." in Path(adapter_path).parts:
+                raise ValueError("adapter path contains disallowed traversal or control chars")
+            adapters.append({"path": adapter_path, "scale": 1.0})
+    if not base_model:
+        raise ValueError("modelfile missing FROM base_model")
+    return base_model, adapters
+
+
+def _execute_si_lora_alias_command(
+    command: list[str],
+    *,
+    si_opener: Callable[..., Any] | None = None,
+    si_origin: str | None = None,
+    timeout: float = 30.0,
+) -> subprocess.CompletedProcess[Any]:
+    """Execute training alias lifecycle commands against Sonder Inference LoRA HTTP endpoints."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    import sonder_runtime.adapters.inference.ollama_endpoint as ollama_endpoint
+
+    if len(command) < 2:
+        return subprocess.CompletedProcess(command, 2, stdout="", stderr="missing SI LoRA subcommand")
+    sub = str(command[1]).strip().lower()
+    opener = si_opener or ollama_endpoint.open_url
+    origin = _si_lora_origin(si_origin)
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
+
+    headers: dict[str, str] = {
+        "Accept": "application/json",
+        "X-Sonder-Local-Only": "1",
+        **si_auth_headers(origin),
+    }
+
+    def _call(method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, str]:
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        req_headers = dict(headers)
+        if data is not None:
+            req_headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(origin + path, data=data, headers=req_headers, method=method)
+        try:
+            with opener(req, timeout=timeout) as resp:
+                raw = resp.read(1_048_576)
+                status = int(getattr(resp, "status", None) or 200)
+                return status, raw.decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            err_raw = exc.read(65536).decode("utf-8", errors="replace") if hasattr(exc, "read") else str(exc)
+            return int(exc.code), err_raw
+        except (OSError, ValueError) as exc:
+            return 599, str(exc)
+
+    if sub == "show" and len(command) >= 3:
+        model = command[2]
+        if not _valid_si_alias_name(model):
+            return subprocess.CompletedProcess(command, 2, stdout="", stderr="invalid SI model/alias name")
+        code, text = _call("GET", "/v1/sonder/identity?model=" + urllib.parse.quote(model, safe=""))
+        if code == 200:
+            return subprocess.CompletedProcess(command, 0, stdout=text, stderr="")
+        if code == 404:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr=f"model '{model}' not found")
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr=text)
+    if sub == "create" and len(command) >= 5 and command[3] == "-f":
+        alias = command[2]
+        if not _valid_si_alias_name(alias):
+            return subprocess.CompletedProcess(command, 2, stdout="", stderr="invalid SI alias name")
+        try:
+            _parse_lora_modelfile(command[4])
+        except (OSError, ValueError) as exc:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr=str(exc))
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr=f"LoRA alias 'create' for {alias!r} is not yet supported by Sonder-Inference",
+        )
+    if sub == "cp" and len(command) >= 4:
+        if not _valid_si_alias_name(command[2]) or not _valid_si_alias_name(command[3]):
+            return subprocess.CompletedProcess(command, 2, stdout="", stderr="invalid SI alias name")
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr=(
+                f"LoRA alias 'cp' ({command[2]!r} -> {command[3]!r}) "
+                "is not yet supported by Sonder-Inference"
+            ),
+        )
+    if sub == "rm" and len(command) >= 3:
+        if not _valid_si_alias_name(command[2]):
+            return subprocess.CompletedProcess(command, 2, stdout="", stderr="invalid SI alias name")
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr=f"LoRA alias 'rm' for {command[2]!r} is not yet supported by Sonder-Inference",
+        )
+    return subprocess.CompletedProcess(
+        command,
+        2,
+        stdout="",
+        stderr=f"LoRA alias command {sub!r} is not yet supported by Sonder-Inference",
+    )
+
+
 def run_external(
     runner: RunnerFn,
     command: list[str],
     *,
     ollama_command: bool = False,
+    si_opener: Callable[..., Any] | None = None,
+    si_origin: str | None = None,
     **kwargs: Any,
 ) -> subprocess.CompletedProcess[Any]:
-    """Run an external command with canonical Ollama endpoint enforcement."""
+    """Run an external command; alias lifecycle commands route over SI LoRA HTTP, never local Ollama CLI."""
     if ollama_command:
         try:
-            kwargs["env"] = _client_environment(kwargs.get("env"))
+            env_map = _client_environment(kwargs.get("env"))
         except ValueError as exc:
             return subprocess.CompletedProcess(
-                command, 125, stdout="", stderr="Ollama endpoint blocked: %s" % exc,
+                command, 125, stdout="", stderr=f"Sonder Inference endpoint blocked: {exc}",
             )
+        timeout = float(kwargs.get("timeout", 30.0) or 30.0)
+        resolved_origin = si_origin or env_map.get("SONDER_INFERENCE_BASE_URL")
+        return _execute_si_lora_alias_command(
+            command, si_opener=si_opener, si_origin=resolved_origin, timeout=timeout,
+        )
     try:
         return runner(command, **kwargs)
     except subprocess.TimeoutExpired as exc:
@@ -201,7 +345,7 @@ def run_external(
 
 
 def model_show_status(result: subprocess.CompletedProcess[Any], model: str) -> str:
-    """Classify an ``ollama show`` result as ``exists``, ``missing``, or ``error``."""
+    """Classify an SI alias/identity show result as ``exists``, ``missing``, or ``error``."""
     if result.returncode == 0:
         return "exists"
     output = "%s\n%s" % (result.stdout or "", result.stderr or "")
@@ -213,7 +357,7 @@ def model_show_status(result: subprocess.CompletedProcess[Any], model: str) -> s
 
 
 def show_identity(result: subprocess.CompletedProcess[Any]) -> str:
-    """Hash normalized ``ollama show`` stdout, or return empty on failure."""
+    """Hash normalized SI identity stdout, or return empty on failure."""
     if result.returncode:
         return ""
     normalized = (result.stdout or "").replace("\r\n", "\n").strip()
@@ -225,13 +369,8 @@ def show_identity(result: subprocess.CompletedProcess[Any]) -> str:
 
 
 def ollama_executable(explicit: str = "") -> str:
-    """Resolve the Ollama binary path from explicit override, env, or PATH."""
-    return (
-        explicit
-        or os.environ.get("SONDER_OLLAMA_EXE", "").strip()
-        or shutil.which("ollama")
-        or "ollama"
-    )
+    """Return the SI LoRA alias logical command target (local Ollama CLI is retired)."""
+    return explicit or "sonder-infer-lora-api"
 
 
 def validate_adapter(

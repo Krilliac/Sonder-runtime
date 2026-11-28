@@ -37,7 +37,7 @@ def route(prompt, available_tiers=None, *, router, tier_models, request_payload=
     models = {
         tier: model if (
             not tier.startswith("cloud-") and ":cloud" not in model.lower()
-            and bindings.tier_providers.get(tier, bindings.default_generation_provider) == "ollama"
+            and bindings.tier_providers.get(tier, bindings.default_generation_provider) in ("sonder_inference", "ollama")
         ) else None
         for tier, model in tier_models.items()
     }

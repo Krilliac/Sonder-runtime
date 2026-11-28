@@ -68,6 +68,8 @@ def served_prompt_model(
     for the tier label ``bind_rung`` gives the gateway; anything else, and any
     error reading the config, keeps ``model`` so the prompt never gets worse.
     """
+    if isinstance(tier, str) and tier.strip().lower().startswith("model:"):
+        return model
     if provider == "openrouter":
         try:
             from .openrouter_gateway import config_from_env as openrouter_config
@@ -75,7 +77,8 @@ def served_prompt_model(
             served = openrouter_config(env).model_for_tier(str(tier or ""))
         except Exception:
             return model
-        return str(served or "").strip() or model
+        resolved = str(served or "").strip()
+        return model if not resolved or resolved == "default" else resolved
     if provider == "anthropic":
         try:
             from .anthropic_gateway import config_from_env as anthropic_config
@@ -83,7 +86,8 @@ def served_prompt_model(
             served = anthropic_config(env).model_for_tier(str(tier or ""))
         except Exception:
             return model
-        return str(served or "").strip() or model
+        resolved = str(served or "").strip()
+        return model if not resolved or resolved == "default" else resolved
     if provider == "openai_compatible":
         try:
             served = _openai_compat_model_for_tier(str(tier or ""), env)
@@ -97,7 +101,8 @@ def served_prompt_model(
         served = settings.tier_models.get(str(tier or "sonder"), settings.model)
     except Exception:
         return model
-    return str(served or "").strip() or model
+    resolved = str(served or "").strip()
+    return model if not resolved or resolved == "default" else resolved
 
 
 def served_tier_models(
@@ -119,7 +124,8 @@ def served_tier_models(
             settings = config_from_env(env)
             for name in inference_tiers:
                 model = settings.tier_models.get(name, settings.model)
-                served[name] = "%s (sonder_inference)" % model
+                if model and model != "default":
+                    served[name] = "%s (sonder_inference)" % model
         router_tiers = [
             name for name, provider in bindings.tier_providers.items()
             if provider == "openrouter"

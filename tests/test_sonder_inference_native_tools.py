@@ -889,26 +889,28 @@ def test_provider_bridge_never_enables_native_tools_for_other_providers_or_image
     assert bridge.ollama_only_feature(payload, provider="openai_compatible", native_tools=True)[0] == "tools"
     assert bridge.ollama_only_feature(payload, provider="sonder_inference") == (
         "tools",
-        "native tool calls are only available on Ollama tiers",
+        "native tool calls are not supported by this provider",
     )
     assert bridge.ollama_only_feature(payload, provider="sonder_inference", native_tools=True) is None
-    # Images and format remain Ollama-only even when native tools are enabled.
+    # Under RET-05, sonder_inference carries images and response_format; other hosted providers still refuse them.
     img_payload = {
         "messages": [{"role": "user", "content": "hi", "images": ["aGk="]}],
         "tools": [WEATHER_TOOL],
     }
-    assert bridge.ollama_only_feature(img_payload, provider="sonder_inference", native_tools=True)[0] == "images"
+    assert bridge.ollama_only_feature(img_payload, provider="sonder_inference", native_tools=True) is None
+    assert bridge.ollama_only_feature(img_payload, provider="openrouter", native_tools=True)[0] == "tools"
     fmt_payload = {
         "messages": [{"role": "user", "content": "hi"}],
         "format": {"type": "object"},
         "tools": [WEATHER_TOOL],
     }
-    assert bridge.ollama_only_feature(fmt_payload, provider="sonder_inference", native_tools=True)[0] == "format"
+    assert bridge.ollama_only_feature(fmt_payload, provider="sonder_inference", native_tools=True) is None
+    assert bridge.ollama_only_feature(fmt_payload, provider="openrouter", native_tools=True)[0] == "format"
 
 
 def test_provider_bridge_refuses_and_reroutes_tool_role_messages_without_native_tools():
     # Mid-history or trailing role="tool" without tools/tool_choice/assistant.tool_calls
-    # must still trigger ollama_only_feature and refuse fail-closed (or reroute to Ollama).
+    # must still trigger ollama_only_feature and refuse fail-closed when native tools are unverified.
     mid_tool_payload = {
         "model": "qwen2.5-coder:7b",
         "messages": [
@@ -926,7 +928,7 @@ def test_provider_bridge_refuses_and_reroutes_tool_role_messages_without_native_
     }
     for payload in (mid_tool_payload, trailing_tool_payload):
         found = bridge.ollama_only_feature(payload, provider="sonder_inference")
-        assert found == ("tool_calls", "images and tool calls are only available on Ollama tiers")
+        assert found == ("tool_calls", "tool calls are not supported by this provider")
         assert bridge.ollama_only_feature(payload, provider="openrouter", native_tools=True) == found
         with pytest.raises(bridge.UnsupportedProviderFeature):
             bridge.model_request_from_ollama_payload(payload, tier="code", provider="sonder_inference")
@@ -940,35 +942,28 @@ def test_provider_bridge_refuses_and_reroutes_tool_role_messages_without_native_
             for entry in req.history
         )
 
-    # Also verify legacy_chat_bridge.ollama_only_reroute reroutes standalone role="tool" to Ollama.
-    bindings = ProviderBindings(
-        default_generation_provider="sonder_inference",
-        tier_providers={t: "sonder_inference" for t in ("fast", "general", "code", "reasoning", "vision")},
-        embedding_provider="ollama",
-        fallbacks={"sonder_inference": "ollama"},
-    )
+    # Under RET-05 local Ollama fallback is retired, so ollama_only_reroute fails closed with ModelCallError.
+    from sonder_runtime.adapters.model_transport import ModelCallError
+    bindings = ProviderBindings.uniform("sonder_inference")
     legacy_gw = _gateway(FakeInference(health=_health(capabilities=["streaming"])))
     graph = SimpleNamespace(provider_bindings=bindings, model_gateway=legacy_gw)
     rung = bridge.RungBinding(provider="sonder_inference", tier="code")
     bridge.set_native_tools_probe(lambda p: p == "sonder_inference" and legacy_gw.supports_native_tools())
-    rerouted = legacy_chat_bridge.ollama_only_reroute(
-        legacy_gw, trailing_tool_payload, rung, model="qwen2.5-coder:7b", graph=graph,
-        loopback_endpoint=True, context_probe=lambda: 8192,
-    )
-    assert rerouted is not None
+    with pytest.raises(ModelCallError) as exc_info:
+        legacy_chat_bridge.ollama_only_reroute(
+            legacy_gw, trailing_tool_payload, rung, model="qwen2.5-coder:7b", graph=graph,
+            loopback_endpoint=True, context_probe=lambda: 8192,
+        )
+    assert exc_info.value.kind == bridge.UNSUPPORTED_FEATURE_KIND
 
 
 def test_ollama_only_reroute_respects_native_tools_probe_and_preserves_fallback():
-    bindings_with_fallback = ProviderBindings(
-        default_generation_provider="sonder_inference",
-        tier_providers={t: "sonder_inference" for t in ("fast", "general", "code", "reasoning", "vision")},
-        embedding_provider="ollama",
-        fallbacks={"sonder_inference": "ollama"},
-    )
+    from sonder_runtime.adapters.model_transport import ModelCallError
+    bindings = ProviderBindings.uniform("sonder_inference")
     capable_gw = _gateway(FakeInference(health=_health(capabilities=["streaming", "tool_calling"])))
     legacy_gw = _gateway(FakeInference(health=_health(capabilities=["streaming"])))
-    graph_capable = SimpleNamespace(provider_bindings=bindings_with_fallback, model_gateway=capable_gw)
-    graph_legacy = SimpleNamespace(provider_bindings=bindings_with_fallback, model_gateway=legacy_gw)
+    graph_capable = SimpleNamespace(provider_bindings=bindings, model_gateway=capable_gw)
+    graph_legacy = SimpleNamespace(provider_bindings=bindings, model_gateway=legacy_gw)
     rung = bridge.RungBinding(provider="sonder_inference", tier="code")
     payload = {
         "model": "qwen2.5-coder:7b",
@@ -978,24 +973,21 @@ def test_ollama_only_reroute_respects_native_tools_probe_and_preserves_fallback(
         "options": {"num_predict": 64},
     }
 
-    # Capable worker: probe reports True -> stays on sonder_inference (no Ollama reroute).
+    # Capable worker: probe reports True -> stays on sonder_inference (no reroute).
     bridge.set_native_tools_probe(lambda p: p == "sonder_inference" and capable_gw.supports_native_tools())
     assert legacy_chat_bridge.ollama_only_reroute(
         capable_gw, payload, rung, model="qwen2.5-coder:7b", graph=graph_capable,
         loopback_endpoint=True, context_probe=lambda: 16384,
     ) is None
 
-    # Non-capable worker: probe reports False -> reroutes cleanly to local Ollama fallback.
+    # Non-capable worker: local Ollama fallback is retired, so ollama_only_reroute fails closed with ModelCallError.
     bridge.set_native_tools_probe(lambda p: p == "sonder_inference" and legacy_gw.supports_native_tools())
-    with bridge.degradation_scope() as notes:
-        rerouted = legacy_chat_bridge.ollama_only_reroute(
+    with pytest.raises(ModelCallError) as exc_info:
+        legacy_chat_bridge.ollama_only_reroute(
             legacy_gw, payload, rung, model="qwen2.5-coder:7b", graph=graph_legacy,
             loopback_endpoint=True, context_probe=lambda: 16384,
         )
-    assert rerouted is not None
-    assert rerouted["tools"] == [WEATHER_TOOL]
-    assert rerouted["options"]["num_ctx"] == 16384
-    assert notes == ["served by ollama (ollama-only feature: tools)"]
+    assert exc_info.value.kind == bridge.UNSUPPORTED_FEATURE_KIND
 
 
 def test_presend_fallback_triggers_on_unreachable_and_does_not_mask_capability_refusal():

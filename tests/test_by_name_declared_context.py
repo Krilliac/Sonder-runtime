@@ -65,15 +65,19 @@ def _chat_context(monkeypatch, show_results):
     sent = []
     results = iter(show_results)
 
-    def fake_post(path, payload, **_kwargs):
-        if path == "/api/show":
+    def fake_get(path, **_kwargs):
+        if path == "/v1/models":
             result = next(results)
             if result is None:
                 raise _not_found()
             return result
+        return {}
+
+    def fake_post(path, payload, **_kwargs):
         sent.append(payload["options"]["num_ctx"])
         return {"message": {"content": "ok"}}
 
+    monkeypatch.setattr(server, "_get", fake_get)
     monkeypatch.setattr(server, "_post", fake_post)
     for _ in show_results:
         server._make_generate(MODEL, "", 0.2, 32, 0, text_only=True)("hello")
@@ -201,15 +205,19 @@ def test_untagged_and_latest_spellings_are_one_model(monkeypatch):
     sent = []
     results = iter([small, None])
 
-    def fake_post(path, payload, **_kwargs):
-        if path == "/api/show":
+    def fake_get(path, **_kwargs):
+        if path == "/v1/models":
             result = next(results)
             if result is None:
                 raise _not_found()
             return result
+        return {}
+
+    def fake_post(path, payload, **_kwargs):
         sent.append(payload["options"]["num_ctx"])
         return {"message": {"content": "ok"}}
 
+    monkeypatch.setattr(server, "_get", fake_get)
     monkeypatch.setattr(server, "_post", fake_post)
     for spelling in ("x", "x:latest"):
         server._make_generate(spelling, "", 0.2, 32, 0, text_only=True)("hello")
@@ -225,12 +233,16 @@ def test_partial_probe_is_a_failure_so_cached_calls_keep_the_same_window(monkeyp
     results = iter([good, partial])
     sent = []
 
-    def fake_post(path, payload, **_kwargs):
-        if path == "/api/show":
+    def fake_get(path, **_kwargs):
+        if path == "/v1/models":
             return next(results)
+        return {}
+
+    def fake_post(path, payload, **_kwargs):
         sent.append(payload["options"]["num_ctx"])
         return {"message": {"content": "ok"}}
 
+    monkeypatch.setattr(server, "_get", fake_get)
     monkeypatch.setattr(server, "_post", fake_post)
     server._make_generate(MODEL, "", 0.2, 32, 0, text_only=True)("hello")
     _expire_cache()

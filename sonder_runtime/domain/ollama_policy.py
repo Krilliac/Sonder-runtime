@@ -13,13 +13,25 @@ import urllib.parse
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_HOST = "127.0.0.1:11434"
-REMOTE_OPT_IN = "SONDER_ALLOW_REMOTE_OLLAMA"
+DEFAULT_HOST = "127.0.0.1:11437"
+REMOTE_OPT_IN = "SONDER_ALLOW_REMOTE_INFERENCE"
+LEGACY_REMOTE_OPT_IN = "SONDER_ALLOW_REMOTE_OLLAMA"
 _TRUE = {"1", "true", "yes", "on"}
 
 
 def remote_allowed(environment) -> bool:
-    return str((environment or {}).get(REMOTE_OPT_IN, "")).strip().lower() in _TRUE
+    env = environment or {}
+    if REMOTE_OPT_IN in env and str(env.get(REMOTE_OPT_IN, "")).strip() != "":
+        return str(env.get(REMOTE_OPT_IN, "")).strip().lower() in _TRUE
+    legacy = str(env.get(LEGACY_REMOTE_OPT_IN, "")).strip()
+    if legacy:
+        logger.warning(
+            "%s is deprecated; use %s instead",
+            LEGACY_REMOTE_OPT_IN,
+            REMOTE_OPT_IN,
+        )
+        return legacy.lower() in _TRUE
+    return False
 
 
 def _candidate(value=None) -> str:

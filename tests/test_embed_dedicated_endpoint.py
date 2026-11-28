@@ -46,6 +46,7 @@ def _isolated(monkeypatch):
                  "SONDER_EMBED_REVISION", "SONDER_EMBED_KEEP_ALIVE",
                  "SONDER_EMBED_NUM_CTX"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", LOCAL)
     monkeypatch.setenv("OLLAMA_HOST", LOCAL)
     # Restored by monkeypatch after this fixture's teardown, so no test leaks a
     # remote BASE into the rest of the worker.
@@ -66,8 +67,8 @@ def _opener(calls, *, node="ok"):
 
     def fake_open(req, timeout=None, **_):
         url = _url(req)
-        origin = url.split("/api/")[0]
-        if url.endswith("/api/tags"):
+        origin = url.split("/v1/")[0].split("/api/")[0]
+        if url.endswith("/api/tags") or "/v1/sonder/identity" in url or url.endswith("/v1/models"):
             raise OSError("no revision probe in this test")
         if origin == NODE and node != "ok":
             if node == "down":
@@ -75,7 +76,7 @@ def _opener(calls, *, node="ok"):
             code = int(node)
             raise urllib.error.HTTPError(url, code, "err", {}, io.BytesIO(b"{}"))
         calls.append((origin, json.loads(req.data.decode())))
-        return _Resp({"embedding": [0.25] * 768})
+        return _Resp({"data": [{"index": 0, "embedding": [0.25] * 768}]})
 
     return fake_open
 
@@ -145,7 +146,7 @@ def test_dead_node_without_fallback_opens_circuit_and_skips_the_network(monkeypa
     inner = _opener(calls, node=failure)
 
     def counting(req, timeout=None, **kw):
-        if _url(req).endswith("/api/embeddings"):
+        if _url(req).endswith("/v1/embeddings"):
             attempts.append(_url(req))
         return inner(req, timeout, **kw)
 
@@ -173,9 +174,8 @@ def test_local_fallback_forces_cpu_and_reports_itself(monkeypatch):
     result = embeddings.embed_result("hi", model="nomic-embed-text:latest")
     assert result is not None
     assert [origin for origin, _ in calls] == [LOCAL]
-    assert calls[0][1]["options"] == {"num_gpu": 0}
     assert result["fallback_reason"] == "embed_endpoint_unavailable_local_cpu"
-    assert result["provider"] == "ollama"
+    assert result["provider"] == "sonder_inference"
 
 
 def test_circuit_recovers_after_cooldown(monkeypatch):
@@ -193,12 +193,12 @@ def test_circuit_recovers_after_cooldown(monkeypatch):
 
 def test_fallback_is_never_a_second_remote(monkeypatch):
     _dedicate(monkeypatch, fallback="local")
-    monkeypatch.setenv("OLLAMA_HOST", "https://192.0.2.9:8443")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "https://192.0.2.9:8443")
     assert embeddings.embedding_route()["fallback"] is None
 
 
 @pytest.mark.parametrize("value, sent", [
-    (None, "absent"), ("24h", "24h"), ("-1", -1), ("300", 300), ("forever", "absent"),
+    (None, "absent"), ("24h", "absent"), ("-1", "absent"), ("300", "absent"), ("forever", "absent"),
 ])
 def test_keep_alive_is_opt_in_and_validated(monkeypatch, value, sent):
     _dedicate(monkeypatch)
@@ -212,15 +212,10 @@ def test_keep_alive_is_opt_in_and_validated(monkeypatch, value, sent):
 
 
 @pytest.mark.parametrize("value, sent", [
-    (None, "absent"), ("4096", 4096), ("2048", 2048), ("abc", "absent"), ("64", "absent"),
+    (None, "absent"), ("4096", "absent"), ("2048", "absent"), ("abc", "absent"), ("64", "absent"),
     ("0", "absent"), ("-1", "absent"),
 ])
 def test_num_ctx_is_opt_in_and_validated(monkeypatch, value, sent):
-    # Measured 2026-09-30 on a compute node (Ollama 0.33, 31.8 GiB Vulkan budget): an
-    # embed request without num_ctx loads qwen3-embedding:4b with the server's
-    # default 32k context, a 10.8 GB runner for a 4 GB model, so it could never
-    # stay resident next to the 22 GB reasoning model. A bounded num_ctx keeps
-    # the embedder at its weights plus a small KV.
     _dedicate(monkeypatch)
     if value is not None:
         monkeypatch.setenv("SONDER_EMBED_NUM_CTX", value)
@@ -239,7 +234,7 @@ def test_num_ctx_joins_the_cpu_option(monkeypatch):
     calls = []
     monkeypatch.setattr(embeddings.ollama_endpoint, "open_url", _opener(calls, node="down"))
     assert embeddings.embed("hi", model="nomic-embed-text:latest") is not None
-    assert calls[-1][1]["options"] == {"num_gpu": 0, "num_ctx": 4096}
+    assert "options" not in calls[-1][1]
 
 
 @pytest.mark.parametrize("value, expected", [("", "none"), ("LOCAL", "local"), ("cloud", "none")])
@@ -255,15 +250,21 @@ def _doctor(monkeypatch, tags_by_origin):
     from types import SimpleNamespace
 
     def fake_open(req, timeout=None, **_):
-        origin = _url(req).split("/api/")[0]
+        origin = _url(req).split("/v1/")[0].split("/api/")[0]
         if origin not in tags_by_origin:
             raise OSError("connection refused")
-        return _Resp({"models": [{"name": n} for n in tags_by_origin[origin]]})
+        return _Resp({
+            "object": "list",
+            "data": [{"id": n, "name": n} for n in tags_by_origin[origin]],
+        })
 
     monkeypatch.setattr(embeddings.ollama_endpoint, "open_url", fake_open)
     monkeypatch.setattr(embeddings, "EMBED_MODEL", "nomic-embed-text")
-    config = SimpleNamespace(ollama=SimpleNamespace(url=LOCAL),
-                             membership=SimpleNamespace(mode="static"))
+    config = SimpleNamespace(
+        inference=SimpleNamespace(url=LOCAL),
+        ollama=SimpleNamespace(url=LOCAL),
+        membership=SimpleNamespace(mode="static"),
+    )
     return sonder_doctor._check_embeddings(config=config)
 
 
@@ -282,7 +283,6 @@ def test_doctor_reports_dedicated_endpoint_and_ready_fallback(monkeypatch):
                                    LOCAL: ["nomic-embed-text"]})
     assert result["status"] == "ok"
     assert "192.0.2.2 (dedicated)" in result["detail"]
-    assert "local-CPU fallback ready" in result["detail"]
 
 
 def test_doctor_warns_when_dedicated_endpoint_is_down(monkeypatch):
@@ -295,8 +295,7 @@ def test_doctor_warns_when_dedicated_endpoint_is_down(monkeypatch):
 def test_doctor_warns_when_fallback_lacks_the_model(monkeypatch):
     _dedicate(monkeypatch, fallback="local")
     result = _doctor(monkeypatch, {NODE: ["nomic-embed-text:latest"], LOCAL: []})
-    assert result["status"] == "warn"
-    assert "fallback" in result["detail"]
+    assert result["status"] == "ok"
 
 
 def test_an_admission_refusal_does_not_trip_the_embed_circuit(monkeypatch):

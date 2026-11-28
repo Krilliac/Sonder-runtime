@@ -458,29 +458,36 @@ def backup_check(config=None, *, max_age_hours: float = 48.0):
 
 
 def _bind_ollama_ca_bundle(config, ollama_endpoint) -> str | None:
-    """Bind ``[ollama].ca_bundle`` as runtime composition does; return any error.
-
-    Without it every doctor probe used the system trust store and reported a
-    healthy private-CA endpoint as "self-signed certificate".
-    """
+    """Bind ``[inference].ca_bundle`` / ``[ollama].ca_bundle`` as runtime composition does; return any error."""
+    bundle = (
+        getattr(getattr(config, "inference", None), "ca_bundle", None)
+        or getattr(getattr(config, "ollama", None), "ca_bundle", None)
+    )
     try:
-        ollama_endpoint.configure_typed_ca_bundle(
-            getattr(getattr(config, "ollama", None), "ca_bundle", None))
+        ollama_endpoint.configure_typed_ca_bundle(bundle)
     except ValueError as exc:
         return "[ollama].ca_bundle: %s" % exc
     return None
 
 
+def _si_url_from_config(config) -> str:
+    import os
+
+    inf = getattr(config, "inference", None)
+    url = str(getattr(inf, "url", "") or "").strip()
+    if not url:
+        url = os.environ.get("SONDER_INFERENCE_BASE_URL", "").strip()
+    return url or "http://127.0.0.1:11437"
+
+
 def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
-    """Probe Ollama reachability read-only via GET /api/tags."""
+    """Probe Sonder Inference reachability read-only via GET /v1/sonder/health."""
     config = config if config is not None else _load_config_or_none()
     if config is None:
-        return _skip("config unavailable for Ollama endpoint")
-    if getattr(getattr(config, "membership", None), "mode", "static") == "external":
+        return _skip("config unavailable for Sonder Inference endpoint")
+    if getattr(getattr(config, "membership", None), "mode", None) == "external":
         return _skip("deferred: external membership requires explicit typed pool refresh")
-    url = getattr(getattr(config, "ollama", None), "url", None)
-    if not url:
-        return _skip("no Ollama url configured")
+    url = _si_url_from_config(config)
     try:
         import json
         import urllib.error
@@ -488,192 +495,209 @@ def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
         from urllib.parse import urlsplit
         from sonder_runtime.adapters.inference import ollama_endpoint
     except Exception as exc:  # pragma: no cover - import guard
-        return _skip("Ollama transport unavailable (%s)" % exc)
+        return _skip("Sonder Inference transport unavailable (%s)" % exc)
     host = urlsplit(url).hostname or ""
     bundle_error = _bind_ollama_ca_bundle(config, ollama_endpoint)
     if bundle_error is not None and urlsplit(url).scheme == "https":
         return {"status": STATUS_FAIL, "detail": "%s: %s" % (host, bundle_error)}
-    tags_url = url.rstrip("/") + "/api/tags"
+    health_url = url.rstrip("/") + "/v1/sonder/health"
     try:
-        request = urllib.request.Request(tags_url, method="GET")
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+            si_auth_headers,
+        )
+        request = urllib.request.Request(
+            health_url, headers=si_auth_headers(url, configured_origin=url), method="GET",
+        )
+        allow_remote = (
+            getattr(getattr(config, "inference", None), "allow_remote", False) is True
+            or getattr(getattr(config, "ollama", None), "allow_remote", False) is True
+        )
         with ollama_endpoint.open_url(
-            request, timeout=timeout,
-            allow_remote=getattr(config.ollama, "allow_remote", False) is True,
+            request, timeout=timeout, allow_remote=allow_remote,
         ) as response:
-            if response.status != 200:
+            payload = json.loads(response.read(1_048_576).decode("utf-8"))
+            state = str(payload.get("status") or payload.get("state") or "").strip().lower() if isinstance(payload, dict) else ""
+            models = len(payload.get("models") or []) if isinstance(payload, dict) else 0
+            if response.status != 200 or state != "ready":
                 return {
                     "status": STATUS_FAIL,
-                    "detail": "%s: HTTP %s" % (host, response.status),
+                    "detail": "%s: HTTP %s state=%s" % (host, response.status, state or "unknown"),
                 }
-            payload = json.loads(response.read(1_048_576).decode("utf-8"))
-            models = len(payload.get("models") or [])
             if not models:
-                # Reachable is not ready: with an empty catalog there is no
-                # model to serve, so the next chat turn fails at the provider.
-                # Report that rather than a bare "ok" the operator would read
-                # as "models are fine".  Warn, not fail — the runtime does
-                # start, and a warn keeps `sonder doctor` at exit code 0.
                 return {
                     "status": STATUS_WARN,
-                    "detail": (
-                        "%s: reachable, no models installed "
-                        "(run setup_alias.py)" % host
-                    ),
+                    "detail": "%s: Sonder Inference ready, no models registered" % host,
                 }
             return {
                 "status": STATUS_OK,
-                "detail": "%s: %d models" % (host, models),
+                "detail": "%s: Sonder Inference ready (%d models)" % (host, models),
             }
     except (urllib.error.URLError, OSError, ValueError) as exc:
         return {"status": STATUS_FAIL, "detail": "%s: %s" % (host, exc)}
 
 
 def _check_ollama_workers(*, timeout: float = 5.0, config=None) -> dict:
-    """Probe every configured multi-PC Ollama worker independently.
-
-    ``_check_ollama`` only verifies the primary endpoint. A remote worker
-    (``[ollama].workers`` / ``SONDER_OLLAMA_WORKERS``, see
-    ``docs/runbooks/multi-pc-ollama.md``) is otherwise invisible in ``sonder
-    doctor`` until a live request happens to fail over onto it -- an operator
-    would not learn PC 2 or PC 3 is down until traffic actually needed it.
-    """
-    config = config if config is not None else _load_config_or_none()
-    if config is None:
-        return _skip("config unavailable for Ollama worker endpoints")
-    if getattr(getattr(config, "membership", None), "mode", "static") == "external":
+    """Report Sonder Inference private worker and static pool worker readiness."""
+    cfg = config if config is not None else _load_config_or_none()
+    if cfg is None:
+        return _skip("config unavailable for Sonder Inference worker endpoints")
+    if getattr(getattr(cfg, "membership", None), "mode", None) == "external":
         return _skip("deferred: external membership requires explicit typed pool refresh")
-    workers = tuple(getattr(getattr(config, "ollama", None), "workers", ()) or ())
+    static_workers = tuple(getattr(getattr(cfg, "ollama", None), "workers", ()) or ())
+    if static_workers:
+        try:
+            import json
+            import urllib.error
+            import urllib.request
+            from urllib.parse import urlsplit
+            from sonder_runtime.adapters.inference import ollama_endpoint
+            from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+                si_auth_headers,
+            )
+        except Exception as exc:  # pragma: no cover - import guard
+            return _skip("Sonder Inference transport unavailable (%s)" % exc)
+        bundle_error = _bind_ollama_ca_bundle(cfg, ollama_endpoint)
+        allow_remote = (
+            getattr(getattr(cfg, "inference", None), "allow_remote", False) is True
+            or getattr(getattr(cfg, "ollama", None), "allow_remote", False) is True
+        )
+        up: list[str] = []
+        down: list[str] = []
+        for origin in static_workers:
+            host = urlsplit(origin).hostname or origin
+            if bundle_error is not None:
+                down.append("%s (%s)" % (host, bundle_error))
+                continue
+            try:
+                request = urllib.request.Request(
+                    origin.rstrip("/") + "/v1/sonder/health",
+                    headers=si_auth_headers(origin, configured_origin=_si_url_from_config(cfg)),
+                    method="GET",
+                )
+                with ollama_endpoint.open_url(
+                    request, timeout=timeout, allow_remote=allow_remote,
+                ) as response:
+                    if response.status != 200:
+                        down.append("%s (HTTP %s)" % (host, response.status))
+                        continue
+                    payload = json.loads(response.read(1_048_576).decode("utf-8"))
+                    models = len(payload.get("models") or []) if isinstance(payload, dict) else 0
+                    up.append("%s: %d models" % (host, models))
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                down.append("%s (%s)" % (host, exc))
+        return _summarize_worker_probe(up, down, len(static_workers))
+    try:
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+            SonderInferenceGateway,
+        )
+        status = SonderInferenceGateway().provider_status().get("sonder_inference", {})
+        workers = status.get("workers") or []
+    except Exception as exc:
+        return _skip("Sonder Inference worker status unavailable (%s)" % exc)
     if not workers:
         return _skip("no worker endpoints configured (single-endpoint deployment)")
-    try:
-        import json
-        import urllib.error
-        import urllib.request
-        from urllib.parse import urlsplit
-        from sonder_runtime.adapters.inference import ollama_endpoint
-    except Exception as exc:  # pragma: no cover - import guard
-        return _skip("Ollama transport unavailable (%s)" % exc)
-
-    bundle_error = _bind_ollama_ca_bundle(config, ollama_endpoint)
-
-    up: list[str] = []
-    down: list[str] = []
-    for origin in workers:
-        if bundle_error is not None:
-            down.append("%s (%s)" % (urlsplit(origin).hostname or origin, bundle_error))
-            continue
-        host = urlsplit(origin).hostname or origin
-        tags_url = origin.rstrip("/") + "/api/tags"
-        try:
-            request = urllib.request.Request(tags_url, method="GET")
-            with ollama_endpoint.open_url(
-                request, timeout=timeout,
-                allow_remote=getattr(config.ollama, "allow_remote", False) is True,
-            ) as response:
-                if response.status != 200:
-                    down.append("%s (HTTP %s)" % (host, response.status))
-                    continue
-                payload = json.loads(response.read(1_048_576).decode("utf-8"))
-                models = len(payload.get("models") or [])
-                up.append("%s: %d models" % (host, models))
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            down.append("%s (%s)" % (host, exc))
-
+    up = [
+        "%s (%s)" % (w.get("base_url") or "?", w.get("state") or "ready")
+        for w in workers if isinstance(w, dict) and w.get("state") == "ready"
+    ]
+    down = [
+        "%s (%s)" % (w.get("base_url") or "?", w.get("state") or "unavailable")
+        for w in workers if isinstance(w, dict) and w.get("state") != "ready"
+    ]
     return _summarize_worker_probe(up, down, len(workers))
 
 
 def _check_ollama_residency(*, timeout: float = 5.0, config=None) -> dict:
-    """Detect Ollama models that outlived their ``keep_alive`` expiry.
-
-    ``/api/ps`` reports each resident model's ``expires_at``. Ollama is
-    supposed to unload a model once that deadline passes; one still listed
-    well after expiry usually means the eviction stalled -- a model wedged in
-    VRAM (often from a killed/hung generation) rather than one legitimately
-    still in use. This is a read-only observation, not a repair: it never
-    unloads anything itself.
-    """
+    """Inspect Sonder Inference model residency from GET /v1/sonder/health."""
     config = config if config is not None else _load_config_or_none()
     if config is None:
-        return _skip("config unavailable for Ollama residency check")
-    if getattr(getattr(config, "membership", None), "mode", "static") == "external":
+        return _skip("config unavailable for Sonder Inference residency check")
+    if getattr(getattr(config, "membership", None), "mode", None) == "external":
         return _skip("deferred: external membership requires explicit typed pool refresh")
-    url = getattr(getattr(config, "ollama", None), "url", None)
-    if not url:
-        return _skip("no Ollama url configured")
+    url = _si_url_from_config(config)
     try:
         import json
         import urllib.error
         import urllib.request
-        from datetime import datetime, timezone
         from urllib.parse import urlsplit
         from sonder_runtime.adapters.inference import ollama_endpoint
     except Exception as exc:  # pragma: no cover - import guard
-        return _skip("Ollama transport unavailable (%s)" % exc)
+        return _skip("Sonder Inference transport unavailable (%s)" % exc)
 
     host = urlsplit(url).hostname or ""
-    ps_url = url.rstrip("/") + "/api/ps"
+    health_url = url.rstrip("/") + "/v1/sonder/health"
     try:
-        request = urllib.request.Request(ps_url, method="GET")
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+            si_auth_headers,
+        )
+        request = urllib.request.Request(
+            health_url, headers=si_auth_headers(url, configured_origin=url), method="GET",
+        )
+        allow_remote = (
+            getattr(getattr(config, "inference", None), "allow_remote", False) is True
+            or getattr(getattr(config, "ollama", None), "allow_remote", False) is True
+        )
         with ollama_endpoint.open_url(
-            request, timeout=timeout,
-            allow_remote=getattr(config.ollama, "allow_remote", False) is True,
+            request, timeout=timeout, allow_remote=allow_remote,
         ) as response:
             if response.status != 200:
-                return _skip("%s: /api/ps returned HTTP %s" % (host, response.status))
+                return _skip("%s: /v1/sonder/health returned HTTP %s" % (host, response.status))
             payload = json.loads(response.read(1_048_576).decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        return _skip("%s: /api/ps unreachable (%s)" % (host, exc))
+        return _skip("%s: /v1/sonder/health unreachable (%s)" % (host, exc))
 
-    models = payload.get("models") or []
-    if not models:
+    models = payload.get("models") or [] if isinstance(payload, dict) else []
+    resident_rows = [
+        m for m in models
+        if isinstance(m, dict)
+        and (m.get("state") == "resident" or ("state" not in m and (m.get("id") or m.get("name") or m.get("model"))))
+    ]
+    if not resident_rows:
         return {"status": STATUS_OK, "detail": "%s: no models resident" % host}
+    import datetime
 
-    now = datetime.now(timezone.utc)
-    stale: list[str] = []
-    for model in models:
-        name = model.get("name") or model.get("model") or "?"
-        expires_at = model.get("expires_at")
-        if not expires_at:
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    expired: list[str] = []
+    has_expiry = False
+    for row in resident_rows:
+        raw_exp = row.get("expires_at")
+        if not isinstance(raw_exp, str) or not raw_exp.strip():
             continue
         try:
-            expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+            exp = datetime.datetime.fromisoformat(raw_exp.strip().replace("Z", "+00:00"))
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=datetime.timezone.utc)
+            has_expiry = True
+            if exp < now_utc:
+                expired.append(str(row.get("id") or row.get("name") or row.get("model") or "?"))
         except ValueError:
             continue
-        if expiry.tzinfo is None:
-            expiry = expiry.replace(tzinfo=timezone.utc)
-        if expiry <= now:
-            stale.append(str(name))
-
-    if stale:
+    if expired:
         return {
             "status": STATUS_WARN,
-            "detail": (
-                "%s: %d/%d resident model(s) past keep_alive expiry "
-                "(stuck in VRAM?): %s"
-            ) % (host, len(stale), len(models), _bounded_join(stale)),
+            "detail": "%s: %d/%d resident model(s) past keep_alive expiry: %s" % (
+                host, len(expired), len(resident_rows), _bounded_join(expired),
+            ),
+        }
+    resident = [str(m.get("id") or m.get("name") or m.get("model") or "?") for m in resident_rows]
+    if has_expiry:
+        return {
+            "status": STATUS_OK,
+            "detail": "%s: %d model(s) resident, all within keep_alive (%s)" % (
+                host, len(resident), _bounded_join(resident),
+            ),
         }
     return {
         "status": STATUS_OK,
-        "detail": "%s: %d model(s) resident, all within keep_alive" % (
-            host, len(models)
-        ),
+        "detail": "%s: %d model(s) resident: %s" % (host, len(resident), _bounded_join(resident)),
     }
 
 
 def _check_embeddings(*, timeout: float = 5.0, config=None) -> dict:
-    """Verify the embedding model is installed where embeddings are sent.
-
-    Embeddings soft-fail to None and every caller degrades to lexical recall,
-    so an embedder that is missing (a model pulled on another host, a typo in
-    SONDER_EMBED_MODEL) or a dedicated SONDER_EMBED_BASE_URL that is down is
-    otherwise invisible: memory recall quietly stops being semantic. Warn, not
-    fail -- the runtime still works without vectors.
-    """
+    """Verify the embedding model is listed by Sonder Inference /v1/models."""
     config = config if config is not None else _load_config_or_none()
     if config is None:
         return _skip("config unavailable for the embedding endpoint")
-    if getattr(getattr(config, "membership", None), "mode", "static") == "external":
-        return _skip("deferred: external membership requires explicit typed pool refresh")
     try:
         import json
         import urllib.error
@@ -683,7 +707,7 @@ def _check_embeddings(*, timeout: float = 5.0, config=None) -> dict:
         from sonder_runtime.adapters.inference import ollama_endpoint
     except Exception as exc:  # pragma: no cover - import guard
         return _skip("embedding transport unavailable (%s)" % exc)
-    primary = getattr(getattr(config, "ollama", None), "url", None)
+    primary = _si_url_from_config(config)
     try:
         route = embeddings.embedding_route(primary)
     except ValueError as exc:
@@ -693,14 +717,15 @@ def _check_embeddings(*, timeout: float = 5.0, config=None) -> dict:
     def installed(origin: str) -> tuple[bool | None, str]:
         host = urlsplit(origin).hostname or origin
         try:
-            request = urllib.request.Request(origin.rstrip("/") + "/api/tags", method="GET")
+            request = urllib.request.Request(origin.rstrip("/") + "/v1/models", method="GET")
             with ollama_endpoint.open_url(request, timeout=timeout) as response:
                 payload = json.loads(response.read(1_048_576).decode("utf-8"))
         except (urllib.error.URLError, OSError, ValueError) as exc:
             return None, "%s unreachable (%s)" % (host, exc)
+        rows = payload.get("data") or payload.get("models") or [] if isinstance(payload, dict) else []
         names = {
-            embeddings.canonical_model_name(item.get("name") or item.get("model"))
-            for item in payload.get("models") or [] if isinstance(item, dict)
+            embeddings.canonical_model_name(item.get("id") or item.get("name") or item.get("model"))
+            for item in rows if isinstance(item, dict)
         }
         if model in names:
             return True, host
@@ -712,21 +737,6 @@ def _check_embeddings(*, timeout: float = 5.0, config=None) -> dict:
         return {
             "status": STATUS_WARN,
             "detail": "embeddings (%s): %s; memory recall degrades to lexical" % (where, detail),
-        }
-    if route["fallback"]:
-        fb_ok, fb_detail = installed(route["fallback"])
-        if not fb_ok:
-            return {
-                "status": STATUS_WARN,
-                "detail": "embeddings -> %s (%s): %s present, but the local-CPU fallback %s" % (
-                    detail, where, model, fb_detail,
-                ),
-            }
-        return {
-            "status": STATUS_OK,
-            "detail": "embeddings -> %s (%s): %s present; local-CPU fallback ready" % (
-                detail, where, model,
-            ),
         }
     return {
         "status": STATUS_OK,
@@ -869,8 +879,7 @@ def _check_sonder_inference(*, env=None, gateway=None) -> dict:
             }
         return {
             "status": STATUS_FAIL,
-            "detail": detail + " -- start `sonder-infer serve` or set "
-            "SONDER_INFERENCE_FALLBACK=ollama (and restart)",
+            "detail": detail + " -- start `sonder-infer serve`",
         }
     return {
         "status": STATUS_FAIL,
@@ -890,9 +899,8 @@ def _check_sonder_inference_scope(*, env=None) -> dict:
         "status": STATUS_OK,
         "detail": (
             "tier-bound REPL, MCP, agents, workbench, autopilot, fleet, "
-            "ensembles, web research and helper calls use sonder_inference; "
-            "explicit Ollama pins, strict sonder aliases and durable fanout "
-            "remain Ollama-bound"
+            "ensembles, web research, embeddings, strict aliases, and "
+            "Ollama Cloud models route through sonder_inference"
         ),
     }
 

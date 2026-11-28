@@ -18,6 +18,7 @@ def consumer(lane_env):
     service, store, model, root, _, _ = lane_env
     app = SimpleNamespace(agent_lanes=lambda: service, config=SimpleNamespace(
         state=SimpleNamespace(workspace_roots=(str(root),)),
+        inference=SimpleNamespace(allow_remote=False),
         ollama=SimpleNamespace(allow_remote=False)))
     controller = StandaloneLaneController(lambda: app)
     child = controller.execute({"action": "spawn", "payload": {
@@ -185,6 +186,7 @@ def test_standalone_composed_catalog_certifies_real_repair_and_diff(coding, monk
     monkeypatch.setenv("SONDER_LANE_TEST_TARGETS_FILE", str(independent))
     app = SimpleNamespace(agent_lanes=lambda: service, process_job_provider=lambda: provider,
         config=SimpleNamespace(state=SimpleNamespace(workspace_roots=(str(repo),)),
+                               inference=SimpleNamespace(allow_remote=False),
                                ollama=SimpleNamespace(allow_remote=False)))
     approvals = []
     def approve(name, args):

@@ -169,6 +169,7 @@ def _backpressure_receipt(monkeypatch, tmp_path):
     def refuse(*_args, **_kwargs):
         raise ollama_pool.WorkerPoolBackpressure("Ollama worker queue is full")
 
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_post", refuse)
     return server._agent_impl(
         "inspect the repository", max_steps=1, project=str(tmp_path),

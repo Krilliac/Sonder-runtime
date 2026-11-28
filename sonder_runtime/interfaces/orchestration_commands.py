@@ -120,16 +120,19 @@ def execute_master_command(argument: str, *, orchestrate, capacity,
 
 
 def inherited_remote_consent(own: bool, admin: bool, application_provider) -> bool:
-    """Remote-Ollama consent for one HTTP tool context (decision 14).
+    """Remote-inference consent for one HTTP tool context (decision 14).
 
-    An owner/admin context inherits the configured ``[ollama].allow_remote``
+    An owner/admin context inherits the configured ``[inference].allow_remote``
     consent from *application_provider*'s config; any other caller keeps only
     its own context's consent (*own*), and the provider is never consulted.
     """
     if own or not admin:
         return bool(own)
     config = getattr(application_provider(), "config", None)
-    return bool(getattr(getattr(config, "ollama", None), "allow_remote", False))
+    return bool(
+        getattr(getattr(config, "inference", None), "allow_remote", False)
+        or getattr(getattr(config, "ollama", None), "allow_remote", False)
+    )
 
 
 def reply_receipt_fields(reply) -> dict:

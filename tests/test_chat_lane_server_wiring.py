@@ -115,7 +115,7 @@ def test_typed_chat_default_honors_strict_alias_at_the_actual_ollama_gateway(mon
 
 @pytest.mark.parametrize(
     ("default_provider", "general_provider"),
-    [("ollama", "openai_compatible"), ("openai_compatible", "ollama")],
+    [("sonder_inference", "openai_compatible"), ("openai_compatible", "sonder_inference")],
 )
 def test_composed_chat_policy_selects_general_provider_in_a_mixed_gateway(
     monkeypatch, default_provider, general_provider,
@@ -145,11 +145,11 @@ def test_composed_chat_policy_selects_general_provider_in_a_mixed_gateway(
     gateway = build_model_gateway(
         ProviderBindings(
             default_provider,
-            {"fast": "ollama", "general": general_provider, "code": "ollama",
-             "reasoning": "ollama", "vision": "ollama"},
-            "ollama",
+            {"fast": "sonder_inference", "general": general_provider, "code": "sonder_inference",
+             "reasoning": "sonder_inference", "vision": "sonder_inference"},
+            "sonder_inference",
         ),
-        {"ollama": lambda: Gateway("ollama"),
+        {"sonder_inference": lambda: Gateway("sonder_inference"),
          "openai_compatible": lambda: Gateway("openai_compatible")},
     )
     chat = ChatService(
@@ -158,8 +158,8 @@ def test_composed_chat_policy_selects_general_provider_in_a_mixed_gateway(
     )
     owner = local_owner_context(correlation_id="mixed-chat-provider", source="system")
     assert chat.complete(ChatCommand(content="hello"), owner).model == general_provider
-    assert chat.complete(ChatCommand(content="hello", tier="code"), owner).model == "ollama"
-    assert calls == [(general_provider, "general"), ("ollama", "code")]
+    assert chat.complete(ChatCommand(content="hello", tier="code"), owner).model == "sonder_inference"
+    assert calls == [(general_provider, "general"), ("sonder_inference", "code")]
 
 
 @pytest.mark.parametrize("alias_model", ["strict-alias", None])
@@ -194,11 +194,11 @@ def test_strict_chat_alias_uses_local_provider_even_if_default_is_openai(monkeyp
     gateway = build_model_gateway(
         ProviderBindings(
             "openai_compatible",
-            {"fast": "openai_compatible", "general": "ollama", "code": "ollama",
-             "reasoning": "ollama", "vision": "ollama"},
+            {"fast": "openai_compatible", "general": "sonder_inference", "code": "sonder_inference",
+             "reasoning": "sonder_inference", "vision": "sonder_inference"},
             "openai_compatible",
         ),
-        {"ollama": lambda: OllamaGateway(
+        {"sonder_inference": lambda: OllamaGateway(
             target_resolver=bootstrap.resolve_target, generate_factory=make_generate,
         ), "openai_compatible": RemoteGateway},
     )

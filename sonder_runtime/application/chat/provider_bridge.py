@@ -399,11 +399,16 @@ def ollama_only_feature(
     """
     if not isinstance(payload, Mapping):
         return None
-    if payload.get("format") is not None:
-        return ("format",
-                "response_format/schema decoding is only available on Ollama tiers")
+    raw_format = payload.get("format")
+    if raw_format is not None:
+        if provider != "sonder_inference":
+            return ("format",
+                    "response_format/schema decoding is only available on Sonder Inference tiers")
+        if raw_format != "json" and not isinstance(raw_format, Mapping):
+            return ("format",
+                    "format must be 'json' or a JSON schema object")
     if payload.get("think") is True and provider not in THINKING_PROVIDERS:
-        return ("think", "model thinking is only available on Ollama tiers")
+        return ("think", "model thinking is only available on Sonder Inference tiers")
     allow_tools: bool | None = None
 
     def tools_allowed() -> bool:
@@ -413,19 +418,19 @@ def ollama_only_feature(
         return allow_tools
 
     if payload.get("tools") and not tools_allowed():
-        return ("tools", "native tool calls are only available on Ollama tiers")
+        return ("tools", "native tool calls are not supported by this provider")
     if payload.get("tool_choice") not in (None, "", {}) and not tools_allowed():
-        return ("tool_choice", "native tool calls are only available on Ollama tiers")
+        return ("tool_choice", "native tool calls are not supported by this provider")
     messages = payload.get("messages")
     for message in messages if isinstance(messages, list) else ():
         if not isinstance(message, Mapping):
             continue
-        if message.get("images"):
+        if message.get("images") and provider != "sonder_inference":
             return ("images",
-                    "images and tool calls are only available on Ollama tiers")
+                    "images are only available on Sonder Inference vision tiers")
         if (message.get("tool_calls") or message.get("role") == "tool") and not tools_allowed():
             return ("tool_calls",
-                    "images and tool calls are only available on Ollama tiers")
+                    "tool calls are not supported by this provider")
     return None
 
 
@@ -491,6 +496,17 @@ def model_request_from_ollama_payload(
                 system_parts.append(content)
             continue
         turn: dict[str, object] = {"role": str(role), "content": content}
+        raw_images = message.get("images")
+        if raw_images and provider == "sonder_inference":
+            if (
+                not isinstance(raw_images, (list, tuple))
+                or len(raw_images) > 16
+                or any(not isinstance(img, str) or not img.strip() for img in raw_images)
+            ):
+                raise InvalidInput(
+                    "chat message %d images must be a list of up to 16 non-empty strings" % index
+                )
+            turn["images"] = [img.strip() for img in raw_images]
         if role == "assistant" and raw_tool_calls:
             if (not isinstance(raw_tool_calls, (list, tuple))
                     or not all(isinstance(tc, Mapping) for tc in raw_tool_calls)):
@@ -514,8 +530,13 @@ def model_request_from_ollama_payload(
         turns.append(turn)
     if not turns:
         raise InvalidInput("chat payload must end with a user message")
+    prompt_images: list[str] | None = None
     if turns[-1]["role"] == "user":
-        prompt = str(turns.pop()["content"])
+        last_turn = turns.pop()
+        prompt = str(last_turn["content"])
+        raw_last_images = last_turn.get("images")
+        if isinstance(raw_last_images, list) and raw_last_images:
+            prompt_images = [str(item) for item in raw_last_images]
     elif allow_native_tools and turns[-1]["role"] == "tool":
         # Multi-turn native tool calling legitimately ends with one or more
         # tool-result messages; keep them in history with an empty prompt.
@@ -524,6 +545,19 @@ def model_request_from_ollama_payload(
         raise InvalidInput("chat payload must end with a user message")
     raw_options = payload.get("options")
     options: dict[str, object] = {}
+    if prompt_images:
+        options["images"] = prompt_images
+    raw_format = payload.get("format")
+    if raw_format is not None and provider == "sonder_inference":
+        if raw_format == "json":
+            options["response_format"] = {"type": "json_object"}
+        elif isinstance(raw_format, Mapping):
+            options["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "response", "schema": dict(raw_format)},
+            }
+        else:
+            raise UnsupportedProviderFeature("format must be 'json' or a JSON schema object")
     if str(tier or "").strip().lower().startswith("model:"):
         pinned_model = str(payload.get("model") or str(tier).strip()[len("model:"):]).strip()
         if pinned_model:

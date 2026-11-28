@@ -187,6 +187,7 @@ def test_refresh_cli_passes_configured_home_and_bounded_options(tmp_path, monkey
 
     observed = []
     monkeypatch.setattr(cli, "_load_config", lambda _: SimpleNamespace(
+        inference=SimpleNamespace(url="http://127.0.0.1:11437"),
         ollama=SimpleNamespace(url="http://127.0.0.1:11434"),
         state=SimpleNamespace(home=str(tmp_path)),
     ))
@@ -195,6 +196,7 @@ def test_refresh_cli_passes_configured_home_and_bounded_options(tmp_path, monkey
     ))
     assert cli.main(["capabilities", "refresh", "--model", "fixture:latest",
                      "--timeout", "30", "--context-tokens", "8192", "--json"]) == 0
+    assert observed[0]["origin"] == "http://127.0.0.1:11437"
     assert observed[0]["home"] == str(tmp_path)
     assert observed[0]["models"] == ["fixture:latest"]
     assert observed[0]["timeout_seconds"] == 30

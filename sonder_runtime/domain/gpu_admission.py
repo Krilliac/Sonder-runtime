@@ -193,11 +193,11 @@ class GpuAdmissionPolicy:
             raise ValueError("chars_per_token must be within 0.5..16")
 
 
-_PROBE_PATHS = frozenset({"/api/show", "/api/ps", "/api/tags", "/api/version"})
-_EMBED_PATHS = frozenset({"/api/embeddings", "/api/embed"})
-_API = "/api/"
-_CHAT_PATH = _API + "chat"
-_GENERATION_PATHS = frozenset({_CHAT_PATH, _API + "generate"})
+_PROBE_PATHS = frozenset({"/v1/sonder/health", "/v1/models", "/v1/sonder/identity", "/v1/sonder/node"})
+_EMBED_PATHS = frozenset({"/v1/embeddings"})
+_API = "/v1/"
+_CHAT_PATH = _API + "chat/completions"
+_GENERATION_PATHS = frozenset({_CHAT_PATH, _API + "completions"})
 _ZERO_DURATION = re.compile(r"0+(\.0+)?(ns|us|ms|s|m|h)?", re.IGNORECASE)
 _BACKGROUND_RANK = 1
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 
+import pytest
+
 from sonder_runtime.interfaces.cli.headless import HeadlessCliOperations, run
 
 
@@ -40,5 +42,9 @@ def test_packaged_headless_interface_preserves_stop_ollama_port_contract():
     seen = []
     operations = _operations(stop_pid=lambda *args: seen.append(args) or "ok")
 
-    assert run(["stop", "--host", "127.0.0.1", "--port", "12000", "--stop-ollama"], operations) == 0
-    assert seen == [("sonder_serve", "127.0.0.1", 12000), ("ollama",)]
+    assert run(["stop", "--host", "127.0.0.1", "--port", "12000"], operations) == 0
+    assert seen == [("sonder_serve", "127.0.0.1", 12000)]
+    # Local Ollama stop flag is retired.
+    with pytest.raises(SystemExit) as caught:
+        run(["stop", "--host", "127.0.0.1", "--port", "12000", "--stop-ollama"], operations)
+    assert caught.value.code == 2

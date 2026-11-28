@@ -82,10 +82,9 @@ def test_show_live_returns_metadata(world):
     w = world()
     probe = OllamaCloudMetadata(w.fake.url).show("kimi-k3:cloud")
     assert probe.status is ProbeStatus.LIVE
-    assert (probe.parameters, probe.context_length, probe.family) == ("1.2T", 262144, "fakefam")
+    assert probe.context_length == 262144
     assert probe.capabilities == ("completion", "tools", "thinking")
-    body = [b for v, p, b in w.fake.requests if p == "/api/show"][0]
-    assert body == {"model": "kimi-k3:cloud", "name": "kimi-k3:cloud"}
+    assert "/v1/models" in w.fake.paths()
 
 
 @pytest.mark.parametrize("status", [400, 404, 410, 500, 200])
@@ -130,17 +129,12 @@ def test_pull_stub_refuses_non_stub_names_before_any_io(world):
 
 
 def test_pull_stub_posts_non_streaming_pull_and_reports_failures(world):
-    w = world(pull_status=500, pull_payload={"error": "nope"})
+    w = world()
     client = OllamaCloudMetadata(w.fake.url)
-    with pytest.raises(OllamaPullFailed):
+    with pytest.raises(OllamaPullFailed) as caught:
         client.pull_stub("kimi-k3:cloud")
-    w.fake.pull_status, w.fake.pull_payload = 200, {"status": "success"}
-    client.pull_stub("kimi-k3:cloud")
-    w.fake.pull_payload = {"error": "disk full"}
-    with pytest.raises(OllamaPullFailed):
-        client.pull_stub("kimi-k3:1017-cloud")
-    pulls = [b for _v, p, b in w.fake.requests if p == "/api/pull"]
-    assert pulls[1] == {"model": "kimi-k3:cloud", "stream": False}
+    assert caught.value.reason == "cloud_stub_pull_retired_configure_in_si_ollama_cloud"
+    assert w.fake.requests == []
 
 
 def test_tags_returns_only_cloud_rows_by_name_or_remote_host():
@@ -154,9 +148,15 @@ def test_tags_returns_only_cloud_rows_by_name_or_remote_host():
             return False
 
         def read(self, _n=-1):
-            rows = [{"name": "a:cloud"}, {"name": "b-cloud"}, {"name": "c:7b", "remote_host": "https://ollama.com:443"},
-                    {"name": "local:7b"}, "junk", {"name": None}]
-            return json.dumps({"models": rows}).encode()
+            rows = [
+                {"id": "a:cloud", "sonder": {"backend": "ollama_cloud"}},
+                {"id": "b-cloud", "sonder": {"backend": "ollama_cloud"}},
+                {"id": "c:7b", "sonder": {"backend": "ollama_cloud"}},
+                {"id": "local:7b", "sonder": {"backend": "llamacpp"}},
+                "junk",
+                {"id": None},
+            ]
+            return json.dumps({"object": "list", "data": rows}).encode()
 
     client = OllamaCloudMetadata("http://127.0.0.1:1", opener=lambda *a, **k: Response())
     assert [r["name"] for r in client.tags()] == ["a:cloud", "b-cloud", "c:7b"]
@@ -167,13 +167,13 @@ def test_metadata_client_uses_open_url_remote_policy_and_bounds_bodies():
 
     def opener(request, timeout, allow_remote):
         calls.append((request.full_url, request.get_method(), timeout, allow_remote))
-        raise ValueError("remote Ollama is not allowed")
+        raise ValueError("remote inference is not allowed")
 
-    client = OllamaCloudMetadata("http://ollama.example:11434", opener=opener)
+    client = OllamaCloudMetadata("http://ollama.example:11437", opener=opener)
     with pytest.raises(OllamaTransportError) as caught:
         client.show("a:cloud")
-    assert caught.value.reason == "ollama_policy_refused"
-    assert calls == [("http://ollama.example:11434/api/show", "POST", 10.0, None)]
+    assert caught.value.reason == "inference_policy_refused"
+    assert calls == [("http://ollama.example:11437/v1/models", "GET", 10.0, None)]
 
     class Huge:
         status = 200
@@ -189,7 +189,7 @@ def test_metadata_client_uses_open_url_remote_policy_and_bounds_bodies():
 
     with pytest.raises(OllamaTransportError) as huge:
         OllamaCloudMetadata("http://127.0.0.1:1", opener=lambda *a, **k: Huge()).show("a:cloud")
-    assert huge.value.reason == "ollama_body_too_large"
+    assert huge.value.reason == "inference_body_too_large"
 
 
 def test_no_chat_generate_or_embed_path_anywhere_in_the_refresh_code():
@@ -308,7 +308,7 @@ def test_apply_writes_overlay_backup_log_and_state(std):
     state = json.loads(std.state.read_text(encoding="utf-8"))
     crm.validate_state(state)
     entry = state["models"]["kimi-k3-code:cloud"]
-    assert entry["status"] == "live" and entry["parameters"] == "1.2T" and entry["context_length"] == 262144
+    assert entry["status"] == "live" and entry["context_length"] == 262144
     assert entry["first_seen"] == entry["last_seen"] == crm.iso_timestamp(NOW)
     assert state["models"][DEFAULT_GENERAL]["retired"]["suggestion"] == "glm-5.3:cloud"
     assert [p["tier"] for p in state["pending_choices"]] == ["general"]
@@ -411,7 +411,7 @@ def test_ollama_dropping_mid_run_aborts_with_every_file_byte_identical(world):
     w.fake.drop_show_after = w.fake._shows_seen + 2
     before = w.snapshot()
     report = w.run(apply=True)
-    assert (report["outcome"], report["reason"]) == ("aborted", "ollama_unreachable")
+    assert (report["outcome"], report["reason"]) == ("aborted", "inference_unreachable")
     assert w.snapshot() == before
 
 
@@ -420,7 +420,7 @@ def test_ollama_unreachable_at_tags_aborts_with_zero_writes(std):
     before = std.snapshot()
     for apply in (False, True):
         report = std.run(apply=apply)
-        assert (report["outcome"], report["reason"]) == ("aborted", "ollama_unreachable")
+        assert (report["outcome"], report["reason"]) == ("aborted", "inference_unreachable")
         assert std.snapshot() == before
 
 
@@ -430,7 +430,7 @@ def test_tags_failure_alone_aborts_before_any_probe_or_write(world):
     before = w.snapshot()
     for apply in (False, True):
         report = w.run(apply=apply)
-        assert (report["outcome"], report["reason"]) == ("aborted", "ollama_tags_http_500")
+        assert (report["outcome"], report["reason"]) == ("aborted", "inference_models_http_500")
     assert w.fake.shown() == [] and w.snapshot() == before
 
 
@@ -486,7 +486,7 @@ def test_catalog_models_are_probed_but_never_bound(std, monkeypatch):
     _enable_web(monkeypatch, std)
     fetch = _snapshot_fetcher({"fresh": ("fresh:cloud",)})
     report = std.run(apply=True, use_catalog=True, catalog_fetcher=fetch)
-    assert "fresh:cloud" in std.fake.shown()
+    assert any(p["model"] == "fresh:cloud" for p in report["probes"])
     assert "fresh:cloud" in report["new_models"]
     overlay = json.loads(std.overlay.read_text())
     assert "fresh:cloud" not in json.dumps(overlay["default_cloud_models"])
@@ -638,19 +638,16 @@ def test_auto_pull_is_off_by_default(world):
     assert report["pulls"] == []
     code = report["decisions"][0]
     assert code["action"] == "needs_operator_choice"
-    assert [e["state"] for e in code["ladder"]] == ["not_pulled", "not_pulled"]
+    assert [e["state"] for e in code["ladder"]] == ["not_live", "not_live"]
 
 
 def test_auto_pull_on_pulls_missing_live_ladder_stub_and_rebinds_in_the_same_run(world):
-    w = world(tags=(), shows=standard_shows())
+    shows = {**standard_shows(), "kimi-k3-code:cloud": (200, {}), "kimi-k3:cloud": (200, {})}
+    w = world(tags=(), shows=shows)
     w.write_preferences({**LADDER, "auto_pull_stubs": True})
     report = w.run(apply=True)
-    pulls = [b for _v, p, b in w.fake.requests if p == "/api/pull"]
-    assert pulls == [{"model": "kimi-k3-code:cloud", "stream": False}, {"model": "kimi-k3:cloud", "stream": False}]
-    assert [(p["model"], p["outcome"]) for p in report["pulls"]] == [
-        ("kimi-k3-code:cloud", "ok"), ("kimi-k3:cloud", "ok")]
-    assert json.loads(w.overlay.read_text())["default_cloud_models"]["code"] == "kimi-k3-code:cloud"
-    assert {"pull"} <= set(_actions(w.change_log))
+    assert "/api/pull" not in w.fake.paths()  # local Ollama stub pulls retired
+    assert report["decisions"][0]["action"] == "rebind"
 
 
 def test_auto_pull_dry_run_only_plans(world):
@@ -659,19 +656,17 @@ def test_auto_pull_dry_run_only_plans(world):
     before = w.snapshot()
     report = w.run(apply=False)
     assert "/api/pull" not in w.fake.paths()
-    assert {p["outcome"] for p in report["pulls"]} == {"planned"}
+    assert report["outcome"] == "ok"
     assert w.snapshot() == before
 
 
 def test_auto_pull_skips_retired_unpulled_and_failed_pulls_do_not_rebind(world):
     shows = standard_shows()
     shows["dead:cloud"] = (200, {"error": retired_message("dead:0101", None)})
-    w = world(tags=(), shows=shows, pull_status=500, pull_payload={"error": "no"})
+    w = world(tags=(), shows=shows)
     w.write_preferences({"code": ["dead:cloud", "kimi-k3:cloud"], "auto_pull_stubs": True})
     report = w.run(apply=True)
-    pulled = [b["model"] for _v, p, b in w.fake.requests if p == "/api/pull"]
-    assert pulled == ["kimi-k3:cloud"]  # the retired stub is never pulled
-    assert report["pulls"][0]["outcome"] == "failed"
+    assert "/api/pull" not in w.fake.paths()
     assert report["decisions"][0]["action"] == "needs_operator_choice"
     assert "default_cloud_models" not in json.loads(w.overlay.read_text())
 
@@ -680,8 +675,9 @@ def test_auto_pull_is_capped_at_max_pulls(world):
     names = ["m%d:cloud" % i for i in range(crm.MAX_PULLS + 3)]
     w = world(tags=(), shows=standard_shows())
     w.write_preferences({"code": names, "auto_pull_stubs": True})
-    w.run(apply=True)
-    assert len([1 for _v, p, _b in w.fake.requests if p == "/api/pull"]) == crm.MAX_PULLS
+    report = w.run(apply=True)
+    assert "/api/pull" not in w.fake.paths()
+    assert report["outcome"] == "ok"
 
 
 def test_plan_pulls_refuses_non_stub_names_even_if_a_hand_built_preference_has_one():
@@ -703,7 +699,7 @@ def test_refresh_never_touches_env_policy_or_permission_state_and_sends_no_promp
     assert {p.name for p in std.home.iterdir() if p.suffix != ".lock"} == {
         "cloud_model_preferences.json", "model_lists.json", "cloud_model_catalog.json",
         "cloud_model_changes.jsonl"}
-    assert set(std.fake.paths()) <= {"/api/tags", "/api/show", "/api/pull"}
+    assert set(std.fake.paths()) <= {"/v1/models"}
     for _verb, _path, body in std.fake.requests:
         assert not (set(body or {}) & {"prompt", "messages", "input", "options"})
 

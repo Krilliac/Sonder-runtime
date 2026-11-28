@@ -83,30 +83,16 @@ class ImageModelDiscoveryTests(unittest.TestCase):
         self.assertFalse(image_generation.is_image_generation_model_name("nomic-embed-text"))
 
     def test_auto_discovers_ollama_image_model_and_calls_generate(self):
-        calls: list[tuple[str, str]] = []
-
+        # Local Ollama /api/generate image synthesis is retired; without SONDER_IMAGE_API_URL
+        # discovery falls back cleanly to local assetgen.
         def fake_open_url(req, timeout=30, **_kwargs):
-            url = req.full_url if hasattr(req, "full_url") else str(req)
-            method = req.get_method() if hasattr(req, "get_method") else "GET"
-            calls.append((method, url))
-            if url.endswith("/api/tags"):
-                return _FakeResponse({
-                    "models": [
-                        {"name": "qwen3-vl:8b-instruct"},
-                        {"name": "x/z-image-turbo:latest"},
-                        {"name": "qwen3:14b"},
-                    ]
-                })
-            if url.endswith("/api/generate"):
-                body = json.loads(req.data.decode("utf-8"))
-                self.assertEqual(body["model"], "x/z-image-turbo:latest")
-                self.assertEqual(body["stream"], False)
-                return _FakeResponse({
-                    "model": "x/z-image-turbo:latest",
-                    "image": base64.b64encode(_TINY_PNG).decode("ascii"),
-                    "done": True,
-                })
-            raise AssertionError(f"unexpected url: {url}")
+            return _FakeResponse({
+                "models": [
+                    {"name": "qwen3-vl:8b-instruct"},
+                    {"name": "x/z-image-turbo:latest"},
+                    {"name": "qwen3:14b"},
+                ]
+            })
 
         with TemporaryDirectory() as tmp:
             with mock.patch.dict(os.environ, {"SONDER_IMAGE_API_URL": "", "SONDER_IMAGE_MODEL": ""}, clear=False), \
@@ -116,14 +102,11 @@ class ImageModelDiscoveryTests(unittest.TestCase):
                     state_home=tmp,
                     ollama_endpoints=("http://127.0.0.1:11434",),
                 )
-            self.assertEqual(result.backend_kind, "ollama")
-            self.assertEqual(result.model_id, "x/z-image-turbo:latest")
-            self.assertFalse(result.used_fallback)
-            self.assertEqual((result.width, result.height), (1, 1))
+            self.assertEqual(result.backend_kind, "assetgen")
+            self.assertEqual(result.model_id, "sonder-assetgen")
+            self.assertTrue(result.used_fallback)
             self.assertIn("](data:image/png;base64,", result.markdown)
             self.assertTrue(Path(result.saved_path).is_file())
-            self.assertEqual(Path(result.saved_path).read_bytes(), _TINY_PNG)
-            self.assertEqual([m for m, _ in calls], ["GET", "POST"])
 
     def test_falls_back_cleanly_to_assetgen_when_no_image_model_installed(self):
         def fake_open_url(req, timeout=30, **_kwargs):
@@ -142,7 +125,7 @@ class ImageModelDiscoveryTests(unittest.TestCase):
             self.assertTrue(result.used_fallback)
             self.assertEqual((result.width, result.height), (512, 320))
             self.assertIn("](data:image/png;base64,", result.markdown)
-            self.assertIn("ollama pull x/z-image-turbo", result.markdown)
+            self.assertIn("SONDER_IMAGE_API_URL", result.markdown)
             saved = Path(result.saved_path)
             self.assertTrue(saved.is_file())
             self.assertTrue(saved.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))

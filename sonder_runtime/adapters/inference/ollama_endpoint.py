@@ -126,6 +126,12 @@ def reset_typed_endpoint() -> None:
     configure_typed_endpoint(None)
 
 
+def configured_typed_endpoint() -> str | None:
+    """Return the process-bound typed endpoint, or None when unset."""
+    with _configuration_lock:
+        return _configured_endpoint
+
+
 def configure_typed_ca_bundle(value: str | None) -> None:
     """Bind an optional absolute CA bundle for verified HTTPS Ollama calls."""
     global _configured_ca_bundle
@@ -169,14 +175,31 @@ def _remote_allowed_in(environment: Mapping[str, str]) -> bool:
     return ollama_policy.remote_allowed(environment)
 
 
+_warned_ollama_host: set[str] = set()
+
+
 def _candidate(value: object = None) -> str:
     with _configuration_lock:
         configured = _configured_endpoint
     if value is None and configured is not None:
-        return ollama_policy._candidate(configured)
-    return ollama_policy._candidate(
-        os.environ.get("OLLAMA_HOST", DEFAULT_HOST) if value is None else value
-    )
+        resolved = ollama_policy._candidate(configured)
+    elif value is None:
+        si_env = os.environ.get("SONDER_INFERENCE_BASE_URL", "").strip()
+        resolved = ollama_policy._candidate(si_env or DEFAULT_HOST)
+    else:
+        return ollama_policy._candidate(value)
+    legacy_host = os.environ.get("OLLAMA_HOST", "").strip()
+    if legacy_host and ollama_policy.normalize(legacy_host) != ollama_policy.normalize(resolved):
+        with _configuration_lock:
+            if legacy_host not in _warned_ollama_host:
+                _warned_ollama_host.add(legacy_host)
+                logger.warning(
+                    "Ignoring deprecated OLLAMA_HOST (%s); local Ollama is retired "
+                    "— using Sonder Inference endpoint %s",
+                    redact_url(legacy_host),
+                    redact_url(resolved),
+                )
+    return resolved
 
 
 def normalize(value: object = None) -> str:
@@ -209,15 +232,21 @@ def configured_origin(value: object = None, *, allow_remote: bool | None = None)
 def client_environment(
     environment: Mapping[str, str] | None = None, *, allow_remote: bool | None = None,
 ) -> dict[str, str]:
-    """Copy an environment and pin Ollama client traffic to canonical origin."""
+    """Copy an environment and pin inference client traffic to canonical SI origin."""
     source = dict(os.environ if environment is None else environment)
     consent = (
         _remote_allowed_in(source) if allow_remote is None else allow_remote is True
     )
-    source["OLLAMA_HOST"] = configured_origin(
-        source.get("OLLAMA_HOST", DEFAULT_HOST),
+    if "OLLAMA_HOST" in source and str(source.get("OLLAMA_HOST", "")).strip() != "":
+        # Still fail closed if an attacker/config supplies hostile OLLAMA_HOST text,
+        # while never routing traffic to it.
+        configured_origin(source["OLLAMA_HOST"], allow_remote=consent)
+    pinned = configured_origin(
+        source.get("SONDER_INFERENCE_BASE_URL", "").strip() or DEFAULT_HOST,
         allow_remote=consent,
     )
+    source["SONDER_INFERENCE_BASE_URL"] = pinned
+    source.pop("OLLAMA_HOST", None)
     return source
 
 

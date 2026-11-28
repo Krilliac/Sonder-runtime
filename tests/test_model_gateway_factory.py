@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from sonder_runtime.adapters.model_gateway_factory import build_model_gateway
-from sonder_runtime.adapters.inference.ollama_gateway import OllamaGateway
 from sonder_runtime.adapters.inference.openai_compat_gateway import OpenAICompatibleGateway
 from sonder_runtime.adapters.provider_dispatch.gateway import ProviderDispatchGateway
 from sonder_runtime.bootstrap import app as bootstrap_app
@@ -16,8 +15,12 @@ from sonder_runtime.domain.common.errors import InvalidInput
 
 
 def test_factory_defaults_to_ollama(monkeypatch):
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+        SonderInferenceGateway,
+    )
+
     monkeypatch.delenv("SONDER_MODEL_BACKEND", raising=False)
-    assert isinstance(build_model_gateway(), OllamaGateway)
+    assert isinstance(build_model_gateway(), SonderInferenceGateway)
 
 
 def test_factory_normalizes_openai_compatible_aliases(monkeypatch):
@@ -27,7 +30,8 @@ def test_factory_normalizes_openai_compatible_aliases(monkeypatch):
 
 
 def test_factory_accepts_explicit_ollama_backend():
-    assert isinstance(build_model_gateway(backend="  Ollama "), OllamaGateway)
+    with pytest.raises(InvalidInput, match="retired"):
+        build_model_gateway(backend="  Ollama ")
 
 
 def test_factory_rejects_unknown_backend_instead_of_defaulting_to_ollama():
@@ -71,48 +75,48 @@ class MarkerGateway:
 
 def test_uniform_binding_returns_direct_gateway_and_builds_only_one_provider():
     calls = []
-    ollama = MarkerGateway()
+    si = MarkerGateway()
     gateway = build_model_gateway(
-        ProviderBindings.uniform("ollama"),
+        ProviderBindings.uniform("sonder_inference"),
         {
-            "ollama": lambda: calls.append("ollama") or ollama,
+            "sonder_inference": lambda: calls.append("sonder_inference") or si,
             "openai_compatible": lambda: calls.append("openai_compatible")
             or MarkerGateway(),
         },
     )
-    assert gateway is ollama
-    assert calls == ["ollama"]
+    assert gateway is si
+    assert calls == ["sonder_inference"]
 
 
 def test_mixed_binding_builds_dispatcher_and_only_referenced_providers():
     bindings = ProviderBindings(
-        default_generation_provider="ollama",
+        default_generation_provider="sonder_inference",
         tier_providers={
             "fast": "openai_compatible",
             "general": "openai_compatible",
-            "code": "ollama",
-            "reasoning": "ollama",
-            "vision": "ollama",
+            "code": "sonder_inference",
+            "reasoning": "sonder_inference",
+            "vision": "sonder_inference",
         },
-        embedding_provider="ollama",
+        embedding_provider="sonder_inference",
     )
     calls = []
     gateway = build_model_gateway(
         bindings,
         {
-            "ollama": lambda: calls.append("ollama") or MarkerGateway(),
+            "sonder_inference": lambda: calls.append("sonder_inference") or MarkerGateway(),
             "openai_compatible": lambda: calls.append("openai_compatible")
             or MarkerGateway(),
             "unused": lambda: calls.append("unused") or MarkerGateway(),
         },
     )
     assert isinstance(gateway, ProviderDispatchGateway)
-    assert calls == ["ollama", "openai_compatible"]
+    assert set(calls) == {"sonder_inference", "openai_compatible"}
 
 
 def test_mixed_binding_constructs_and_routes_an_unreferenced_default_provider():
     bindings = ProviderBindings(
-        default_generation_provider="ollama",
+        default_generation_provider="sonder_inference",
         tier_providers={
             "fast": "openai_compatible",
             "general": "openai_compatible",
@@ -122,12 +126,12 @@ def test_mixed_binding_constructs_and_routes_an_unreferenced_default_provider():
         },
         embedding_provider="openai_compatible",
     )
-    ollama = MarkerGateway("ollama")
+    si = MarkerGateway("sonder_inference")
     prism = MarkerGateway("prism")
     gateway = build_model_gateway(
         bindings,
         {
-            "ollama": lambda: ollama,
+            "sonder_inference": lambda: si,
             "openai_compatible": lambda: prism,
         },
     )
@@ -136,21 +140,21 @@ def test_mixed_binding_constructs_and_routes_an_unreferenced_default_provider():
 
     response = gateway.generate(request, context)
 
-    assert response.model == "ollama"
-    assert ollama.generated == [(request, context)]
+    assert response.model == "sonder_inference"
+    assert si.generated == [(request, context)]
     assert prism.generated == []
 
 
 def test_application_graph_composes_mixed_provider_bindings(monkeypatch, tmp_path):
     monkeypatch.setenv("SONDER_RUNTIME_POLICY", str(tmp_path / "policy.json"))
-    monkeypatch.setenv("SONDER_MODEL_BACKEND", "ollama")
+    monkeypatch.setenv("SONDER_MODEL_BACKEND", "sonder-inference")
     monkeypatch.setenv("SONDER_FAST_PROVIDER", "llamacpp")
     bootstrap_app.reset_for_tests()
     try:
         application = bootstrap_app.build_application()
         assert isinstance(application.model_gateway, ProviderDispatchGateway)
         assert application.provider_bindings.tier_providers["fast"] == "openai_compatible"
-        assert application.provider_bindings.tier_providers["code"] == "ollama"
+        assert application.provider_bindings.tier_providers["code"] == "sonder_inference"
     finally:
         bootstrap_app.reset_for_tests()
 
@@ -169,19 +173,10 @@ def test_factory_selects_sonder_inference_for_every_alias(monkeypatch):
 
 
 def test_inference_chat_tiers_with_ollama_embeddings_compose_a_dispatcher(monkeypatch):
-    from sonder_runtime.adapters.inference.sonder_inference_gateway import (
-        SonderInferenceGateway,
-    )
-
     monkeypatch.setenv("SONDER_MODEL_BACKEND", "sonder-inference")
     monkeypatch.setenv("SONDER_EMBEDDING_PROVIDER", "ollama")
-    gateway = build_model_gateway()
-    assert isinstance(gateway, ProviderDispatchGateway)
-    for tier in ("fast", "general", "code", "reasoning", "vision", "sonder"):
-        provider = gateway._provider_for_request(ModelRequest(prompt="x", tier=tier))
-        assert provider == "sonder_inference"
-        assert isinstance(gateway._providers[provider], SonderInferenceGateway)
-    assert isinstance(gateway._providers["ollama"], OllamaGateway)
+    with pytest.raises(InvalidInput, match="retired"):
+        build_model_gateway()
 
 
 def test_factory_rejects_an_invalid_fallback(monkeypatch):

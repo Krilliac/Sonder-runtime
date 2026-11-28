@@ -13,31 +13,29 @@ POLICY = ga.GpuAdmissionPolicy(
 
 
 @pytest.mark.parametrize("path,payload,method,prewarm,lane", [
-    ("/api/show", {"model": "m"}, "POST", False, ga.AdmissionLane.PROBE),
-    ("/api/ps", None, "GET", False, ga.AdmissionLane.PROBE),
-    ("/api/tags", None, "GET", False, ga.AdmissionLane.PROBE),
-    ("/api/version", None, "GET", False, ga.AdmissionLane.PROBE),
-    ("/api/tags?x=1", None, "GET", False, ga.AdmissionLane.PROBE),
-    ("/api/generate", {"model": "m", "keep_alive": 0}, "POST", False, ga.AdmissionLane.UNLOAD),
-    ("/api/generate", {"model": "m", "keep_alive": "0"}, "POST", False, ga.AdmissionLane.UNLOAD),
-    ("/api/generate", {"model": "m", "keep_alive": "0s"}, "POST", False, ga.AdmissionLane.UNLOAD),
-    ("/api/chat", {"model": "m", "messages": [], "keep_alive": 0}, "POST", False, ga.AdmissionLane.UNLOAD),
-    ("/api/generate", {"model": "m"}, "POST", False, ga.AdmissionLane.LOAD),
-    ("/api/generate", {"model": "m", "keep_alive": "5m"}, "POST", False, ga.AdmissionLane.LOAD),
-    ("/api/chat", {"model": "m", "messages": []}, "POST", False, ga.AdmissionLane.LOAD),
-    ("/api/chat", {"model": "m", "messages": [{"role": "user", "content": "x"}]}, "POST", True,
+    ("/v1/sonder/identity", {"model": "m"}, "POST", False, ga.AdmissionLane.PROBE),
+    ("/v1/sonder/health", None, "GET", False, ga.AdmissionLane.PROBE),
+    ("/v1/models", None, "GET", False, ga.AdmissionLane.PROBE),
+    ("/v1/sonder/node", None, "GET", False, ga.AdmissionLane.PROBE),
+    ("/v1/models?x=1", None, "GET", False, ga.AdmissionLane.PROBE),
+    ("/v1/completions", {"model": "m", "keep_alive": 0}, "POST", False, ga.AdmissionLane.UNLOAD),
+    ("/v1/completions", {"model": "m", "keep_alive": "0"}, "POST", False, ga.AdmissionLane.UNLOAD),
+    ("/v1/completions", {"model": "m", "keep_alive": "0s"}, "POST", False, ga.AdmissionLane.UNLOAD),
+    ("/v1/chat/completions", {"model": "m", "messages": [], "keep_alive": 0}, "POST", False, ga.AdmissionLane.UNLOAD),
+    ("/v1/completions", {"model": "m"}, "POST", False, ga.AdmissionLane.LOAD),
+    ("/v1/completions", {"model": "m", "keep_alive": "5m"}, "POST", False, ga.AdmissionLane.LOAD),
+    ("/v1/chat/completions", {"model": "m", "messages": []}, "POST", False, ga.AdmissionLane.LOAD),
+    ("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "x"}]}, "POST", True,
      ga.AdmissionLane.LOAD),
-    ("/api/chat", {"model": "m", "messages": [{"role": "user", "content": "x"}]}, "POST", False,
+    ("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "x"}]}, "POST", False,
      ga.AdmissionLane.INFERENCE),
-    ("/api/generate", {"model": "m", "prompt": "hi"}, "POST", False, ga.AdmissionLane.INFERENCE),
-    ("/api/generate", {"model": "m", "prompt": "", "images": ["aa"]}, "POST", False,
+    ("/v1/completions", {"model": "m", "prompt": "hi"}, "POST", False, ga.AdmissionLane.INFERENCE),
+    ("/v1/completions", {"model": "m", "prompt": "", "images": ["aa"]}, "POST", False,
      ga.AdmissionLane.INFERENCE),
-    ("/api/embeddings", {"model": "m", "prompt": "x"}, "POST", False, ga.AdmissionLane.EMBED),
-    ("/api/embed", {"model": "m", "input": "x"}, "POST", False, ga.AdmissionLane.EMBED),
-    ("/api/embeddings", {"model": "m", "keep_alive": 0}, "POST", False, ga.AdmissionLane.UNLOAD),
-    ("/api/pull", {"name": "m"}, "POST", False, ga.AdmissionLane.MANAGE),
-    ("/api/create", {"model": "m"}, "POST", False, ga.AdmissionLane.MANAGE),
-    ("/api/pull", None, "GET", False, ga.AdmissionLane.PROBE),
+    ("/v1/embeddings", {"model": "m", "input": "x"}, "POST", False, ga.AdmissionLane.EMBED),
+    ("/v1/embeddings", {"model": "m", "keep_alive": 0}, "POST", False, ga.AdmissionLane.UNLOAD),
+    ("/v1/sonder/plan", {"name": "m"}, "POST", False, ga.AdmissionLane.MANAGE),
+    ("/v1/sonder/plan", None, "GET", False, ga.AdmissionLane.PROBE),
 ])
 def test_lane_classification(path, payload, method, prewarm, lane):
     assert ga.classify_operation(path, payload, method=method, prewarm=prewarm) is lane
@@ -45,7 +43,7 @@ def test_lane_classification(path, payload, method, prewarm, lane):
 
 def test_keep_alive_zero_with_content_still_runs_inference():
     payload = {"model": "m", "keep_alive": 0, "messages": [{"role": "user", "content": "x"}]}
-    assert ga.classify_operation("/api/chat", payload) is ga.AdmissionLane.INFERENCE
+    assert ga.classify_operation("/v1/chat/completions", payload) is ga.AdmissionLane.INFERENCE
 
 
 @pytest.mark.parametrize("value,zero", [

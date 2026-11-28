@@ -64,11 +64,16 @@ class ProviderDispatchGateway:
         This is an explicit ChatService route; user-supplied ModelRequest
         metadata cannot override the normal provider binding.
         """
-        if request.tier != "sonder" or "ollama" not in self._providers:
+        local_provider = (
+            "sonder_inference" if "sonder_inference" in self._providers
+            else "ollama" if "ollama" in self._providers
+            else None
+        )
+        if request.tier != "sonder" or local_provider is None:
             raise InvalidInput("strict chat alias requires a configured local Ollama provider")
         if "_resolved_route" in (request.options or {}) or request._resolved_route is not None:
             raise InvalidInput("strict alias route cannot accept a supplied model route")
-        return self._providers["ollama"].generate(request, context)
+        return self._providers[local_provider].generate(request, context)
 
     def resolve_route(
         self, request: ModelRequest, context: OperationContext

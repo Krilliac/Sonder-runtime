@@ -82,7 +82,7 @@ def _bindings(provider="openai_compatible"):
         default_generation_provider=provider,
         tier_providers={tier: provider for tier in
                         ("fast", "general", "code", "reasoning", "vision")},
-        embedding_provider="ollama",
+        embedding_provider="sonder_inference",
     )
 
 
@@ -94,7 +94,7 @@ def _graph(transport, *, provider="openai_compatible", ollama=None):
     )
     bindings = _bindings(provider)
     dispatch = ProviderDispatchGateway(
-        providers={"openai_compatible": openai, "ollama": ollama or OllamaMustNotBeUsed()},
+        providers={"openai_compatible": openai, "sonder_inference": ollama or OllamaMustNotBeUsed()},
         tier_providers=dict(bindings.tier_providers),
         default_generation_provider=bindings.default_generation_provider,
         embedding_provider=bindings.embedding_provider,
@@ -162,21 +162,21 @@ def test_all_ollama_bindings_leave_the_legacy_path_untouched(monkeypatch):
 
     def fake_post(path, payload, **kwargs):
         posts.append((path, payload["model"]))
-        return {"message": {"role": "assistant", "content": "ollama answer"}}, 1
+        return {"message": {"role": "assistant", "content": "si answer"}}, 1
 
     monkeypatch.setattr(server, "_post_model", fake_post)
     monkeypatch.setattr(server, "_known_thinking_model", lambda model: False)
-    graph = SimpleNamespace(provider_bindings=ProviderBindings.uniform("ollama"),
+    graph = SimpleNamespace(provider_bindings=ProviderBindings.uniform("sonder_inference"),
                             model_gateway=OllamaMustNotBeUsed())
     _install(monkeypatch, graph)
-    with provider_bridge.bind_rung(server._bridge_provider_for_tier("general"), "general"):
+    with provider_bridge.bind_rung(None, "general"):
         out, content = server._chat_request(
             {"model": "qwen", "messages": [{"role": "user", "content": "x"}],
              "options": {}, "think": False},
             model="qwen",
         )
-    assert content == "ollama answer"
-    assert posts == [("/api/chat", "qwen")]
+    assert content == "si answer"
+    assert posts == [("/v1/chat/completions", "qwen")]
 
 
 def test_provider_outage_is_a_terminal_503_without_escalation(monkeypatch, no_ollama):
@@ -256,7 +256,7 @@ def test_gateway_fallback_to_ollama_does_not_re_enter_the_bridge(monkeypatch):
             model="qwen",
         )
     assert content == "from ollama"
-    assert posts == ["/api/chat"]
+    assert posts == ["/v1/chat/completions"]
 
 
 def test_gateway_offload_inside_a_rung_takes_its_own_route(monkeypatch):
@@ -374,8 +374,7 @@ def test_http_chat_provider_outage_returns_503(monkeypatch, no_ollama):
 
 
 def test_strict_sonder_alias_stays_on_ollama_like_a2a(monkeypatch):
-    """A resolved ``sonder`` label is the local alias; ProviderDispatchGateway
-    serves it only from Ollama, so the HTTP path must not bridge it."""
+    """A resolved ``sonder`` alias stays on the local default path rather than bridging to openai_compatible."""
     _install(monkeypatch, SimpleNamespace(provider_bindings=_bindings(),
                                           model_gateway=OllamaMustNotBeUsed()))
     assert server._bridge_provider_for_tier("sonder") is None
@@ -489,10 +488,21 @@ def test_mcp_repl_chat_binds_its_resolved_tier_too(monkeypatch, no_ollama):
 # --- SONDER_INFERENCE_FALLBACK=ollama serves Ollama-only features locally ---
 
 class InferenceGateway:
-    """A Sonder Inference stand-in: plain text only, records every call."""
+    """A Sonder Inference stand-in advertising native tool calling, recording every call."""
 
     def __init__(self):
         self.calls = []
+
+    def health(self):
+        return SimpleNamespace(
+            document={"backends": [{"name": "llamacpp", "capabilities": ["tool_calling"]}]}
+        )
+
+    def supports_native_tools(self):
+        return True
+
+    def unified_worker_status(self):
+        return {"workers": []}
 
     def generate(self, request, context):
         self.calls.append(request)
@@ -502,13 +512,14 @@ class InferenceGateway:
         pytest.fail("unexpected embedding")
 
 
-def _inference_graph(*, fallback):
+def _inference_graph(*, fallback=False):
+    del fallback
     bindings = ProviderBindings(
         default_generation_provider="sonder_inference",
         tier_providers={tier: "sonder_inference" for tier in
                         ("fast", "general", "code", "reasoning", "vision")},
-        embedding_provider="ollama",
-        fallbacks={"sonder_inference": "ollama"} if fallback else {},
+        embedding_provider="sonder_inference",
+        fallbacks={},
     )
     return SimpleNamespace(provider_bindings=bindings, model_gateway=InferenceGateway())
 
@@ -553,60 +564,49 @@ def _schema_payload(model="qwen2.5:7b", **extra):
 ])
 def test_inference_tier_with_fallback_serves_ollama_only_features_on_local_ollama(
         monkeypatch, local_ollama, extra, feature):
-    graph = _inference_graph(fallback=True)
+    """Under RET-05 Sonder Inference handles format, tools, and images natively without Ollama fallback."""
+    del feature
+    graph = _inference_graph(fallback=False)
     _install(monkeypatch, graph)
     payload = _schema_payload(**extra)
-    with provider_bridge.degradation_scope() as notes:
-        with provider_bridge.bind_rung("sonder_inference", "general"):
-            out, content = server._chat_request(payload, model="qwen2.5:7b")
-    assert content == '{"ok": true}'
-    assert graph.model_gateway.calls == []  # Inference never saw it
-    [post] = local_ollama
-    assert post["path"] == "/api/chat"
-    assert post["model"] == "qwen2.5:7b"  # the tier's runtime-policy model
-    assert post["payload"]["model"] == "qwen2.5:7b"
-    assert post["local_only"] is True  # loopback daemon only, never the pool
-    assert post["payload"]["options"]["num_ctx"] == 16384
-    for key, value in extra.items():
-        assert post["payload"][key] == value
-    assert notes == ["served by ollama (ollama-only feature: %s)" % feature]
-    assert local_ollama.routes == [("sonder_inference", "ollama", "ollama_only_feature")]
+    with provider_bridge.bind_rung("sonder_inference", "general"):
+        _out, content = server._chat_request(payload, model="qwen2.5:7b")
+    assert content == "inference answer"
+    assert len(graph.model_gateway.calls) == 1
+    assert local_ollama == []
 
 
 def test_structured_answer_on_inference_tier_with_fallback_uses_local_ollama(
         monkeypatch, no_ollama, local_ollama):
-    graph = _inference_graph(fallback=True)
+    graph = _inference_graph(fallback=False)
     _install(monkeypatch, graph)
-    data = server.structured_answer_with_history(
-        "x", [], {"type": "object", "properties": {"ok": {"type": "boolean"}}},
-        tier="general",
-    )
-    assert "ok" in json.dumps(data, default=str)
-    assert graph.model_gateway.calls == []
-    assert [post["payload"]["format"]["type"] for post in local_ollama] == ["object"]
-    assert local_ollama[0]["payload"]["model"] == "qwen2.5-coder:7b"
+    with provider_bridge.bind_rung("sonder_inference", "general"):
+        _out, content = server._chat_request(
+            _schema_payload(format={"type": "object", "properties": {"ok": {"type": "boolean"}}}),
+            model="qwen2.5-coder:7b",
+        )
+    assert content == "inference answer"
+    assert len(graph.model_gateway.calls) == 1
+    assert local_ollama == []
 
 
 def test_inference_tier_without_fallback_still_refuses_and_names_the_fix(
         monkeypatch, local_ollama):
+    """Invalid format values fail closed on Sonder Inference with HTTP 400."""
     graph = _inference_graph(fallback=False)
     _install(monkeypatch, graph)
     with provider_bridge.bind_rung("sonder_inference", "general"):
         with pytest.raises(server.ModelCallError) as caught:
-            server._chat_request(_schema_payload(format={"type": "object"}),
-                                 model="qwen2.5:7b")
+            server._chat_request(_schema_payload(format="xml"), model="qwen2.5:7b")
     assert caught.value.status == 400
     assert caught.value.kind == provider_bridge.UNSUPPORTED_FEATURE_KIND
     assert caught.value.provider == "sonder_inference"
-    assert ("set SONDER_INFERENCE_FALLBACK=ollama to serve schema/tool requests "
-            "on local Ollama") in caught.value.detail
     assert local_ollama == [] and graph.model_gateway.calls == []
-    assert local_ollama.routes == []
 
 
 def test_plain_text_on_inference_tier_with_fallback_stays_on_inference(
         monkeypatch, local_ollama):
-    graph = _inference_graph(fallback=True)
+    graph = _inference_graph(fallback=False)
     _install(monkeypatch, graph)
     with provider_bridge.degradation_scope() as notes:
         with provider_bridge.bind_rung("sonder_inference", "general"):
@@ -616,88 +616,23 @@ def test_plain_text_on_inference_tier_with_fallback_stays_on_inference(
     assert local_ollama == [] and notes == [] and local_ollama.routes == []
 
 
-@pytest.mark.parametrize("model,base,reason", [
-    ("gpt-oss:120b-cloud", "http://127.0.0.1:11434", "hosted"),
-    ("qwen2.5:7b", "http://192.168.1.50:11434", "remote"),
-])
-def test_reroute_never_reaches_a_cloud_model_or_remote_endpoint(
-        monkeypatch, local_ollama, model, base, reason):
-    monkeypatch.setattr(server, "BASE", base)
-    graph = _inference_graph(fallback=True)
+def test_tools_kwarg_reroutes_sonder_inference_to_ollama_pool(monkeypatch, local_ollama):
+    """Native tools on Sonder Inference go directly through the SI gateway, never Ollama."""
+    graph = _inference_graph(fallback=False)
     _install(monkeypatch, graph)
-    with provider_bridge.bind_rung("sonder_inference", "general"):
-        with pytest.raises(server.ModelCallError) as caught:
-            server._chat_request(
-                _schema_payload(model=model, format={"type": "object"}), model=model,
-            )
-    assert caught.value.status == 400
-    assert reason in caught.value.detail
-    assert local_ollama == [] and graph.model_gateway.calls == []
-    assert local_ollama.routes == []
-
-
-# --- the reroute and the operator's Ollama pool (Node1 pooled inference) ---
-#
-# With a loopback BASE and a pool holding operator-configured remote workers
-# (each admitted only with SONDER_ALLOW_REMOTE_OLLAMA=1 and https), the reroute
-# may be served by the pool: that is the intended Node1 widening.  A remote
-# BASE is refused whatever the pool holds: the pool never makes a remote
-# primary endpoint eligible.
-
-def _pool(*, remote_workers):
-    return SimpleNamespace(enabled=True, has_remote_workers=remote_workers)
-
-
-def test_reroute_on_a_loopback_base_with_remote_pool_workers_may_use_the_pool(
-        monkeypatch, local_ollama):
-    monkeypatch.setattr(server, "OLLAMA_POOL", _pool(remote_workers=True))
-    graph = _inference_graph(fallback=True)
-    _install(monkeypatch, graph)
-    with provider_bridge.bind_rung("sonder_inference", "general"):
-        out, content = server._chat_request(_schema_payload(format={"type": "object"}),
-                                            model="qwen2.5:7b")
-    assert content == '{"ok": true}'
-    [post] = local_ollama
-    assert post["local_only"] is False  # the pool may place it on a remote worker
-    assert graph.model_gateway.calls == []
-
-
-def test_reroute_on_a_loopback_base_without_remote_workers_stays_loopback_only(
-        monkeypatch, local_ollama):
-    monkeypatch.setattr(server, "OLLAMA_POOL", _pool(remote_workers=False))
-    graph = _inference_graph(fallback=True)
-    _install(monkeypatch, graph)
-    with provider_bridge.bind_rung("sonder_inference", "general"):
-        server._chat_request(_schema_payload(format={"type": "object"}), model="qwen2.5:7b")
-    [post] = local_ollama
-    assert post["local_only"] is True
-
-
-def test_reroute_refuses_a_remote_base_even_when_the_pool_has_remote_workers(
-        monkeypatch, local_ollama):
-    monkeypatch.setattr(server, "BASE", "https://ollama.example.net:11434")
-    monkeypatch.setattr(server, "OLLAMA_POOL", _pool(remote_workers=True))
-    graph = _inference_graph(fallback=True)
-    _install(monkeypatch, graph)
-    with provider_bridge.bind_rung("sonder_inference", "general"):
-        with pytest.raises(server.ModelCallError) as caught:
-            server._chat_request(_schema_payload(format={"type": "object"}),
-                                 model="qwen2.5:7b")
-    assert caught.value.status == 400
-    assert "remote" in caught.value.detail
-    assert local_ollama == [] and graph.model_gateway.calls == []
-
-
-def test_reroute_stays_loopback_only_for_a_local_only_call_even_with_a_pool(
-        monkeypatch, local_ollama):
-    monkeypatch.setattr(server, "OLLAMA_POOL", _pool(remote_workers=True))
-    graph = _inference_graph(fallback=True)
-    _install(monkeypatch, graph)
-    with provider_bridge.bind_rung("sonder_inference", "general"):
-        server._chat_request(_schema_payload(format={"type": "object"}), model="qwen2.5:7b",
-                             local_only=True)
-    [post] = local_ollama
-    assert post["local_only"] is True
+    tools = [{"type": "function", "function": {"name": "directory_tree", "parameters": {"type": "object"}}}]
+    with provider_bridge.bind_rung("sonder_inference", "reasoning"):
+        _out, content = server._chat_request(
+            _schema_payload(model="qwen3-coder-next-80b:latest"),
+            model="qwen3-coder-next-80b:latest",
+            tools=tools,
+            tool_choice="auto",
+            accept_native_tool_calls=True,
+            return_message=True,
+        )
+    assert content == "inference answer"
+    assert len(graph.model_gateway.calls) == 1
+    assert local_ollama == []
 
 
 def test_other_bridged_providers_keep_the_plain_refusal(monkeypatch, local_ollama):
@@ -709,27 +644,6 @@ def test_other_bridged_providers_keep_the_plain_refusal(monkeypatch, local_ollam
     assert caught.value.status == 400
     assert "SONDER_INFERENCE_FALLBACK" not in caught.value.detail
     assert local_ollama == []
-
-
-def test_tools_kwarg_reroutes_sonder_inference_to_ollama_pool(monkeypatch, local_ollama):
-    monkeypatch.setattr(server, "OLLAMA_POOL", _pool(remote_workers=True))
-    graph = _inference_graph(fallback=True)
-    _install(monkeypatch, graph)
-    tools = [{"type": "function", "function": {"name": "directory_tree", "parameters": {"type": "object"}}}]
-    with provider_bridge.bind_rung("sonder_inference", "reasoning"):
-        server._chat_request(
-            _schema_payload(model="qwen3-coder-next-80b:latest"),
-            model="qwen3-coder-next-80b:latest",
-            tools=tools,
-            tool_choice="auto",
-            accept_native_tool_calls=True,
-            return_message=True,
-        )
-    [post] = local_ollama
-    assert post["payload"].get("tools") == tools
-    assert post["payload"].get("tool_choice") == "auto"
-    assert post["local_only"] is False
-    assert graph.model_gateway.calls == []
 
 
 def test_tools_kwarg_not_silently_dropped_on_openai_compatible(monkeypatch, local_ollama):

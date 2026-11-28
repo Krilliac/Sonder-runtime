@@ -42,7 +42,9 @@ def _fake_daemon(seen, *, root="/srv/models", reachable=True):
         seen.append(url)
         if not reachable:
             raise OSError("connection refused")
-        if url.endswith("/api/tags"):
+        if url.endswith("/v1/sonder/health"):
+            body = {"status": "ready", "models": [{"id": "tiny:latest", "state": "resident"}]}
+        elif url.endswith("/api/tags"):
             body = {"models": [{"name": "tiny:latest"}]}
         elif url.endswith("/api/ps"):
             body = {"models": []}
@@ -88,7 +90,7 @@ def test_doctor_ollama_probes_use_the_cli_selected_endpoint(
             ],
         )
         assert main([
-            "doctor", "--json", "--set", "ollama.url=http://127.0.0.1:11999",
+            "doctor", "--json", "--set", "inference.url=http://127.0.0.1:11999",
         ]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert [c["status"] for c in payload["checks"]] == ["ok", "ok"]
@@ -112,7 +114,7 @@ def test_doctor_reports_selected_dead_endpoint_as_failing(
             lambda: [("ollama", sonder_doctor._check_ollama)],
         )
         assert main([
-            "doctor", "--json", "--set", "ollama.url=http://127.0.0.1:11999",
+            "doctor", "--json", "--set", "inference.url=http://127.0.0.1:11999",
         ]) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["checks"][0]["status"] == "fail"
@@ -121,6 +123,7 @@ def test_doctor_reports_selected_dead_endpoint_as_failing(
 def test_storage_models_uses_the_daemon_reported_root(
     home, tmp_path, monkeypatch, capsys
 ):
+    # Under RET-05 local Ollama daemon model-root discovery is retired (returns None).
     daemon_root = tmp_path / "daemon-models"
     daemon_root.mkdir()
     monkeypatch.delenv("OLLAMA_MODELS", raising=False)
@@ -135,8 +138,7 @@ def test_storage_models_uses_the_daemon_reported_root(
         )
         assert main(["doctor", "--json"]) == 0
     detail = json.loads(capsys.readouterr().out)["checks"][0]["detail"]
-    assert str(daemon_root) in detail
-    assert "reported by the local Ollama daemon" in detail
+    assert "assumed" in detail and seen == []
 
 
 def test_storage_models_labels_an_undiscovered_default(
@@ -172,9 +174,12 @@ def test_storage_models_skip_ollama_never_probes(home, monkeypatch, capsys):
 def test_storage_models_warns_when_process_env_disagrees_with_daemon(
     home, tmp_path, monkeypatch, capsys
 ):
+    # Under RET-05 local Ollama daemon model-root discovery is retired; configured OLLAMA_MODELS is honored directly.
     daemon_root = tmp_path / "daemon-models"
     daemon_root.mkdir()
-    monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path / "elsewhere"))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setenv("OLLAMA_MODELS", str(elsewhere))
     with _patched_endpoint(
         monkeypatch, _fake_daemon([], root=daemon_root.as_posix())
     ):
@@ -185,9 +190,8 @@ def test_storage_models_warns_when_process_env_disagrees_with_daemon(
         )
         assert main(["doctor", "--json"]) == 0
     check = json.loads(capsys.readouterr().out)["checks"][0]
-    assert check["status"] == "warn"
-    assert str(daemon_root) in check["detail"]
-    assert "differs" in check["detail"]
+    assert check["status"] == "ok"
+    assert str(elsewhere) in check["detail"]
 
 
 @pytest.mark.parametrize(

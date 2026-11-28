@@ -73,7 +73,7 @@ class Transport:
         return payload.get("options", {}).get("num_predict") == lanes.EXPAND_NUM_PREDICT
 
     def __call__(self, path, payload, *args, **kwargs):
-        if path != "/api/chat":
+        if path not in ("/api/chat", "/v1/chat/completions"):
             return {}
         self.payloads.append(json.loads(json.dumps(payload)))
         if self.is_expansion(payload):
@@ -114,6 +114,16 @@ def lane(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(embeddings, "embed", lambda text: None)
     transport = Transport()
+    real_pft = server._legacy_chat_bridge.provider_for_tier
+    monkeypatch.setattr(
+        server._legacy_chat_bridge,
+        "provider_for_tier",
+        lambda tier, cloud, graph: (
+            None if graph is None or graph is server._APP_GRAPH_BUILT_BY_SERVER
+            else real_pft(tier, cloud, graph)
+        ),
+    )
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
     monkeypatch.setattr(server, "_post", transport)
     lanes.reset_turn()
     yield transport
@@ -419,7 +429,7 @@ def _reasoning_search_terms(lane):
     answer = lane.__call__
 
     def call(path, payload, *args, **kwargs):
-        if path != "/api/chat" or payload.get("options", {}).get("temperature") != 0.0:
+        if path not in ("/api/chat", "/v1/chat/completions") or payload.get("options", {}).get("temperature") != 0.0:
             return answer(path, payload, *args, **kwargs)
         lane.payloads.append(json.loads(json.dumps(payload)))
         if payload["options"]["num_predict"] < server.LOCAL_THINKING_MIN_NUM_PREDICT:
@@ -524,7 +534,7 @@ class _ForwardingTransport(Transport):
     """
 
     def __call__(self, path, payload, *args, **kwargs):
-        if path != "/api/chat":
+        if path not in ("/api/chat", "/v1/chat/completions"):
             return super().__call__(path, payload, *args, **kwargs)
         with stream_sink.claimed_for_call() as live:
             result = super().__call__(path, payload, *args, **kwargs)

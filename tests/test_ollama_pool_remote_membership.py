@@ -333,7 +333,7 @@ def test_real_request_waits_for_its_own_prewarm_instead_of_failing_admission(mon
     def open_url(request, *, timeout, allow_remote=None):
         body = json.loads(request.data)
         bodies.append(body)
-        if "prompt" not in body and "messages" not in body:
+        if body.get("max_tokens") == 1 or ("prompt" not in body and "messages" not in body):
             loading.set()
             assert release.wait(5)
         yield io.BytesIO(b'{"done": true}')
@@ -346,19 +346,19 @@ def test_real_request_waits_for_its_own_prewarm_instead_of_failing_admission(mon
     assert prewarm_gate.begin("qwen3.6:35b")
     prewarm = threading.Thread(target=lambda: (
         prewarm_gate.run_as_prewarm(lambda: server._post(
-            "/api/generate", {"model": "qwen3.6:35b", "keep_alive": "5m"}, timeout=10)),
+            "/v1/completions", {"model": "qwen3.6:35b", "keep_alive": "5m", "max_tokens": 1}, timeout=10)),
         prewarm_gate.finish("qwen3.6:35b")))
     prewarm.start()
     try:
         assert loading.wait(5)
         threading.Timer(0.5, release.set).start()
         # Admission timeout is 0.2s but the prewarm holds the slot for 0.5s.
-        assert server._post("/api/generate", {"model": "qwen3.6:35b", "prompt": "hi"},
+        assert server._post("/v1/completions", {"model": "qwen3.6:35b", "prompt": "hi"},
                             timeout=10) == {"done": True}
     finally:
         release.set()
         prewarm.join(5)
-    assert [body.get("prompt") for body in bodies] == [None, "hi"]
+    assert [body.get("prompt") for body in bodies] == ["", "hi"]
 
 
 def test_prewarm_gate_wait_is_bounded_and_never_self_blocking():

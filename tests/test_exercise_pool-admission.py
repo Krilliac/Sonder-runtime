@@ -429,12 +429,12 @@ def test_work_narration_names_the_carriers_for_admins_and_hides_them_from_accoun
         BASE=LOCAL, OLLAMA_POOL=pool, _RUNTIME_POLICY={"local_models": {"code": MODEL}},
     )
     with role_tool_policy.caller_role_scope(None):
-        assert configured_host(runtime, "code") == "ollama node1.example:11434"
-    assert configured_host(runtime, "code") == "ollama 1 worker"  # unbound: generic
+        assert configured_host(runtime, "code") == "sonder_inference node1.example:11434"
+    assert configured_host(runtime, "code") == "sonder_inference 1 worker"  # unbound: generic
     with role_tool_policy.caller_role_scope("user"):
-        assert configured_host(runtime, "code") == "ollama 1 worker"
+        assert configured_host(runtime, "code") == "sonder_inference 1 worker"
     lone = SimpleNamespace(BASE=LOCAL, OLLAMA_POOL=OllamaWorkerPool(LOCAL))
-    assert configured_host(lone, "code") == "ollama 127.0.0.1:11434"
+    assert configured_host(lone, "code") == "sonder_inference 127.0.0.1:11434"
 
 
 def _run_unbound_thread(fn):
@@ -463,7 +463,7 @@ def test_worker_thread_without_a_copied_context_never_sees_worker_hosts(monkeypa
         text = _run_unbound_thread(lambda: server._format_model_call_error(error))
         host = _run_unbound_thread(lambda: configured_host(runtime, "code"))
     assert "remote worker" in text and "node1.example" not in text
-    assert host == "ollama 1 worker"
+    assert host == "sonder_inference 1 worker"
 
 
 # (g) the backpressure text carries the queue position and never the holder note --------

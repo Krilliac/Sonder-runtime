@@ -992,7 +992,7 @@ def test_agent_generate_enables_agent_transport_mode(monkeypatch, without_standi
     monkeypatch.setattr(server, "_make_generate", fake_make_generate)
 
     assert without_standing(server._agent_impl("finish", max_steps=1)) == "done"
-    assert seen["args"][3] == server._LOCAL_AGENT_NUM_PREDICT
+    assert seen["args"][3] == server._agent_generation_budget.decision_num_predict("sonder_inference", False, True)
     assert seen["accept_native_tool_calls"] is True
     assert seen["compact_cloud_reasoning"] is True
 

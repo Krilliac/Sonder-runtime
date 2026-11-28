@@ -85,9 +85,12 @@ def build(monkeypatch, tmp_path, *, models=("m:1", "m:2"), config=None):
     harness = Harness(mcp=FakeMCP(), service=None, database=database)
 
     def get(path):
-        if path == "/api/tags":
-            return {"models": [{"name": name, "capabilities": ["chat"]} for name in models]}
-        return {"models": []}
+        if path in ("/v1/models", "/api/tags"):
+            return {
+                "object": "list",
+                "data": [{"id": name, "name": name, "capabilities": ["chat"]} for name in models],
+            }
+        return {"object": "list", "data": []}
 
     def fake_make(model, system, temperature, num_predict, num_ctx, **kwargs):
         def generate(prompt, history=None):

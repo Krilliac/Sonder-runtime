@@ -21708,6 +21708,12 @@
     },
     {
       "default": null,
+      "field": "inference",
+      "section": "root",
+      "type": "InferenceConfig"
+    },
+    {
+      "default": null,
       "field": "ollama",
       "section": "root",
       "type": "OllamaConfig"
@@ -22996,6 +23002,102 @@
       "type": "<class 'float'>"
     },
     {
+      "default": "http://127.0.0.1:11437",
+      "field": "url",
+      "section": "inference",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "ready_file",
+      "section": "inference",
+      "type": "str"
+    },
+    {
+      "default": false,
+      "field": "allow_remote",
+      "section": "inference",
+      "type": "bool"
+    },
+    {
+      "default": "",
+      "field": "api_key_file",
+      "section": "inference",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "private_workers",
+      "section": "inference",
+      "type": "str"
+    },
+    {
+      "default": "default",
+      "field": "model",
+      "section": "inference",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "embed_model",
+      "section": "inference",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "rerank_model",
+      "section": "inference",
+      "type": "str"
+    },
+    {
+      "default": "",
+      "field": "tier_models",
+      "section": "inference",
+      "type": "str"
+    },
+    {
+      "default": 1,
+      "field": "max_inflight",
+      "section": "inference",
+      "type": "int"
+    },
+    {
+      "default": 60,
+      "field": "startup_timeout_seconds",
+      "section": "inference",
+      "type": "int"
+    },
+    {
+      "default": 300,
+      "field": "request_timeout_seconds",
+      "section": "inference",
+      "type": "int"
+    },
+    {
+      "default": 5.0,
+      "field": "health_ttl_seconds",
+      "section": "inference",
+      "type": "float"
+    },
+    {
+      "default": 5.0,
+      "field": "health_timeout_seconds",
+      "section": "inference",
+      "type": "float"
+    },
+    {
+      "default": 120.0,
+      "field": "health_stale_seconds",
+      "section": "inference",
+      "type": "float"
+    },
+    {
+      "default": "",
+      "field": "ca_bundle",
+      "section": "inference",
+      "type": "str"
+    },
+    {
       "default": "static",
       "field": "mode",
       "section": "membership",
@@ -23212,7 +23314,7 @@
       "type": "tuple[str, ...]"
     },
     {
-      "default": "http://127.0.0.1:11434",
+      "default": "http://127.0.0.1:11437",
       "field": "url",
       "section": "ollama",
       "type": "str"
@@ -23629,13 +23731,13 @@
   "counts": {
     "capabilities": 273,
     "commands": 397,
-    "configuration": 319,
+    "configuration": 336,
     "events": 43,
     "native_tools": 94,
     "schemas": 4,
     "tools": 273
   },
-  "digest": "380d70662a0231134d4f900f56b9ec493d10dc1b2c2766310a34fbdb358407f3",
+  "digest": "30b0925cb2f15e453ade075f334cde6c4ea824226e138272f0b5c95d8597e27a",
   "events": [
     {
       "name": "session.started",
@@ -60295,13 +60397,13 @@
   },
   "sources": {
     "runtime/command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "runtime/server.py": "28b89c8eece5dc218ce04b4096f549bac4ff8e7a3d5ed88188cdb05370be0a3e",
+    "runtime/server.py": "62f153aa31ca39b64813d62a46c222a48ddaeb3056b3d96655e5f7b48e437126",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "a91fb2598788ed5f175431983f33e3b9f97d8ab8bdf50123248335d065cc1e93",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
     "sonder_runtime/domain/operational_capabilities.py": "6f8f2083343ac1b0de076cd4d545b5f99602a9916c185bd15d965ffa0c405fe6",
     "sonder_runtime/interfaces/sdk/discovery.py": "db8aeca8dd84d06cbbf834495db30b211956393375676f23899a28685aea015b",
-    "sonder_runtime/platform/config.py": "67d2eb2e23876545cf9dd66b8d9d45bceb397f492377226e716be65edbbeb583",
+    "sonder_runtime/platform/config.py": "24ae4c7787273b26f524636519c1c0dae474461243a9a8097befeeb9fd24e173",
     "sonder_runtime/platform/memory_replication_config.py": "f9fc0a642812bdc456ac082f0f8c52f051822f0160e16882b634895feb0cea61"
   },
   "tool_source": "server.mcp._tool_manager.list_tools",

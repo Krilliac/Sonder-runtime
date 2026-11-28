@@ -25,7 +25,7 @@ def test_a_measured_17gb_footprint_is_refused_before_the_transport(monkeypatch, 
     _seed_measured(service)
 
     with pytest.raises(server.ModelCallError) as refused:
-        server._post_model("/api/chat", chat_body(16384), model=MODEL)
+        server._post_model("/v1/chat/completions", chat_body(16384), model=MODEL)
 
     error = refused.value
     assert error.kind == "admission"
@@ -44,7 +44,7 @@ def test_an_unmeasured_model_is_estimated_from_the_tags_size(monkeypatch, tmp_pa
     wire(monkeypatch, server, fake, service)
 
     with pytest.raises(server.ModelCallError) as refused:
-        server._post_model("/api/chat", chat_body(16384), model=MODEL)
+        server._post_model("/v1/chat/completions", chat_body(16384), model=MODEL)
 
     assert refused.value.kind == "admission"
     assert refused.value.refusal.footprint.source.name == "ESTIMATED"
@@ -57,7 +57,7 @@ def test_a_model_that_fits_is_admitted(monkeypatch, tmp_path):
     wire(monkeypatch, server, fake, service)
     _seed_measured(service)
 
-    server._post_model("/api/chat", chat_body(16384), model=MODEL)
+    server._post_model("/v1/chat/completions", chat_body(16384), model=MODEL)
 
     assert len(fake.chat_bodies) == 1
 
@@ -69,7 +69,7 @@ def test_a_loaded_model_needs_no_host_memory_check(monkeypatch, tmp_path):
     wire(monkeypatch, server, fake, service)
     _seed_measured(service)
 
-    server._post_model("/api/chat", chat_body(16384), model=MODEL)
+    server._post_model("/v1/chat/completions", chat_body(16384), model=MODEL)
 
     assert len(fake.chat_bodies) == 1
 
@@ -89,7 +89,7 @@ def test_queue_mode_remeasures_until_memory_frees(monkeypatch, tmp_path):
     threading.Timer(0.3, lambda: state.update(available=40 * GIB)).start()
 
     started = time.monotonic()
-    server._post_model("/api/chat", chat_body(16384), model=MODEL, timeout=10)
+    server._post_model("/v1/chat/completions", chat_body(16384), model=MODEL, timeout=10)
 
     assert time.monotonic() - started >= 0.25
     assert len(fake.chat_bodies) == 1
@@ -103,7 +103,7 @@ def test_queue_mode_gives_up_at_the_deadline_with_the_evidence(monkeypatch, tmp_
     _seed_measured(service)
 
     with pytest.raises(server.ModelCallError) as refused:
-        server._post_model("/api/chat", chat_body(16384), model=MODEL, timeout=1)
+        server._post_model("/v1/chat/completions", chat_body(16384), model=MODEL, timeout=1)
 
     assert refused.value.kind == "admission"
     assert refused.value.refusal.reason.name == "HOST_RAM_FLOOR"
@@ -119,7 +119,7 @@ def test_an_unreadable_ps_is_unknown_not_cold(monkeypatch, tmp_path):
     wire(monkeypatch, server, fake, service)
     _seed_measured(service)
 
-    server._post_model("/api/chat", chat_body(16384), model=MODEL)
+    server._post_model("/v1/chat/completions", chat_body(16384), model=MODEL)
 
     assert len(fake.chat_bodies) == 1
     assert service.snapshot()["refused"] == 0

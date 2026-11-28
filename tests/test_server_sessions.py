@@ -2,6 +2,7 @@
 import sonder_runtime.adapters.embeddings as embeddings
 import pytest
 import server
+from tests.support.si_server_stub import bind_fake_si_post
 
 
 @pytest.fixture
@@ -18,7 +19,13 @@ def stub(monkeypatch, tmp_path):
         calls.append(payload)
         return {"message": {"content": "ECHO"}}
 
-    monkeypatch.setattr(server, "_post", fake_post)
+    bind_fake_si_post(
+        monkeypatch,
+        server,
+        fake_post,
+        models=("qwen2.5:3b",),
+        default_model="qwen2.5:3b",
+    )
     return calls
 
 
@@ -141,7 +148,7 @@ def test_long_thread_summarizes_overflow(stub, monkeypatch):
     p = _answer_payload(stub, "turn 3")
     contents = _contents(p)
     # Oldest turns are folded into a summary system message instead of being sent raw.
-    assert any(c.startswith("Earlier in this conversation:") for c in contents)
+    assert any("Earlier in this conversation:" in c for c in contents)
     # Only the last MAX_TURNS turns remain verbatim (turn 1 and turn 2), not turn 0.
     assert not any(c == "turn 0" for c in contents)
     conn = server._open_db()

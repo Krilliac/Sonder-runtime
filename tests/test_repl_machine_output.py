@@ -113,7 +113,7 @@ def test_piped_error_turn_carries_the_same_hint_the_panel_shows(
 
     row = json.loads(capsys.readouterr().out)
     assert row["error"] is True
-    assert "make sure it is running" in row["hint"]
+    assert "sonder-infer serve" in row["hint"] and "running" in row["hint"]
 
 
 def test_successful_turns_never_carry_a_hint(monkeypatch, capsys):

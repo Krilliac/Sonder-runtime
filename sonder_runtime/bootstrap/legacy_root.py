@@ -22,9 +22,17 @@ def require_inference_application(application, *, expected_pool=None, allow_inac
             or (expected_pool is not None and pool is not expected_pool)
             or controller._pool is not pool):
         raise ValueError("invalid legacy membership binding: exact pool/controller ownership required")
-    configured = configured_worker_origins(application.config.ollama)
+    from dataclasses import replace as _dc_replace
+    effective_ollama = _dc_replace(
+        application.config.ollama,
+        url=application.config.inference.url,
+        allow_remote=bool(
+            application.config.inference.allow_remote or application.config.ollama.allow_remote
+        ),
+    )
+    configured = configured_worker_origins(effective_ollama)
     validate_membership_config(application.config.membership, application.config.secrets,
-                               allow_remote=application.config.ollama.allow_remote)
+                               allow_remote=effective_ollama.allow_remote)
     origins = pool.configured_origins
     if (type(origins) is not tuple or any(type(origin) is not str for origin in origins)
             or origins != configured):
@@ -122,7 +130,7 @@ def require_mcp_inference_binding(application, pool, *, primary_origin):
                 and application.inference_pool is None and application.inference_membership is None):
             return
     require_inference_application(application, expected_pool=pool)
-    if primary_origin != ollama_endpoint.normalize(application.config.ollama.url):
+    if primary_origin != ollama_endpoint.normalize(application.config.inference.url):
         raise ValueError("invalid legacy membership binding: primary differs from typed configuration")
 
 
@@ -155,7 +163,7 @@ def configure_application(application) -> None:
             # path. Existing work finishes against its original pool.
             previous_pool.drain(timeout_seconds=0)
         legacy.OLLAMA_POOL = pool
-        legacy.BASE = ollama_endpoint.normalize(application.config.ollama.url)
+        legacy.BASE = ollama_endpoint.normalize(application.config.inference.url)
         if current is application:
             return
         legacy._APP_GRAPH = application

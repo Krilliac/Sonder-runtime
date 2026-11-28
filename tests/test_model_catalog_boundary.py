@@ -55,7 +55,7 @@ def test_root_discovery_functions_fetch_once_and_parse_through_the_domain(monkey
     assert server.resolve_discovered_model_record("phi4:latest")[0] == "Phi4:latest"
     assert server.resolve_discovered_model("GEMMA3:12b") == "gemma3:12b"
     assert server._cache_model_revision("phi4") == "abc123"
-    assert fetched == ["/api/tags"] * 6
+    assert fetched == ["/v1/models"] * 6
 
 
 def test_root_delegates_keep_their_short_circuits_and_failure_shapes(monkeypatch):

@@ -17,42 +17,35 @@ from sonder_runtime.application.context import bind_operation_context, local_own
 def test_tier_wrapper_ollama_payload_usage_and_override_match_legacy(monkeypatch):
     import server
 
-    graph = SimpleNamespace(provider_bindings=ProviderBindings.uniform("ollama"))
+    class Gateway:
+        def __init__(self):
+            self.requests = []
+
+        def generate(self, request, _context):
+            self.requests.append(request)
+            return ModelResponse(
+                "  answer with whitespace \n", "same-model", request.tier,
+                tokens_in=2, tokens_out=3,
+            )
+
+    gateway = Gateway()
+    graph = SimpleNamespace(
+        provider_bindings=ProviderBindings.uniform("sonder_inference"),
+        model_gateway=gateway,
+    )
     monkeypatch.setattr(server, "_APP_GRAPH", graph)
     monkeypatch.setattr(server, "_refresh_live_cloud_tiers", lambda: None)
-    captured = []
-
-    def post(_path, payload, **kwargs):
-        captured.append((json.dumps(payload, sort_keys=True, separators=(",", ":")), kwargs))
-        return (
-            {"message": {"content": "  answer with whitespace \n"},
-             "prompt_eval_count": 2, "eval_count": 3},
-            1,
-        )
-
-    monkeypatch.setattr(server, "_post_model", post)
-    legacy = server._make_generate(
-        "same-model", "system", .2, 111, 2048, cloud=False,
-        timeout=5,
-    )
-    legacy.num_predict_override = 77
-    legacy_text = legacy("prompt", [{"role": "user", "content": "history"}])
-    legacy_wire = captured[-1]
-    legacy_usage = dict(legacy.last_usage)
 
     tiered = server._make_tier_generate(
         "code", "same-model", "system", .2, 111, 2048,
-        cloud=False, timeout=5,
+        cloud=False, timeout=5, think=False,
     )
     tiered.num_predict_override = 77
     tiered_text = tiered("prompt", [{"role": "user", "content": "history"}])
-    tiered_wire = captured[-1]
 
-    assert tiered_text == legacy_text == "  answer with whitespace \n"
-    assert tiered_wire[0] == legacy_wire[0]
-    assert tiered_wire[1].get("model") == legacy_wire[1].get("model")
-    assert dict(tiered.last_usage) == legacy_usage
-    assert json.loads(tiered_wire[0])["options"]["num_predict"] == 77
+    assert tiered_text == "  answer with whitespace \n"
+    assert len(gateway.requests) == 1
+    assert gateway.requests[0].options["num_predict"] == 77
 
 
 def test_offload_learn_false_uses_bound_gateway_without_ollama_probe(monkeypatch):
@@ -255,8 +248,7 @@ def test_helper_uses_configured_dispatch_fallback_only_before_execution(monkeypa
             return ModelResponse("fallback", "ollama-model", request.tier)
 
     base = ProviderBindings.uniform("sonder_inference")
-    bindings = ProviderBindings(base.default_generation_provider, base.tier_providers, base.embedding_provider,
-                                {"sonder_inference": "ollama"} if fallback_enabled else {})
+    bindings = base
     primary = PreSendFallbackGateway(Primary(), fallback=Fallback()) if fallback_enabled else Primary()
     gateway = ProviderDispatchGateway(
         providers={"sonder_inference": primary}, tier_providers=bindings.tier_providers,
@@ -368,7 +360,7 @@ def _generation_host(graph, wire):
     return namespace, construct_agent
 
 
-@pytest.mark.parametrize("provider,expected", [("sonder_inference", 4096), ("ollama", 1200)])
+@pytest.mark.parametrize("provider,expected", [("sonder_inference", 4096), ("openai_compatible", 1200)])
 def test_isolated_agent_construction_sets_real_cap_and_preserves_ollama_bytes(monkeypatch, provider, expected):
     requests = []
     class Gateway:
@@ -381,7 +373,7 @@ def test_isolated_agent_construction_sets_real_cap_and_preserves_ollama_bytes(mo
     namespace, construct = _generation_host(graph, wire)
     monkeypatch.delenv("SONDER_AGENT_NUM_PREDICT", raising=False)
     monkeypatch.delenv("SONDER_AGENT_TEMPERATURE", raising=False)
-    gen = construct(provider if provider != "ollama" else None)
+    gen = construct(provider)
     assert gen("task") == '{"final":"done"}'
     assert json.loads(wire[-1])["options"]["num_predict"] == expected
     if provider == "sonder_inference":
@@ -391,9 +383,7 @@ def test_isolated_agent_construction_sets_real_cap_and_preserves_ollama_bytes(mo
         monkeypatch.setenv("SONDER_AGENT_TEMPERATURE", "0.6")
         monkeypatch.setenv("SONDER_AGENT_SAMPLING", "0.95,20,0")
         monkeypatch.setenv("SONDER_AGENT_DECISION_THINKING", "off")
-        construct(None)("task")
-        assert wire[-1] == original
-        namespace["_make_generate"]("model", "system", .1, 1200, 0)("task")
+        construct(provider)("task")
         assert wire[-1] == original
 
 

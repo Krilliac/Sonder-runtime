@@ -646,9 +646,9 @@ def _sonder_inference_advertises_model(graph: object, model_name: str) -> bool:
 
 
 def provider_for_tier(tier_label: object, cloud: bool, graph: object) -> str | None:
-    """The non-Ollama provider serving a local rung, or None for Ollama."""
+    """The provider serving a rung (Sonder Inference handles local, pins, and Ollama Cloud)."""
     if cloud:
-        return None
+        return "sonder_inference"
     bindings = provider_bindings(graph)
     provider = provider_bridge.provider_for_tier(tier_label, bindings)
     if provider_bridge.is_bridged(provider):
@@ -972,121 +972,30 @@ def note_degradation(step: str, detail: str) -> None:
     provider_bridge.record_degradation(step)
 
 
-# The receipt/route reason for a request rerouted by ``ollama_only_reroute``.
-OLLAMA_ONLY_FEATURE_REASON = "ollama_only_feature"
-_FALLBACK_HINT = (
-    "set SONDER_INFERENCE_FALLBACK=ollama to serve schema/tool requests on "
-    "local Ollama"
-)
-
-
 def ollama_only_reroute(
     gateway: object, payload: dict, rung, *, model: str, graph: object,
     loopback_endpoint: bool, context_probe: Callable[[], object],
 ) -> dict | None:
-    """The payload to serve on local Ollama instead of the bridge, or None.
-
-    Sonder Inference v1 cannot carry Ollama-only features (decoder schemas,
-    native tools, images, tool calls; the predicate is
-    ``provider_bridge.ollama_only_feature``, the same one the bridge refuses
-    on).  When the operator has declared ``SONDER_INFERENCE_FALLBACK=ollama``
-    -- the existing statement that local Ollama may serve prompts bound for
-    Inference -- such a step returns its payload (with the Ollama context
-    window the bridged rung skipped, via ``context_probe``) and the caller
-    runs its ordinary Ollama path with the payload's own tier model: on the
-    loopback endpoint only (``local_only``), unless ``reroute_may_use_pool``
-    lets the operator's Ollama pool place it on one of its configured workers.
-    A hosted ``-cloud`` model or a non-loopback primary Ollama endpoint is
-    refused here whatever the pool holds, exactly as the pre-send fallback's
-    narrowed context would refuse it.
-
-    Returns None for every other step (it stays on the bridge, which refuses
-    the feature for providers without a declared fallback).  Without the
-    declaration a Sonder Inference step is refused with a message naming the
-    fix.  Every reroute is logged, announced as ``route.changed`` and noted on
-    the turn receipt (``served by ollama (ollama-only feature: ...)``).
-    """
+    """Local Ollama rerouting is retired; Sonder Inference carries all supported features."""
     provider = getattr(rung, "provider", None)
     if provider != "sonder_inference":
         return None
     found = provider_bridge.ollama_only_feature(payload, provider=provider)
     if found is None:
         return None
-    feature, message = found
-
-    def refuse(detail: str) -> ModelCallError:
-        error = ModelCallError(
-            provider_bridge.UNSUPPORTED_FEATURE_KIND, detail,
-            status=400, attempts=0, cloud=False,
-        )
-        error.provider = provider
-        error.provider_display_url = _provider_display_url(gateway, provider)
-        return error
-
-    if provider_bindings(graph).fallbacks.get(provider) != "ollama":
-        raise refuse("%s; %s" % (message, _FALLBACK_HINT))
-    from sonder_runtime.domain.model_routing import is_cloud_model_name
-
-    names = {str(model or "").strip(), str(payload.get("model") or "").strip()}
-    names.discard("")
-    if not names:
-        raise refuse("%s; the tier has no local Ollama model to serve it" % message)
-    if any(is_cloud_model_name(name) for name in names):
-        raise refuse(
-            "%s; SONDER_INFERENCE_FALLBACK=ollama serves it only on a local "
-            "Ollama model, and this tier's model is hosted" % message
-        )
-    if not loopback_endpoint:
-        raise refuse(
-            "%s; SONDER_INFERENCE_FALLBACK=ollama serves it only on the "
-            "loopback Ollama endpoint, and this one is remote" % message
-        )
-    step = "served by ollama (ollama-only feature: %s)" % feature
-    _logger.warning(
-        "sonder_inference chat step %s; model=%s tier=%s",
-        step, sorted(names)[0], getattr(rung, "tier", ""),
+    _feature, message = found
+    error = ModelCallError(
+        provider_bridge.UNSUPPORTED_FEATURE_KIND, message,
+        status=400, attempts=0, cloud=False,
     )
-    provider_bridge.record_degradation(step)
-    from sonder_runtime.application.session.provider_attempts import (
-        report_provider_fallback,
-    )
-
-    report_provider_fallback(provider, "ollama", OLLAMA_ONLY_FEATURE_REASON)
-    return with_local_context(payload, context_probe)
+    error.provider = provider
+    error.provider_display_url = _provider_display_url(gateway, provider)
+    raise error
 
 
 def reroute_may_use_pool(pool: object, *, base_loopback: bool, local_only: bool) -> bool:
-    """Whether an ``ollama_only_reroute`` step may be placed by the Ollama pool.
-
-    Node1 pooled inference: with a loopback primary and a pool that holds
-    remote workers, the rerouted step may run on any pool member, a remote
-    worker included.  Those workers are the operator's configured list
-    (``SONDER_OLLAMA_WORKERS``), each admitted by ``validate_worker_origin``
-    only with ``SONDER_ALLOW_REMOTE_OLLAMA=1`` and https; nothing here checks
-    that a worker's address is private.  A remote primary never qualifies
-    (``ollama_only_reroute`` refuses it), and a ``local_only`` call stays on
-    the loopback endpoint.
-    """
+    """Whether a pooled step may be placed by the worker pool."""
     return bool(
         base_loopback and not local_only
         and getattr(pool, "enabled", False) and getattr(pool, "has_remote_workers", False)
     )
-
-
-def with_local_context(payload: dict, context_probe: Callable[[], object]) -> dict:
-    """A rerouted payload with the Ollama context window a bridged rung skipped.
-
-    A bridged rung builds its payload without probing Ollama for the model's
-    window (``num_ctx`` is left unset); the rerouted Ollama call restores it
-    so a schema prompt is not truncated at the daemon's default.
-    """
-    options = payload.get("options")
-    if not isinstance(options, dict):
-        return payload
-    current = options.get("num_ctx")
-    if isinstance(current, int) and not isinstance(current, bool) and current > 0:
-        return payload
-    probed = context_probe()
-    if not isinstance(probed, int) or isinstance(probed, bool) or probed <= 0:
-        return payload
-    return {**payload, "options": {**options, "num_ctx": probed}}

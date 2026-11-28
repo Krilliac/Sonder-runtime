@@ -974,25 +974,41 @@ def resolve_sonder_inference_pin(
     *,
     fallback_pin: PinResolution,
 ) -> PinResolution:
-    """Resolve direct model pins against healthy ``sonder-inference`` / pool workers."""
+    """Resolve direct model pins against healthy ``sonder-inference`` / private workers."""
     wanted = str(selector or "").strip()
-    if not wanted or fallback_pin.ok:
+    if not wanted or fallback_pin.ok or fallback_pin.status in (
+        PinStatus.NOT_CHAT_CAPABLE,
+        PinStatus.CATALOG_UNAVAILABLE,
+    ):
         return fallback_pin
     gw = _find_sonder_inference_gateway(server)
     if gw is None:
         return fallback_pin
-    pool = getattr(server, "OLLAMA_POOL", None)
     try:
-        status = gw.unified_worker_status(ollama_pool=pool)
+        status = gw.unified_worker_status(ollama_pool=None)
     except _SOFT_ERRORS as exc:
         _logger.debug("unified_worker_status lookup failed: %s", exc)
         status = None
     candidates: list[str] = []
     if isinstance(status, Mapping):
-        for raw_model in status.get("available_models") or ():
-            text = str(raw_model or "").strip()
-            if text:
-                candidates.append(text)
+        workers = status.get("workers")
+        has_non_ollama_healthy = False
+        if isinstance(workers, list) and workers:
+            for worker in workers:
+                if not isinstance(worker, Mapping):
+                    continue
+                if worker.get("source") == "ollama_pool" or not worker.get("healthy"):
+                    continue
+                has_non_ollama_healthy = True
+                for raw_model in worker.get("models") or ():
+                    text = str(raw_model or "").strip()
+                    if text:
+                        candidates.append(text)
+        if not candidates and (not isinstance(workers, list) or not workers or has_non_ollama_healthy):
+            for raw_model in status.get("available_models") or ():
+                text = str(raw_model or "").strip()
+                if text:
+                    candidates.append(text)
     if not candidates:
         try:
             snap = gw.health()
@@ -1011,9 +1027,9 @@ def resolve_sonder_inference_pin(
             matched = item
             break
     if not matched and ":" not in wanted:
-        prefix = wanted_cf + ":"
+        latest_target = wanted_cf + ":latest"
         for item in candidates:
-            if item.casefold().startswith(prefix):
+            if item.casefold() == latest_target:
                 matched = item
                 break
     if not matched:

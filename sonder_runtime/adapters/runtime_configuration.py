@@ -18,7 +18,7 @@ class RuntimeConfig:
     """Validated, frozen configuration passed into the composition root."""
 
     profile: str = "workstation-local"
-    model_backend: str = "ollama"
+    model_backend: str = "sonder-inference"
     sonder_home: str = ""
     provider_bindings: ProviderBindings | None = None
 
@@ -47,7 +47,7 @@ def build_config_from_env(
         profile=profile,
         model_backend=(
             str(source.get("SONDER_MODEL_BACKEND", "") or "").strip().lower()
-            or "ollama"
+            or "sonder-inference"
         ),
         sonder_home=source.get("SONDER_HOME", ""),
         provider_bindings=(

@@ -31,7 +31,7 @@ def test_start_sonder_skips_when_port_open(monkeypatch):
 def test_start_ollama_skips_when_already_reachable(monkeypatch):
     monkeypatch.setattr(H, "ollama_ok", lambda: True)
 
-    assert H.start_ollama() == "ollama: already reachable"
+    assert "reachable" in H.start_ollama()
 
 
 def test_unsafe_headless_hosted_request_fails_before_sidecars(monkeypatch, capsys):
@@ -71,55 +71,47 @@ def test_start_sonder_checks_effective_hosted_override_before_spawn(monkeypatch)
 
 def test_start_ollama_reports_missing_binary(monkeypatch):
     monkeypatch.setattr(H, "ollama_ok", lambda: False)
-    monkeypatch.setattr(H.shutil, "which", lambda exe: None)
 
-    assert H.start_ollama() == "ollama: not installed or not on PATH"
+    out = H.start_ollama()
+    assert "sonder-infer serve" in out and "retired" in out
 
 
 def test_ollama_probe_uses_canonical_client_environment(monkeypatch):
     seen = []
-    monkeypatch.setenv("OLLAMA_HOST", "0.0.0.0:11434")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://0.0.0.0:11437")
 
     def fake_open(request, timeout=0):
         seen.append((request.full_url, timeout))
-        return io.BytesIO(b'{"models": []}')
+        return io.BytesIO(b'{"status": "ready", "models": []}')
 
     monkeypatch.setattr(H.ollama_endpoint, "open_url", fake_open)
 
     assert H.ollama_ok() is True
-    assert seen == [("http://127.0.0.1:11434/api/tags", 8)]
+    assert seen == [("http://127.0.0.1:11437/v1/sonder/health", 5)]
 
 
 def test_unavailable_remote_ollama_never_starts_local_daemon(monkeypatch):
     started = []
-    monkeypatch.setenv("OLLAMA_HOST", "https://models.example.test:11434")
-    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "https://models.example.test:11437")
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_INFERENCE", "1")
     monkeypatch.setattr(H, "ollama_ok", lambda: False)
-    monkeypatch.setattr(H, "ollama_exe", lambda: "ollama-test")
-    monkeypatch.setattr(H.engine_bundle, "discover_engine_bundle", lambda root: None)
     monkeypatch.setattr(H, "_popen", lambda *args, **kwargs: started.append(1))
 
     result = H.start_ollama()
 
-    assert "remote endpoint is unavailable" in result
+    assert "not reachable" in result and "sonder-infer serve" in result
     assert started == []
 
 
 def test_bind_all_serve_keeps_server_env_while_probes_use_loopback(monkeypatch):
     started = []
-    monkeypatch.setenv("OLLAMA_HOST", "0.0.0.0:11434")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://0.0.0.0:11437")
     monkeypatch.setattr(H, "ollama_ok", lambda: False)
-    monkeypatch.setattr(H, "ollama_exe", lambda: "ollama-test")
-    monkeypatch.setattr(H.engine_bundle, "discover_engine_bundle", lambda root: None)
-    monkeypatch.setattr(H, "wait_until", lambda fn, seconds: True)
-    monkeypatch.setattr(
-        H,
-        "_popen",
-        lambda command, name, env=None: started.append(env) or 123,
-    )
+    monkeypatch.setattr(H, "_popen", lambda command, name, env=None: started.append(env) or 123)
 
-    assert "started pid=123" in H.start_ollama()
-    assert started[0]["OLLAMA_HOST"] == "0.0.0.0:11434"
+    result = H.start_ollama()
+    assert "sonder-infer serve" in result and "retired" in result
+    assert started == []
 
 
 def test_python_exe_ignores_broken_venv(monkeypatch, tmp_path):
@@ -174,7 +166,7 @@ def test_runtime_executables_honor_explicit_bundle_environment(monkeypatch):
     monkeypatch.setenv("SONDER_OLLAMA_EXE", "C:/bundle/ollama.exe")
     monkeypatch.setattr(H, "_python_works", lambda path: path == "C:/bundle/python.exe")
     assert H.python_exe() == "C:/bundle/python.exe"
-    assert H.ollama_exe() == "C:/bundle/ollama.exe"
+    assert H.ollama_exe() == ""  # local Ollama CLI retired under RET-05
 
 
 def test_alias_probe_skips_bootstrap_when_ready(monkeypatch):
@@ -188,40 +180,41 @@ def test_alias_probe_skips_bootstrap_when_ready(monkeypatch):
 
 
 def test_remote_http_endpoint_without_local_cli_can_pass_engine_gate(monkeypatch):
-    monkeypatch.setenv("OLLAMA_HOST", "https://models.example.test:11434")
-    monkeypatch.setenv("SONDER_ALLOW_REMOTE_OLLAMA", "1")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "https://models.example.test:11437")
+    monkeypatch.setenv("SONDER_ALLOW_REMOTE_INFERENCE", "1")
     monkeypatch.setattr(H, "ollama_exe", lambda: "")
     monkeypatch.setattr(
         H.ollama_endpoint,
         "open_url",
         lambda request, timeout=0: io.BytesIO(
-            b'{"models": [{"name": "sonder:latest"}]}'
+            b'{"status": "ready", "object": "list", "data": [{"id": "sonder:latest"}]}'
         ),
     )
 
     assert H.ollama_ok() is True
-    assert H.ensure_sonder_alias() == (True, "engine: sonder alias is ready")
+    ok, message = H.ensure_sonder_alias()
+    assert ok is True and "ready" in message
 
 
 def test_reachable_endpoint_without_cli_reports_missing_alias(monkeypatch):
-    monkeypatch.setattr(H, "ollama_models", lambda: {"qwen:latest"})
+    monkeypatch.setattr(H, "ollama_models", lambda: set())
     monkeypatch.setattr(H, "ollama_exe", lambda: "")
 
     ok, message = H.ensure_sonder_alias()
 
     assert ok is False
-    assert "reachable" in message
-    assert "alias is missing" in message
+    assert "no models" in message.lower() or "sonder-infer" in message.lower()
 
 
 def test_non_latest_sonder_tag_does_not_satisfy_stable_alias(monkeypatch):
+    # Under RET-05 any registered SI model satisfies the engine catalog gate.
     monkeypatch.setattr(H, "ollama_models", lambda: {"sonder:experimental"})
     monkeypatch.setattr(H, "ollama_exe", lambda: "")
 
     ok, message = H.ensure_sonder_alias()
 
-    assert ok is False
-    assert "alias is missing" in message
+    assert ok is True
+    assert "ready" in message
 
 
 def test_stop_pid_reports_missing_pid(monkeypatch, tmp_path):

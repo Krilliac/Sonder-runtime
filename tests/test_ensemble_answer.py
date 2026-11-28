@@ -247,15 +247,16 @@ def test_cancellation_is_not_swallowed(monkeypatch):
 
 
 def test_each_model_is_unloaded_before_the_next_one_loads(monkeypatch):
-    """Only one model fits on the card, so the ensemble must free as it goes."""
+    """Sonder Inference manages residency directly; ensemble does not emit legacy Ollama /api/generate unload POSTs."""
     freed = []
     _stub(monkeypatch, {"a": "answer A", "b": "answer B"})
     monkeypatch.setattr(
         server, "_post",
-        lambda path, payload, **k: freed.append(payload.get("model")) or {},
+        lambda path, payload, **k: freed.append((path, payload.get("model"))) or {},
     )
-    server.ensemble_answer("q", tiers="a,b")
-    assert "model-a" in freed and "model-b" in freed
+    out = server.ensemble_answer("q", tiers="a,b")
+    assert "merged answer" in out and "model-a" in out and "model-b" in out
+    assert freed == []
 
 
 # --- learning the capability from responses, not from a probe -----------------
@@ -306,6 +307,8 @@ def test_chat_request_retries_once_with_headroom_when_thinking_ate_the_budget(
             }, 1
         return {"message": {"content": "the real answer"}}, 1
 
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_post_model", fake_post_model)
     _out, content = server._chat_request(
         {"model": "r", "messages": [], "options": {"num_predict": 260}}, model="r",
@@ -335,6 +338,8 @@ def test_ensemble_code_tier_retries_with_full_thinking_headroom(monkeypatch):
             }, 1
         return {"message": {"content": "the real answer"}}, 1
 
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_post_model", fake_post_model)
     response = server.ensemble_answer("q", tiers="code", mode="general")
     assert "the real answer" in response
@@ -355,6 +360,8 @@ def test_cloud_chat_retries_once_without_thinking_when_budget_is_exhausted(
             }, 1
         return {"message": {"content": "the real answer"}}, 1
 
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_post_model", fake_post_model)
     _out, content = server._chat_request(
         {
@@ -382,6 +389,8 @@ def test_cloud_chat_does_not_disable_thinking_for_unknown_model(monkeypatch):
             "done_reason": "length",
         }, 1
 
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_post_model", fake_post_model)
     with pytest.raises(server.ModelCallError) as caught:
         server._chat_request(
@@ -426,6 +435,8 @@ def test_a_learned_thinking_model_gets_headroom_up_front(monkeypatch):
         budgets.append(payload["options"]["num_predict"])
         return {"message": {"content": "answer"}}, 1
 
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_post_model", fake_post_model)
     server._chat_request(
         {"model": "r", "messages": [], "options": {"num_predict": 260}}, model="r",
@@ -459,6 +470,8 @@ def test_reasoning_continuation_compacts_and_reserves_a_final_answer(monkeypatch
             "done_reason": "length",
         }, 1
 
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_post_model", fake_post_model)
     out, content = server._chat_request(
         {
@@ -506,6 +519,8 @@ def test_make_generate_reports_aggregate_continued_thinking_without_text(monkeyp
             "done_reason": "length",
         }, 1
 
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_post_model", fake_post_model)
     generate = server._make_generate(
         "r",
@@ -545,6 +560,8 @@ def test_make_generate_preserves_continued_thinking_when_final_segment_fails(
             "done_reason": "length",
         }, 1
 
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_post_model", fake_post_model)
     generate = server._make_generate(
         "r",
@@ -618,6 +635,8 @@ def test_reasoning_continuation_default_reaches_answer_only_segment(monkeypatch)
             "done_reason": "length",
         }, 1
 
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_post_model", fake_post_model)
     _out, content = server._chat_request(
         {
@@ -649,6 +668,8 @@ def test_reasoning_continuation_floors_fractional_remaining_timeout(monkeypatch)
             "done_reason": "length",
         }, 1
 
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_post_model", fake_post_model)
     monkeypatch.setattr(server.time, "monotonic", lambda: 100.0)
     _out, content = server._chat_request(
@@ -692,6 +713,8 @@ def test_reasoning_continuation_preserves_user_owned_checkpoint_prefix(monkeypat
             "done_reason": "length",
         }, 1
 
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_post_model", fake_post_model)
     _out, content = server._chat_request(
         {
@@ -719,6 +742,8 @@ def test_explicit_think_false_skips_learned_headroom_and_retry(monkeypatch):
         seen.append((payload["options"]["num_predict"], payload.get("think")))
         return {"message": {"content": "direct answer"}}, 1
 
+    monkeypatch.setattr(server, "_bridge_provider_for_tier", lambda *_a, **_k: None)
+    monkeypatch.setattr(server._legacy_chat_bridge, "provider_for_tier", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_post_model", fake_post_model)
     _out, content = server._chat_request(
         {

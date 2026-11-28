@@ -41,14 +41,13 @@ def run(
     """Parse and execute one headless command through injected operations."""
     out = sys.stdout if out is None else out
     err = sys.stderr if err is None else err
-    parser = argparse.ArgumentParser(description="Run Sonder Runtime and Ollama headlessly.")
+    parser = argparse.ArgumentParser(description="Run Sonder Runtime headlessly against Sonder Inference.")
     parser.add_argument(
         "command", nargs="?", default="start",
         choices=["start", "engine", "status", "stop", "restart"],
     )
     parser.add_argument("--host", default=default_host)
     parser.add_argument("--port", type=int, default=default_port)
-    parser.add_argument("--stop-ollama", action="store_true", help="Also stop Ollama when stopping.")
     parser.add_argument("--context-size", default=os.environ.get("SONDER_CONTEXT_SIZE", ""))
     parser.add_argument("--allow-hosted", action="store_true")
     args = parser.parse_args(argv)
@@ -65,9 +64,6 @@ def run(
     if args.command == "stop":
         messages = [operations.stop_pid("sonder_serve", args.host, args.port)]
         print(messages[0], file=out)
-        if args.stop_ollama:
-            messages.append(operations.stop_pid("ollama"))
-            print(messages[-1], file=out)
         return 0 if all(operations.stop_succeeded(message) for message in messages) else 1
     if args.command == "restart":
         stopped = operations.stop_pid("sonder_serve", args.host, args.port)

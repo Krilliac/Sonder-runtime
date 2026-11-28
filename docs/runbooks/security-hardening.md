@@ -291,14 +291,16 @@ on only what you need, in `sonder.toml` or the secrets file. Truthy values are
   leave the machine. Home:
   [wiki 08](../wiki/08-model-tiers-and-gateway.md#remote--cloud-opt-in).
 - [ ] Web tools: `SONDER_WEB_TOOLS` / `[features].web`.
-- [ ] Remote Ollama: `SONDER_ALLOW_REMOTE_OLLAMA` / `[ollama].allow_remote`,
-  with an `https://` origin that names an explicit port and no path. Home:
+- [ ] Remote inference (Sonder Inference and pooled inference workers):
+  `SONDER_ALLOW_REMOTE_INFERENCE` / `[inference].allow_remote`
+  (`SONDER_ALLOW_REMOTE_OLLAMA` is accepted as a deprecated alias with a
+  warning), with an `https://` origin that names an explicit port and no path
+  (plus `SONDER_INFERENCE_API_KEY` / `SONDER_INFERENCE_API_KEY_FILE` and a
+  cloud-allowed context for remote Sonder Inference). Home:
+  [sonder-inference.md](sonder-inference.md),
   [remote-ollama-caddy.md](remote-ollama-caddy.md#coordinator-settings).
 - [ ] Remote compute: `SONDER_ALLOW_REMOTE_COMPUTE` / `[compute].allow_remote`,
   plus a per-workload opt-in. Home: [compute-fabric.md](compute-fabric.md).
-- [ ] Remote Sonder Inference: `SONDER_ALLOW_REMOTE_INFERENCE`, exactly `0` or
-  `1`, plus `https://`, `SONDER_INFERENCE_API_KEY` and a cloud-allowed
-  context. Home: [sonder-inference.md](sonder-inference.md).
 - [ ] Model reasoning: `SONDER_EXPOSE_REASONING` / `[features].expose_reasoning`.
   Private chain of thought: `SONDER_ALLOW_PRIVATE_COT`, which also needs an
   explicit `allow` rule for `admin_private_chain_of_thought` in

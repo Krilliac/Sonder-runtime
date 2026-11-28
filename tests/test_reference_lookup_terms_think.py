@@ -42,7 +42,7 @@ def _thinking_model(lane):  # noqa: F811  # the fixture's value, passed in
     answer = lane.__call__
 
     def call(path, payload, *args, **kwargs):
-        if path != "/api/chat" or not _is_search_terms(payload):
+        if path not in ("/api/chat", "/v1/chat/completions") or not _is_search_terms(payload):
             return answer(path, payload, *args, **kwargs)
         lane.payloads.append(json.loads(json.dumps(payload)))
         if payload.get("think") is False:
@@ -97,7 +97,7 @@ def _stubborn_thinking_model(lane):  # noqa: F811
     answer = lane.__call__
 
     def call(path, payload, *args, **kwargs):
-        if path != "/api/chat" or not _is_search_terms(payload):
+        if path not in ("/api/chat", "/v1/chat/completions") or not _is_search_terms(payload):
             return answer(path, payload, *args, **kwargs)
         lane.payloads.append(json.loads(json.dumps(payload)))
         if payload["options"]["num_predict"] < server.LOCAL_THINKING_MIN_NUM_PREDICT:

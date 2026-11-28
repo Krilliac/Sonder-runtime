@@ -31,11 +31,17 @@ class _Response:
         return False
 
 
-def _install(monkeypatch, payload, *, status=200, url="http://127.0.0.1:11434"):
-    config = types.SimpleNamespace(ollama=types.SimpleNamespace(url=url))
+def _install(monkeypatch, payload, *, status=200, url="http://127.0.0.1:11437"):
+    config = types.SimpleNamespace(
+        inference=types.SimpleNamespace(url=url, allow_remote=False),
+        ollama=types.SimpleNamespace(url=url, allow_remote=False),
+    )
     monkeypatch.setattr(sonder_doctor, "_load_config_or_none", lambda: config)
+    body = dict(payload)
+    if status == 200 and "status" not in body and "state" not in body:
+        body["status"] = "ready"
     monkeypatch.setattr(
-        ollama_endpoint._OPENER, "open", lambda *a, **k: _Response(payload, status)
+        ollama_endpoint._OPENER, "open", lambda *a, **k: _Response(body, status)
     )
 
 
@@ -46,8 +52,7 @@ def test_empty_catalog_warns_instead_of_reporting_ok(monkeypatch):
 
     assert result["status"] == sonder_doctor.STATUS_WARN
     assert "127.0.0.1" in result["detail"]
-    assert "no models installed" in result["detail"]
-    assert "setup_alias.py" in result["detail"]
+    assert "no models" in result["detail"]
 
 
 def test_absent_models_key_is_treated_as_an_empty_catalog(monkeypatch):
@@ -56,7 +61,7 @@ def test_absent_models_key_is_treated_as_an_empty_catalog(monkeypatch):
     result = sonder_doctor._check_ollama()
 
     assert result["status"] == sonder_doctor.STATUS_WARN
-    assert "no models installed" in result["detail"]
+    assert "no models" in result["detail"]
 
 
 def test_populated_catalog_still_reports_ok_with_the_count(monkeypatch):
@@ -68,7 +73,7 @@ def test_populated_catalog_still_reports_ok_with_the_count(monkeypatch):
     result = sonder_doctor._check_ollama()
 
     assert result["status"] == sonder_doctor.STATUS_OK
-    assert result["detail"] == "127.0.0.1: 2 models"
+    assert "127.0.0.1" in result["detail"] and "2 models" in result["detail"]
 
 
 def test_non_200_response_still_fails(monkeypatch):

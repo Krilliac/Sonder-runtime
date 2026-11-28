@@ -534,8 +534,9 @@ def build_application(
             raise TypeError("config must be a SonderConfig when provided")
         from ..platform.config import validate_deployment
         validate_deployment(config)
+        effective_allow_remote = bool(config.inference.allow_remote or config.ollama.allow_remote)
         from ..platform.config import validate_membership_config
-        validate_membership_config(config.membership, config.secrets, allow_remote=config.ollama.allow_remote)
+        validate_membership_config(config.membership, config.secrets, allow_remote=effective_allow_remote)
         from ..platform.child_storage_config import child_storage_errors
         from ..platform.config import ConfigError
         child_errors = child_storage_errors(config)
@@ -553,14 +554,22 @@ def build_application(
             # any lazy persistence factory can resolve a database path, and
             # must not be translated through the mutable process environment.
             runtime_paths.configure_home(config.state.home)
-        ollama_endpoint.configure_typed_endpoint(config.ollama.url)
-        ollama_endpoint.configure_typed_ca_bundle(config.ollama.ca_bundle)
+        if config.ollama.url and config.ollama.url != config.inference.url:
+            logger.warning(
+                "Ignoring deprecated [ollama].url (%s); using [inference].url (%s)",
+                config.ollama.url,
+                config.inference.url,
+            )
+        ollama_endpoint.configure_typed_endpoint(config.inference.url)
+        ollama_endpoint.configure_typed_ca_bundle(
+            config.inference.ca_bundle or config.ollama.ca_bundle
+        )
         from ..adapters.inference import ollama_pool
-        logger.info(f"ollama pool configured, workers={len(config.ollama.workers)}, allow_remote={config.ollama.allow_remote}")
-        logger.debug(f"configuring ollama pool: workers={len(config.ollama.workers)}, allow_remote={config.ollama.allow_remote}")
+        logger.info(f"ollama pool configured, workers={len(config.ollama.workers)}, allow_remote={effective_allow_remote}")
+        logger.debug(f"configuring ollama pool: workers={len(config.ollama.workers)}, allow_remote={effective_allow_remote}")
         ollama_pool.configure_typed_workers(
             config.ollama.workers,
-            allow_remote=config.ollama.allow_remote,
+            allow_remote=effective_allow_remote,
             trusted_origins=config.ollama.trusted_origins,
             failure_threshold=config.ollama.worker_failure_threshold,
             cooldown_seconds=config.ollama.worker_cooldown_seconds,
@@ -581,7 +590,7 @@ def build_application(
         from ..adapters.inference.static_membership import StaticMembershipSource
         from ..application.inference_membership.controller import MembershipController
         membership_clock = lambda: datetime.now(timezone.utc)
-        inference_pool = ollama_pool.from_environment(config.ollama.url)
+        inference_pool = ollama_pool.from_environment(config.inference.url)
         source_limits = high_water_store = None
         if config.membership.mode == "external":
             from ..adapters.inference.external_membership import (
@@ -599,7 +608,13 @@ def build_application(
             interval = config.membership.refresh_interval_seconds
             inference_pool.configure_external_source(source, probe_timeout_seconds=config.ollama.worker_probe_timeout_ms / 1000)
         else:
-            source = StaticMembershipSource(config.ollama, clock=membership_clock)
+            from dataclasses import replace as _dc_replace
+            static_cfg = _dc_replace(
+                config.ollama,
+                url=config.inference.url,
+                allow_remote=bool(config.inference.allow_remote or config.ollama.allow_remote),
+            )
+            source = StaticMembershipSource(static_cfg, clock=membership_clock)
             interval = max(1, min(30, config.ollama.worker_capability_ttl_seconds / 2))
         inference_membership = MembershipController(
             source, inference_pool, clock=membership_clock,

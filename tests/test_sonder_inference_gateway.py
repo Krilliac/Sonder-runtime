@@ -360,7 +360,7 @@ def test_down_server_message_names_url_command_and_fallback():
     message = str(info.value)
     assert DEFAULT_BASE_URL in message
     assert "sonder-infer serve" in message
-    assert "SONDER_INFERENCE_FALLBACK" in message
+    assert "SONDER_INFERENCE_FALLBACK" not in message
     assert fake.posts == []
 
 
@@ -693,7 +693,7 @@ def test_provider_status_when_down_degraded_or_misconfigured():
 
 
 def test_embeddings_are_refused_with_the_fix():
-    with pytest.raises(DependencyUnavailable, match="SONDER_EMBEDDING_PROVIDER=ollama"):
+    with pytest.raises(DependencyUnavailable, match="configure an embedding model on Sonder Inference"):
         _gateway(FakeInference()).embed(["x"], _ctx())
 
 
@@ -1292,7 +1292,7 @@ def test_down_server_message_is_stated_once():
         gateway.generate(ModelRequest(prompt="x", tier="fast"), _ctx())
     message = str(info.value)
     assert message.count("not reachable") == 1 and message.count("sonder-infer serve") == 1
-    assert "restart" in message
+    assert "SONDER_INFERENCE_FALLBACK" not in message
     assert info.value.reason == "connection refused"
     assert gateway.health().detail == "connection refused"
     assert gateway.provider_status()["sonder_inference"]["detail"] == "connection refused"
@@ -1770,7 +1770,7 @@ def test_a3_doctor_and_preflight_surface_busy(monkeypatch):
     gateway.health()
     clock.now += 6
     fake.get_error = TimeoutError("busy")
-    env = {"SONDER_MODEL_BACKEND": "sonder-inference", "SONDER_EMBEDDING_PROVIDER": "ollama"}
+    env = {"SONDER_MODEL_BACKEND": "sonder-inference", "SONDER_EMBEDDING_PROVIDER": "sonder-inference"}
     doctor = sonder_doctor._check_sonder_inference(env=env, gateway=gateway)
     assert doctor["status"] == "ok" and "busy" in doctor["detail"]
     for key, value in env.items():
@@ -2297,9 +2297,9 @@ def test_embeddings_capability_gated_post_and_index_alignment():
             _gateway(empty_fake).embed(bad_inputs, _ctx())
     assert empty_fake.gets == [] and empty_fake.posts == []
 
-    # Health does not advertise embeddings -> refused with fallback hint, 0 POSTs
+    # Health does not advertise embeddings -> refused with SI config hint, 0 POSTs
     plain = FakeInference(health=_health())
-    with pytest.raises(DependencyUnavailable, match="SONDER_EMBEDDING_PROVIDER=ollama"):
+    with pytest.raises(DependencyUnavailable, match="configure an embedding model on Sonder Inference"):
         _gateway(plain).embed(["alpha"], _ctx())
     assert plain.posts == []
 

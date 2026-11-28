@@ -10,9 +10,7 @@ for _sonder_p in (str(_SONDER_REPO_ROOT / "scripts"), str(_SONDER_REPO_ROOT / "r
 import argparse
 import glob
 import os
-import shutil
 import subprocess
-import tempfile
 
 import bootstrap_engine
 from sonder_runtime.adapters.inference import ollama_endpoint
@@ -65,10 +63,8 @@ def model_file(base_model: str) -> str:
 
 
 def ollama_executable(explicit: str = "") -> str:
-    candidate = explicit.strip() or os.environ.get("SONDER_OLLAMA_EXE", "").strip()
-    if candidate:
-        return candidate
-    return shutil.which("ollama") or "ollama"
+    """Local Ollama CLI is retired; Sonder Inference owns the model store."""
+    return explicit.strip() or "sonder-infer"
 
 
 def _run(ollama: str, args: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess:
@@ -137,25 +133,11 @@ def import_gguf(
     This is the offline import path for a portable model such as the
     facts. USB (Qwen 3.x 4B) — no registry contact.
     """
-    gguf_path = os.path.abspath(os.path.expanduser(gguf_path))
-    if not os.path.isfile(gguf_path):
-        return False, f"GGUF file not found: {gguf_path}"
-    if not gguf_path.lower().endswith(".gguf"):
-        return False, f"not a .gguf file: {gguf_path}"
-    fd, path = tempfile.mkstemp(suffix=".Modelfile")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write("FROM %s\n" % gguf_path)
-        created = _run(ollama, ["create", model_name, "-f", path], env=env)
-    finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-    if created.returncode == 0:
-        return True, f"Imported {os.path.basename(gguf_path)} as {model_name}."
-    detail = (created.stderr or created.stdout).strip()
-    return False, f"Could not import {gguf_path}: {detail or 'ollama create failed'}"
+    return False, (
+        "Local `ollama create` GGUF import is retired; register GGUF models in "
+        "Sonder Inference's model store (`sonder-infer models import-ollama` or "
+        "`--model-dir`)."
+    )
 
 
 def ensure_model(
@@ -165,16 +147,10 @@ def ensure_model(
     offline: bool,
     env: dict[str, str],
 ) -> tuple[bool, str]:
-    present = _run(ollama, ["show", model], env=env)
-    if present.returncode == 0:
-        return True, f"{model} is already available."
-    if offline:
-        return False, f"{model} is missing; offline mode will not contact a registry."
-    pulled = _run(ollama, ["pull", model], env=env)
-    if pulled.returncode == 0:
-        return True, f"Downloaded {model}."
-    detail = (pulled.stderr or pulled.stdout).strip()
-    return False, f"Could not download {model}: {detail or 'ollama pull failed'}"
+    return False, (
+        f"Local `ollama show`/`ollama pull` is retired; register {model!r} in "
+        "Sonder Inference's model store."
+    )
 
 
 def create_alias(
@@ -183,20 +159,11 @@ def create_alias(
     *,
     env: dict[str, str],
 ) -> tuple[bool, str]:
-    fd, path = tempfile.mkstemp(suffix=".Modelfile")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(model_file(base_model))
-        created = _run(ollama, ["create", _list_value('STABLE_ALIAS'), "-f", path], env=env)
-    finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-    if created.returncode == 0:
-        return True, f"Created the {_list_value('STABLE_ALIAS')} alias."
-    detail = (created.stderr or created.stdout).strip()
-    return False, f"Could not create {_list_value('STABLE_ALIAS')}: {detail or 'ollama create failed'}"
+    return False, (
+        f"Local `ollama create {_list_value('STABLE_ALIAS')}` is retired; "
+        f"configure alias {_list_value('STABLE_ALIAS')!r} -> {base_model!r} in "
+        "Sonder Inference's model store."
+    )
 
 
 def main(argv=None) -> int:
@@ -278,7 +245,7 @@ def main(argv=None) -> int:
                       "nomic-embed-text when back online, or set SONDER_EMBED_MODEL.")
         else:
             print("  embedding: skipped; recall/lessons can be enabled later")
-        print("Done. %s now serves the imported model. Verify: ollama list"
+        print("Done. %s now serves the imported model. Verify via Sonder Inference /v1/models"
               % _list_value('STABLE_ALIAS'))
         return 0
 
@@ -313,7 +280,7 @@ def main(argv=None) -> int:
         return 3
     if embedding_note:
         print(embedding_note)
-    print("Done. Verify with: ollama list")
+    print("Done. Verify via Sonder Inference /v1/models")
     return 0
 
 

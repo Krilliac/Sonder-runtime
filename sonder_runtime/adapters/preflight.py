@@ -1,12 +1,9 @@
 """Host-I/O implementation of the startup preflight contract."""
 from __future__ import annotations
 
-from sonder_runtime.platform.runtime_threads import ThreadPoolExecutor as owned_runtime_pool
-
 import json
 import os
 import shutil
-from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.request
 from dataclasses import dataclass  # noqa: F401 - legacy star-import surface
@@ -103,90 +100,87 @@ def _check_runtime_policy() -> CheckResult:
         return CheckResult("runtime_policy", False, True, str(exc))
 
 
-def _check_ollama_origin(
+def _check_inference_origin(
     origin: str,
     *,
     name: str,
     required: bool,
     timeout: float,
     allow_remote: bool = False,
+    configured_origin: str | None = None,
 ) -> CheckResult:
-    url = origin.rstrip("/") + "/api/tags"
+    url = origin.rstrip("/") + "/v1/sonder/health"
     host = urlsplit(origin).hostname or ""
     try:
-        request = urllib.request.Request(url, method="GET")
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import (
+            si_auth_headers,
+        )
+        request = urllib.request.Request(
+            url,
+            headers=si_auth_headers(origin, configured_origin=configured_origin),
+            method="GET",
+        )
         with ollama_endpoint.open_url(
             request, timeout=timeout, allow_remote=allow_remote is True,
         ) as response:
-            if response.status != 200:
-                return CheckResult(
-                    name, False, required, f"{host}: HTTP {response.status}"
-                )
             raw = response.read(1_048_577)
             if len(raw) > 1_048_576:
-                raise ValueError("capability response exceeded 1 MiB")
+                raise ValueError("health response exceeded 1 MiB")
             payload = json.loads(raw.decode("utf-8"))
             if not isinstance(payload, dict):
-                raise ValueError("capability response must be an object")
+                raise ValueError("health response must be an object")
+            state = str(payload.get("status") or payload.get("state") or "").strip().lower()
             models = len(payload.get("models") or [])
-            return CheckResult(name, True, required, f"{host}: {models} models")
+            if response.status != 200 or state != "ready":
+                return CheckResult(
+                    name, False, required,
+                    f"{host}: HTTP {response.status} state={state or 'unknown'}",
+                )
+            return CheckResult(name, True, required, f"{host}: ready ({models} models)")
     except (urllib.error.URLError, OSError, ValueError) as exc:
         return CheckResult(name, False, required, f"{host}: {exc}")
 
 
-def _check_ollama(config: SonderConfig, *, timeout: float = 5.0) -> CheckResult:
+def _check_inference(config: SonderConfig, *, timeout: float = 5.0) -> CheckResult:
     if getattr(getattr(config, "membership", None), "mode", None) == "external":
-        return CheckResult("ollama", False, False,
-            "deferred: external membership requires explicit typed pool refresh")
-    return _check_ollama_origin(
-        config.ollama.url,
-        name="ollama",
+        return CheckResult(
+            "inference", False, False,
+            "deferred: external membership requires explicit typed pool refresh",
+        )
+    inf = getattr(config, "inference", None)
+    url = (
+        getattr(inf, "url", "")
+        or os.environ.get("SONDER_INFERENCE_BASE_URL", "").strip()
+        or "http://127.0.0.1:11437"
+    )
+    allow_remote = (
+        getattr(inf, "allow_remote", False) is True
+        or getattr(getattr(config, "ollama", None), "allow_remote", False) is True
+    )
+    return _check_inference_origin(
+        url,
+        name="inference",
         required=True,
         timeout=timeout,
-        allow_remote=config.ollama.allow_remote,
+        allow_remote=allow_remote,
+        configured_origin=url,
     )
+
+
+_check_ollama_origin = _check_inference_origin
+_check_ollama = _check_inference
 
 
 def _check_ollama_workers(
     config: SonderConfig, *, timeout: float = 5.0,
 ) -> list[CheckResult]:
-    """Probe optional workers independently so one outage stays degraded."""
+    """SI private workers are probed via SonderInferenceGateway; no legacy Ollama pool."""
     if getattr(getattr(config, "membership", None), "mode", None) == "external":
-        return [CheckResult("ollama_workers", False, False,
-            "deferred: external membership requires explicit typed pool refresh")]
-    entries = list(enumerate(config.ollama.workers, start=1))
-    if not entries:
-        return []
-
-    def check(entry) -> CheckResult:
-        index, origin = entry
-        return _check_ollama_origin(
-            origin,
-            name="ollama_worker_%d" % index,
-            required=False,
-            timeout=timeout,
-            allow_remote=config.ollama.allow_remote,
-        )
-
-    with owned_runtime_pool(max_workers=min(4, len(entries))) as executor:
-        return list(executor.map(check, entries))
-
-
-def _check_sonder_inference() -> CheckResult | None:
-    """Non-required readiness note for a bound Sonder Inference provider.
-
-    Startup never blocks on Inference: the server may legitimately start
-    after the runtime, and a request that finds it down fails closed (or
-    falls back) at call time.  This only makes the state visible, and it
-    never raises: any failure of the check itself is reported, not thrown.
-    """
-    try:
-        return _sonder_inference_result()
-    except Exception as exc:  # noqa: BLE001 - preflight never blocks on Inference
-        return CheckResult(
-            "sonder_inference", False, False,
-            f"check failed: {type(exc).__name__}: {exc}"[:240],
-        )
+        return [CheckResult(
+            "inference_workers", False, False,
+            "deferred: external membership requires explicit typed pool refresh",
+        )]
+    return []
 
 
 def _sonder_inference_result() -> CheckResult | None:
@@ -296,17 +290,15 @@ def run_preflight(
     checks.extend(_check_schema_versions(config))
     checks.append(_check_runtime_policy())
     if check_ollama:
-        # Probe HTTPS workers with the typed CA bundle composition binds, not
-        # only the system trust store (a private-CA worker otherwise fails).
+        ca_bundle = getattr(getattr(config, "inference", None), "ca_bundle", "") or getattr(
+            getattr(config, "ollama", None), "ca_bundle", "",
+        )
         try:
-            ollama_endpoint.configure_typed_ca_bundle(config.ollama.ca_bundle)
+            ollama_endpoint.configure_typed_ca_bundle(ca_bundle)
         except ValueError as exc:
-            checks.append(CheckResult("ollama_ca_bundle", False, False, str(exc)))
-        checks.append(_check_ollama(config, timeout=ollama_timeout))
+            checks.append(CheckResult("inference_ca_bundle", False, False, str(exc)))
+        checks.append(_check_inference(config, timeout=ollama_timeout))
         checks.extend(_check_ollama_workers(config, timeout=ollama_timeout))
-    inference = _check_sonder_inference()
-    if inference is not None:
-        checks.append(inference)
     router = _check_openrouter()
     if router is not None:
         checks.append(router)

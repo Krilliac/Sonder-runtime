@@ -51,7 +51,7 @@ def test_import_gguf_rejects_missing_file(tmp_path):
     ok, message = setup_alias.import_gguf(
         "ollama", str(tmp_path / "nope.gguf"), "sonder:latest", env={},
     )
-    assert not ok and "not found" in message
+    assert not ok and "retired" in message.lower()
 
 
 def test_import_gguf_rejects_non_gguf(tmp_path):
@@ -59,53 +59,23 @@ def test_import_gguf_rejects_non_gguf(tmp_path):
     ok, message = setup_alias.import_gguf(
         "ollama", str(other), "sonder:latest", env={},
     )
-    assert not ok and "not a .gguf" in message
+    assert not ok and "retired" in message.lower()
 
 
 def test_import_gguf_writes_from_modelfile(tmp_path, monkeypatch):
     gguf = _touch(tmp_path / "facts.gguf")
-    captured = {}
-
-    def fake_run(ollama, argv, *, env):
-        # Capture the Modelfile contents the create call references.
-        assert argv[0] == "create"
-        modelfile = argv[argv.index("-f") + 1]
-        captured["contents"] = open(modelfile, encoding="utf-8").read()
-        captured["model_name"] = argv[1]
-
-        class _R:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
-        return _R()
-
-    monkeypatch.setattr(setup_alias, "_run", fake_run)
     ok, message = setup_alias.import_gguf(
         "ollama", str(gguf), "sonder:latest", env={},
     )
-    assert ok, message
-    assert captured["model_name"] == "sonder:latest"
-    assert captured["contents"].startswith("FROM ")
-    assert os.path.abspath(str(gguf)) in captured["contents"]
+    assert not ok and "retired" in message.lower()
 
 
 def test_import_gguf_reports_create_failure(tmp_path, monkeypatch):
     gguf = _touch(tmp_path / "facts.gguf")
-
-    def fake_run(ollama, argv, *, env):
-        class _R:
-            returncode = 1
-            stdout = ""
-            stderr = "disk full"
-
-        return _R()
-
-    monkeypatch.setattr(setup_alias, "_run", fake_run)
     ok, message = setup_alias.import_gguf(
         "ollama", str(gguf), "sonder:latest", env={},
     )
-    assert not ok and "disk full" in message
+    assert not ok and "retired" in message.lower()
 
 
 def test_discover_usb_scans_extra_roots(tmp_path):
@@ -117,23 +87,6 @@ def test_discover_usb_scans_extra_roots(tmp_path):
 def test_cli_gguf_flag_imports_and_aliases(tmp_path, monkeypatch):
     gguf = _touch(tmp_path / "facts.gguf")
     calls = []
-
-    def fake_run(ollama, argv, *, env):
-        calls.append(argv[0])
-
-        class _R:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
-        return _R()
-
-    monkeypatch.setattr(setup_alias, "_run", fake_run)
-    monkeypatch.setattr(
-        setup_alias.ollama_endpoint, "client_environment", lambda env: {},
-    )
-    monkeypatch.setattr(setup_alias, "ollama_executable", lambda x: "ollama")
-    rc = setup_alias.main(["--gguf", str(gguf)])
-    assert rc == 0
-    # create was called for the alias import (and possibly embedding pull).
-    assert "create" in calls
+    monkeypatch.setattr(setup_alias, "_run", lambda *a, **kw: calls.append((a, kw)))
+    rc = setup_alias.main(["--gguf", str(gguf), "--ollama", "ollama-test"])
+    assert rc == 2 and calls == []

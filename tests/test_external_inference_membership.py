@@ -304,7 +304,7 @@ def test_default_embedding_rejects_reentrant_registration_without_partial_owners
     owners, calls, serialized = [], [], []
     original_dumps = json.dumps
     def dumps(value, *args, **kwargs):
-        if isinstance(value, dict) and set(value) == {"model", "prompt"}:
+        if isinstance(value, dict) and {"model", "input"}.issubset(value):
             serialized.append(embeddings.ollama_endpoint._default_embeddings_disabled())
         return original_dumps(value, *args, **kwargs)
     monkeypatch.setattr(json, "dumps", dumps)
@@ -320,11 +320,11 @@ def test_default_embedding_rejects_reentrant_registration_without_partial_owners
         return io.BytesIO(b'{"embedding":[1.0]}')
     monkeypatch.setattr(embeddings.ollama_endpoint._OPENER, "open", opened)
     try:
-        result = embeddings.embed("dispatch-private-text", base="http://127.0.0.1:11434", model="test-embed")
+        result = embeddings.embed("dispatch-private-text", base="http://127.0.0.1:11437", model="test-embed")
         assert result == [1.0]  # refused registration never became an external owner
         assert not any(serialized)
         assert len(calls) == 1
-        if calls: assert json.loads(calls[0])["prompt"] == "dispatch-private-text"
+        if calls: assert json.loads(calls[0])["input"] == "dispatch-private-text"
     finally:
         for owner in owners: owner.close(timeout=1)
 
@@ -338,7 +338,7 @@ def test_default_policy_registration_cannot_overtake_active_operation(tmp_path, 
     owners, calls, results, failures, serialized = [], [], [], [], []
     original_dumps = json.dumps
     def dumps(value, *args, **kwargs):
-        if isinstance(value, dict) and set(value) == {"model", "prompt"}:
+        if isinstance(value, dict) and {"model", "input"}.issubset(value):
             serialized.append(endpoint._default_embeddings_disabled())
         return original_dumps(value, *args, **kwargs)
     monkeypatch.setattr(json, "dumps", dumps)
@@ -517,8 +517,8 @@ def test_pinned_transport_rejects_boundary_failures(tmp_path, monkeypatch, failu
             status = b"302 Found" if failure == "redirect" else b"503 Unavailable" if failure == "server_error" else b"200 OK"
             body = b"x" * (1048577 if failure == "oversized" else 1)
             if failure.endswith("missing"):
-                status = b"200 OK" if failure == "version_missing" and b"GET /api/tags " in self.request else b"404 Not Found"
-                body = b'{"models":[{"name":"code"}]}'
+                status = b"200 OK" if failure == "version_missing" and b"GET /v1/models " in self.request else b"404 Not Found"
+                body = b'{"object":"list","data":[{"id":"code"}]}'
                 if failure == "version_missing" and status.startswith(b"404"): body = b""
             if failure in ("version_body", "version_unknown_length", "version_chunked", "version_truncated",
                            "version_oversized", "version_hidden_body", "version_compressed", "version_duplicate_length"):
@@ -555,14 +555,13 @@ def test_pinned_transport_rejects_boundary_failures(tmp_path, monkeypatch, failu
                 return source.open_worker_url(request, timeout=kwargs["timeout"])
             prober = _default_capability_prober(timeout=1, allow_remote=True, open_url=opened)
             assert prober(ORIGIN)["models"] == ("code",)
-            # /api/version (404 tolerated), /api/tags, best-effort /api/ps,
-            # then one background /api/show for the uncached model.
+            # /v1/sonder/health (404 tolerated), /v1/models, then background /v1/models fill.
             prober.wait_show_fill(5.0)
-            assert len(connected) == 4
+            assert len(connected) == 3
             return
         with pytest.raises((MembershipSourceError, ModelCallError)) as caught:
-            path = {"post_version_missing":"/api/version", "inference_missing":"/api/generate", "tags_missing":"/api/tags"}.get(failure, "/v1/membership")
-            if failure.startswith("version_"): path = "/api/version"
+            path = {"post_version_missing":"/v1/sonder/health", "inference_missing":"/v1/completions", "tags_missing":"/v1/models"}.get(failure, "/v1/membership")
+            if failure.startswith("version_"): path = "/v1/sonder/health"
             source._transport.retrieve(source._source_policy, path=path, timeout=1, max_bytes=1048576,
                 method="POST" if failure == "post_version_missing" else "GET")
         for private in ("registry.example", "secret client certificate", "secret certificate chain", str(tmp_path), "private.pem"):
@@ -789,7 +788,7 @@ def test_external_local_fallback_cannot_authorize_a_remote_or_cross_lane_origin(
     calls = []
     monkeypatch.setattr(ollama_endpoint, "open_url", lambda request, **_k: calls.append(request.full_url) or io.BytesIO(b"{}"))
     try:
-        request = urllib.request.Request("http://127.0.0.1:11434/api/generate", data=b"{}")
+        request = urllib.request.Request("http://127.0.0.1:11437/v1/completions", data=b"{}")
         if fallback:
             with pool.open_url(request, timeout=1) as response: assert response.read() == b"{}"
         else:
@@ -797,9 +796,8 @@ def test_external_local_fallback_cannot_authorize_a_remote_or_cross_lane_origin(
         with pytest.raises(ollama_pool.WorkerPoolError):
             pool.request(lambda _: pytest.fail("unadmitted remote dispatched"), model="remote-only")
         with pytest.raises(ollama_pool.WorkerPoolUnavailable):
-            pool.open_url(urllib.request.Request("http://127.0.0.2:11434/api/generate"), timeout=1)
-        assert calls == ([request.full_url, "http://127.0.0.1:11434/api/version", "http://127.0.0.1:11434/api/tags",
-                          "http://127.0.0.1:11434/api/ps"] if fallback else [])
+            pool.open_url(urllib.request.Request("http://127.0.0.2:11437/v1/completions"), timeout=1)
+        assert calls == ([request.full_url, "http://127.0.0.1:11437/v1/sonder/health", "http://127.0.0.1:11437/v1/models"] if fallback else [])
         assert control._thread is None
     finally:
         application.close_providers(timeout=2)
@@ -875,7 +873,7 @@ def test_external_policy_ceiling_does_not_bypass_pool_admission_bound(tmp_path, 
         pool._capability_prober.wait_show_fill(5.0)
         assert {origin for origin, _path in probed} == admitted
         assert sorted(path for _origin, path in probed) == sorted(
-            ["/api/version", "/api/tags", "/api/ps", "/api/show"] * 3)
+            ["/v1/sonder/health", "/v1/models", "/v1/models"] * 3)
         dispatched = []
         for _ in range(8): pool.request(lambda origin: dispatched.append(origin), model="code")
         assert set(dispatched) <= admitted
@@ -945,13 +943,14 @@ def test_real_entrypoints_keep_external_admission_transport_and_local_choice(
     from sonder_runtime.bootstrap import app as bootstrap, legacy_root
     from sonder_runtime.interfaces.http import serve
     from sonder_runtime.interfaces.repl import repl
-    from sonder_runtime.platform.config import SonderConfig, StateConfig, OllamaConfig
+    from sonder_runtime.platform.config import InferenceConfig, SonderConfig, StateConfig, OllamaConfig
     key = Ed25519PrivateKey.generate()
     (tmp_path / "authority" / "signer.pem").write_bytes(key.public_key().public_bytes(serialization.Encoding.PEM,
         serialization.PublicFormat.SubjectPublicKeyInfo))
-    local = "http://127.0.0.1:11434"
+    local = "http://127.0.0.1:11437"
     config = SonderConfig(state=StateConfig(home=str(tmp_path)), membership=replace(configuration(tmp_path), local_fallback=fallback),
         secrets=credentials(tmp_path),
+        inference=InferenceConfig(url=ORIGIN if primary_remote else local, allow_remote=True),
         ollama=OllamaConfig(url=ORIGIN if primary_remote else local, allow_remote=True))
     monkeypatch.setattr(server, "OLLAMA_POOL", ollama_pool.OllamaWorkerPool(local))
     monkeypatch.setattr(server, "BASE", local)
@@ -983,7 +982,7 @@ def test_real_entrypoints_keep_external_admission_transport_and_local_choice(
     serialized_embedding_bodies = []
     original_dumps = json.dumps
     def watched_dumps(value, *args, **kwargs):
-        if isinstance(value, dict) and set(value) == {"model", "prompt"}:
+        if isinstance(value, dict) and {"model", "input"}.issubset(value):
             serialized_embedding_bodies.append(value)
         return original_dumps(value, *args, **kwargs)
     monkeypatch.setattr(json, "dumps", watched_dumps)

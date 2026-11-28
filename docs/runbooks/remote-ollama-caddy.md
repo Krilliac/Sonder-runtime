@@ -312,24 +312,26 @@ Restart Sonder after any change below.
 TOML (`sonder.toml`):
 
 ```toml
-[ollama]
+[inference]
 allow_remote = true
-workers = ["https://<worker-host>:443"]
 ca_bundle = "/etc/sonder/ollama-ca.pem"
+
+[ollama]
+workers = ["https://<worker-host>:443"]
 ```
 
-Environment equivalent (the environment overrides the file):
+Environment equivalent (the environment overrides the file; `SONDER_ALLOW_REMOTE_OLLAMA` is a deprecated alias for `SONDER_ALLOW_REMOTE_INFERENCE`):
 
 ```bash
-export SONDER_ALLOW_REMOTE_OLLAMA=1
+export SONDER_ALLOW_REMOTE_INFERENCE=1
 export SONDER_OLLAMA_WORKERS=https://<worker-host>:443
-export SONDER_OLLAMA_CA_BUNDLE=/etc/sonder/ollama-ca.pem
+export SONDER_INFERENCE_CA_BUNDLE=/etc/sonder/ollama-ca.pem
 ```
 
 ```powershell
-$env:SONDER_ALLOW_REMOTE_OLLAMA = "1"
+$env:SONDER_ALLOW_REMOTE_INFERENCE = "1"
 $env:SONDER_OLLAMA_WORKERS = "https://<worker-host>:443"
-$env:SONDER_OLLAMA_CA_BUNDLE = "$env:USERPROFILE\sonder\ollama-ca.pem"
+$env:SONDER_INFERENCE_CA_BUNDLE = "$env:USERPROFILE\sonder\ollama-ca.pem"
 ```
 
 Rules, each enforced in code at startup (a violation fails closed with the
@@ -337,7 +339,7 @@ quoted message):
 
 | Rule | Detail | Error text | Code |
 |---|---|---|---|
-| Consent | Any non-loopback endpoint needs `[ollama].allow_remote = true` or `SONDER_ALLOW_REMOTE_OLLAMA` set to `1`, `true`, `yes` or `on`. | `non-loopback OLLAMA_HOST is blocked because prompts and embeddings would leave this machine; set SONDER_ALLOW_REMOTE_OLLAMA=1 to opt in explicitly`; for workers `remote worker endpoints require SONDER_ALLOW_REMOTE_OLLAMA=1`, or `[ollama].workers remote entries require the remote-Ollama consent gate`; for a TOML `[ollama].url`, `[ollama].url host '...' is not loopback and allow_remote is false (remote-Ollama consent gate)` | `sonder_runtime/domain/ollama_policy.py:17-22, :162-169`; `sonder_runtime/adapters/inference/ollama_pool.py:358-360`; `sonder_runtime/platform/config.py:2124-2127`; `config.py:2074-2080` |
+| Consent | Any non-loopback endpoint needs `[inference].allow_remote = true` (or `[ollama].allow_remote = true`) in TOML, or `SONDER_ALLOW_REMOTE_INFERENCE` set to `1` (`0` or `1`; `SONDER_ALLOW_REMOTE_OLLAMA` is accepted as a deprecated alias with a warning). | `non-loopback OLLAMA_HOST is blocked because prompts and embeddings would leave this machine; set SONDER_ALLOW_REMOTE_INFERENCE=1 to opt in explicitly`; for workers `remote worker endpoints require SONDER_ALLOW_REMOTE_INFERENCE=1`, or `[ollama].workers remote entries require the remote-Ollama consent gate`; for a TOML `[ollama].url`, `[ollama].url host '...' is not loopback and allow_remote is false (remote-Ollama consent gate)` | `sonder_runtime/domain/ollama_policy.py`; `sonder_runtime/adapters/inference/ollama_pool.py`; `sonder_runtime/platform/config.py` |
 | `https` | Remote endpoints must use `https`. | `non-loopback OLLAMA_HOST must use https to protect prompts and embeddings in transit`; `remote worker endpoints must use https`; `[ollama].workers remote entries must use https`; for a TOML `[ollama].url`, `[ollama].url remote Ollama must use https so prompts and embeddings are protected in transit` | `ollama_policy.py:170-174`; `ollama_pool.py:361-363`; `config.py:2128-2129`; `config.py:2081-2086` |
 | Explicit port | Always write the port, even `:443`. | `OLLAMA_HOST must include an explicit port`; `[ollama].url must include an explicit port`; `[ollama].workers entry '...' must include a host and explicit port` | `ollama_policy.py:156-157`; `config.py:2070-2071, :2112-2116` |
 | Origin only | `scheme://host:port`: no path, query, fragment or `user:pass@`. | `[ollama].workers entries must be origins without paths, queries, or fragments`; `[ollama].workers entries must not contain inline credentials` | `config.py:2108-2121` |
@@ -546,7 +548,7 @@ the default place, plus `--secrets`, `--set`, `--json` and `--skip-ollama`;
 
 | Symptom (exact text) | Cause | Fix |
 |---|---|---|
-| `non-loopback OLLAMA_HOST is blocked because prompts and embeddings would leave this machine ...`, `[ollama].url host '...' is not loopback and allow_remote is false ...` | No consent. | Set `allow_remote = true` or `SONDER_ALLOW_REMOTE_OLLAMA=1`. |
+| `non-loopback OLLAMA_HOST is blocked because prompts and embeddings would leave this machine; set SONDER_ALLOW_REMOTE_INFERENCE=1 to opt in explicitly`, `remote worker endpoints require SONDER_ALLOW_REMOTE_INFERENCE=1`, `[ollama].workers remote entries require the remote-Ollama consent gate`, `[ollama].url host '...' is not loopback and allow_remote is false (remote-Ollama consent gate)` | No consent. | Set `[inference].allow_remote = true` (or `[ollama].allow_remote = true`) or `SONDER_ALLOW_REMOTE_INFERENCE=1` (`0` or `1`; `SONDER_ALLOW_REMOTE_OLLAMA` is a deprecated alias). |
 | `non-loopback OLLAMA_HOST must use https ...`, `remote worker endpoints must use https`, `[ollama].workers remote entries must use https`, `[ollama].url remote Ollama must use https ...` | `http://` URL, or an env entry with no scheme that got `http://` prepended. | Write `https://` explicitly. |
 | `OLLAMA_HOST must include an explicit port`, `must include a host and explicit port` | Port missing. | Add `:443`. |
 | `[ollama].workers entries must be origins without paths, queries, or fragments` | URL has a path such as `/api`. | Origin only: `https://<worker-host>:443`. |

@@ -236,8 +236,30 @@ class ContextConfig:
 
 
 @dataclass(frozen=True)
+class InferenceConfig:
+    """Typed Sonder-Inference ([inference]) server configuration."""
+
+    url: str = "http://127.0.0.1:11437"
+    ready_file: str = ""
+    allow_remote: bool = False
+    api_key_file: str = ""
+    private_workers: str = ""
+    model: str = "default"
+    embed_model: str = ""
+    rerank_model: str = ""
+    tier_models: str = ""
+    max_inflight: int = 1
+    startup_timeout_seconds: int = 60
+    request_timeout_seconds: int = 300
+    health_ttl_seconds: float = 5.0
+    health_timeout_seconds: float = 5.0
+    health_stale_seconds: float = 120.0
+    ca_bundle: str = ""
+
+
+@dataclass(frozen=True)
 class OllamaConfig:
-    url: str = "http://127.0.0.1:11434"
+    url: str = "http://127.0.0.1:11437"
     allow_remote: bool = False
     workers: tuple[str, ...] = ()
     trusted_origins: tuple[str, ...] = ()
@@ -655,6 +677,7 @@ class SonderConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     state: StateConfig = field(default_factory=StateConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
+    inference: InferenceConfig = field(default_factory=InferenceConfig)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
     compute: ComputeConfig = field(default_factory=ComputeConfig)
     deployment: DeploymentConfig = field(default_factory=DeploymentConfig)
@@ -708,6 +731,7 @@ class SonderConfig:
             "artifact_mobility",
             "control_state_rehearsal",
             "state",
+            "inference",
             "ollama",
             "features",
             "capacity",
@@ -729,6 +753,12 @@ class SonderConfig:
         # These values identify private disk boundaries and a fixed remote peer.
         # Public diagnostics need only show whether an operator configured them;
         # retaining their text would disclose local layout or peer information.
+        out["inference"]["api_key_file"] = redact_presence(
+            self.inference.api_key_file
+        )
+        out["inference"]["private_workers"] = redact_presence(
+            self.inference.private_workers
+        )
         out["artifact_mobility_source"]["store_dir"] = redact_presence(
             self.artifact_mobility_source.store_dir
         )
@@ -1082,6 +1112,7 @@ _SECTION_TYPES = {
     "control_state_rehearsal": ControlStateRehearsalConfig,
     "state": StateConfig,
     "context": ContextConfig,
+    "inference": InferenceConfig,
     "ollama": OllamaConfig,
     "features": FeaturesConfig,
     "capacity": CapacityConfig,
@@ -1540,6 +1571,7 @@ def _apply_environment(
     """Fold the existing compatibility environment variables in."""
     server = config.server
     state = config.state
+    inference = config.inference
     ollama = config.ollama
     compute = config.compute
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", compute.node_id):
@@ -1684,6 +1716,47 @@ def _apply_environment(
         state = replace(
             state, default_workspace_root=env["SONDER_DEFAULT_WORKSPACE_ROOT"].strip()
         )
+    if env.get("SONDER_INFERENCE_BASE_URL", "").strip():
+        raw_si = env["SONDER_INFERENCE_BASE_URL"].strip()
+        inference = replace(
+            inference, url=raw_si if "://" in raw_si else f"http://{raw_si}",
+        )
+    if env.get("SONDER_INFERENCE_READY_FILE", "").strip():
+        inference = replace(
+            inference, ready_file=env["SONDER_INFERENCE_READY_FILE"].strip(),
+        )
+    if "SONDER_ALLOW_REMOTE_INFERENCE" in env:
+        inference = replace(
+            inference, allow_remote=_env_bool(env["SONDER_ALLOW_REMOTE_INFERENCE"]),
+        )
+    if env.get("SONDER_INFERENCE_PRIVATE_WORKERS", "").strip():
+        inference = replace(
+            inference, private_workers=env["SONDER_INFERENCE_PRIVATE_WORKERS"].strip(),
+        )
+    if env.get("SONDER_INFERENCE_MODEL", "").strip():
+        inference = replace(inference, model=env["SONDER_INFERENCE_MODEL"].strip())
+    if env.get("SONDER_INFERENCE_EMBED_MODEL", "").strip():
+        inference = replace(
+            inference, embed_model=env["SONDER_INFERENCE_EMBED_MODEL"].strip(),
+        )
+    if env.get("SONDER_INFERENCE_RERANK_MODEL", "").strip():
+        inference = replace(
+            inference, rerank_model=env["SONDER_INFERENCE_RERANK_MODEL"].strip(),
+        )
+    if env.get("SONDER_INFERENCE_TIER_MODELS", "").strip():
+        inference = replace(
+            inference, tier_models=env["SONDER_INFERENCE_TIER_MODELS"].strip(),
+        )
+    inference = replace(
+        inference,
+        max_inflight=_env_int(
+            "SONDER_INFERENCE_MAX_INFLIGHT", env, inference.max_inflight, errors,
+        ),
+        request_timeout_seconds=_env_int(
+            "SONDER_INFERENCE_TIMEOUT_SECONDS", env,
+            inference.request_timeout_seconds, errors,
+        ),
+    )
     if env.get("OLLAMA_HOST", "").strip():
         raw = env["OLLAMA_HOST"].strip()
         url = raw if "://" in raw else f"http://{raw}"
@@ -1697,9 +1770,25 @@ def _apply_environment(
                 if value.strip()
             ),
         )
-    if "SONDER_ALLOW_REMOTE_OLLAMA" in env:
-        ollama = replace(
-            ollama, allow_remote=_env_bool(env["SONDER_ALLOW_REMOTE_OLLAMA"])
+    if "SONDER_ALLOW_REMOTE_INFERENCE" in env:
+        allow_remote_val = _env_bool(env["SONDER_ALLOW_REMOTE_INFERENCE"])
+        inference = replace(inference, allow_remote=allow_remote_val)
+        ollama = replace(ollama, allow_remote=allow_remote_val)
+    elif "SONDER_ALLOW_REMOTE_OLLAMA" in env:
+        import logging
+        logging.getLogger(__name__).warning(
+            "SONDER_ALLOW_REMOTE_OLLAMA is deprecated; use SONDER_ALLOW_REMOTE_INFERENCE instead"
+        )
+        allow_remote_val = _env_bool(env["SONDER_ALLOW_REMOTE_OLLAMA"])
+        inference = replace(inference, allow_remote=allow_remote_val)
+        ollama = replace(ollama, allow_remote=allow_remote_val)
+    if env.get("SONDER_INFERENCE_API_KEY_FILE", "").strip():
+        inference = replace(
+            inference, api_key_file=env["SONDER_INFERENCE_API_KEY_FILE"].strip()
+        )
+    if env.get("SONDER_INFERENCE_CA_BUNDLE", "").strip():
+        inference = replace(
+            inference, ca_bundle=env["SONDER_INFERENCE_CA_BUNDLE"].strip()
         )
     if env.get("SONDER_TRUSTED_ORIGINS", "").strip():
         ollama = replace(
@@ -1866,6 +1955,7 @@ def _apply_environment(
         observability=observability,
         server=server,
         state=state,
+        inference=inference,
         ollama=ollama,
         compute=compute,
         features=features,
@@ -2000,7 +2090,11 @@ def _rpc_sharding_errors(env: dict[str, str]) -> list[str]:
 def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(_context_root_errors(config))
     try:
-        validate_membership_config(config.membership, config.secrets, allow_remote=config.ollama.allow_remote)
+        validate_membership_config(
+            config.membership,
+            config.secrets,
+            allow_remote=bool(config.inference.allow_remote or config.ollama.allow_remote),
+        )
     except ValueError as error:
         errors.append(str(error))
     errors.extend(child_storage_errors(config))
@@ -2208,6 +2302,60 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         effective_workspace_roots[mapping] = resolved
         local_workspace_mappings.add(mapping)
 
+    try:
+        si_parts = urlsplit(config.inference.url)
+        si_port = si_parts.port
+    except ValueError:
+        si_parts = None
+        si_port = None
+    if si_parts is None or si_parts.scheme not in ("http", "https") or not si_parts.hostname:
+        errors.append(
+            f"[inference].url invalid: {_redact_url_userinfo(config.inference.url)!r}"
+        )
+    elif si_parts.username is not None or si_parts.password is not None:
+        errors.append("[inference].url must not contain inline credentials")
+    elif si_port is None:
+        errors.append("[inference].url must include an explicit port")
+    elif si_parts.query or si_parts.fragment:
+        errors.append("[inference].url must not contain a query or fragment")
+    elif not config.inference.allow_remote and not _is_loopback_host(si_parts.hostname):
+        errors.append(
+            f"[inference].url host {si_parts.hostname!r} is not loopback and "
+            "allow_remote is false (remote-inference consent gate)"
+        )
+    elif not _is_loopback_host(si_parts.hostname) and si_parts.scheme != "https":
+        errors.append(
+            "[inference].url remote Sonder Inference must use https so prompts "
+            "and embeddings are protected in transit"
+        )
+    if not 1 <= config.inference.max_inflight <= 16:
+        errors.append("[inference].max_inflight must be within 1..16")
+    if config.inference.startup_timeout_seconds < 1:
+        errors.append("[inference].startup_timeout_seconds must be >= 1")
+    if config.ollama.startup_timeout_seconds < 1:
+        errors.append("[ollama].startup_timeout_seconds must be >= 1")
+    if config.inference.request_timeout_seconds < 1:
+        errors.append("[inference].request_timeout_seconds must be >= 1")
+    import math as _math
+    if (not _math.isfinite(config.inference.health_ttl_seconds)
+            or config.inference.health_ttl_seconds <= 0):
+        errors.append("[inference].health_ttl_seconds must be a positive finite number")
+    if (not _math.isfinite(config.inference.health_timeout_seconds)
+            or not (0 < config.inference.health_timeout_seconds <= 6.0)):
+        errors.append("[inference].health_timeout_seconds must be within (0, 6]")
+    if (not _math.isfinite(config.inference.health_stale_seconds)
+            or not (0 <= config.inference.health_stale_seconds <= 3600.0)):
+        errors.append("[inference].health_stale_seconds must be within 0..3600")
+    if config.inference.api_key_file:
+        if any(ord(c) < 32 or ord(c) == 127 for c in config.inference.api_key_file):
+            errors.append("[inference].api_key_file must not contain control characters")
+        else:
+            parsed_key = sonder_paths.try_parse_local_root(
+                config.inference.api_key_file, expand_user=True
+            )
+            if parsed_key is None or parsed_key.is_symlink() or not parsed_key.is_file():
+                errors.append("[inference].api_key_file must name an existing non-symlink absolute file")
+
     for cidr in config.ollama.trusted_origins:
         try:
             ipaddress.ip_network(cidr, strict=False)
@@ -2215,6 +2363,8 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             errors.append(
                 f"[ollama].trusted_origins entry invalid CIDR: {cidr!r}"
             )
+
+    effective_remote_allowed = config.inference.allow_remote or config.ollama.allow_remote
 
     try:
         parts = urlsplit(config.ollama.url)
@@ -2230,7 +2380,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[ollama].url must include an explicit port")
     elif parts.path not in ("", "/") or parts.query or parts.fragment:
         errors.append("[ollama].url must be an origin without a path, query, or fragment")
-    elif not config.ollama.allow_remote and not _is_loopback_host(parts.hostname):
+    elif not effective_remote_allowed and not _is_loopback_host(parts.hostname):
         errors.append(
             f"[ollama].url host {parts.hostname!r} is not loopback and "
             "allow_remote is false (remote-Ollama consent gate)"
@@ -2283,6 +2433,10 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
                         errors.append("[ollama].ca_bundle must name an existing regular file")
 
     canonical_primary = _canonical_ollama_origin(config.ollama.url)
+    canonical_inference = _canonical_ollama_origin(config.inference.url)
+    primary_origins = {
+        origin for origin in (canonical_primary, canonical_inference) if origin is not None
+    }
     canonical_workers: list[str] = []
     for worker in config.ollama.workers:
         try:
@@ -2311,7 +2465,7 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
             )
             continue
         if not _is_loopback_host(worker_parts.hostname):
-            if not config.ollama.allow_remote:
+            if not effective_remote_allowed:
                 errors.append(
                     "[ollama].workers remote entries require the remote-Ollama consent gate"
                 )
@@ -2321,11 +2475,12 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         if canonical_worker is not None:
             canonical_workers.append(canonical_worker)
 
+    roster_primary = canonical_inference or canonical_primary
     canonical_origins = (
-        {canonical_primary} if canonical_primary is not None else set()
+        {roster_primary} if roster_primary is not None else set()
     )
     for canonical_worker in canonical_workers:
-        if canonical_worker == canonical_primary:
+        if canonical_worker in primary_origins:
             errors.append(
                 "[ollama].workers contains a worker that duplicates primary "
                 "after canonical normalization"
@@ -2660,6 +2815,8 @@ def load_config(
     sources: list[str] = ["defaults"]
     private_source_paths: list[str] = []
     config = SonderConfig()
+    inf_startup_explicit = False
+    ollama_startup_explicit = False
 
     if toml_path is not None:
         path = Path(toml_path)
@@ -2704,6 +2861,10 @@ def load_config(
                     errors.append("[memory_replication] must be a table")
             elif key in _SECTION_TYPES:
                 if isinstance(value, dict):
+                    if key == "inference" and "startup_timeout_seconds" in value:
+                        inf_startup_explicit = True
+                    elif key == "ollama" and "startup_timeout_seconds" in value:
+                        ollama_startup_explicit = True
                     config = replace(
                         config,
                         **{
@@ -2760,7 +2921,36 @@ def load_config(
 
     if overrides:
         sources.append("command-line")
+        if "inference.startup_timeout_seconds" in overrides:
+            inf_startup_explicit = True
+        if "ollama.startup_timeout_seconds" in overrides:
+            ollama_startup_explicit = True
         config = _apply_overrides(config, overrides, errors)
+
+    if ollama_startup_explicit and not inf_startup_explicit:
+        logging.getLogger(__name__).warning(
+            "Using deprecated [ollama].startup_timeout_seconds=%d; "
+            "set [inference].startup_timeout_seconds instead",
+            config.ollama.startup_timeout_seconds,
+        )
+        config = replace(
+            config,
+            inference=replace(
+                config.inference,
+                startup_timeout_seconds=config.ollama.startup_timeout_seconds,
+            ),
+        )
+    elif (
+        ollama_startup_explicit
+        and inf_startup_explicit
+        and config.ollama.startup_timeout_seconds != config.inference.startup_timeout_seconds
+    ):
+        logging.getLogger(__name__).warning(
+            "Ignoring deprecated [ollama].startup_timeout_seconds=%d; "
+            "using [inference].startup_timeout_seconds=%d",
+            config.ollama.startup_timeout_seconds,
+            config.inference.startup_timeout_seconds,
+        )
 
     # Check the final effective listener host, including the highest-precedence
     # CLI overrides. Otherwise an exact unsafe acknowledgement plus
@@ -2775,7 +2965,10 @@ def load_config(
         effective_env = dict(merged_env)
         if config.features.cloud:
             effective_env["SONDER_ALLOW_CLOUD"] = "1"
+        effective_env["SONDER_INFERENCE_BASE_URL"] = config.inference.url
         effective_env["OLLAMA_HOST"] = config.ollama.url
+        if config.inference.private_workers:
+            effective_env["SONDER_INFERENCE_PRIVATE_WORKERS"] = config.inference.private_workers
         lab_error = unsafe_lab_policy.validation_error(
             effective_env, host=config.server.host
         )
@@ -2806,6 +2999,8 @@ def load_config(
     _validate(config, errors)
     if errors:
         raise ConfigError(errors)
+    if config.inference.api_key_file:
+        private_source_paths.append(str(Path(config.inference.api_key_file).resolve()))
     if config.ollama.ca_bundle:
         private_source_paths.append(str(Path(config.ollama.ca_bundle).resolve()))
     if config.app_control.catalog_file:

@@ -14,15 +14,11 @@ machine's filesystem and cannot be measured here.
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
-import urllib.error
 import urllib.request
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Protocol
-
-import sonder_runtime.adapters.inference.ollama_endpoint as ollama_endpoint
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
@@ -74,49 +70,7 @@ def discover_daemon_model_root(
     timeout: float = 2.0,
     opener: Opener | None = None,
 ) -> str | None:
-    """Return the daemon-reported model root, or ``None`` when unknown.
-
-    Never raises for transport, policy, or payload faults; the caller labels
-    its fallback instead.  ``opener`` defaults to the policy-enforcing
-    ``ollama_endpoint.open_url``.
-    """
-    if not url or not ollama_endpoint.is_loopback(url):
-        return None
-    open_url: Opener = opener or ollama_endpoint.open_url
-    base = url.rstrip("/")
-    try:
-        with open_url(
-            urllib.request.Request(base + "/api/tags", method="GET"),
-            timeout=timeout, allow_remote=allow_remote,
-        ) as response:
-            tags = json.loads(response.read(_MAX_RESPONSE_BYTES).decode("utf-8"))
-        names = [
-            str(item.get("name") or item.get("model") or "")
-            for item in (tags.get("models") or [])
-            if isinstance(item, dict)
-        ]
-        for name in [n for n in names if n][:3]:
-            request = urllib.request.Request(
-                base + "/api/show",
-                data=json.dumps({"model": name}).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with open_url(
-                request, timeout=timeout, allow_remote=allow_remote,
-            ) as response:
-                shown = json.loads(
-                    response.read(_MAX_RESPONSE_BYTES).decode("utf-8")
-                )
-            root = model_root_from_modelfile(
-                shown.get("modelfile", "") if isinstance(shown, dict) else ""
-            )
-            if root:
-                return root
-    except (urllib.error.URLError, OSError, ValueError, AttributeError) as exc:
-        logger.debug(
-            "daemon model-root discovery unavailable: %s", type(exc).__name__
-        )
+    """Local Ollama daemon model-root discovery is retired; SI model store owns paths."""
     return None
 
 

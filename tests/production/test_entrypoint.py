@@ -184,19 +184,19 @@ def test_the_environment_snapshot_actually_restores_what_the_export_changed():
     import sonder_config
     from sonder_runtime.__main__ import _export_runtime_environment
 
-    sentinel = "127.0.0.1:1"
-    os.environ["OLLAMA_HOST"] = sentinel
+    sentinel = "http://127.0.0.1:1"
+    os.environ["SONDER_INFERENCE_BASE_URL"] = sentinel
     before = dict(os.environ)
     try:
         _export_runtime_environment(sonder_config.SonderConfig())
-        assert os.environ["OLLAMA_HOST"] != sentinel, (
-            "the export no longer touches OLLAMA_HOST; this test can no longer "
+        assert os.environ["SONDER_INFERENCE_BASE_URL"] != sentinel, (
+            "the export no longer touches SONDER_INFERENCE_BASE_URL; this test can no longer "
             "detect a leak and needs a variable the export does write"
         )
     finally:
         os.environ.clear()
         os.environ.update(before)
-    assert os.environ["OLLAMA_HOST"] == sentinel
+    assert os.environ["SONDER_INFERENCE_BASE_URL"] == sentinel
 
 
 def test_entrypoint_redactor_covers_config_file_secrets_before_export(tmp_path):
@@ -650,7 +650,7 @@ def test_serve_exports_validated_config_before_migrations(
             "serve", "--skip-preflight",
             "--set", f"state.home={configured_home}",
             "--set", f"state.workspace_roots={workspace}",
-            "--set", "ollama.url=http://127.0.0.1:11500",
+            "--set", "inference.url=http://127.0.0.1:11500",
             "--set", "features.web=true",
             "--set", "server.tls_terminated_by_proxy=true",
         ]

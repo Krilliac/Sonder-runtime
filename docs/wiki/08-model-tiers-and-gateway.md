@@ -432,9 +432,10 @@ note: [use-facts-model](../runbooks/use-facts-model.md).
 Default is fully local. This section is the one home of the **provider
 consent map** (verified against the code on 2026-11-20).
 
-- **Remote Ollama** — set `[ollama].allow_remote = true` /
-  `SONDER_ALLOW_REMOTE_OLLAMA=1` to point at a non-loopback **HTTPS** Ollama
-  origin. HTTP remains available only for loopback Ollama because remote
+- **Remote inference** — set `[inference].allow_remote = true` /
+  `SONDER_ALLOW_REMOTE_INFERENCE=1` (`SONDER_ALLOW_REMOTE_OLLAMA=1` is a
+  deprecated alias with a warning) to point at a non-loopback **HTTPS**
+  inference origin. HTTP remains available only for loopback because remote
   prompts and embeddings must be protected in transit. URL rules and the
   Caddy-fronted setup:
   [remote-ollama-caddy](../runbooks/remote-ollama-caddy.md#coordinator-settings).

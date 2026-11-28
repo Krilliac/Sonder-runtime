@@ -90,13 +90,9 @@ def _fallback_fact(selected: Any) -> tuple[str, str]:
     fallback = _get(selected, "_fallback")
     if fallback is None:
         return "", ""
-    label = str(_get(selected, "_fallback_id", "ollama") or "ollama")
+    label = str(_get(selected, "_fallback_id", "") or "")
     config = _get(fallback, "_settings_override") or _get(fallback, "_config")
     host = _base_url(config)
-    if not host:
-        env = _get(fallback, "_env", {})
-        if isinstance(env, Mapping):
-            host = _url_host(env.get("OLLAMA_HOST", ""))
     return label, host
 
 
@@ -104,7 +100,7 @@ def configured_host(runtime: Any, tier: str = "") -> str:
     """Describe the selected configured provider endpoint without secrets.
 
     The result is suitable for a short acknowledgement, for example
-    ``"sonder_inference 127.0.0.1:11437 (fallback ollama 127.0.0.1:11434)"``.
+    ``"sonder_inference 127.0.0.1:11437"``.
     An unavailable or malformed configuration returns ``""`` honestly.
     """
     runtime = runtime or {}
@@ -117,23 +113,35 @@ def configured_host(runtime: Any, tier: str = "") -> str:
             return ""
     graph = _get(runtime, "_APP_GRAPH") or _get(runtime, "app_graph") or runtime
     gateway = _get(graph, "model_gateway")
-    if provider and provider.lower() not in {"ollama", "local_ollama"}:
-        label, host, selected = _configured_provider(gateway, provider)
-        if not host:
-            env_name = _ENV_BY_PROVIDER.get(provider.lower())
-            host = _url_host(os.environ.get(env_name, "")) if env_name else ""
-        if not host:
+    effective_provider = provider.strip() if provider and provider.lower() not in {"ollama", "local_ollama"} else "sonder_inference"
+    label, host, selected = _configured_provider(gateway, effective_provider)
+    if selected is not None and not host:
+        primary_or_selected = _get(selected, "_primary") or selected
+        selected_config = _get(primary_or_selected, "_settings_override")
+        if selected_config is None:
+            selected_config = _get(primary_or_selected, "_config")
+        raw_configured_url = _get(selected_config, "base_url", None)
+        if raw_configured_url is not None and str(raw_configured_url).strip():
+            # A bound gateway with an unparseable configured URL is honestly unknown.
             return ""
-        fallback_label, fallback_host = _fallback_fact(selected)
-        suffix = (" (fallback %s %s)" % (fallback_label, fallback_host)
-                  if fallback_label and fallback_host else "")
-        return "%s %s%s" % (label, host, suffix)
-    pooled = _pool_hosts(runtime, tier)
-    if pooled:
-        return "ollama " + pooled
-    base = _get(runtime, "BASE", "") or _get(runtime, "OLLAMA_HOST", "")
-    host = _url_host(base) or _url_host(os.environ.get("OLLAMA_HOST", ""))
-    return ("ollama " + host) if host else ""
+    if not host and selected is None and effective_provider == "sonder_inference":
+        pool_hosts = _pool_hosts(runtime, tier)
+        if pool_hosts:
+            return "%s %s" % (effective_provider, pool_hosts)
+        raw_base = _get(runtime, "BASE", None)
+        if raw_base is not None:
+            host = _url_host(raw_base)
+            if not host:
+                return ""
+    if not host:
+        env_name = _ENV_BY_PROVIDER.get(effective_provider.lower())
+        host = _url_host(os.environ.get(env_name, "")) if env_name else ""
+    if not host:
+        return ""
+    fallback_label, fallback_host = _fallback_fact(selected)
+    suffix = (" (fallback %s %s)" % (fallback_label, fallback_host)
+              if fallback_label and fallback_host else "")
+    return "%s %s%s" % (label or effective_provider, host, suffix)
 
 
 def _pool_hosts(runtime: Any, tier: str) -> str:

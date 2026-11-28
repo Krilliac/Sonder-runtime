@@ -64,6 +64,13 @@ def posts(monkeypatch):
             "done_reason": "stop", "prompt_eval_count": 3, "eval_count": 2,
         }, 1
 
+    real_pft = server._legacy_chat_bridge.provider_for_tier
+    monkeypatch.setattr(
+        server._legacy_chat_bridge,
+        "provider_for_tier",
+        lambda tier, cloud, graph: None if graph is None else real_pft(tier, cloud, graph),
+    )
+    monkeypatch.setattr(server, "_APP_GRAPH", None)
     monkeypatch.setattr(server, "_post_model", fake_post)
     monkeypatch.setattr(server, "_known_thinking_model", lambda model: False)
     monkeypatch.setattr(server, "_think_option_supported", lambda model: False)
@@ -93,7 +100,7 @@ def test_a_denied_model_is_refused_before_anything_is_sent(posts, name):
 def test_a_text_only_call_still_reaches_the_denied_model(posts, name):
     gen = server._make_generate(name, "", 0.2, 64, 4096, text_only=True)
     assert gen("hi") == "answer from " + name
-    assert [(path, payload["model"]) for path, payload, _ in posts] == [("/api/chat", name)]
+    assert [(path, payload["model"]) for path, payload, _ in posts] == [("/v1/chat/completions", name)]
 
 
 def test_tier_generation_refuses_by_default_and_answers_when_text_only(posts):
@@ -324,7 +331,7 @@ def test_an_ordinary_models_request_is_the_same_whether_declared_text_only_or_no
         "hi", [{"role": "assistant", "content": "a"}])
     assert len(posts) == 2 and posts[0] == posts[1]
     path, payload, kwargs = posts[0]
-    assert path == "/api/chat" and payload["model"] == ALLOWED
+    assert path == "/v1/chat/completions" and payload["model"] == ALLOWED
     assert "text_only" not in payload and "text_only" not in kwargs
 
 
@@ -476,7 +483,7 @@ def test_a_fanout_row_for_a_denied_model_answers(chat, monkeypatch, tmp_path):
     server.fanout_store.reset_schema_cache_for_tests()
     server.fanout_prompt_vault.reset_cache_for_tests()
     monkeypatch.setattr(server, "_get", lambda path: (
-        {"models": [{"name": DENIED}]} if path == "/api/tags" else {"models": []}))
+        {"models": [{"name": DENIED}]} if path in ("/api/tags", "/v1/models") else {"models": []}))
     monkeypatch.setattr(server, "_post", lambda path, payload, **kwargs: {})
     monkeypatch.setattr(server.fanout_store, "get_model_health", lambda _name: None)
     monkeypatch.setattr(guard, "sweep_skip_reason", lambda *a, **k: "")

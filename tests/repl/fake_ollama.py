@@ -63,12 +63,31 @@ class FakeOllama:
 
             def do_GET(self):
                 owner.requests.append(("GET", self.path, None))
-                if self.path.startswith("/api/tags"):
-                    return self._send(200, {"models": [
-                        {"name": name, "model": name, "size": size,
-                         "details": {"family": "fake"}}
-                        for name, size in MODELS
-                    ]})
+                if self.path.startswith(("/api/tags", "/v1/models")):
+                    return self._send(200, {
+                        "object": "list",
+                        "data": [
+                            {"id": name, "name": name, "model": name, "size": size,
+                             "capabilities": ["completion", "chat"],
+                             "details": {"family": "fake"}}
+                            for name, size in MODELS
+                        ],
+                        "models": [
+                            {"name": name, "model": name, "size": size,
+                             "details": {"family": "fake"}}
+                            for name, size in MODELS
+                        ],
+                    })
+                if self.path.startswith("/v1/sonder/health"):
+                    return self._send(200, {
+                        "status": "ready",
+                        "api_version": 1,
+                        "version": "0.0.0-fake",
+                        "models": [
+                            {"id": name, "name": name, "state": "resident"}
+                            for name, _size in MODELS
+                        ],
+                    })
                 if self.path.startswith("/api/version"):
                     return self._send(200, {"version": "0.0.0-fake"})
                 if self.path.startswith("/api/ps"):
@@ -89,19 +108,24 @@ class FakeOllama:
                         "model_info": {"general.context_length": 8192},
                         "details": {"family": "fake"},
                     })
-                if self.path.startswith("/api/embed"):
-                    vector = [0.0] * 8
+                if self.path.startswith(("/api/embed", "/v1/embeddings")):
+                    vector = [0.1] * 8
+                    if self.path.startswith("/v1/embeddings"):
+                        return self._send(200, {"object": "list", "data": [{"index": 0, "embedding": vector}]})
                     if self.path.startswith("/api/embeddings"):
                         return self._send(200, {"embedding": vector})
                     return self._send(200, {"embeddings": [vector]})
-                if self.path.startswith("/api/chat"):
+                if self.path.startswith(("/api/chat", "/v1/chat/completions")):
                     return self._chat(payload)
-                if self.path.startswith("/api/generate"):
+                if self.path.startswith(("/api/generate", "/v1/completions")):
                     if not payload.get("prompt"):
                         return self._send(200, {"model": payload.get("model", ""),
+                                                "choices": [{"text": "", "finish_reason": "stop"}],
                                                 "response": "", "done": True})
                     text = owner.answer(str(payload.get("prompt") or ""))
                     return self._send(200, {"model": payload.get("model", ""),
+                                            "choices": [{"text": text, "finish_reason": "stop"}],
+                                            "usage": {"prompt_tokens": 12, "completion_tokens": 8},
                                             "response": text, "done": True,
                                             "prompt_eval_count": 12, "eval_count": 8})
                 return self._send(404, {"error": "not found"})
@@ -114,13 +138,34 @@ class FakeOllama:
                         last = str(message.get("content") or "")
                 lowered = last.lower()
                 if "explode" in lowered:
-                    return self._send(500, {"error": "fake model crashed"})
+                    return self._send(500, {"error": {"message": "fake model crashed"}})
                 if "hold" in lowered:
                     owner.holding.set()
                     owner._release.wait(30)
                 text = owner.answer(last)
+                raw_model = str(payload.get("model") or "").strip()
+                served_model = "sonder:latest" if not raw_model or raw_model == "default" else raw_model
+                if payload.get("stream"):
+                    chunk = json.dumps({
+                        "model": served_model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": text},
+                            "finish_reason": "stop",
+                        }],
+                        "usage": {"prompt_tokens": 2600, "completion_tokens": 43},
+                    })
+                    sse = f"data: {chunk}\n\ndata: [DONE]\n\n".encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Content-Length", str(len(sse)))
+                    self.end_headers()
+                    self.wfile.write(sse)
+                    return
                 return self._send(200, {
-                    "model": payload.get("model", ""),
+                    "model": served_model,
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 2600, "completion_tokens": 43},
                     "message": {"role": "assistant", "content": text},
                     "done": True, "done_reason": "stop",
                     "prompt_eval_count": 2600, "eval_count": 43,

@@ -15,7 +15,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import socket
 import subprocess
 import sys
@@ -351,16 +350,9 @@ def _managed_listener_pid(host=DEFAULT_HOST, port=DEFAULT_PORT) -> int | None:
 
 
 def ollama_exe() -> str:
-    configured = os.environ.get("SONDER_OLLAMA_EXE", "").strip()
-    if configured:
-        return configured
-    try:
-        bundle = engine_bundle.discover_engine_bundle(repo_root())
-    except ValueError:
-        bundle = None
-    if bundle is not None:
-        return str(bundle.ollama_executable)
-    return shutil.which("ollama") or ""
+    # Local Ollama daemon spawning is retired (RET-05); Sonder Inference
+    # (sonder-infer serve) owns local inference and Ollama Cloud access.
+    return ""
 
 
 def runtime_environment() -> dict[str, str]:
@@ -383,12 +375,19 @@ def ollama_client_environment() -> dict[str, str]:
     return ollama_endpoint.client_environment(runtime_environment())
 
 
+def _si_origin() -> str:
+    raw = os.environ.get("SONDER_INFERENCE_BASE_URL", "").strip()
+    return ollama_endpoint.configured_origin(raw or None)
+
+
 def ollama_models() -> set[str] | None:
-    """Return registered model names, or None when the gated endpoint is unavailable."""
+    """Return models listed by Sonder Inference ``/v1/models``, or None when unavailable."""
     try:
-        client_env = ollama_client_environment()
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
+
+        origin = _si_origin()
         request = urllib.request.Request(
-            client_env["OLLAMA_HOST"] + "/api/tags", method="GET",
+            origin + "/v1/models", headers=si_auth_headers(origin), method="GET",
         )
         with ollama_endpoint.open_url(request, timeout=8) as response:
             raw = response.read(_MAX_OLLAMA_TAGS_BYTES + 1)
@@ -397,21 +396,37 @@ def ollama_models() -> set[str] | None:
         payload = json.loads(raw.decode("utf-8"))
     except (OSError, TimeoutError, ValueError, urllib.error.URLError):
         return None
-    models = payload.get("models") if isinstance(payload, dict) else None
+    models = (payload.get("data") or payload.get("models")) if isinstance(payload, dict) else None
     if not isinstance(models, list):
         return None
     names = set()
     for model in models:
         if not isinstance(model, dict):
             continue
-        name = str(model.get("name") or model.get("model") or "").strip()
+        name = str(model.get("id") or model.get("name") or model.get("model") or "").strip()
         if name:
             names.add(name)
     return names
 
 
 def ollama_ok() -> bool:
-    return ollama_models() is not None
+    """Return True when Sonder Inference ``/v1/sonder/health`` reports ready."""
+    try:
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
+
+        origin = _si_origin()
+        request = urllib.request.Request(
+            origin + "/v1/sonder/health", headers=si_auth_headers(origin), method="GET",
+        )
+        with ollama_endpoint.open_url(request, timeout=5) as response:
+            raw = response.read(_MAX_OLLAMA_TAGS_BYTES + 1)
+        if len(raw) > _MAX_OLLAMA_TAGS_BYTES:
+            return False
+        payload = json.loads(raw.decode("utf-8"))
+        state = str(payload.get("status") or payload.get("state") or "").strip().lower() if isinstance(payload, dict) else ""
+        return getattr(response, "status", 200) == 200 and state == "ready"
+    except (OSError, TimeoutError, ValueError, urllib.error.URLError):
+        return False
 
 
 def wait_until(fn, seconds: float) -> bool:
@@ -424,66 +439,25 @@ def wait_until(fn, seconds: float) -> bool:
 
 
 def start_ollama() -> str:
+    """Check Sonder Inference reachability; never spawns local Ollama."""
     if ollama_ok():
-        return "ollama: already reachable"
-    executable = ollama_exe()
-    if not executable:
-        return "ollama: not installed or not on PATH"
-    server_env = runtime_environment()
-    try:
-        client_env = ollama_endpoint.client_environment(server_env)
-    except ValueError as exc:
-        return "ollama: endpoint blocked - %s" % exc
-    if not ollama_endpoint.is_loopback(client_env["OLLAMA_HOST"]):
-        return "ollama: remote endpoint is unavailable; local daemon not started"
-    pid = _popen([executable, "serve"], "ollama", env=server_env)
-    if wait_until(ollama_ok, 12):
-        return "ollama: started pid=%s" % pid
-    return "ollama: start requested pid=%s, not reachable yet (see %s)" % (pid, log_file("ollama"))
+        return "inference: Sonder Inference (sonder-infer) is reachable"
+    return (
+        "inference: Sonder Inference is not reachable at %s; "
+        "start `sonder-infer serve` (local Ollama daemon is retired)" % _si_origin()
+    )
 
 
 def ensure_sonder_alias() -> tuple[bool, str]:
+    """Verify Sonder Inference serves the configured model catalog."""
     models = ollama_models()
     if models is None:
-        return False, "engine: Ollama is not reachable; alias setup skipped"
-    if any(name.casefold() == "sonder:latest" for name in models):
-        return True, "engine: sonder alias is ready"
-    executable = ollama_exe()
-    if not executable:
-        return False, (
-            "engine: Ollama is reachable but the sonder alias is missing; "
-            "install the Ollama CLI to create it"
-        )
-    try:
-        env = ollama_client_environment()
-    except ValueError as exc:
-        return False, "engine: Ollama endpoint blocked: %s" % exc
-    command = [python_exe(), str(repo_root() / "bootstrap_engine.py")]
-    try:
-        bundle = engine_bundle.discover_engine_bundle(repo_root())
-    except ValueError as exc:
-        return False, "engine: bundled runtime is invalid: %s" % exc
-    if bundle is not None:
-        command.append("--offline")
-    try:
-        setup = subprocess.run(
-            command,
-            cwd=str(repo_root()),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30 * 60,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, "engine: bootstrap could not run: %s" % exc
-    if setup.returncode == 0:
-        return True, "engine: bootstrap completed"
-    detail = (setup.stderr or setup.stdout).strip()
-    if len(detail) > 600:
-        detail = detail[-600:]
-    return False, "engine: bootstrap failed (%s)%s" % (
-        setup.returncode,
-        ": " + detail if detail else "",
+        return False, "engine: Sonder Inference is not reachable; model check skipped"
+    if any(name.casefold() == "sonder:latest" for name in models) or models:
+        return True, "engine: Sonder Inference model catalog is ready (%d models)" % len(models)
+    return False, (
+        "engine: Sonder Inference is reachable but serves no models; "
+        "register models in the SI model store before starting"
     )
 
 

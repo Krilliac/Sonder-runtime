@@ -21,12 +21,11 @@ TIER_PROVIDER_ENV = {
 }
 INFERENCE_FALLBACK_ENV = "SONDER_INFERENCE_FALLBACK"
 _ALIASES = {
-    "ollama": "ollama",
     "openai": "openai_compatible",
     "openai-compatible": "openai_compatible",
     "openai_compatible": "openai_compatible",
-    "llamacpp": "openai_compatible",
     "vllm": "openai_compatible",
+    "llamacpp": "openai_compatible",
     "distributed-rpc": "openai_compatible",
     "rpc-sharded": "openai_compatible",
     "sonder-inference": "sonder_inference",
@@ -42,18 +41,20 @@ _ALIASES = {
     "anthropic": "anthropic",
 }
 # "sonder" names the logical chat tier and the local model alias, so it must
-# never silently select a transport.  It stays an unknown-provider error with
-# a pointer at the provider name the operator most likely meant.
+# never silently select a transport.  Local "ollama" is retired; Sonder
+# Inference is the sole local engine and also reaches Ollama Cloud directly.
 _RESERVED_NAMES = {
     "sonder": (
         "'sonder' is a tier/model name, not a provider; "
         "use 'sonder-inference' for the Sonder Inference server"
     ),
+    "ollama": (
+        "local 'ollama' backend is retired; use 'sonder-inference' "
+        "(Sonder Inference serves local models and Ollama Cloud via ollama_cloud)"
+    ),
 }
-# The only fallback a provider may declare.  A fallback is attempted solely
-# when the primary provably did not execute the request, so the target must
-# be a local provider whose own consent rules still apply.
-ALLOWED_FALLBACKS = MappingProxyType({"sonder_inference": frozenset({"ollama"})})
+# Local Ollama fallback is retired: Sonder Inference is the only local engine.
+ALLOWED_FALLBACKS: Mapping[str, frozenset[str]] = MappingProxyType({})
 # dispatch_provider() labels are persisted as capture evidence and must not
 # change; this maps each label to the provider id used by bindings, status
 # and telemetry.
@@ -168,14 +169,13 @@ class ProviderBindings:
 
 
 def inference_fallback_from_env(source: Mapping[str, str]) -> str | None:
-    """Parse ``SONDER_INFERENCE_FALLBACK`` (``none`` or ``ollama``)."""
+    """Parse ``SONDER_INFERENCE_FALLBACK`` (only ``none``/empty is valid)."""
     raw = str(source.get(INFERENCE_FALLBACK_ENV, "") or "").strip().lower()
     if raw in ("", "none"):
         return None
-    if raw == "ollama":
-        return "ollama"
     raise ValueError(
-        "%s must be 'none' or 'ollama', got %r" % (INFERENCE_FALLBACK_ENV, raw)
+        "%s must be 'none' (local Ollama fallback is retired), got %r"
+        % (INFERENCE_FALLBACK_ENV, raw)
     )
 
 
@@ -184,7 +184,7 @@ def provider_bindings_from_env(
 ) -> ProviderBindings:
     source = os.environ if env is None else env
     default = normalize_provider(
-        str(source.get("SONDER_MODEL_BACKEND", "") or "").strip() or "ollama"
+        str(source.get("SONDER_MODEL_BACKEND", "") or "").strip() or "sonder_inference"
     )
     tiers = {
         tier: normalize_provider(

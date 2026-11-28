@@ -16,8 +16,9 @@ of the model — an uncensored or "abliterated" model changes what it will
   ([secure-remote-access](../runbooks/secure-remote-access.md)). Setup-time
   checklist: [security-hardening](../runbooks/security-hardening.md).
 - **Consent gates**, each independent and default-off: cloud/hosted models
-  (`SONDER_ALLOW_CLOUD`), web tools (`SONDER_WEB_TOOLS`), remote Ollama
-  (`SONDER_ALLOW_REMOTE_OLLAMA`), private-node whole-job compute
+  (`SONDER_ALLOW_CLOUD`), web tools (`SONDER_WEB_TOOLS`), remote inference
+  (`SONDER_ALLOW_REMOTE_INFERENCE`; `SONDER_ALLOW_REMOTE_OLLAMA` is a
+  deprecated alias that logs a warning), private-node whole-job compute
   (`SONDER_ALLOW_REMOTE_COMPUTE`, additionally requiring per-workload
   `allow_remote`), approximate location, model reasoning
   (`SONDER_EXPOSE_REASONING`), private chain-of-thought
@@ -28,13 +29,14 @@ of the model — an uncensored or "abliterated" model changes what it will
   isolated private network). Runtime policy can never turn any of these on.
 - **Remote Sonder Inference needs four things at once:**
   `SONDER_ALLOW_REMOTE_INFERENCE=1`, an `https://` URL, a
-  `SONDER_INFERENCE_API_KEY` and an operation context that allows cloud; a
-  loopback base URL needs none of them. The fallback to local Ollama cannot
-  widen where a prompt goes. Rules and failure modes:
+  `SONDER_INFERENCE_API_KEY` (or `SONDER_INFERENCE_API_KEY_FILE`) and an
+  operation context that allows cloud; a loopback base URL needs none of them.
+  Rules and failure modes:
   [provider reference](../architecture/sonder-inference-provider.md),
   setup: [sonder-inference](../runbooks/sonder-inference.md).
-- **Remote Ollama is its own gate:** `SONDER_ALLOW_REMOTE_OLLAMA=1` and an
-  `https://` origin with an explicit port and no path
+- **Remote pooled inference workers share the same remote-inference gate:**
+  `SONDER_ALLOW_REMOTE_INFERENCE=1` (`SONDER_ALLOW_REMOTE_OLLAMA=1` is a
+  deprecated alias) and an `https://` origin with an explicit port and no path
   ([remote-ollama-caddy](../runbooks/remote-ollama-caddy.md#coordinator-settings)).
 - **Private Sonder Inference workers are their own consent lane.**
   `SONDER_INFERENCE_PRIVATE_WORKERS` names operator-approved private servers

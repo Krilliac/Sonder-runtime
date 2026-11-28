@@ -306,7 +306,7 @@ class _PinnedTransport:
             response = http.client.HTTPResponse(ResponseSocket())
             response.begin()
             version_not_found = (response.status == 404 and method == "GET"
-                and path == "/api/version" and data is None
+                and path == "/v1/sonder/health" and data is None
                 and response.getheader("Content-Encoding", "identity") == "identity"
                 and response.headers.get_all("Content-Length") == ["0"]
                 and response.getheader("Transfer-Encoding") is None
