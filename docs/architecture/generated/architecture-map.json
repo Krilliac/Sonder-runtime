@@ -38,7 +38,7 @@
   ],
   "layers": [
     {
-      "file_count": 535,
+      "file_count": 536,
       "name": "adapters",
       "python_files": [
         "sonder_runtime/adapters/__init__.py",
@@ -259,6 +259,7 @@
         "sonder_runtime/adapters/inference/request_tuning.py",
         "sonder_runtime/adapters/inference/residency_feedback.py",
         "sonder_runtime/adapters/inference/rpc_cluster.py",
+        "sonder_runtime/adapters/inference/rpc_split_policy.py",
         "sonder_runtime/adapters/inference/runner_footprint.py",
         "sonder_runtime/adapters/inference/served_tier_models.py",
         "sonder_runtime/adapters/inference/sonder_inference_gateway.py",
@@ -1146,7 +1147,7 @@
       ]
     },
     {
-      "file_count": 347,
+      "file_count": 349,
       "name": "domain",
       "python_files": [
         "sonder_runtime/domain/__init__.py",
@@ -1426,8 +1427,10 @@
         "sonder_runtime/domain/routing/execution_mode_router.py",
         "sonder_runtime/domain/routing/fleet_router.py",
         "sonder_runtime/domain/routing/model_names.py",
+        "sonder_runtime/domain/routing/node_health_gate.py",
         "sonder_runtime/domain/routing/prefix_locality.py",
         "sonder_runtime/domain/routing/route_planner.py",
+        "sonder_runtime/domain/routing/rpc_split_policy.py",
         "sonder_runtime/domain/routing/semantic_tier.py",
         "sonder_runtime/domain/routing/thinking_ensemble.py",
         "sonder_runtime/domain/runtime_identity.py",

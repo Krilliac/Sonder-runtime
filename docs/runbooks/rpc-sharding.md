@@ -53,10 +53,21 @@ variables are listed in the
 - The main machine's `llama-server` listens on loopback only
   (`127.0.0.1:11438` by default). The launcher refuses any other bind address
   and refuses `extra_args` that would override `--host`, `--port` or `--rpc`.
-- Set `SONDER_RPC_LINK_CIDR` to the private link's network (for example
-  `10.77.0.0/30`) to pin every worker, and the worker's bind address, to that
-  link. A private address that is not on the link (a LAN or VPN address) is
-  then refused too.
+- Set `SONDER_RPC_LINK_CIDR` to the dedicated private link's network (for
+  example `10.77.0.0/30`). For base allowlist validation and non-`Start`
+  actions (`Env`/`Status`/`Health`/`Stop`), `SONDER_RPC_LINK_CIDR` is optional
+  and accepts any private/link-local prefix `0..32`. For cross-host split
+  starts (`start-rpc-sharded.ps1 -Action Start` and
+  `require_cross_host_split_policy`), `SONDER_RPC_LINK_CIDR` is **required**
+  with prefix `/24` or narrower (recommended `/30`), and every peer must sit
+  inside it (a LAN or VPN address outside the link is refused).
+- **Cross-host split policy (FED-05).** `start-rpc-sharded.ps1 -Action Start`
+  enforces layer split only (`-SplitMode layer`), speculative decoding enabled
+  (`-SpecType ngram-mod` default; `none`/`off` refused), local output-head
+  placement (explicit `-Devices` must place `RPC*` before local GPUs; explicit
+  `-TensorSplit` must end with a positive local weight), and measured TCP
+  connect RTT over the dedicated link (`-RttSamples` default `5`, median RTT
+  `<= SONDER_RPC_MAX_RTT_MS` / `-MaxRttMs`, default `2.0` ms, range `(0, 100]`).
 - **Version lockstep.** The RPC wire protocol changes between llama.cpp
   releases (`RPC_PROTO_MAJOR_VERSION` 7 at b11195, 10 at v1.0.0 and v1.1.0).
   Before launching, `start-rpc-sharded.ps1 -Action Start` sends one RPC HELLO
@@ -97,16 +108,22 @@ as part of `Start`.
 
 ```powershell
 $env:SONDER_RPC_PEERS = '<worker-ip>'
+$env:SONDER_RPC_LINK_CIDR = '<link-cidr>'   # required on Start, >= /24 (e.g. 10.77.0.0/30)
 powershell -NoProfile -File .\scripts\rpc\start-rpc-sharded.ps1 -Action Start `
   -ModelPath '<path-to-model.gguf>' -TensorSplit '1,1' -CtxSize 16384
 ```
 
-`Start` refuses to launch when a worker is unreachable or fails the version
-lockstep check, records each worker's RPC protocol (`rpcNodes`) and this
-machine's llama.cpp build (`llamaBuild`, from `llama-server --version`), waits up to
-`-ReadyWaitSeconds` (default 180) for `/health` to report `ok`, and records its
-state in `%LOCALAPPDATA%\sonder\run\llama-rpc-server.json`. `-OllamaModel <tag>`
-uses an already-pulled Ollama model's GGUF file instead of `-ModelPath`.
+`Start` fails closed when `SONDER_RPC_LINK_CIDR` (`-RpcLinkCidr`) is unset or
+broader than `/24`, when split policy flags are violated (non-`layer` split,
+speculation off, remote device last in `-Devices`, or zero trailing weight in
+`-TensorSplit`), when a worker is unreachable, exceeds `SONDER_RPC_MAX_RTT_MS`
+(default `2.0` ms), or fails the version lockstep check. It records each
+worker's RPC protocol (`rpcNodes`), measured RTTs (`splitPolicy.peerRtts`), and
+this machine's llama.cpp build (`llamaBuild`, from `llama-server --version`),
+waits up to `-ReadyWaitSeconds` (default 180) for `/health` to report `ok`, and
+records its state in `%LOCALAPPDATA%\sonder\run\llama-rpc-server.json`.
+`-OllamaModel <tag>` uses an already-pulled Ollama model's GGUF file instead of
+`-ModelPath`.
 
 Choosing `-TensorSplit`: the weights are relative shares of layers per device,
 main GPU first. `1,1` suits two GPUs with similar free VRAM; `7,1` keeps most
@@ -168,5 +185,8 @@ back at their previous providers.
 | `Cross-host RPC split refused: ... RPC protocol mismatch` | A worker runs a different llama.cpp release. Install the same release on every node (the worker's `Start` records its build as `llamaBuild` in `llama-rpc-worker.json`), or correct `SONDER_RPC_PROTO_MAJOR`. |
 | `... did not answer the RPC HELLO` | Worker not running, firewall closed, or another `llama-server` already holds that `rpc-server` (it serves one client at a time). |
 | `... is not on the configured private link` | An address lies outside `SONDER_RPC_LINK_CIDR`. Use the link address or correct the CIDR. |
+| `SONDER_RPC_LINK_CIDR / -RpcLinkCidr must name a dedicated private IPv4 subnet` or `must have prefix length in 24..32` | `start-rpc-sharded.ps1 -Action Start` requires `SONDER_RPC_LINK_CIDR` (or `-RpcLinkCidr`) set to a dedicated `/24`–`/32` private subnet (e.g. `10.77.0.0/30`). Set it before running `Start`. |
+| `median RTT ... exceeds MaxRttMs` | Peer TCP connect RTT over the link exceeded `SONDER_RPC_MAX_RTT_MS` / `-MaxRttMs` (default `2.0` ms). Verify traffic is traversing the direct link (not Wi-Fi/routed LAN) or raise `SONDER_RPC_MAX_RTT_MS` within `(0, 100]`. |
+| `Cross-host RPC device order places remote device ... last` or `split_mode must be 'layer'` | Explicit `-Devices` placed an `RPC*` device after a local GPU (pass `RPC0,CUDA0`, not `CUDA0,RPC0`), `-SplitMode` was not `layer`, or `-SpecType` disabled speculation. |
 | `llama-server exited during startup` | Mismatched llama.cpp releases, not enough VRAM for the split, or a bad model path. The stderr tail is in the error and in `%LOCALAPPDATA%\sonder\logs`. |
 | Very slow generation | Expected to a degree; check the link speed and move layers to the main GPU with a larger first `-TensorSplit` weight. |

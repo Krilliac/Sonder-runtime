@@ -64,12 +64,11 @@ invariants as `sonder_runtime/domain/routing/rpc_split_policy.py`:
 ## Binaries
 
 Install the same official `ggml-org/llama.cpp` release **`v1.0.0` or newer**
-(minimum `>= b12658` for RPC CVE-2026-137567 and `--spec-type` /
-`--split-mode layer` support; the `ggml-rpc` protocol must match on every
-machine) into a dedicated folder: `%LOCALAPPDATA%\sonder\llama-rpc` by
-default, or the folder named by `SONDER_RPC_INSTALL_DIR` / `-InstallDir`. Pick
-the build that matches each machine's GPU (for example CUDA on the main
-machine, Vulkan on the worker).
+(verified for `--split-mode layer` and `--spec-type ngram-mod`; the `ggml-rpc`
+protocol must match on every machine) into a dedicated folder:
+`%LOCALAPPDATA%\sonder\llama-rpc` by default, or the folder named by
+`SONDER_RPC_INSTALL_DIR` / `-InstallDir`. Pick the build that matches each
+machine's GPU (for example CUDA on the main machine, Vulkan on the worker).
 
 ## Quick start
 
