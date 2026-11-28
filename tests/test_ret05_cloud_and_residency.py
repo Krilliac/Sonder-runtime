@@ -251,7 +251,6 @@ def test_si_v1_models_envelope_parsed_by_catalog_inventory_and_pool():
                 "id": "nomic-embed-text:latest",
                 "object": "model",
                 "owned_by": "sonder-inference",
-                "capabilities": ["embedding"],
                 "sonder": {
                     "backend": "llamacpp",
                     "default": False,
@@ -314,9 +313,14 @@ def test_si_v1_models_envelope_parsed_by_catalog_inventory_and_pool():
     assert ctx == 32768
     assert declared == 32768
 
-    # Chat-fitness gate unwraps the matching data[] row and rejects embedding-only / tiny-context models.
+    # Chat-fitness gate unwraps the matching data[] row:
+    # - real SI ['speculative'] profile stays fit ("");
+    # - tiny-context SI model (512 < 2048) is rejected;
+    # - real SI /v1/models emits only id/object/owned_by/sonder (server_endpoints.cpp:511-512,
+    #   launch_profile.cpp:902-921) with no embedding-only capability field, so an embedding
+    #   row carries no negative fitness evidence and returns "" (only positive evidence excludes).
     assert unfit_reason(extract_chat_fitness_payload(si_models, "qwen3.6:35b")) == ""
-    assert "embedding" in unfit_reason(extract_chat_fitness_payload(si_models, "nomic-embed-text:latest")).lower()
+    assert unfit_reason(extract_chat_fitness_payload(si_models, "nomic-embed-text:latest")) == ""
     assert "minimum" in unfit_reason(extract_chat_fitness_payload(si_models, "tiny-chat:latest")).lower()
 
     # Prober reads /v1/sonder/health residency state/resident flags (never counting lazy/evicted rows as loaded)
@@ -357,8 +361,8 @@ def test_si_v1_models_envelope_parsed_by_catalog_inventory_and_pool():
     assert result["model_contexts"]["tiny-chat:latest"] == 512
 
 
-def test_server_chat_model_unfit_reason_rejects_embedding_only_si_model(monkeypatch):
-    """Round 4 (R1): _CHAT_FITNESS keeps SI ['speculative'] profiles fit and rejects tiny-context/embedding-only models."""
+def test_server_chat_model_unfit_reason_handles_real_si_models(monkeypatch):
+    """Round 5: _CHAT_FITNESS uses real SI /v1/models rows (id/object/owned_by/sonder only): keeps ['speculative'] fit, rejects tiny-context (<2048), and admits rows without negative evidence."""
     import server as srv
 
     si_models = {
@@ -368,9 +372,10 @@ def test_server_chat_model_unfit_reason_rejects_embedding_only_si_model(monkeypa
                 "id": "nomic-embed-text:latest",
                 "object": "model",
                 "owned_by": "sonder-inference",
-                "capabilities": ["embedding"],
                 "sonder": {
                     "backend": "llamacpp",
+                    "default": False,
+                    "synthetic": False,
                     "profile": {
                         "name": "nomic-embed-text:latest",
                         "backend": "llamacpp",
@@ -386,6 +391,8 @@ def test_server_chat_model_unfit_reason_rejects_embedding_only_si_model(monkeypa
                 "owned_by": "sonder-inference",
                 "sonder": {
                     "backend": "llamacpp",
+                    "default": True,
+                    "synthetic": False,
                     "runtime": {"context": {"fitted_ctx": 32768}},
                     "profile": {
                         "name": "qwen3.8:27b",
@@ -403,6 +410,8 @@ def test_server_chat_model_unfit_reason_rejects_embedding_only_si_model(monkeypa
                 "owned_by": "sonder-inference",
                 "sonder": {
                     "backend": "llamacpp",
+                    "default": False,
+                    "synthetic": False,
                     "runtime": {"context": {"fitted_ctx": 512}},
                     "profile": {
                         "name": "tiny-model:latest",
@@ -419,8 +428,9 @@ def test_server_chat_model_unfit_reason_rejects_embedding_only_si_model(monkeypa
     srv._CHAT_FITNESS._cache.clear()
     try:
         assert srv.chat_model_unfit_reason("qwen3.8:27b") == ""
-        reason = srv.chat_model_unfit_reason("nomic-embed-text:latest")
-        assert reason and "embedding" in reason.lower()
+        # Real SI /v1/models emits no embedding-only capability marker (server_endpoints.cpp:511-512),
+        # so chat_model_fitness admits the row when no negative evidence is present.
+        assert srv.chat_model_unfit_reason("nomic-embed-text:latest") == ""
         tiny_reason = srv.chat_model_unfit_reason("tiny-model:latest")
         assert tiny_reason and "minimum" in tiny_reason.lower()
     finally:

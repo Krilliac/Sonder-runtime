@@ -126,6 +126,12 @@ def reset_typed_endpoint() -> None:
     configure_typed_endpoint(None)
 
 
+def configured_typed_endpoint() -> str | None:
+    """Return the process-bound typed endpoint, or None when unset."""
+    with _configuration_lock:
+        return _configured_endpoint
+
+
 def configure_typed_ca_bundle(value: str | None) -> None:
     """Bind an optional absolute CA bundle for verified HTTPS Ollama calls."""
     global _configured_ca_bundle

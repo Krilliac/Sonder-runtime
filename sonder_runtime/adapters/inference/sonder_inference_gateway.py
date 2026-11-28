@@ -1319,12 +1319,14 @@ def si_auth_headers(
 
     try:
         target = _ollama_policy.normalize(raw_target).rstrip("/")
-        if env is None:
-            configured = _ollama_endpoint.normalize().rstrip("/")
+        typed = _ollama_endpoint.configured_typed_endpoint() if env is None else None
+        if typed is not None:
+            configured = _ollama_policy.normalize(typed).rstrip("/")
         else:
-            base_url = str(env.get(ENV_BASE_URL, "") or "").strip()
+            source = os.environ if env is None else env
+            base_url = str(source.get(ENV_BASE_URL, "") or "").strip()
             if not base_url:
-                ready_file = str(env.get(ENV_READY_FILE, "") or "").strip()
+                ready_file = str(source.get(ENV_READY_FILE, "") or "").strip()
                 base_url = read_ready_file(ready_file) if ready_file else DEFAULT_BASE_URL
             configured = _ollama_policy.normalize(base_url).rstrip("/")
     except (ValueError, SonderError):

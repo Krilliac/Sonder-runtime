@@ -681,14 +681,10 @@ class RuntimeLifecycle:
                 si_origin = "http://" + si_origin
             url = si_origin + "/v1/sonder/health"
             from sonder_runtime.adapters.inference.sonder_inference_gateway import (
-                resolve_api_key,
+                si_auth_headers,
             )
-            headers: dict[str, str] = {}
-            api_key = resolve_api_key()
-            if api_key:
-                headers["Authorization"] = "Bearer " + api_key
             with ollama_endpoint.open_url(
-                urllib.request.Request(url, headers=headers, method="GET"),
+                urllib.request.Request(url, headers=si_auth_headers(si_origin), method="GET"),
                 timeout=timeout,
             ) as response:
                 raw = response.read(262_145)
@@ -1385,6 +1381,21 @@ def get() -> RuntimeLifecycle:
                 _instance = RuntimeLifecycle()
             else:
                 startup_timeout = config.inference.startup_timeout_seconds
+                ollama_startup = config.ollama.startup_timeout_seconds
+                if startup_timeout == 60 and ollama_startup != 60:
+                    logging.getLogger(__name__).warning(
+                        "Using deprecated [ollama].startup_timeout_seconds=%d; "
+                        "set [inference].startup_timeout_seconds instead",
+                        ollama_startup,
+                    )
+                    startup_timeout = ollama_startup
+                elif ollama_startup != 60 and ollama_startup != startup_timeout:
+                    logging.getLogger(__name__).warning(
+                        "Ignoring deprecated [ollama].startup_timeout_seconds=%d; "
+                        "using [inference].startup_timeout_seconds=%d",
+                        ollama_startup,
+                        startup_timeout,
+                    )
                 _instance = RuntimeLifecycle(
                     deployment_status=DeploymentStatus(
                         profile=config.deployment.profile,

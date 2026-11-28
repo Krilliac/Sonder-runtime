@@ -534,8 +534,9 @@ def build_application(
             raise TypeError("config must be a SonderConfig when provided")
         from ..platform.config import validate_deployment
         validate_deployment(config)
+        effective_allow_remote = bool(config.inference.allow_remote or config.ollama.allow_remote)
         from ..platform.config import validate_membership_config
-        validate_membership_config(config.membership, config.secrets, allow_remote=config.ollama.allow_remote)
+        validate_membership_config(config.membership, config.secrets, allow_remote=effective_allow_remote)
         from ..platform.child_storage_config import child_storage_errors
         from ..platform.config import ConfigError
         child_errors = child_storage_errors(config)
@@ -564,11 +565,11 @@ def build_application(
             config.inference.ca_bundle or config.ollama.ca_bundle
         )
         from ..adapters.inference import ollama_pool
-        logger.info(f"ollama pool configured, workers={len(config.ollama.workers)}, allow_remote={config.ollama.allow_remote}")
-        logger.debug(f"configuring ollama pool: workers={len(config.ollama.workers)}, allow_remote={config.ollama.allow_remote}")
+        logger.info(f"ollama pool configured, workers={len(config.ollama.workers)}, allow_remote={effective_allow_remote}")
+        logger.debug(f"configuring ollama pool: workers={len(config.ollama.workers)}, allow_remote={effective_allow_remote}")
         ollama_pool.configure_typed_workers(
             config.ollama.workers,
-            allow_remote=bool(config.inference.allow_remote or config.ollama.allow_remote),
+            allow_remote=effective_allow_remote,
             trusted_origins=config.ollama.trusted_origins,
             failure_threshold=config.ollama.worker_failure_threshold,
             cooldown_seconds=config.ollama.worker_cooldown_seconds,

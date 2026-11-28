@@ -1842,7 +1842,7 @@ def _model_context_metadata(model):
 
 def _chat_fitness_probe(model):
     from sonder_runtime.adapters.inference.model_context_probe import extract_chat_fitness_payload
-    return extract_chat_fitness_payload(_get("/v1/models"), model)
+    return extract_chat_fitness_payload(_discovery_tags(True), model)
 
 
 _CHAT_FITNESS = _chat_model_fitness.ChatModelFitness(

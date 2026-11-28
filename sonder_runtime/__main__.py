@@ -1308,7 +1308,7 @@ def cmd_serve(args) -> int:
     from sonder_runtime.adapters.inference import ollama_pool
     ollama_pool.configure_typed_workers(
         config.ollama.workers,
-        allow_remote=config.ollama.allow_remote,
+        allow_remote=bool(config.inference.allow_remote or config.ollama.allow_remote),
         trusted_origins=config.ollama.trusted_origins,
         failure_threshold=config.ollama.worker_failure_threshold,
         cooldown_seconds=config.ollama.worker_cooldown_seconds,
@@ -1612,7 +1612,7 @@ def cmd_mcp(args) -> int:
         from sonder_runtime.adapters.inference import ollama_pool
         ollama_pool.configure_typed_workers(
             config.ollama.workers,
-            allow_remote=config.ollama.allow_remote,
+            allow_remote=bool(config.inference.allow_remote or config.ollama.allow_remote),
             trusted_origins=config.ollama.trusted_origins,
             failure_threshold=config.ollama.worker_failure_threshold,
             cooldown_seconds=config.ollama.worker_cooldown_seconds,
@@ -1934,9 +1934,14 @@ def _add_mobility_arguments(parser):
 
 
 def cmd_capabilities(args) -> int:
+    from sonder_runtime.adapters.inference import ollama_endpoint
     from sonder_runtime.adapters.inference.capability_refresh import refresh_capabilities
 
     config = _load_config(args)
+    ollama_endpoint.configure_typed_endpoint(config.inference.url)
+    ollama_endpoint.configure_typed_ca_bundle(
+        config.inference.ca_bundle or config.ollama.ca_bundle
+    )
     try:
         result = refresh_capabilities(
             origin=config.inference.url, home=config.state.home or None,
@@ -1952,10 +1957,15 @@ def cmd_capabilities(args) -> int:
 
 
 def cmd_models(args) -> int:
+    from sonder_runtime.adapters.inference import ollama_endpoint
     from sonder_runtime.bootstrap.cloud_models_cli import run_cloud_refresh
 
     config = _load_config(args)
     _configure_typed_home(config)
+    ollama_endpoint.configure_typed_endpoint(config.inference.url)
+    ollama_endpoint.configure_typed_ca_bundle(
+        config.inference.ca_bundle or config.ollama.ca_bundle
+    )
     return run_cloud_refresh(args, origin=config.inference.url, home=config.state.home or None)
 
 

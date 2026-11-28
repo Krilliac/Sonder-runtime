@@ -2090,7 +2090,11 @@ def _rpc_sharding_errors(env: dict[str, str]) -> list[str]:
 def _validate(config: SonderConfig, errors: list[str]) -> None:
     errors.extend(_context_root_errors(config))
     try:
-        validate_membership_config(config.membership, config.secrets, allow_remote=config.ollama.allow_remote)
+        validate_membership_config(
+            config.membership,
+            config.secrets,
+            allow_remote=bool(config.inference.allow_remote or config.ollama.allow_remote),
+        )
     except ValueError as error:
         errors.append(str(error))
     errors.extend(child_storage_errors(config))

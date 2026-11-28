@@ -112,13 +112,9 @@ def _check_inference_origin(
     host = urlsplit(origin).hostname or ""
     try:
         from sonder_runtime.adapters.inference.sonder_inference_gateway import (
-            resolve_api_key,
+            si_auth_headers,
         )
-        headers: dict[str, str] = {}
-        api_key = resolve_api_key()
-        if api_key:
-            headers["Authorization"] = "Bearer " + api_key
-        request = urllib.request.Request(url, headers=headers, method="GET")
+        request = urllib.request.Request(url, headers=si_auth_headers(origin), method="GET")
         with ollama_endpoint.open_url(
             request, timeout=timeout, allow_remote=allow_remote is True,
         ) as response:

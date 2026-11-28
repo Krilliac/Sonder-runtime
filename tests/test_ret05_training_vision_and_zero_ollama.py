@@ -832,26 +832,30 @@ def test_primary_si_bearer_never_sent_to_pool_workers(tmp_path, monkeypatch):
             else:
                 assert "Authorization" not in hdrs, f"leaked primary SI key to worker {url}"
 
-        # 3. server._post send(origin): primary gets bearer; pinned loopback/remote workers get NONE.
+        # 3. server._post send(origin): primary gets bearer; loopback/remote workers get NONE.
+        # Pin all three origins deterministically (unpinned pool tie-breaking depends on probe latency),
+        # then also exercise one unpinned pool-routed _post asserting strict origin gating.
         pool.refresh_capabilities()
         seen.clear()
         monkeypatch.setattr(srv, "OLLAMA_POOL", pool)
         monkeypatch.setattr(srv, "BASE", primary)
         monkeypatch.setattr(srv, "dispatch_provider", lambda provider, path, body, transport: transport())
-        srv._post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "hi"}]})
-        for worker in (loopback_worker, remote_worker):
-            token = srv._PINNED_OLLAMA_ORIGIN.set(worker)
+        for target_origin in (primary, loopback_worker, remote_worker):
+            token = srv._PINNED_OLLAMA_ORIGIN.set(target_origin)
             try:
                 srv._post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "hi"}]})
             finally:
                 srv._PINNED_OLLAMA_ORIGIN.reset(token)
+        srv._post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "hi"}]})
         post_calls = [(u, h) for u, h in seen if u.endswith("/v1/chat/completions")]
-        assert len(post_calls) == 3
+        assert len(post_calls) == 4
         assert post_calls[0][0].startswith(primary + "/") and post_calls[0][1].get("Authorization") == "Bearer primary-si-secret-token"
         assert post_calls[1][0].startswith(loopback_worker + "/") and "Authorization" not in post_calls[1][1]
         assert post_calls[2][0].startswith(remote_worker + "/") and "Authorization" not in post_calls[2][1]
         for url, hdrs in seen:
-            if not url.startswith(primary + "/"):
+            if url.startswith(primary + "/"):
+                assert hdrs.get("Authorization") == "Bearer primary-si-secret-token"
+            else:
                 assert "Authorization" not in hdrs, f"_post path leaked primary SI key to worker {url}"
 
         # 4. sonder_doctor._check_ollama_workers: loopback & remote workers get NONE.
@@ -873,7 +877,8 @@ def test_primary_si_bearer_never_sent_to_pool_workers(tmp_path, monkeypatch):
         assert OllamaCloudMetadata(loopback_worker, opener=fake_open).tags() == ()
         assert len(seen) == 1 and "Authorization" not in seen[0][1]
 
-        # 6. si_auth_headers rejects userinfo, path, query, fragment, and mismatched port/host.
+        # 6. si_auth_headers rejects userinfo, path, query, fragment, and mismatched port/host,
+        # and reads SONDER_INFERENCE_READY_FILE consistently when env=None or env is passed.
         from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
 
         assert si_auth_headers(primary) == {"Authorization": "Bearer primary-si-secret-token"}
@@ -890,6 +895,18 @@ def test_primary_si_bearer_never_sent_to_pool_workers(tmp_path, monkeypatch):
             "",
         ):
             assert si_auth_headers(hostile) == {}, f"unexpected auth header for {hostile!r}"
+
+        ready_file = tmp_path / "si_ready.json"
+        ready_file.write_text(json.dumps({"url": "http://127.0.0.1:11439"}), encoding="utf-8")
+        ollama_endpoint.configure_typed_endpoint(None)
+        monkeypatch.delenv("SONDER_INFERENCE_BASE_URL", raising=False)
+        monkeypatch.setenv("SONDER_INFERENCE_READY_FILE", str(ready_file))
+        assert si_auth_headers("http://127.0.0.1:11439") == {"Authorization": "Bearer primary-si-secret-token"}
+        assert si_auth_headers(primary) == {}
+        assert si_auth_headers(
+            "http://127.0.0.1:11439",
+            env={"SONDER_INFERENCE_READY_FILE": str(ready_file), "SONDER_INFERENCE_API_KEY_FILE": str(key_file)},
+        ) == {"Authorization": "Bearer primary-si-secret-token"}
     finally:
         ollama_endpoint.configure_typed_endpoint(None)
 
@@ -1024,3 +1041,119 @@ def test_ollama_conformance_and_headless_use_origin_gated_api_key_file_and_local
         assert seen[1][1].get("Authorization") == "Bearer r3-file-secret-key"
     finally:
         ollama_endpoint.configure_typed_endpoint(None)
+
+
+def test_cmd_serve_and_cmd_mcp_accept_runbook_inference_allow_remote_with_https_worker(tmp_path, monkeypatch):
+    """Round 5 (R2): runbook TOML ([inference].allow_remote=true + https [ollama].workers) succeeds through cmd_serve and cmd_mcp configure_typed_workers."""
+    from sonder_runtime import __main__ as cli_main
+    from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+    from sonder_runtime.adapters.persistence.sqlite import bridge_migration
+    from sonder_runtime.bootstrap import app as bootstrap_app
+    from sonder_runtime.domain.common.errors import MigrationRequired
+    from sonder_runtime.platform import config as sonder_config
+
+    runbook_toml = tmp_path / "runbook.toml"
+    runbook_toml.write_text(
+        "[state]\n"
+        f'home = "{(tmp_path / "home").as_posix()}"\n'
+        "[inference]\n"
+        "allow_remote = true\n"
+        "[ollama]\n"
+        'workers = ["https://192.0.2.50:443"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("SONDER_ALLOW_REMOTE_INFERENCE", raising=False)
+    monkeypatch.delenv("SONDER_ALLOW_REMOTE_OLLAMA", raising=False)
+    monkeypatch.delenv("SONDER_OLLAMA_WORKERS", raising=False)
+
+    cfg = sonder_config.load_config(runbook_toml, env={})
+    assert cfg.inference.allow_remote is True
+    assert cfg.ollama.allow_remote is False
+    assert cfg.ollama.workers == ("https://192.0.2.50:443",)
+
+    monkeypatch.setattr(cli_main, "_load_config", lambda _args: cfg)
+    monkeypatch.setattr(bridge_migration, "stamp_fresh_home", lambda _home: None)
+
+    def _stop_after_serve_workers(_home):
+        raise MigrationRequired("stop-after-worker-config")
+
+    monkeypatch.setattr(bridge_migration, "require_epoch_2", _stop_after_serve_workers)
+
+    serve_args = SimpleNamespace(
+        config=str(runbook_toml),
+        secrets=None,
+        set=None,
+        skip_preflight=True,
+        skip_ollama=True,
+        json=False,
+    )
+    try:
+        rc = cli_main.cmd_serve(serve_args)
+        assert rc == 1  # reached require_epoch_2 AFTER configure_typed_workers succeeded
+        assert ollama_pool._configured_allow_remote is True
+        assert ollama_pool._configured_workers == ("https://192.0.2.50:443",)
+    finally:
+        ollama_pool.reset_typed_workers()
+        ollama_endpoint.reset_typed_endpoint()
+
+    # Also drive cmd_mcp legacy configuration callback through configure_typed_workers.
+    class _StopAfterMcpWorkers(RuntimeError):
+        pass
+
+    monkeypatch.setattr(cli_main, "_stamp_home_before_stores", lambda *, gate=False: True)
+    monkeypatch.setattr(
+        bootstrap_app,
+        "default_app",
+        lambda **_kw: (_ for _ in ()).throw(_StopAfterMcpWorkers()),
+    )
+    monkeypatch.setattr(cli_main.McpCommand, "execute", lambda self, cb: cb())
+    mcp_args = SimpleNamespace(
+        config=str(runbook_toml),
+        secrets=None,
+        set=None,
+        native=False,
+        legacy=True,
+        progressive_tools=False,
+        json=False,
+    )
+    try:
+        try:
+            cli_main.cmd_mcp(mcp_args)
+        except _StopAfterMcpWorkers:
+            pass
+        else:
+            raise AssertionError("expected _StopAfterMcpWorkers after configure_typed_workers")
+        assert ollama_pool._configured_allow_remote is True
+        assert ollama_pool._configured_workers == ("https://192.0.2.50:443",)
+    finally:
+        ollama_pool.reset_typed_workers()
+        ollama_endpoint.reset_typed_endpoint()
+
+    # cmd_models also binds ollama_endpoint to a TOML-only non-default [inference].url so si_auth_headers attaches the key.
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import si_auth_headers
+    from sonder_runtime.bootstrap import cloud_models_cli
+
+    custom_toml = tmp_path / "custom_inf.toml"
+    custom_toml.write_text(
+        "[state]\n"
+        f'home = "{(tmp_path / "models_home").as_posix()}"\n'
+        "[inference]\n"
+        'url = "http://127.0.0.1:11441"\n',
+        encoding="utf-8",
+    )
+    custom_cfg = sonder_config.load_config(custom_toml, env={})
+    monkeypatch.delenv("SONDER_INFERENCE_BASE_URL", raising=False)
+    monkeypatch.setenv("SONDER_INFERENCE_API_KEY", "toml-only-si-key")
+    monkeypatch.setattr(cli_main, "_load_config", lambda _args: custom_cfg)
+    captured_auth: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        cloud_models_cli,
+        "run_cloud_refresh",
+        lambda _args, *, origin, home=None: captured_auth.append(si_auth_headers(origin)) or 0,
+    )
+    try:
+        rc_models = cli_main.cmd_models(SimpleNamespace(config=str(custom_toml), secrets=None, set=None, json=True))
+        assert rc_models == 0
+        assert captured_auth == [{"Authorization": "Bearer toml-only-si-key"}]
+    finally:
+        ollama_endpoint.reset_typed_endpoint()
