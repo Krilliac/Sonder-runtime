@@ -91,6 +91,7 @@ from ...domain.inference_profiles import (
     CATALOG_ERROR,
     CATALOG_OK,
     LaunchProfileCatalog,
+    parse_health_gpus,
     parse_launch_profile_models,
 )
 from ...domain.model_capabilities import (
@@ -99,6 +100,10 @@ from ...domain.model_capabilities import (
     GATEWAY_CAPABILITY_FIXED_ENDPOINT,
 )
 from ...domain.routing.backend_conformance import BackendIdentity
+from ...domain.routing.node_health_gate import (
+    NodeHealthBaseline,
+    NodeHealthGate,
+)
 from ...domain.routing.prefix_locality import (
     DEFAULT_MAX_LOCALITY_ENTRIES,
     LocalityMatch,
@@ -188,6 +193,19 @@ ENV_FALLBACK = "SONDER_INFERENCE_FALLBACK"
 ENV_PRIVATE_WORKERS = "SONDER_INFERENCE_PRIVATE_WORKERS"
 ENV_MAX_INFLIGHT = "SONDER_INFERENCE_MAX_INFLIGHT"
 ENV_NATIVE_TOOLS = "SONDER_INFERENCE_NATIVE_TOOLS"
+ENV_NODE_HEALTH_BASELINES = "SONDER_NODE_HEALTH_BASELINES"
+_NODE_BASELINE_KEYS = frozenset({
+    "spec_bandwidth_gbps",
+    "active_bytes_per_token",
+    "baseline_tg_tps",
+    "baseline_pp_tps",
+    "expected_pcie_gen",
+    "expected_pcie_width",
+    "expect_rebar",
+    "max_baseline_context_tokens",
+})
+_MAX_NODE_BASELINES_BYTES = 32_768
+_MAX_NODE_BASELINES_ENTRIES = 64
 LATENCY_EWMA_ALPHA = 0.3
 MAX_PRIVATE_WORKERS = 8
 MAX_WORKER_INFLIGHT = 16
@@ -1241,6 +1259,75 @@ def _parse_max_inflight(source: Mapping[str, str]) -> int:
     return value
 
 
+def parse_node_health_baselines(raw: str) -> dict[str, NodeHealthBaseline]:
+    """Parse ``SONDER_NODE_HEALTH_BASELINES`` JSON mapping endpoint -> baseline spec."""
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    if len(text.encode("utf-8")) > _MAX_NODE_BASELINES_BYTES:
+        raise InvalidInput("%s exceeds %d bytes" % (ENV_NODE_HEALTH_BASELINES, _MAX_NODE_BASELINES_BYTES))
+    try:
+        parsed = json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        raise InvalidInput("%s must be a JSON object: %s" % (ENV_NODE_HEALTH_BASELINES, exc)) from None
+    if not isinstance(parsed, dict):
+        raise InvalidInput(
+            "%s must be a JSON object mapping endpoint URLs to baseline objects" % ENV_NODE_HEALTH_BASELINES
+        )
+    if len(parsed) > _MAX_NODE_BASELINES_ENTRIES:
+        raise InvalidInput("%s accepts at most %d endpoints" % (ENV_NODE_HEALTH_BASELINES, _MAX_NODE_BASELINES_ENTRIES))
+    baselines: dict[str, NodeHealthBaseline] = {}
+    for raw_ep, entry in parsed.items():
+        endpoint = str(raw_ep or "").strip().rstrip("/")
+        if not endpoint or not isinstance(entry, dict):
+            raise InvalidInput("%s entries must map non-empty endpoint keys to objects" % ENV_NODE_HEALTH_BASELINES)
+        unknown = sorted(set(entry) - _NODE_BASELINE_KEYS)
+        if unknown:
+            raise InvalidInput(
+                "%s[%r] has unknown field(s): %s" % (ENV_NODE_HEALTH_BASELINES, endpoint, ", ".join(unknown))
+            )
+        try:
+            baselines[endpoint] = NodeHealthBaseline(**entry)
+        except (TypeError, ValueError) as exc:
+            raise InvalidInput("%s[%r] invalid: %s" % (ENV_NODE_HEALTH_BASELINES, endpoint, exc)) from None
+    return baselines
+
+
+def _extract_runtime_gpu_memory_signals(
+    document: Mapping[str, object] | None,
+) -> tuple[bool, bool]:
+    """Read SI's authoritative ``backends[].runtime.gpu_memory`` spill and eviction flags.
+
+    Matches Sonder-Inference ``src/backends/backend.cpp`` ``to_json(GpuMemoryStatus)``:
+    trusts SI's ``spilled`` boolean and ``residency.vram_evicted`` boolean directly
+    without re-deriving spill from raw ``shared_bytes`` (SI deliberately reports
+    ``spilled: false`` in UMA mode, hybrid dGPU+iGPU pools, and CPU-only runs even
+    when raw ``shared_bytes`` is large).
+    """
+    if not isinstance(document, Mapping):
+        return False, False
+    backends = document.get("backends")
+    if not isinstance(backends, list):
+        return False, False
+    spilled = False
+    vram_evicted = False
+    for backend in backends:
+        if not isinstance(backend, Mapping):
+            continue
+        runtime = backend.get("runtime")
+        if not isinstance(runtime, Mapping):
+            continue
+        gpu_mem = runtime.get("gpu_memory")
+        if not isinstance(gpu_mem, Mapping):
+            continue
+        if gpu_mem.get("spilled") is True:
+            spilled = True
+        residency = gpu_mem.get("residency")
+        if isinstance(residency, Mapping) and residency.get("vram_evicted") is True:
+            vram_evicted = True
+    return spilled, vram_evicted
+
+
 def config_from_env(env: Mapping[str, str] | None = None) -> SonderInferenceConfig:
     """Resolve settings lazily from the environment (never at import)."""
     source = os.environ if env is None else env
@@ -1479,6 +1566,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         residency_probe: ResidencyProbe | None = None,
         is_model_resident: ResidencyProbe | None = None,
         locality_max_entries: int = DEFAULT_MAX_LOCALITY_ENTRIES,
+        node_health_gate: NodeHealthGate | None = None,
     ) -> None:
         super().__init__(
             None,
@@ -1532,6 +1620,60 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         self._request_ewma_ms: dict[str, float] = {}
         self._locality_table = PrefixLocalityTable(max_entries=locality_max_entries)
         self._last_routing_decision: dict[str, object] | None = None
+        self._observed_health_snaps: dict[str, HealthSnapshot] = {}
+        if node_health_gate is not None:
+            self._node_health_gate = node_health_gate
+        else:
+            env_source = os.environ if env is None else env
+            raw_baselines = str(env_source.get(ENV_NODE_HEALTH_BASELINES, "") or "").strip()
+            parsed_baselines = None
+            if raw_baselines:
+                try:
+                    parsed_baselines = parse_node_health_baselines(raw_baselines)
+                except InvalidInput as exc:
+                    logger.warning(
+                        "ignoring malformed %s: %s",
+                        ENV_NODE_HEALTH_BASELINES,
+                        _bounded(exc),
+                    )
+            self._node_health_gate = NodeHealthGate(baselines=parsed_baselines)
+
+    @property
+    def node_health_gate(self) -> NodeHealthGate:
+        return self._node_health_gate
+
+    def node_health_status(self) -> dict[str, dict[str, object]]:
+        """Content-free per-endpoint health gate status (NAT-08 + pp/tg baselines)."""
+        return self._node_health_gate.status(now=self._monotonic())
+
+    def _observe_health_device_telemetry(
+        self,
+        endpoint_key: str,
+        snapshot: HealthSnapshot | None,
+        *,
+        now: float,
+    ) -> None:
+        if snapshot is None or snapshot.document is None:
+            return
+        with self._lock:
+            if self._observed_health_snaps.get(endpoint_key) is snapshot:
+                return
+            self._observed_health_snaps[endpoint_key] = snapshot
+        gpus = parse_health_gpus(snapshot.document)
+        host_spilled, vram_evicted = _extract_runtime_gpu_memory_signals(snapshot.document)
+        if (
+            gpus
+            or host_spilled
+            or vram_evicted
+            or self._node_health_gate.has_device_observation(endpoint_key)
+        ):
+            self._node_health_gate.observe_device_telemetry(
+                endpoint_key,
+                gpus,
+                now=now,
+                host_spilled=host_spilled,
+                vram_evicted=vram_evicted,
+            )
 
     def _probe_model_residency(
         self, model: str, cfg: OpenAICompatibleConfig,
@@ -1806,6 +1948,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 if not snapshot.overloaded:
                     self._health_cache = snapshot
                     self._health_probe_monotonic = now
+            if snapshot.document is not None:
+                self._observe_health_device_telemetry(settings.base_url, snapshot, now=now)
         return snapshot
 
     def _probe_health(self, settings: SonderInferenceConfig, timeout: float) -> HealthSnapshot:
@@ -2724,6 +2868,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 worker_snap = self._worker_snapshot(gateway, endpoint, snapshot, model)
                 if worker_snap is None:
                     continue
+                self._observe_health_device_telemetry(key, worker_snap, now=self._monotonic())
                 if not predicate(worker_snap.document):
                     continue
                 usable.append((key, gateway, endpoint))
@@ -2737,6 +2882,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                     raise
                 except Exception:  # noqa: BLE001 - the primary path reports it
                     snapshot = None
+            if snapshot is not None and snapshot.document is not None:
+                self._observe_health_device_telemetry(key, snapshot, now=self._monotonic())
             if snapshot is not None and snapshot.state != "ready" and not snapshot.busy:
                 continue
             if not self._serves(snapshot, model):
@@ -3000,7 +3147,15 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 open_ = [item for item in usable if item[0] not in excluded]
                 if not open_:
                     return None
-                ready = [item for item in open_
+                now = self._monotonic()
+                routable_keys, degraded_skipped, degraded_fallback = (
+                    self._node_health_gate.filter_routable_endpoints(
+                        [item[0] for item in open_], now=now,
+                    )
+                )
+                routable_set = set(routable_keys)
+                filtered_open = [item for item in open_ if item[0] in routable_set]
+                ready = [item for item in filtered_open
                          if self._inflight.get(item[0], 0) < item[2].max_inflight]
                 if not ready:
                     self._wait_for_slot(context)
@@ -3010,7 +3165,6 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                 start = self._cursor % len(ready)
                 self._cursor += 1
                 rotated = ready[start:] + ready[:start]
-                now = self._monotonic()
                 matches: dict[str, LocalityMatch] = {}
                 if hints is not None and hints.prefix_key:
                     for ep_key, _gw, _ep in rotated:
@@ -3072,6 +3226,8 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                     "expected_decode_work_ms": chosen_est.expected_decode_work_ms,
                     "locality_bonus_ms": chosen_est.locality_bonus_ms,
                     "total_cost_ms": chosen_est.total_cost_ms,
+                    "degraded_skipped": degraded_skipped,
+                    "degraded_fallback": degraded_fallback,
                 }
                 self._last_routing_decision = decision
                 self._call.routing_decision = decision
@@ -3116,6 +3272,22 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
                         LATENCY_EWMA_ALPHA * prompt_sample + (1 - LATENCY_EWMA_ALPHA) * prev_prompt
                     )
                 )
+        self._observe_node_health_inference(key, response)
+
+    def _observe_node_health_inference(self, key: str, response: ModelResponse) -> None:
+        telemetry = getattr(response, "telemetry", None)
+        if telemetry is None:
+            return
+        self._node_health_gate.observe_inference(
+            key,
+            now=self._monotonic(),
+            decode_tps=getattr(telemetry, "output_tokens_per_second", None),
+            prompt_tps=getattr(telemetry, "prompt_tokens_per_second", None),
+            output_tokens=getattr(telemetry, "output_tokens", None),
+            prompt_tokens=getattr(telemetry, "prompt_tokens", None),
+            prompt_uncached_tokens=getattr(telemetry, "prompt_uncached_tokens", None),
+            load_state=getattr(telemetry, "load_state", None),
+        )
 
     def _observe_prefix_locality(
         self,
@@ -3166,6 +3338,7 @@ class SonderInferenceGateway(OpenAICompatibleGateway):
         if settings.private_worker or not settings.workers:
             with self._local_slot(settings, context):
                 response = self._generate_here(request, context)
+            self._observe_node_health_inference(settings.base_url, response)
             self._observe_prefix_locality(settings.base_url, hints, response)
             return response
         self._call.response_meta = {}
@@ -3872,6 +4045,7 @@ __all__ = [
     "EMBEDDING_MARKERS",
     "ENV_EMBED_MODEL",
     "ENV_NATIVE_TOOLS",
+    "ENV_NODE_HEALTH_BASELINES",
     "ENV_PRIVATE_WORKERS",
     "ENV_RERANK_MODEL",
     "HealthSnapshot",
@@ -3907,6 +4081,7 @@ __all__ = [
     "logprobs_supported",
     "native_tools_supported",
     "normalize_base_url",
+    "parse_node_health_baselines",
     "parse_private_workers",
     "read_ready_file",
     "rerank_supported",

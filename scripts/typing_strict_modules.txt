@@ -103,6 +103,7 @@ sonder_runtime/adapters/inference/overflow_availability.py
 sonder_runtime/adapters/inference/prefix_cache.py
 sonder_runtime/adapters/inference/prewarm_gate.py
 sonder_runtime/adapters/inference/rpc_cluster.py
+sonder_runtime/adapters/inference/rpc_split_policy.py
 sonder_runtime/adapters/inference/runner_footprint.py
 sonder_runtime/adapters/inference/served_tier_models.py
 sonder_runtime/adapters/inference/sonder_inference_probe.py
@@ -774,7 +775,9 @@ sonder_runtime/domain/routing/capability_profiles.py
 sonder_runtime/domain/routing/execution_mode_router.py
 sonder_runtime/domain/routing/fleet_router.py
 sonder_runtime/domain/routing/model_names.py
+sonder_runtime/domain/routing/node_health_gate.py
 sonder_runtime/domain/routing/prefix_locality.py
+sonder_runtime/domain/routing/rpc_split_policy.py
 sonder_runtime/domain/routing/semantic_tier.py
 sonder_runtime/domain/routing/thinking_ensemble.py
 sonder_runtime/domain/runtime_identity.py

@@ -38,18 +38,43 @@ Configuration reference:
 The same rules are enforced by the runtime
 (`sonder_runtime/platform/rpc_sharding_config.py`) when it loads configuration.
 
+## Cross-host split policy (FED-05, fail closed)
+
+`start-rpc-sharded.ps1 -Action Start` enforces the same cross-host split
+invariants as `sonder_runtime/domain/routing/rpc_split_policy.py`:
+
+- **Layer split only** (`-SplitMode layer`, `--split-mode layer`): `tensor`
+  and `row` splits over RPC are refused.
+- **Local output head / logits**: explicit `-Devices` lists must place `RPC*`
+  devices before local GPUs, and explicit `-TensorSplit` weights must end with
+  a strictly positive local weight. Pass `-LogVerbosity 4` (default) and verify
+  actual output-layer placement in the `--log-file` with
+  `verify_split_load_log()` (a tiny trailing weight can still place the output
+  head on an RPC peer under llama.cpp `upper_bound` splitting).
+- **Speculative decoding enabled** (`-SpecType`, default `ngram-mod`,
+  `--spec-type`): `none`/`off` is refused so network round trips are amortised.
+- **Dedicated private link + measured RTT**: `-RpcLinkCidr` /
+  `SONDER_RPC_LINK_CIDR` is **required** on `Start` and must be a private or
+  link-local IPv4 subnet narrower than or equal to `/24` (recommended `/30`,
+  e.g. `10.77.0.0/30`), containing every configured peer. Before launching
+  `llama-server`, each peer's TCP connect RTT is sampled (`-RttSamples`,
+  default `5`, range `1..20`) and refused if median RTT exceeds `-MaxRttMs` /
+  `SONDER_RPC_MAX_RTT_MS` (default `2.0` ms, allowed `(0, 100]`).
+
 ## Binaries
 
-Install the same official `ggml-org/llama.cpp` release on every machine (the
-`ggml-rpc` protocol must match) into a dedicated folder:
+Install the same official `ggml-org/llama.cpp` release **`v1.0.0` or newer**
+(verified for `--split-mode layer` and `--spec-type ngram-mod`; the `ggml-rpc`
+protocol must match on every machine) into a dedicated folder:
 `%LOCALAPPDATA%\sonder\llama-rpc` by default, or the folder named by
 `SONDER_RPC_INSTALL_DIR` / `-InstallDir`. Pick the build that matches each
 machine's GPU (for example CUDA on the main machine, Vulkan on the worker).
 
 ## Quick start
 
-Replace `<worker-ip>` and `<main-ip>` with the two machines' addresses on the
-private link (both must be private or link-local IPv4 addresses, as above).
+Replace `<worker-ip>`, `<main-ip>`, and `<link-cidr>` with the two machines'
+addresses and dedicated private subnet (e.g. `10.77.0.0/30`; both addresses
+must be private or link-local IPv4 literals inside that subnet).
 
 On the worker (once, as administrator, then whenever you start it):
 
@@ -63,6 +88,7 @@ On the main machine:
 
 ```powershell
 $env:SONDER_RPC_PEERS = '<worker-ip>'
+$env:SONDER_RPC_LINK_CIDR = '<link-cidr>'
 powershell -NoProfile -File .\start-rpc-sharded.ps1 -Action Start `
   -ModelPath '<path-to-model.gguf>' -TensorSplit '1,1' -CtxSize 16384
 powershell -NoProfile -File .\start-rpc-sharded.ps1 -Action Env

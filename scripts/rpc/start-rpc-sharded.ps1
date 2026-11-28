@@ -36,6 +36,11 @@ param(
     [string]$RpcPort = $env:SONDER_RPC_PORT,
     [string]$RpcLinkCidr = $env:SONDER_RPC_LINK_CIDR,
     [string]$RpcProtoMajor = $env:SONDER_RPC_PROTO_MAJOR,
+    [string]$SplitMode = 'layer',
+    [string]$SpecType = 'ngram-mod',
+    [string[]]$Devices = @(),
+    [string]$MaxRttMs = $env:SONDER_RPC_MAX_RTT_MS,
+    [int]$RttSamples = 5,
     [int]$CtxSize = 8192,
     [int]$GpuLayers = 999,
     [ValidatePattern('^([0-9.]+(,[0-9.]+)*)?$')]
@@ -223,10 +228,16 @@ switch ($Action) {
             throw "llama-server.exe not found under '$InstallDir'."
         }
 
+        $splitPolicy = Assert-RpcSplitPolicy -SplitMode $SplitMode -SpecType $SpecType -TensorSplit $TensorSplit -PeerCount $validatedPeers.Count -Devices $Devices
+        $dedicatedLink = Assert-RpcDedicatedLink -Link $rpcLink -PeerHosts @($validatedPeers | ForEach-Object { $_.Host })
+        $maxRttMsValue = ConvertTo-RpcMaxRttMs -Value $MaxRttMs
+
+        $peerRtts = @()
         foreach ($peer in $validatedPeers) {
             if (-not (Test-RpcTcpReachable -TargetHost $peer.Host -TargetPort $peer.Port)) {
                 throw "RPC peer $($peer.Address) is unreachable. Start rpc-server on that worker first (start-rpc-worker.ps1 -Action Start)."
             }
+            $peerRtts += (Measure-RpcPeerRtt -TargetHost $peer.Host -TargetPort $peer.Port -Samples $RttSamples -MaxRttMs $maxRttMsValue)
         }
 
         $existing = Get-CurrentState
@@ -255,6 +266,8 @@ switch ($Action) {
                 '--host', $loopbackHost,
                 '--port', [string]$Port,
                 '--rpc', $rpcArg,
+                '--split-mode', $splitPolicy.splitMode,
+                '--spec-type', $splitPolicy.specType,
                 '--ctx-size', [string]$CtxSize,
                 '--n-gpu-layers', [string]$GpuLayers,
                 '--flash-attn', $FlashAttn,
@@ -265,6 +278,9 @@ switch ($Action) {
                 '--no-webui',
                 '--log-file', $stderr
             )
+            if ($splitPolicy.devices.Count -gt 0) {
+                $serverArgs += @('--device', ($splitPolicy.devices -join ','))
+            }
             if ($TensorSplit.Trim()) {
                 $serverArgs += @('--tensor-split', $TensorSplit.Trim())
             }
@@ -304,10 +320,17 @@ switch ($Action) {
                 baseUrl    = $baseUrl
                 modelPath  = $ModelPath
                 alias      = $Alias
-                rpcPeers   = @($validatedPeers | ForEach-Object { $_.Address })
-                rpcNodes   = $rpcNodes
-                llamaBuild = $llamaBuild
-                args       = $serverArgs
+                rpcPeers    = @($validatedPeers | ForEach-Object { $_.Address })
+                rpcNodes    = $rpcNodes
+                llamaBuild  = $llamaBuild
+                splitPolicy = [ordered]@{
+                    splitMode = $splitPolicy.splitMode
+                    specType  = $splitPolicy.specType
+                    linkCidr  = $dedicatedLink.Cidr
+                    maxRttMs  = $maxRttMsValue
+                    peerRtts  = $peerRtts
+                }
+                args        = $serverArgs
                 stdout     = $stdout
                 stderr     = $stderr
                 startedAt  = (Get-Date).ToString('o')

@@ -465,3 +465,216 @@ function Get-RpcProcessStartUtc([int]$ProcessId) {
     $proc = Get-Process -Id $ProcessId -ErrorAction Stop
     return $proc.StartTime.ToUniversalTime().ToString('o')
 }
+
+$script:RpcAllowedSplitSpecTypes = @(
+    'ngram-mod', 'ngram-simple', 'ngram-map-k', 'ngram-map-k4v', 'ngram-cache',
+    'draft-simple', 'draft-eagle3', 'draft-mtp', 'draft-dflash', 'draft-dspark'
+)
+
+function Assert-RpcDedicatedLink(
+    [string]$LinkCidr = '',
+    [string[]]$PeerHosts = @(),
+    [int]$MinPrefixLength = 24,
+    $Link = $null
+) {
+    # Builds on FED-02's ConvertTo-RpcLinkNetwork and Assert-RpcAddressOnLink
+    # (which leave SONDER_RPC_LINK_CIDR optional with 0..32 prefixes on the base
+    # allowlist) and adds only the FED-05 cross-host split requirement:
+    # non-empty dedicated link with prefix length >= $MinPrefixLength (default /24).
+    $resolvedLink = if ($null -ne $Link) { $Link } else { ConvertTo-RpcLinkNetwork $LinkCidr }
+    if ($null -eq $resolvedLink) {
+        throw 'SONDER_RPC_LINK_CIDR / -RpcLinkCidr must name a dedicated private IPv4 subnet (e.g. 10.77.0.0/30) before enabling a cross-host RPC split.'
+    }
+    $parts = ([string]$resolvedLink.Text).Split('/')
+    $netText = $parts[0]
+    $prefix = [int]$parts[1]
+    if ($prefix -lt $MinPrefixLength -or $prefix -gt 32) {
+        throw "Dedicated RPC link CIDR '$($resolvedLink.Text)' (/$prefix) must have prefix length in $MinPrefixLength..32 (e.g. /30)."
+    }
+    foreach ($peerHost in $PeerHosts) {
+        $cleanPeer = ConvertTo-RpcPrivateIPv4 -Address $peerHost -Label 'RPC peer host'
+        $null = Assert-RpcAddressOnLink -Address $cleanPeer -Link $resolvedLink -Label 'RPC peer host'
+    }
+    return [pscustomobject]@{
+        Cidr         = $resolvedLink.Text
+        Network      = $netText
+        PrefixLength = $prefix
+        Link         = $resolvedLink
+    }
+}
+
+function Assert-RpcSplitPolicy(
+    [string]$SplitMode = 'layer',
+    [string]$SpecType = 'ngram-mod',
+    [string]$TensorSplit = '',
+    [int]$PeerCount = 1,
+    [string[]]$Devices = @()
+) {
+    $mode = ([string]$SplitMode).Trim().ToLowerInvariant()
+    if ($mode -eq 'tensor') {
+        throw "Cross-host RPC split_mode='tensor' is refused: tensor parallelism over Ethernet is latency-floored; use 'layer' only."
+    }
+    if ($mode -eq 'row') {
+        throw "Cross-host RPC split_mode='row' is refused: row split was removed from CUDA (#24216); use 'layer' only."
+    }
+    if ($mode -ne 'layer') {
+        throw "Cross-host RPC split_mode must be 'layer' only, got '$SplitMode'."
+    }
+
+    $spec = ([string]$SpecType).Trim().ToLowerInvariant()
+    if (-not $spec -or $spec -eq 'none' -or $spec -eq 'off') {
+        throw "Cross-host RPC split requires speculative decoding enabled (e.g. 'ngram-mod'); got '$SpecType'."
+    }
+    if ($script:RpcAllowedSplitSpecTypes -notcontains $spec) {
+        throw "Unsupported cross-host RPC spec_type '$SpecType'; allowed: $($script:RpcAllowedSplitSpecTypes -join ', ')."
+    }
+
+    # Under `powershell -File ... -Devices CUDA0,RPC0`, PowerShell passes a
+    # comma-separated list as a single string element in [string[]]$Devices.
+    # Split every element on ',' and validate each token (matching Python's
+    # _DEVICE_TOKEN_RE) before enforcing RPC-before-local ordering.
+    $cleanDevices = @()
+    foreach ($rawDeviceEntry in @($Devices)) {
+        $entryText = [string]$rawDeviceEntry
+        if (-not $entryText.Trim()) { continue }
+        foreach ($part in $entryText.Split(',')) {
+            $token = $part.Trim()
+            if (-not $token -or $token -notmatch '^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63}$') {
+                throw "Invalid cross-host RPC device token '$part' in '$rawDeviceEntry'."
+            }
+            if ($cleanDevices -contains $token) {
+                throw "Duplicate device '$token' in cross-host RPC device list."
+            }
+            $cleanDevices += $token
+        }
+    }
+    if ($cleanDevices.Count -gt 0) {
+        $lastDev = $cleanDevices[$cleanDevices.Count - 1]
+        if ($lastDev.ToUpperInvariant().StartsWith('RPC')) {
+            throw "Cross-host RPC device order places remote device '$lastDev' last, which pushes the output head/logits over Ethernet."
+        }
+        $seenLocal = $false
+        foreach ($dev in $cleanDevices) {
+            if ($dev.ToUpperInvariant().StartsWith('RPC')) {
+                if ($seenLocal) {
+                    throw "Cross-host RPC device order places local device before RPC device '$dev'; RPC devices must precede local GPUs."
+                }
+            }
+            else {
+                $seenLocal = $true
+            }
+        }
+        if (-not $seenLocal) {
+            throw 'Cross-host RPC device list must include at least one local GPU.'
+        }
+    }
+
+    $cleanSplit = ([string]$TensorSplit).Trim()
+    if ($cleanSplit) {
+        $parts = @($cleanSplit.Split(',') | ForEach-Object { $_.Trim() })
+        if ($parts.Count -lt ($PeerCount + 1)) {
+            throw "TensorSplit '$TensorSplit' requires at least $($PeerCount + 1) weights (RPC peers + local GPU)."
+        }
+        $weights = @()
+        $sum = 0.0
+        foreach ($p in $parts) {
+            $val = 0.0
+            if (-not [double]::TryParse($p, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$val) -or
+                [double]::IsNaN($val) -or [double]::IsInfinity($val) -or $val -lt 0.0) {
+                throw "Invalid TensorSplit weight '$p' in '$TensorSplit'."
+            }
+            $weights += $val
+            $sum += $val
+        }
+        if ($sum -le 0.0) {
+            throw "TensorSplit '$TensorSplit' must have a positive sum."
+        }
+        if ($weights[$weights.Count - 1] -le 0.0) {
+            throw "TensorSplit '$TensorSplit' gives the trailing local device weight 0; local weight must be > 0 so output head/logits stay local."
+        }
+    }
+
+    return [pscustomobject]@{
+        splitMode   = $mode
+        specType    = $spec
+        tensorSplit = $cleanSplit
+        devices     = $cleanDevices
+    }
+}
+
+$script:RpcDefaultMaxRttMs = 2.0
+$script:RpcMaxConfiguredRttMs = 100.0
+
+function ConvertTo-RpcMaxRttMs([string]$Value) {
+    $text = ([string]$Value).Trim()
+    if (-not $text) {
+        return [double]$script:RpcDefaultMaxRttMs
+    }
+    $parsed = 0.0
+    if (-not [double]::TryParse(
+            $text,
+            [System.Globalization.NumberStyles]::Float,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [ref]$parsed
+        ) -or [double]::IsNaN($parsed) -or [double]::IsInfinity($parsed)) {
+        throw "SONDER_RPC_MAX_RTT_MS / -MaxRttMs must be a positive finite number (ms), got '$Value'."
+    }
+    if ($parsed -le 0.0 -or $parsed -gt $script:RpcMaxConfiguredRttMs) {
+        throw "SONDER_RPC_MAX_RTT_MS / -MaxRttMs must be in (0, $($script:RpcMaxConfiguredRttMs)], got '$Value'."
+    }
+    return $parsed
+}
+
+function Measure-RpcPeerRtt(
+    [string]$TargetHost,
+    [int]$TargetPort,
+    [int]$Samples = 5,
+    [double]$MaxRttMs = 2.0,
+    [int]$TimeoutMs = 1500
+) {
+    if ($Samples -lt 1 -or $Samples -gt 20) {
+        throw "RttSamples must be in 1..20, got $Samples."
+    }
+    if ([double]::IsNaN($MaxRttMs) -or [double]::IsInfinity($MaxRttMs) -or $MaxRttMs -le 0.0 -or $MaxRttMs -gt $script:RpcMaxConfiguredRttMs) {
+        throw "MaxRttMs must be in (0, $($script:RpcMaxConfiguredRttMs)], got $MaxRttMs."
+    }
+    $measured = @()
+    for ($i = 0; $i -lt $Samples; $i++) {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $async = $null
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            $async = $client.BeginConnect($TargetHost, $TargetPort, $null, $null)
+            if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) {
+                throw "RPC peer ${TargetHost}:$TargetPort timed out during RTT probe."
+            }
+            $client.EndConnect($async)
+            $sw.Stop()
+            $measured += [math]::Round($sw.Elapsed.TotalMilliseconds, 4)
+        }
+        finally {
+            if ($null -ne $async -and $null -ne $async.AsyncWaitHandle) {
+                $async.AsyncWaitHandle.Dispose()
+            }
+            $client.Close()
+        }
+    }
+    $sorted = @($measured | Sort-Object)
+    $mid = [int][math]::Floor($sorted.Count / 2)
+    $medianMs = if (($sorted.Count % 2) -eq 1) {
+        [double]$sorted[$mid]
+    }
+    else {
+        [math]::Round(([double]$sorted[$mid - 1] + [double]$sorted[$mid]) / 2.0, 4)
+    }
+    if ($medianMs -gt $MaxRttMs) {
+        throw "RPC peer ${TargetHost}:$TargetPort median RTT ${medianMs}ms exceeds MaxRttMs=${MaxRttMs}ms."
+    }
+    return [pscustomobject]@{
+        endpoint  = "${TargetHost}:$TargetPort"
+        samplesMs = $measured
+        minMs     = $sorted[0]
+        medianMs  = $medianMs
+        maxMs     = $sorted[$sorted.Count - 1]
+    }
+}
