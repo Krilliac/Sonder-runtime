@@ -108,6 +108,7 @@ def reconstruct_model_visible_request(
 ) -> ModelVisibleRequest | None:
     """Reconstruct the immutable request snapshot, including tools and UI facts."""
     selected: DomainEvent | None = None
+    selected_turn = ""
     for event in events:
         if event.event_type not in {"model.requested", "prompt.snapshot"}:
             continue
@@ -118,6 +119,7 @@ def reconstruct_model_visible_request(
         if not isinstance(candidate_turn, str):
             raise IntegrityFailure("request snapshot turn_id is invalid")
         selected = event
+        selected_turn = candidate_turn
     if selected is None:
         return None
     payload = selected.payload
@@ -147,7 +149,7 @@ def reconstruct_model_visible_request(
     return ModelVisibleRequest(
         request=request,
         request_id=_text(payload, "request_id", required=False),
-        turn_id=candidate_turn,
+        turn_id=selected_turn,
         tools=_tools(payload.get("tools")),
         ui_facts=_mapping(payload.get("ui_facts", {}), "ui_facts"),
         snapshot_digest=calculated,
