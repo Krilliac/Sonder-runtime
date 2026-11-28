@@ -221,7 +221,7 @@ def _seed_with_cmd_script(tmp_path):
     origin = tmp_path / "origin"
     work = tmp_path / "work"
     clone = tmp_path / "clone"
-    script = Path(safe_update.__file__).with_name("sonder-safe-update.cmd")
+    script = Path(__file__).resolve().parents[1] / "sonder-safe-update.cmd"
     git(tmp_path, "init", "--bare", "--initial-branch=main", origin.name)
     git(tmp_path, "clone", str(origin), str(work))
     git(work, "config", "user.email", "test@example.com")
@@ -296,7 +296,7 @@ def test_windows_script_success_path_restores_edits_and_drops_only_its_stash(
 def test_windows_script_identifies_own_stash_after_concurrent_push(checkout_tmp_path):
     """A foreign stash pushed before lookup must stay untouched."""
     tmp_path = checkout_tmp_path
-    script = Path(safe_update.__file__).with_name("sonder-safe-update.cmd")
+    script = Path(__file__).resolve().parents[1] / "sonder-safe-update.cmd"
     # A batch script must use CALL when its Git executable is a test .cmd shim.
     (tmp_path / script.name).write_text(
         script.read_text(encoding="utf-8").replace("git ", "call git "),
