@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import http.client
 import json
-import os
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -71,9 +70,11 @@ class OllamaCloudMetadata:
         self._pull_timeout = pull_timeout
 
     def _request(self, path: str, body: dict[str, Any] | None) -> urllib.request.Request:
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import resolve_api_key
+
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers: dict[str, str] = {} if body is None else {"Content-Type": "application/json"}
-        api_key = os.environ.get("SONDER_INFERENCE_API_KEY", "").strip()
+        api_key = resolve_api_key()
         if api_key:
             headers["Authorization"] = "Bearer " + api_key
         return urllib.request.Request(
@@ -152,14 +153,10 @@ class OllamaCloudMetadata:
                     if retired is not None:
                         return ProbeResult(model, ProbeStatus.RETIRED, retired, detail="retired")
                     return ProbeResult(model, ProbeStatus.ERROR, detail="upstream_error")
-                runtime_meta = sonder_meta.get("runtime")
-                profile_meta = sonder_meta.get("profile")
-                ctx: object = None
-                if isinstance(runtime_meta, dict):
-                    ctx = runtime_meta.get("context_tokens") or runtime_meta.get("context_length")
-                if ctx is None and isinstance(profile_meta, dict):
-                    ctx = profile_meta.get("context_length") or profile_meta.get("context_tokens")
-                ctx_int = ctx if type(ctx) is int and ctx > 0 else None
+                from sonder_runtime.adapters.inference.model_context_probe import (
+                    extract_si_context_length,
+                )
+                ctx_int = extract_si_context_length(sonder_meta)
                 backend = str(sonder_meta.get("backend") or "").strip().lower()
                 caps = backend_caps.get(backend, ())
                 return ProbeResult(

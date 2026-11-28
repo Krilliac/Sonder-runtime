@@ -538,8 +538,14 @@ def admitted_get(pool, origin: str, path: str, *, timeout: float):
     Yields the open response; the admission (a PROBE slot for a loopback
     origin) is held until the caller has read it and leaves the block.
     """
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import resolve_api_key
+
+    headers: dict[str, str] = {}
+    api_key = resolve_api_key()
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
     with admitted(pool, path, None, origin, deadline=time.monotonic() + timeout):
-        with pool.open_url(urllib.request.Request(origin + path), timeout=timeout) as response:
+        with pool.open_url(urllib.request.Request(origin + path, headers=headers), timeout=timeout) as response:
             yield response
 
 
@@ -1251,15 +1257,18 @@ def _parse_si_sonder_context_length(entry: Mapping[str, Any] | None) -> int | No
     sonder_meta = entry.get("sonder")
     if not isinstance(sonder_meta, Mapping):
         return None
-    for nested_key, field_name in (
-        ("runtime", "context_tokens"),
-        ("runtime", "context_length"),
-        ("profile", "context_length"),
-        ("profile", "context_tokens"),
-    ):
-        nested = sonder_meta.get(nested_key)
-        if isinstance(nested, Mapping):
-            parsed = _positive_int_value(nested.get(field_name))
+    runtime_meta = sonder_meta.get("runtime")
+    if isinstance(runtime_meta, Mapping):
+        runtime_ctx = runtime_meta.get("context")
+        if isinstance(runtime_ctx, Mapping):
+            for field_name in ("fitted_ctx", "configured_ctx"):
+                parsed = _positive_int_value(runtime_ctx.get(field_name))
+                if parsed is not None:
+                    return parsed
+    profile_meta = sonder_meta.get("profile")
+    if isinstance(profile_meta, Mapping):
+        for field_name in ("context_length", "configured_context_length"):
+            parsed = _positive_int_value(profile_meta.get(field_name))
             if parsed is not None:
                 return parsed
     return _positive_int_value(sonder_meta.get("context_length"))
@@ -1351,6 +1360,11 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
         transport = open_url or ollama_endpoint.open_url
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers = {"Content-Type": "application/json"} if data is not None else {}
+        from sonder_runtime.adapters.inference.sonder_inference_gateway import resolve_api_key
+
+        api_key = resolve_api_key()
+        if api_key:
+            headers["Authorization"] = "Bearer " + api_key
         request = urllib.request.Request(origin + path, data=data, headers=headers, method=method)
         with transport(
             request,
@@ -1509,21 +1523,27 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
         ps_payload: Mapping[str, Any] | None = version if isinstance(version, Mapping) else None
 
         loaded_models: list[str] = []
-        ps_contexts: dict[str, int] = {}
         if isinstance(ps_payload, Mapping):
             ps_rows = ps_payload.get("models")
             if isinstance(ps_rows, list):
                 for row in ps_rows:
                     if not isinstance(row, Mapping):
                         continue
+                    is_resident = (
+                        row.get("resident") is True
+                        or str(row.get("state") or "").strip().lower() == "resident"
+                    )
+                    if not is_resident:
+                        continue
                     name = str(row.get("id") or row.get("name") or row.get("model") or "").strip()[:256]
                     if name:
                         loaded_models.append(name)
-                        ctx = _positive_int_value(row.get("context_length"))
-                        if ctx is not None:
-                            ps_contexts[name] = ctx
 
-        model_contexts: dict[str, int] = dict(ps_contexts)
+        model_contexts: dict[str, int] = {}
+        for name, tag_entry in tag_entries.items():
+            tag_ctx = _parse_si_sonder_context_length(tag_entry)
+            if tag_ctx is not None:
+                model_contexts[name] = tag_ctx
         supports_tools: dict[str, bool] = {}
         model_active_billions: dict[str, float] = {}
         model_metadata: dict[str, dict[str, Any]] = {}
@@ -1548,9 +1568,8 @@ def _default_capability_prober(*, allow_remote: bool, timeout: float = 2.0, open
             )
             if meta:
                 model_metadata[name] = meta
-            # Loaded models keep the runtime context from /api/ps; the
-            # trained maximum from /api/show only fills models not loaded.
-            if name not in ps_contexts and isinstance(meta.get("context_length"), int):
+            # Prefer runtime/profile context from /v1/models; cached detail fills gaps.
+            if name not in model_contexts and isinstance(meta.get("context_length"), int):
                 model_contexts[name] = meta["context_length"]
             if isinstance(meta.get("supports_tools"), bool):
                 supports_tools[name] = meta["supports_tools"]

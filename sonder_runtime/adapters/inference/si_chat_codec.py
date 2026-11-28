@@ -152,10 +152,7 @@ def to_openai_chat_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     if num_ctx is None:
         num_ctx = payload.get("num_ctx")
     if isinstance(num_ctx, int) and not isinstance(num_ctx, bool) and num_ctx > 0:
-        existing_extra = wire.get("extra_body")
-        merged_extra = dict(existing_extra) if isinstance(existing_extra, Mapping) else {}
-        merged_extra.setdefault("num_ctx", num_ctx)
-        wire["extra_body"] = merged_extra
+        wire.setdefault("num_ctx", num_ctx)
 
     raw_think = payload.get("think")
     if isinstance(raw_think, bool):
@@ -198,10 +195,7 @@ def to_openai_completion_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     if num_ctx is None:
         num_ctx = payload.get("num_ctx")
     if isinstance(num_ctx, int) and not isinstance(num_ctx, bool) and num_ctx > 0:
-        existing_extra = wire.get("extra_body")
-        merged_extra = dict(existing_extra) if isinstance(existing_extra, Mapping) else {}
-        merged_extra.setdefault("num_ctx", num_ctx)
-        wire["extra_body"] = merged_extra
+        wire.setdefault("num_ctx", num_ctx)
     for key in ("max_tokens", "temperature", "top_p", "seed", "stop"):
         if key in payload and payload[key] is not None and key not in wire:
             wire[key] = payload[key]

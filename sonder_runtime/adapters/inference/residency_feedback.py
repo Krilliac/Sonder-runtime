@@ -298,12 +298,9 @@ def record_dispatched_context(
         return
     model = payload.get("model")
     options = payload.get("options")
-    extra_body = payload.get("extra_body")
     context = None
     if isinstance(options, Mapping) and "num_ctx" in options:
         context = options.get("num_ctx")
-    elif isinstance(extra_body, Mapping) and "num_ctx" in extra_body:
-        context = extra_body.get("num_ctx")
     elif "num_ctx" in payload:
         context = payload.get("num_ctx")
     if not isinstance(model, str) or not model.strip():
