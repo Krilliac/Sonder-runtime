@@ -1381,21 +1381,6 @@ def get() -> RuntimeLifecycle:
                 _instance = RuntimeLifecycle()
             else:
                 startup_timeout = config.inference.startup_timeout_seconds
-                ollama_startup = config.ollama.startup_timeout_seconds
-                if startup_timeout == 60 and ollama_startup != 60:
-                    logging.getLogger(__name__).warning(
-                        "Using deprecated [ollama].startup_timeout_seconds=%d; "
-                        "set [inference].startup_timeout_seconds instead",
-                        ollama_startup,
-                    )
-                    startup_timeout = ollama_startup
-                elif ollama_startup != 60 and ollama_startup != startup_timeout:
-                    logging.getLogger(__name__).warning(
-                        "Ignoring deprecated [ollama].startup_timeout_seconds=%d; "
-                        "using [inference].startup_timeout_seconds=%d",
-                        ollama_startup,
-                        startup_timeout,
-                    )
                 _instance = RuntimeLifecycle(
                     deployment_status=DeploymentStatus(
                         profile=config.deployment.profile,

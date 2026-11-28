@@ -2332,6 +2332,8 @@ def _validate(config: SonderConfig, errors: list[str]) -> None:
         errors.append("[inference].max_inflight must be within 1..16")
     if config.inference.startup_timeout_seconds < 1:
         errors.append("[inference].startup_timeout_seconds must be >= 1")
+    if config.ollama.startup_timeout_seconds < 1:
+        errors.append("[ollama].startup_timeout_seconds must be >= 1")
     if config.inference.request_timeout_seconds < 1:
         errors.append("[inference].request_timeout_seconds must be >= 1")
     import math as _math
@@ -2813,6 +2815,8 @@ def load_config(
     sources: list[str] = ["defaults"]
     private_source_paths: list[str] = []
     config = SonderConfig()
+    inf_startup_explicit = False
+    ollama_startup_explicit = False
 
     if toml_path is not None:
         path = Path(toml_path)
@@ -2857,6 +2861,10 @@ def load_config(
                     errors.append("[memory_replication] must be a table")
             elif key in _SECTION_TYPES:
                 if isinstance(value, dict):
+                    if key == "inference" and "startup_timeout_seconds" in value:
+                        inf_startup_explicit = True
+                    elif key == "ollama" and "startup_timeout_seconds" in value:
+                        ollama_startup_explicit = True
                     config = replace(
                         config,
                         **{
@@ -2913,7 +2921,36 @@ def load_config(
 
     if overrides:
         sources.append("command-line")
+        if "inference.startup_timeout_seconds" in overrides:
+            inf_startup_explicit = True
+        if "ollama.startup_timeout_seconds" in overrides:
+            ollama_startup_explicit = True
         config = _apply_overrides(config, overrides, errors)
+
+    if ollama_startup_explicit and not inf_startup_explicit:
+        logging.getLogger(__name__).warning(
+            "Using deprecated [ollama].startup_timeout_seconds=%d; "
+            "set [inference].startup_timeout_seconds instead",
+            config.ollama.startup_timeout_seconds,
+        )
+        config = replace(
+            config,
+            inference=replace(
+                config.inference,
+                startup_timeout_seconds=config.ollama.startup_timeout_seconds,
+            ),
+        )
+    elif (
+        ollama_startup_explicit
+        and inf_startup_explicit
+        and config.ollama.startup_timeout_seconds != config.inference.startup_timeout_seconds
+    ):
+        logging.getLogger(__name__).warning(
+            "Ignoring deprecated [ollama].startup_timeout_seconds=%d; "
+            "using [inference].startup_timeout_seconds=%d",
+            config.ollama.startup_timeout_seconds,
+            config.inference.startup_timeout_seconds,
+        )
 
     # Check the final effective listener host, including the highest-precedence
     # CLI overrides. Otherwise an exact unsafe acknowledgement plus

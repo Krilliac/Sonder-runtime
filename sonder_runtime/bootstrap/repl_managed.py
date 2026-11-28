@@ -188,22 +188,26 @@ def run_managed_repl_work(*, application, session_id, project, get_session,
     expiry = time.time() + 3600
     original_roots = roots()
     original_tools = tuple(sorted(lanes.allowed_tools))
+    def _remote_allowed(cfg) -> bool:
+        return bool(cfg.inference.allow_remote or cfg.ollama.allow_remote)
+
+    initial_remote_allowed = _remote_allowed(application.config)
     policy_digest = hashlib.sha256(json.dumps({
         'session': session_id, 'roots': [str(root) for root in original_roots],
         'tools': original_tools,
-        'remote': application.config.ollama.allow_remote,
+        'remote': initial_remote_allowed,
     }, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     context = local_owner_context(
         correlation_id='repl-work-' + uuid.uuid4().hex, source='repl',
         workspace_roots=original_roots, timeout_seconds=3600,
-        remote_ollama_allowed=application.config.ollama.allow_remote,
+        remote_ollama_allowed=initial_remote_allowed,
     )
 
     def policy(current, exact_session):
         inventory()
         if exact_session != session_id:
             raise PermissionError('REPL selection changed')
-        if current.remote_ollama_allowed and not application.config.ollama.allow_remote:
+        if current.remote_ollama_allowed and not _remote_allowed(application.config):
             raise PermissionError('configured remote inference grant was removed')
         return ReplHostPolicy('repl-policy-' + policy_digest, 1, expiry,
                               tuple(str(root) for root in roots()),

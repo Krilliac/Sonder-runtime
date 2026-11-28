@@ -1287,6 +1287,8 @@ def resolve_api_key(env: Mapping[str, str] | None = None) -> str:
 def si_auth_headers(
     target_origin: str,
     env: Mapping[str, str] | None = None,
+    *,
+    configured_origin: str | None = None,
 ) -> dict[str, str]:
     """Return ``Authorization: Bearer ...`` ONLY when ``target_origin`` equals the configured SI origin.
 
@@ -1319,16 +1321,19 @@ def si_auth_headers(
 
     try:
         target = _ollama_policy.normalize(raw_target).rstrip("/")
-        typed = _ollama_endpoint.configured_typed_endpoint() if env is None else None
-        if typed is not None:
-            configured = _ollama_policy.normalize(typed).rstrip("/")
+        if configured_origin is not None:
+            configured = _ollama_policy.normalize(configured_origin).rstrip("/")
         else:
-            source = os.environ if env is None else env
-            base_url = str(source.get(ENV_BASE_URL, "") or "").strip()
-            if not base_url:
-                ready_file = str(source.get(ENV_READY_FILE, "") or "").strip()
-                base_url = read_ready_file(ready_file) if ready_file else DEFAULT_BASE_URL
-            configured = _ollama_policy.normalize(base_url).rstrip("/")
+            typed = _ollama_endpoint.configured_typed_endpoint() if env is None else None
+            if typed is not None:
+                configured = _ollama_policy.normalize(typed).rstrip("/")
+            else:
+                source = os.environ if env is None else env
+                base_url = str(source.get(ENV_BASE_URL, "") or "").strip()
+                if not base_url:
+                    ready_file = str(source.get(ENV_READY_FILE, "") or "").strip()
+                    base_url = read_ready_file(ready_file) if ready_file else DEFAULT_BASE_URL
+                configured = _ollama_policy.normalize(base_url).rstrip("/")
     except (ValueError, SonderError):
         return {}
     if target != configured:

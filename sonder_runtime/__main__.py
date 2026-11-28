@@ -388,12 +388,34 @@ def _run_preflight(config, *, check_ollama=True, ollama_timeout=5.0):
     )
 
 
+def _configure_typed_inference_endpoint(config) -> None:
+    """Bind the typed Sonder Inference origin and optional CA bundle defensively."""
+    from sonder_runtime.adapters.inference import ollama_endpoint
+
+    inf = getattr(config, "inference", None)
+    oll = getattr(config, "ollama", None)
+    inf_url = getattr(inf, "url", "")
+    oll_url = getattr(oll, "url", "")
+    if oll_url and inf_url and oll_url != inf_url:
+        import logging
+        logging.getLogger("sonder.cli").warning(
+            "Ignoring deprecated [ollama].url (%s); using [inference].url (%s)",
+            oll_url,
+            inf_url,
+        )
+    if inf_url:
+        ollama_endpoint.configure_typed_endpoint(inf_url)
+    ca_bundle = getattr(inf, "ca_bundle", "") or getattr(oll, "ca_bundle", "")
+    ollama_endpoint.configure_typed_ca_bundle(ca_bundle)
+
+
 def cmd_preflight(args) -> int:
     try:
         config = _load_config(args)
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    _configure_typed_inference_endpoint(config)
     report = _run_preflight(
         config, check_ollama=not args.skip_ollama
     )
@@ -414,6 +436,7 @@ def cmd_doctor(args) -> int:
     except sonder_config.ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    _configure_typed_inference_endpoint(config)
     checks = sonder_doctor.default_checks()
     replacements = dict(sonder_doctor.storage_checks(
         config, throughput=args.storage_probe,
@@ -1273,6 +1296,7 @@ def cmd_serve(args) -> int:
         log_format=config.observability.log_format,
         redactor=_redactor_for_config(config),
     )
+    _configure_typed_inference_endpoint(config)
     if not args.skip_preflight:
         report = _run_preflight(
             config, check_ollama=not args.skip_ollama
@@ -1291,18 +1315,6 @@ def cmd_serve(args) -> int:
     # ownership guard, after migrations have succeeded, so a refused migration
     # cannot leave a live route behind.
     _configure_typed_home(config)
-    from sonder_runtime.adapters.inference import ollama_endpoint
-    if config.ollama.url and config.ollama.url != config.inference.url:
-        import logging
-        logging.getLogger("sonder.cli").warning(
-            "Ignoring deprecated [ollama].url (%s); using [inference].url (%s)",
-            config.ollama.url,
-            config.inference.url,
-        )
-    ollama_endpoint.configure_typed_endpoint(config.inference.url)
-    ollama_endpoint.configure_typed_ca_bundle(
-        config.inference.ca_bundle or config.ollama.ca_bundle
-    )
     from sonder_runtime.adapters import embeddings as sonder_embeddings
     sonder_embeddings.configure_typed_endpoint(config.inference.url)
     from sonder_runtime.adapters.inference import ollama_pool
@@ -1597,18 +1609,7 @@ def cmd_mcp(args) -> int:
         _stamp_home_before_stores(gate=False)
         from sonder_runtime.bootstrap.app import default_app
         from sonder_runtime.bootstrap.legacy_mcp import configure_legacy_application
-        from sonder_runtime.adapters.inference import ollama_endpoint
-        if config.ollama.url and config.ollama.url != config.inference.url:
-            import logging
-            logging.getLogger("sonder.cli").warning(
-                "Ignoring deprecated [ollama].url (%s); using [inference].url (%s)",
-                config.ollama.url,
-                config.inference.url,
-            )
-        ollama_endpoint.configure_typed_endpoint(config.inference.url)
-        ollama_endpoint.configure_typed_ca_bundle(
-            config.inference.ca_bundle or config.ollama.ca_bundle
-        )
+        _configure_typed_inference_endpoint(config)
         from sonder_runtime.adapters.inference import ollama_pool
         ollama_pool.configure_typed_workers(
             config.ollama.workers,
@@ -1934,14 +1935,10 @@ def _add_mobility_arguments(parser):
 
 
 def cmd_capabilities(args) -> int:
-    from sonder_runtime.adapters.inference import ollama_endpoint
     from sonder_runtime.adapters.inference.capability_refresh import refresh_capabilities
 
     config = _load_config(args)
-    ollama_endpoint.configure_typed_endpoint(config.inference.url)
-    ollama_endpoint.configure_typed_ca_bundle(
-        config.inference.ca_bundle or config.ollama.ca_bundle
-    )
+    _configure_typed_inference_endpoint(config)
     try:
         result = refresh_capabilities(
             origin=config.inference.url, home=config.state.home or None,
@@ -1957,15 +1954,11 @@ def cmd_capabilities(args) -> int:
 
 
 def cmd_models(args) -> int:
-    from sonder_runtime.adapters.inference import ollama_endpoint
     from sonder_runtime.bootstrap.cloud_models_cli import run_cloud_refresh
 
     config = _load_config(args)
     _configure_typed_home(config)
-    ollama_endpoint.configure_typed_endpoint(config.inference.url)
-    ollama_endpoint.configure_typed_ca_bundle(
-        config.inference.ca_bundle or config.ollama.ca_bundle
-    )
+    _configure_typed_inference_endpoint(config)
     return run_cloud_refresh(args, origin=config.inference.url, home=config.state.home or None)
 
 

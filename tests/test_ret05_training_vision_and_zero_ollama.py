@@ -1157,3 +1157,185 @@ def test_cmd_serve_and_cmd_mcp_accept_runbook_inference_allow_remote_with_https_
         assert captured_auth == [{"Authorization": "Bearer toml-only-si-key"}]
     finally:
         ollama_endpoint.reset_typed_endpoint()
+
+
+def test_toml_only_nondefault_inference_url_sends_si_bearer_in_serve_preflight_and_doctor(tmp_path, monkeypatch):
+    """Round 6 (BLOCKING 1): TOML-only non-default [inference].url sends SI bearer in cmd_preflight, cmd_doctor, and cmd_serve preflight."""
+    import sonder_doctor
+    from sonder_runtime import __main__ as cli_main
+    from sonder_runtime.adapters import preflight as preflight_adapter
+    from sonder_runtime.adapters.inference import ollama_endpoint, ollama_pool
+    from sonder_runtime.adapters.persistence.sqlite import bridge_migration
+    from sonder_runtime.application.ports.preflight import CheckResult, PreflightReport
+    from sonder_runtime.domain.common.errors import MigrationRequired
+    from sonder_runtime.platform import config as sonder_config
+
+    custom_url = "http://127.0.0.1:11441"
+    toml_path = tmp_path / "toml_only_si.toml"
+    toml_path.write_text(
+        "[state]\n"
+        f'home = "{(tmp_path / "state_home").as_posix()}"\n'
+        "[inference]\n"
+        f'url = "{custom_url}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("SONDER_INFERENCE_BASE_URL", raising=False)
+    monkeypatch.delenv("SONDER_INFERENCE_READY_FILE", raising=False)
+    monkeypatch.delenv("SONDER_INFERENCE_API_KEY_FILE", raising=False)
+    monkeypatch.setenv("SONDER_INFERENCE_API_KEY", "toml-only-preflight-doctor-key")
+
+    cfg = sonder_config.load_config(toml_path, env={})
+    monkeypatch.setattr(cli_main, "_load_config", lambda _args: cfg)
+
+    seen: list[tuple[str, dict[str, str]]] = []
+
+    class _Resp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1):
+            return json.dumps({
+                "status": "ready",
+                "models": [{"id": "qwen3.8:27b", "state": "resident"}],
+            }).encode("utf-8")
+
+    def fake_open(req, timeout=5.0, allow_remote=None):
+        seen.append((req.full_url, dict(req.header_items())))
+        return _Resp()
+
+    monkeypatch.setattr(ollama_endpoint, "open_url", fake_open)
+
+    # Narrow preflight execution to only the inference check so we exercise the real CLI->preflight->_check_inference path cleanly.
+    from sonder_runtime.adapters.preflight_executor import PreflightExecutor
+
+    monkeypatch.setattr(
+        PreflightExecutor,
+        "run",
+        lambda self, config, *, check_ollama=True, ollama_timeout=5.0: PreflightReport(
+            checks=[
+                preflight_adapter._check_inference(config, timeout=ollama_timeout)
+                if check_ollama
+                else CheckResult("inference", True, False, "skipped")
+            ]
+        ),
+    )
+
+    try:
+        # 1. cmd_preflight with TOML-only non-default URL sends SI bearer.
+        ollama_endpoint.reset_typed_endpoint()
+        seen.clear()
+        rc_pre = cli_main.cmd_preflight(SimpleNamespace(
+            config=str(toml_path), secrets=None, set=None, skip_ollama=False, json=True,
+        ))
+        assert rc_pre == 0
+        assert len(seen) == 1
+        assert seen[0][0] == custom_url + "/v1/sonder/health"
+        assert seen[0][1].get("Authorization") == "Bearer toml-only-preflight-doctor-key"
+
+        # 2. cmd_doctor with TOML-only non-default URL sends SI bearer on both _check_ollama and _check_ollama_residency.
+        ollama_endpoint.reset_typed_endpoint()
+        seen.clear()
+        monkeypatch.setattr(
+            sonder_doctor,
+            "default_checks",
+            lambda: [
+                ("ollama", sonder_doctor._check_ollama),
+                ("ollama_residency", sonder_doctor._check_ollama_residency),
+            ],
+        )
+        rc_doc = cli_main.cmd_doctor(SimpleNamespace(
+            config=str(toml_path), secrets=None, set=None,
+            skip_ollama=False, skip_inference=True, storage_probe=False,
+            json=True, alert=False,
+        ))
+        assert rc_doc == 0
+        assert len(seen) == 2
+        for url, hdrs in seen:
+            assert url == custom_url + "/v1/sonder/health"
+            assert hdrs.get("Authorization") == "Bearer toml-only-preflight-doctor-key"
+
+        # 3. cmd_serve preflight with TOML-only non-default URL sends SI bearer BEFORE binding listener.
+        ollama_endpoint.reset_typed_endpoint()
+        seen.clear()
+        monkeypatch.setattr(bridge_migration, "stamp_fresh_home", lambda _home: None)
+        monkeypatch.setattr(
+            bridge_migration,
+            "require_epoch_2",
+            lambda _home: (_ for _ in ()).throw(MigrationRequired("stop-after-serve-preflight")),
+        )
+        rc_serve = cli_main.cmd_serve(SimpleNamespace(
+            config=str(toml_path), secrets=None, set=None,
+            skip_preflight=False, skip_ollama=False, json=False,
+        ))
+        assert rc_serve == 1  # passed preflight and reached require_epoch_2
+        assert len(seen) == 1
+        assert seen[0][0] == custom_url + "/v1/sonder/health"
+        assert seen[0][1].get("Authorization") == "Bearer toml-only-preflight-doctor-key"
+    finally:
+        ollama_pool.reset_typed_workers()
+        ollama_endpoint.reset_typed_endpoint()
+
+
+def test_startup_timeout_real_unset_fallback_and_agent_lane_inference_allow_remote(tmp_path):
+    """Round 6 (non-blocking): real unset check for startup_timeout_seconds fallback, [ollama].startup_timeout_seconds validation, and agent-lane [inference].allow_remote OR."""
+    from sonder_runtime.adapters.web import lifecycle
+    from sonder_runtime.platform import config as sonder_config
+
+    # 1. Deprecated [ollama].startup_timeout_seconds alone falls back cleanly into lifecycle.
+    fallback_toml = tmp_path / "fallback_timeout.toml"
+    fallback_toml.write_text(
+        "[state]\n"
+        f'home = "{(tmp_path / "st1").as_posix()}"\n'
+        "[ollama]\n"
+        "startup_timeout_seconds = 120\n",
+        encoding="utf-8",
+    )
+    cfg_fb = sonder_config.load_config(fallback_toml, env={})
+    assert cfg_fb.inference.startup_timeout_seconds == 120
+    lifecycle.reset_for_tests()
+    try:
+        lifecycle.configure(cfg_fb)
+        assert lifecycle.get()._ollama_probe_interval == 30.0
+    finally:
+        lifecycle.reset_for_tests()
+
+    # 2. Explicit [inference].startup_timeout_seconds = 60 beats [ollama].startup_timeout_seconds = 120 (no magic 60 sentinel!).
+    explicit_60_toml = tmp_path / "explicit_60.toml"
+    explicit_60_toml.write_text(
+        "[state]\n"
+        f'home = "{(tmp_path / "st2").as_posix()}"\n'
+        "[inference]\n"
+        "startup_timeout_seconds = 60\n"
+        "[ollama]\n"
+        "startup_timeout_seconds = 120\n",
+        encoding="utf-8",
+    )
+    cfg_60 = sonder_config.load_config(explicit_60_toml, env={})
+    assert cfg_60.inference.startup_timeout_seconds == 60
+
+    # 3. Invalid [ollama].startup_timeout_seconds < 1 is rejected.
+    bad_toml = tmp_path / "bad_timeout.toml"
+    bad_toml.write_text("[ollama]\nstartup_timeout_seconds = 0\n", encoding="utf-8")
+    try:
+        sonder_config.load_config(bad_toml, env={})
+    except sonder_config.ConfigError as exc:
+        assert "[ollama].startup_timeout_seconds must be >= 1" in str(exc)
+    else:
+        raise AssertionError("[ollama].startup_timeout_seconds = 0 must fail validation")
+
+    # 4. Agent-lane remote permission honors [inference].allow_remote = true even when [ollama].allow_remote = false.
+    from sonder_runtime.interfaces.standalone_agent_lanes import StandaloneLaneController
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    lane_cfg = sonder_config.SonderConfig(
+        state=sonder_config.StateConfig(home=str(tmp_path / "st3"), workspace_roots=(str(ws),)),
+        inference=sonder_config.InferenceConfig(allow_remote=True),
+        ollama=sonder_config.OllamaConfig(allow_remote=False),
+    )
+    ctrl = StandaloneLaneController(
+        lambda: SimpleNamespace(config=lane_cfg, agent_lanes=lambda: SimpleNamespace()),
+        project=str(ws),
+    )
+    ctrl._initialize()
+    assert ctrl._context is not None and ctrl._context.remote_ollama_allowed is True

@@ -107,6 +107,7 @@ def _check_inference_origin(
     required: bool,
     timeout: float,
     allow_remote: bool = False,
+    configured_origin: str | None = None,
 ) -> CheckResult:
     url = origin.rstrip("/") + "/v1/sonder/health"
     host = urlsplit(origin).hostname or ""
@@ -114,7 +115,11 @@ def _check_inference_origin(
         from sonder_runtime.adapters.inference.sonder_inference_gateway import (
             si_auth_headers,
         )
-        request = urllib.request.Request(url, headers=si_auth_headers(origin), method="GET")
+        request = urllib.request.Request(
+            url,
+            headers=si_auth_headers(origin, configured_origin=configured_origin),
+            method="GET",
+        )
         with ollama_endpoint.open_url(
             request, timeout=timeout, allow_remote=allow_remote is True,
         ) as response:
@@ -155,6 +160,7 @@ def _check_inference(config: SonderConfig, *, timeout: float = 5.0) -> CheckResu
         required=True,
         timeout=timeout,
         allow_remote=allow_remote,
+        configured_origin=url,
     )
 
 

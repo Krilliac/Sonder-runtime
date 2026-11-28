@@ -152,7 +152,10 @@ class LaneConsoleFacade:
                 source="repl",
                 workspace_roots=roots,
                 timeout_seconds=CONTEXT_TIMEOUT_SECONDS,
-                remote_ollama_allowed=application.config.ollama.allow_remote,
+                remote_ollama_allowed=bool(
+                    application.config.inference.allow_remote
+                    or application.config.ollama.allow_remote
+                ),
             )
             service = application.agent_lanes()
             text = self._run(service, context, action, args)
@@ -337,7 +340,10 @@ class LaneConsoleFacade:
             Path(root).resolve() for root in current_config.state.workspace_roots
         )
         configured = tuple(root for root in configured if root.is_dir())
-        if current_config.ollama.allow_remote != context.remote_ollama_allowed:
+        effective_remote = bool(
+            current_config.inference.allow_remote or current_config.ollama.allow_remote
+        )
+        if effective_remote != context.remote_ollama_allowed:
             raise PermissionError("remote model permission changed after approval")
         if set(configured) != set(context.workspace_roots):
             raise PermissionError("configured workspace roots changed after approval")

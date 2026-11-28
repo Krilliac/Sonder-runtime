@@ -392,7 +392,10 @@ class StandaloneLaneController:
             source="repl",
             workspace_roots=roots,
             timeout_seconds=3600,
-            remote_ollama_allowed=application.config.ollama.allow_remote,
+            remote_ollama_allowed=bool(
+                application.config.inference.allow_remote
+                or application.config.ollama.allow_remote
+            ),
         )
         self._application = application
 

@@ -505,7 +505,9 @@ def _check_ollama(*, timeout: float = 5.0, config=None) -> dict:
         from sonder_runtime.adapters.inference.sonder_inference_gateway import (
             si_auth_headers,
         )
-        request = urllib.request.Request(health_url, headers=si_auth_headers(url), method="GET")
+        request = urllib.request.Request(
+            health_url, headers=si_auth_headers(url, configured_origin=url), method="GET",
+        )
         allow_remote = (
             getattr(getattr(config, "inference", None), "allow_remote", False) is True
             or getattr(getattr(config, "ollama", None), "allow_remote", False) is True
@@ -569,7 +571,7 @@ def _check_ollama_workers(*, timeout: float = 5.0, config=None) -> dict:
             try:
                 request = urllib.request.Request(
                     origin.rstrip("/") + "/v1/sonder/health",
-                    headers=si_auth_headers(origin),
+                    headers=si_auth_headers(origin, configured_origin=_si_url_from_config(cfg)),
                     method="GET",
                 )
                 with ollama_endpoint.open_url(
@@ -628,7 +630,9 @@ def _check_ollama_residency(*, timeout: float = 5.0, config=None) -> dict:
         from sonder_runtime.adapters.inference.sonder_inference_gateway import (
             si_auth_headers,
         )
-        request = urllib.request.Request(health_url, headers=si_auth_headers(url), method="GET")
+        request = urllib.request.Request(
+            health_url, headers=si_auth_headers(url, configured_origin=url), method="GET",
+        )
         allow_remote = getattr(getattr(config, "inference", None), "allow_remote", False) is True
         with ollama_endpoint.open_url(
             request, timeout=timeout, allow_remote=allow_remote,
