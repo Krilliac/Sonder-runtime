@@ -1038,6 +1038,9 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     # time, so the home must be exported before anything opens a database.
     if config.state.home:
         os.environ["SONDER_HOME"] = config.state.home
+        # SONDER_STATE_HOME outranks SONDER_HOME in the path resolver, so an
+        # inherited value would otherwise override the configured home.
+        os.environ["SONDER_STATE_HOME"] = config.state.home
     if config.state.workspace_roots:
         os.environ["SONDER_FILE_ROOTS"] = os.pathsep.join(
             config.state.workspace_roots
