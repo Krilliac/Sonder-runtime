@@ -1199,7 +1199,7 @@ def test_terminal_cleanup_retry_reaps_root_after_posix_kill_race(monkeypatch):
     assert process.wait_calls == [0, 0]
 
 
-def test_provider_rehydrates_persisted_deadline_after_owner_restart(tmp_path):
+def test_provider_rehydrates_persisted_deadline_after_owner_restart(tmp_path, monkeypatch):
     database = tmp_path / "deadline-restart.db"
     registry = SQLiteDurableJobRegistry(database)
     cleanup = ProcessTreeSupervisor(platform_name=os.name, timeout_seconds=5)
@@ -1208,6 +1208,10 @@ def test_provider_rehydrates_persisted_deadline_after_owner_restart(tmp_path):
         process_cleanup=cleanup,
         platform_name=os.name,
     )
+    # Without this, a start slower than the 2 s deadline lets the first
+    # provider cancel the job itself and the test passes without ever
+    # exercising the restored deadline.
+    monkeypatch.setattr(first, "_schedule_deadline", lambda *_args, **_kwargs: None)
     job_id = "job-restarted-deadline"
     first.start(ProcessJobRequest(
         JobIdentity(job_id, "process", "execute", "idem-restarted-deadline"),
@@ -1217,7 +1221,8 @@ def test_provider_rehydrates_persisted_deadline_after_owner_restart(tmp_path):
         max_descendants=4,
     ))
     process = first._processes[job_id]
-    first._discard_deadline(job_id)
+    assert registry.view(job_id).metadata["hard_deadline_at"]
+    assert first._deadline_timers == {}
 
     reopened = SQLiteDurableJobRegistry(database)
     second = SubprocessJobProvider(
@@ -1378,7 +1383,7 @@ def test_deadline_kill_is_cancelled_even_when_the_waiter_sees_the_exit_first(
     assert token.closed and job_id not in provider._processes
 
 
-def test_restarted_deadline_never_signals_a_reused_process_identity(tmp_path):
+def test_restarted_deadline_never_signals_a_reused_process_identity(tmp_path, monkeypatch):
     database = tmp_path / "pid-reuse.db"
     registry = SQLiteDurableJobRegistry(database)
     cleanup = _Cleanup(complete=True)
@@ -1391,13 +1396,18 @@ def test_restarted_deadline_never_signals_a_reused_process_identity(tmp_path):
         process_identity_resolver=lambda _pid: "birth-A",
         memory_limiter=_MemoryLimiter(),
     )
+    # The first provider stands in for a controller that died: it must never
+    # arm its own deadline timer, or a launch slower than the 1 s deadline
+    # (seen on a loaded Windows CI runner) cancels the job before the restart.
+    monkeypatch.setattr(first, "_schedule_deadline", lambda *_args, **_kwargs: None)
     job_id = "job-pid-reused"
     first.start(ProcessJobRequest(
         JobIdentity(job_id, "process", "execute", "idem-pid-reused"),
         ("python", "-c", "pass"),
         deadline_seconds=1,
     ))
-    first._discard_deadline(job_id)
+    assert registry.view(job_id).metadata["hard_deadline_at"]
+    assert first._deadline_timers == {}
 
     reopened = SQLiteDurableJobRegistry(database)
     second = SubprocessJobProvider(
