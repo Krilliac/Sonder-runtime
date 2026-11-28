@@ -66,7 +66,6 @@ def _worker(tmp_path: Path, provider) -> ComputeJobWorker:
         (JobStatus.SUCCEEDED, "succeeded"),
         (JobStatus.FAILED, "failed"),
         (JobStatus.INTERRUPTED, "interrupted"),
-        (JobStatus.CANCELLED, "cancelled"),
     ],
 )
 def test_cancelling_a_terminal_job_keeps_its_receipt(tmp_path, status, state) -> None:

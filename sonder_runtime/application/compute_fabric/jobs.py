@@ -1729,7 +1729,11 @@ class ComputeJobWorker:
         receipt = self.status(remote_job_id)
         if not isinstance(reason, str) or not reason.strip() or len(reason) > 512:
             raise InvalidInput("cancellation reason must be non-empty and bounded")
-        if receipt.state in _TERMINAL_RECEIPT_STATES:
+        # "cancelled" is deliberately excluded: a job cancelled by another path
+        # (e.g. deadline) is not proof of this operator cancel, and the effect
+        # reconciliation fence requires it to stay "cancellation_requested"
+        # until this request's own cleanup is proven.
+        if receipt.state in _TERMINAL_RECEIPT_STATES - {"cancelled"}:
             logger.info(f"compute job already terminal; cancel ignored: remote_job_id={remote_job_id!r}, state={receipt.state!r}")
             return receipt
         result = self._provider.cancel(remote_job_id, reason=reason)
