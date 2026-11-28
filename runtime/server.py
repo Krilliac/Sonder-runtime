@@ -1840,8 +1840,13 @@ def _model_context_metadata(model):
     return _MODEL_CONTEXT_MEMORY.settle(model, declared, context_length, parameter_size)
 
 
+def _chat_fitness_probe(model):
+    from sonder_runtime.adapters.inference.model_context_probe import extract_chat_fitness_payload
+    return extract_chat_fitness_payload(_get("/v1/models"), model)
+
+
 _CHAT_FITNESS = _chat_model_fitness.ChatModelFitness(
-    lambda model: _get("/v1/models"),
+    _chat_fitness_probe,
     vision_only_model_families=lambda: _model_list_consumers.values()["vision_only_model_families"],
 )
 
@@ -4724,6 +4729,8 @@ def _post_model(
         post_kwargs = {}
         if local_only:
             post_kwargs["local_only"] = True
+        if _callable_accepts_keyword(_post, "cloud_allowed"):
+            post_kwargs["cloud_allowed"] = bool(cloud)
         if idempotent and _callable_accepts_keyword(_post, "idempotent"):
             # Preserve compatibility with narrow test doubles and legacy
             # callers while forwarding the explicit replay-safety contract to
@@ -5323,11 +5330,26 @@ def _post(
     *,
     local_only: bool = False,
     idempotent: bool = False,
+    cloud_allowed: bool | None = None,
 ) -> dict:
     _require_ollama_endpoint()
     data = json.dumps(payload).encode("utf-8")
     request_timeout = _bound_request_timeout(timeout, TIMEOUT)
     deadline = time.monotonic() + request_timeout
+    model_hint = payload.get("model") if isinstance(payload, dict) else None
+    is_inference_path = path in {"/v1/chat/completions", "/v1/completions"}
+    cloud_consented = (
+        not local_only
+        and (
+            (cloud_allowed is True and _cloud_allowed_policy(os.environ))
+            or (
+                cloud_allowed is None
+                and bool(model_hint)
+                and _is_cloud_model_name(model_hint)
+                and _cloud_allowed_policy(os.environ)
+            )
+        )
+    )
 
     def send(origin):
         effective_payload, stripped = _pool_wiring.strip_default_num_thread_for_remote(
@@ -5351,8 +5373,12 @@ def _post(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("Sonder Inference worker pool request timeout expired")
+            from sonder_runtime.adapters.inference.sonder_inference_gateway import resolve_api_key
             headers = {"Content-Type": "application/json"}
-            if local_only:
+            api_key = resolve_api_key()
+            if api_key:
+                headers["Authorization"] = "Bearer " + api_key
+            if local_only or (is_inference_path and not cloud_consented):
                 headers["X-Sonder-Local-Only"] = "1"
             req = urllib.request.Request(f"{origin}{path}", data=wire_bytes, headers=headers)
             def transport():
@@ -5376,15 +5402,12 @@ def _post(
 
     if local_only and not ollama_endpoint.is_loopback(BASE):
         raise ollama_pool.WorkerPoolUnavailable("local-only inference requires a loopback primary")
-    model_hint = payload.get("model") if isinstance(payload, dict) else None
     pinned_origin = _PINNED_OLLAMA_ORIGIN.get()
     if pinned_origin and not local_only:
         return OLLAMA_POOL.request_primary(send, model=model_hint, payload=payload, origin=pinned_origin)
     if local_only or not OLLAMA_POOL.enabled:
         return OLLAMA_POOL.request_primary(send, model=model_hint, payload=payload, origin=BASE)
-    if path in {"/v1/chat/completions", "/v1/completions"} or (
-        path.startswith("/api/") and path[5:] in {"chat", "generate"}
-    ):  # never fail behind our own prewarm
+    if is_inference_path:  # never fail behind our own prewarm
         prewarm_gate.await_prewarm(model_hint, min(request_timeout, _PREWARM_LOAD_TIMEOUT))
     return OLLAMA_POOL.request(send, model=model_hint, idempotent=idempotent, payload=payload)
 

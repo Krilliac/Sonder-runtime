@@ -154,16 +154,15 @@ def ensure_ollama_running(
         client_env = ollama_endpoint.client_environment(process_env)
     except ValueError as exc:
         return False, "Sonder Inference endpoint blocked: %s" % exc
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import resolve_api_key
+    from sonder_runtime.domain import ollama_policy
+
     origin = client_env["SONDER_INFERENCE_BASE_URL"].rstrip("/")
     headers: dict[str, str] = {"Accept": "application/json"}
-    api_key = process_env.get("SONDER_INFERENCE_API_KEY", "").strip()
+    api_key = resolve_api_key(process_env)
     if api_key:
         headers["Authorization"] = "Bearer " + api_key
-    allow_remote = process_env.get("SONDER_ALLOW_REMOTE_INFERENCE", "").strip().lower() in {
-        "1", "true", "yes", "on",
-    } or process_env.get("SONDER_ALLOW_REMOTE_OLLAMA", "").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
+    allow_remote = ollama_policy.remote_allowed(process_env)
     try:
         req = urllib.request.Request(origin + "/v1/sonder/health", headers=headers, method="GET")
         with ollama_endpoint.open_url(req, timeout=5, allow_remote=allow_remote) as resp:

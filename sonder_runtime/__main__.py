@@ -1112,9 +1112,19 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
     # endpoint directly.
     if config.ollama.workers:
         os.environ["SONDER_OLLAMA_WORKERS"] = ",".join(config.ollama.workers)
+    if config.ollama.trusted_origins:
+        os.environ["SONDER_TRUSTED_ORIGINS"] = ",".join(config.ollama.trusted_origins)
+    else:
+        os.environ.setdefault("SONDER_TRUSTED_ORIGINS", "")
     if include_typed_runtime:
         os.environ["SONDER_OLLAMA_POOL_MAX_WORKERS"] = str(
             config.ollama.worker_pool_max_workers
+        )
+        os.environ["SONDER_OLLAMA_WORKER_MAX_INFLIGHT"] = str(
+            config.ollama.worker_max_inflight
+        )
+        os.environ["SONDER_OLLAMA_WORKER_QUEUE_DEPTH"] = str(
+            config.ollama.worker_queue_depth
         )
         os.environ["SONDER_OLLAMA_WORKER_PROBE_PARALLELISM"] = str(
             config.ollama.worker_capability_probe_parallelism
@@ -1124,6 +1134,21 @@ def _export_runtime_environment(config, *, include_typed_runtime: bool = True) -
         )
         os.environ["SONDER_OLLAMA_WORKER_STATUS_PAGE_SIZE"] = str(
             config.ollama.worker_status_page_size
+        )
+        os.environ["SONDER_OLLAMA_WORKER_ADMISSION_TIMEOUT_MS"] = str(
+            config.ollama.worker_admission_timeout_ms
+        )
+        os.environ["SONDER_OLLAMA_WORKER_FAILURE_THRESHOLD"] = str(
+            config.ollama.worker_failure_threshold
+        )
+        os.environ["SONDER_OLLAMA_WORKER_COOLDOWN_SECONDS"] = str(
+            config.ollama.worker_cooldown_seconds
+        )
+        os.environ["SONDER_OLLAMA_WORKER_CAPABILITY_TTL_SECONDS"] = str(
+            config.ollama.worker_capability_ttl_seconds
+        )
+        os.environ["SONDER_OLLAMA_WORKER_PROBE_TIMEOUT_MS"] = str(
+            config.ollama.worker_probe_timeout_ms
         )
     os.environ["SONDER_INFERENCE_BASE_URL"] = config.inference.url
     if config.inference.ready_file:
@@ -1545,7 +1570,7 @@ def cmd_mcp(args) -> int:
             from sonder_runtime.bootstrap.app import start_inference_membership
             start_inference_membership(application)
             from sonder_runtime.adapters.cloud_model_refresh_schedule import start_scheduled_refresh
-            start_scheduled_refresh(origin=config.ollama.url)
+            start_scheduled_refresh(origin=config.inference.url)
             # run_native_mcp returns the number of frames served, not a
             # status: a session that reached EOF cleanly exits 0.
             if getattr(args, "progressive_tools", False):
@@ -1612,7 +1637,7 @@ def cmd_mcp(args) -> int:
         from sonder_runtime.bootstrap.app import start_inference_membership
         start_inference_membership(owned_application)
         from sonder_runtime.adapters.cloud_model_refresh_schedule import start_scheduled_refresh
-        start_scheduled_refresh(origin=config.ollama.url)
+        start_scheduled_refresh(origin=config.inference.url)
 
     from sonder_runtime.adapters.security import unsafe_lab
 
@@ -1914,7 +1939,7 @@ def cmd_capabilities(args) -> int:
     config = _load_config(args)
     try:
         result = refresh_capabilities(
-            origin=config.ollama.url, home=config.state.home or None,
+            origin=config.inference.url, home=config.state.home or None,
             models=args.model, timeout_seconds=args.timeout,
             context_tokens=args.context_tokens,
         )

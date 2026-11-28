@@ -390,8 +390,17 @@ class RuntimeLifecycle:
         self._queue_depth = queue_depth or _env_int("SONDER_QUEUE_DEPTH", 32)
         self._admission_timeout = admission_timeout_seconds
         self._drain_deadline_seconds = drain_deadline_seconds
-        self._ollama_probe_interval = ollama_probe_interval_seconds or 15.0
-        self._ollama_probe_timeout = ollama_probe_timeout_seconds or 5.0
+        env_startup = _env_int("SONDER_INFERENCE_STARTUP_TIMEOUT_SECONDS", 60)
+        self._ollama_probe_interval = (
+            ollama_probe_interval_seconds
+            if ollama_probe_interval_seconds is not None
+            else max(1.0, env_startup / 4)
+        )
+        self._ollama_probe_timeout = (
+            ollama_probe_timeout_seconds
+            if ollama_probe_timeout_seconds is not None
+            else max(1.0, env_startup / 12)
+        )
         self._slots = threading.BoundedSemaphore(self._max_concurrent)
         self._waiters = 0
         self._active_requests = 0
@@ -1375,7 +1384,9 @@ def get() -> RuntimeLifecycle:
             if config is None:
                 _instance = RuntimeLifecycle()
             else:
-                startup_timeout = config.ollama.startup_timeout_seconds
+                inf_startup = getattr(getattr(config, "inference", None), "startup_timeout_seconds", 60)
+                ollama_startup = getattr(getattr(config, "ollama", None), "startup_timeout_seconds", 60)
+                startup_timeout = inf_startup if inf_startup != 60 else ollama_startup
                 _instance = RuntimeLifecycle(
                     deployment_status=DeploymentStatus(
                         profile=config.deployment.profile,

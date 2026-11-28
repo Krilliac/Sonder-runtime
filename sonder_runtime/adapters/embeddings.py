@@ -15,12 +15,12 @@ import urllib.parse
 import sonder_runtime.adapters.embedding_cache as embed_cache
 from sonder_runtime.adapters.inference import gpu_admission, ollama_endpoint
 
-# A dedicated embedding endpoint lets the embedder live on another Ollama host
+# A dedicated embedding endpoint lets the embedder live on another inference host
 # (for example a LAN node) while chat stays on the local primary. Without it,
-# every embedding goes to the primary; with OLLAMA_MAX_LOADED_MODELS=1 each one
-# evicts the resident chat model, and with more slots it competes for its VRAM.
-# The origin passes the same policy as OLLAMA_HOST (remote needs https and
-# SONDER_ALLOW_REMOTE_OLLAMA=1). See docs/runbooks/multi-pc-ollama.md.
+# every embedding goes to the primary. The origin passes the same policy as
+# [inference].url (remote needs https and SONDER_ALLOW_REMOTE_INFERENCE=1).
+# The SI bearer key is attached ONLY when targeting the configured SI origin,
+# never when targeting a separate SONDER_EMBED_BASE_URL host.
 EMBED_BASE_ENV = "SONDER_EMBED_BASE_URL"
 # "none" (default): while the dedicated endpoint is down, embed() returns None
 # and callers take their existing lexical fallback. "local": retry once on the
@@ -220,6 +220,21 @@ def _extract_si_model_digest(payload: object) -> str:
     return ""
 
 
+def _si_auth_headers(target_origin: str) -> dict[str, str]:
+    """Attach the SI bearer token only when ``target_origin`` equals the configured SI origin."""
+    try:
+        configured = ollama_endpoint.normalize().rstrip("/")
+        target = ollama_endpoint.normalize(target_origin).rstrip("/")
+    except ValueError:
+        return {}
+    if target != configured:
+        return {}
+    from sonder_runtime.adapters.inference.sonder_inference_gateway import resolve_api_key
+
+    api_key = resolve_api_key()
+    return {"Authorization": "Bearer " + api_key} if api_key else {}
+
+
 def serving_model_revision(model=None, base=None, timeout=0.5):
     """Read the digest advertised by Sonder Inference ``/v1/sonder/identity``."""
     with ollama_endpoint._default_embedding_operation() as allowed:
@@ -239,9 +254,11 @@ def serving_model_revision(model=None, base=None, timeout=0.5):
             encoded = urllib.parse.quote(query_model, safe="")
             url = "%s/v1/sonder/identity?model=%s" % (selected_base.rstrip("/"), encoded)
             try:
+                headers = {"Accept": "application/json", "X-Sonder-Local-Only": "1"}
+                headers.update(_si_auth_headers(selected_base))
                 req = urllib.request.Request(
                     url,
-                    headers={"Accept": "application/json", "X-Sonder-Local-Only": "1"},
+                    headers=headers,
                     method="GET",
                 )
                 with ollama_endpoint.open_url(req, timeout=timeout) as response:
@@ -502,9 +519,7 @@ def _admitted_embeddings_response(body, base, timeout):
             "Content-Type": "application/json",
             "X-Sonder-Local-Only": "1",
         }
-        api_key = os.environ.get("SONDER_INFERENCE_API_KEY", "").strip()
-        if api_key:
-            headers["Authorization"] = "Bearer " + api_key
+        headers.update(_si_auth_headers(base))
         req = urllib.request.Request(
             "%s/v1/embeddings" % base.rstrip("/"),
             data=ticket.body(json.dumps(body).encode("utf-8")),
