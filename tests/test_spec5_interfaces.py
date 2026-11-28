@@ -250,6 +250,21 @@ class TestReplHandler:
         assert "r1" in result
         assert "r2" in result
 
+    def test_recall_searches_the_whole_query_not_the_first_word(self):
+        from sonder_runtime.interfaces.repl.handler import ReplHandler
+        seen = []
+
+        class Recorder:
+            def recall(self, task, k=2):
+                seen.append(task)
+                return ["hit"]
+
+        h = ReplHandler(recall_service=Recorder())
+        h.dispatch("recall fix the login redirect bug", out=io.StringIO())
+        h.dispatch("recall single", out=io.StringIO())
+        h.dispatch("recall", out=io.StringIO())
+        assert seen == ["fix the login redirect bug", "single", ""]
+
     def test_outcome(self):
         from sonder_runtime.interfaces.repl.handler import ReplHandler
         svc = StubOutcomeService(score=0.6)
