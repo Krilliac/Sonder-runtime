@@ -872,3 +872,22 @@ def test_migrate_store_rejects_unknown_store(isolated_home, capsys):
         main(["migrate", "--store", "not-a-real-store"])
     assert exc_info.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
+
+
+def test_exported_state_home_wins_over_inherited_state_home_override(
+    restored_process_environment, tmp_path, monkeypatch,
+):
+    """The path resolver prefers SONDER_STATE_HOME over SONDER_HOME, so the
+    validated config home must be what it resolves even when the process
+    inherited a different SONDER_STATE_HOME."""
+    from sonder_runtime.__main__ import _export_runtime_environment
+    from sonder_runtime.platform import paths as sonder_paths
+    from sonder_runtime.platform.config import SonderConfig, StateConfig
+
+    inherited = tmp_path / "inherited"
+    configured = tmp_path / "configured"
+    monkeypatch.setenv("SONDER_STATE_HOME", str(inherited))
+    monkeypatch.setenv("SONDER_HOME", str(inherited))
+    _export_runtime_environment(SonderConfig(state=StateConfig(home=str(configured))))
+    assert sonder_paths.env_home_override() == str(configured)
+    assert sonder_paths.default_home() == configured

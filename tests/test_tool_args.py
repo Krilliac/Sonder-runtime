@@ -304,3 +304,20 @@ def test_name_arguments_alias_survives_structural_validation(boundary):
     assert error is None
     assert decision == {"tool": "file_read", "args": {"path": "a.py"}}
     assert original == raw
+
+
+_CONTENT_SCHEMA = {"properties": {"content": {"type": "string"}}}
+
+
+def test_multiple_fenced_blocks_are_not_treated_as_one_outer_fence():
+    raw = "```python\na = 1\n```\nsome prose\n```python\nb = 2\n```"
+    args, notes = normalize_tool_args("file_write", {"content": raw}, _CONTENT_SCHEMA)
+    assert args["content"] == raw
+    assert not any("outer fence" in note for note in notes)
+
+
+def test_single_fenced_block_with_trailing_whitespace_still_stripped():
+    args, _ = normalize_tool_args(
+        "file_write", {"content": "```py\nx = 1\n```\n"}, _CONTENT_SCHEMA
+    )
+    assert args["content"] == "x = 1"
