@@ -51,14 +51,15 @@ def test_default_capability_prober_reads_ps_and_caches_show_by_digest():
         url = request.full_url
         if url.endswith("/v1/sonder/health"):
             return _json_response({
+                "status": "ready",
                 "version": "0.12.6",
                 "models": [
                     {
                         "id": MOE,
-                        "name": MOE,
-                        "size": 21_000_000_000,
-                        "size_vram": 21_000_000_000,
-                        "context_length": 32768,
+                        "backend": "llamacpp",
+                        "default": True,
+                        "state": "resident",
+                        "resident": True,
                     }
                 ],
             })
@@ -68,7 +69,16 @@ def test_default_capability_prober_reads_ps_and_caches_show_by_digest():
                 return _json_response({
                     "object": "list",
                     "data": [
-                        {"id": MOE, "name": MOE, "digest": digest, "details": {"parameter_size": "35B"}},
+                        {
+                            "id": MOE,
+                            "name": MOE,
+                            "digest": digest,
+                            "details": {"parameter_size": "35B"},
+                            "sonder": {
+                                "backend": "llamacpp",
+                                "runtime": {"context": {"fitted_ctx": 32768}},
+                            },
+                        },
                     ],
                 })
             show_calls.append((url, MOE))

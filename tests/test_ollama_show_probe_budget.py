@@ -23,16 +23,38 @@ def _make_transport(names, show_handler, ps_models=()):
     show_calls: list[str] = []
     ordered = sorted(names)
     call_idx = [0]
+    fitted_by_name = {
+        str(row.get("id") or row.get("name") or ""): row["context_length"]
+        for row in ps_models
+        if isinstance(row, dict) and isinstance(row.get("context_length"), int)
+    }
+    health_models = [
+        {
+            "id": str(row.get("id") or row.get("name") or ""),
+            "state": "resident",
+            "resident": True,
+        }
+        for row in ps_models
+        if isinstance(row, dict)
+    ]
 
     def fake(request, **kwargs):
         url = request.full_url
         if url.endswith("/v1/sonder/health"):
-            return _Resp(json.dumps({"version": "0.12.6", "models": list(ps_models)}).encode())
+            return _Resp(json.dumps({"status": "ready", "version": "0.12.6", "models": health_models}).encode())
         if url.endswith("/v1/models"):
             is_show = float(kwargs.get("timeout", 0.0) or 0.0) >= 5.0
             if not is_show:
-                return _Resp(json.dumps({"object": "list", "data": [
-                    {"id": n, "name": n, "digest": "sha256:" + n} for n in names]}).encode())
+                data_rows = []
+                for n in names:
+                    entry = {"id": n, "name": n, "digest": "sha256:" + n}
+                    if n in fitted_by_name:
+                        entry["sonder"] = {
+                            "backend": "llamacpp",
+                            "runtime": {"context": {"fitted_ctx": fitted_by_name[n]}},
+                        }
+                    data_rows.append(entry)
+                return _Resp(json.dumps({"object": "list", "data": data_rows}).encode())
             idx = call_idx[0]
             call_idx[0] += 1
             model = ordered[idx % len(ordered)]

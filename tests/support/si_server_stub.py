@@ -152,11 +152,8 @@ def _from_openai_request(payload: dict[str, Any]) -> dict[str, Any]:
         opts["seed"] = payload["seed"]
     if "stop" in payload and payload["stop"] is not None:
         opts["stop"] = payload["stop"]
-    extra = payload.get("extra_body") if isinstance(payload.get("extra_body"), dict) else {}
     if "num_ctx" in payload and payload["num_ctx"] is not None:
         opts["num_ctx"] = payload["num_ctx"]
-    elif "num_ctx" in extra and extra["num_ctx"] is not None:
-        opts["num_ctx"] = extra["num_ctx"]
     if opts:
         out["options"] = opts
     ctk = payload.get("chat_template_kwargs")

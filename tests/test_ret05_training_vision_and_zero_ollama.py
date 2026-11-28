@@ -318,8 +318,10 @@ def test_server_post_and_fanout_translate_openai_chat_completions(monkeypatch):
     assert len(sent_bodies) == 1
     wire = sent_bodies[0]
     assert "options" not in wire
+    assert "extra_body" not in wire
     assert "keep_alive" not in wire
     assert "think" not in wire
+    assert wire["num_ctx"] == 8192
     assert wire["max_tokens"] == 64
     assert wire["temperature"] == 0.2
     assert wire["chat_template_kwargs"] == {"enable_thinking": False}
@@ -449,3 +451,266 @@ def test_zero_local_ollama_api_or_port_11434_literals_in_code():
                     if val == "OLLAMA_HOST" and rel not in ollama_host_allowlist:
                         offenders.append(f"{rel}:{node.lineno} env_read={val!r}")
     assert offenders == [], "Remaining local-Ollama literals:\n" + "\n".join(offenders[:30])
+
+
+def test_scheduled_refresh_and_capabilities_ignore_ollama_host_and_bind_inference_url(tmp_path, monkeypatch):
+    """SECURITY (Round 3): OLLAMA_HOST never diverts scheduled cloud refresh or cmd_capabilities."""
+    from sonder_runtime import __main__ as cli_main
+    from sonder_runtime.adapters import cloud_model_refresh_schedule
+    from sonder_runtime.adapters.inference import capability_refresh, ollama_endpoint
+    from sonder_runtime.platform.config import InferenceConfig, OllamaConfig, SonderConfig, StateConfig
+
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://127.0.0.1:11437")
+    monkeypatch.setenv("SONDER_INFERENCE_API_KEY", "si-secret-token-only-for-si")
+
+    seen_cap_origins = []
+    monkeypatch.setattr(
+        capability_refresh,
+        "refresh_capabilities",
+        lambda *, origin, **_kw: seen_cap_origins.append(origin) or {"models": []},
+    )
+    cfg = SonderConfig(
+        state=StateConfig(home=str(tmp_path)),
+        inference=InferenceConfig(url="http://127.0.0.1:11437"),
+        ollama=OllamaConfig(url="http://127.0.0.1:11434"),
+    )
+    monkeypatch.setattr(cli_main, "_load_config", lambda _args: cfg)
+    rc = cli_main.cmd_capabilities(
+        SimpleNamespace(model=None, timeout=1.0, context_tokens=None, json=True)
+    )
+    assert rc == 0
+    assert seen_cap_origins == ["http://127.0.0.1:11437"]
+    assert all("11434" not in o for o in seen_cap_origins)
+
+    # Also prove start_scheduled_refresh called with config.inference.url never contacts OLLAMA_HOST.
+    seen_urls = []
+    seen_auth = []
+
+    class _Resp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1): return b'{"object":"list","data":[]}'
+
+    def fake_open(req, timeout=5.0, allow_remote=None):
+        seen_urls.append(req.full_url)
+        seen_auth.append(dict(req.header_items()).get("Authorization"))
+        return _Resp()
+
+    monkeypatch.setattr(ollama_endpoint, "open_url", fake_open)
+    from sonder_runtime.adapters.inference.ollama_cloud_metadata import OllamaCloudMetadata
+
+    # Verify __main__ passes config.inference.url (never config.ollama.url) at both MCP call sites.
+    main_src = (REPO_ROOT / "sonder_runtime" / "__main__.py").read_text(encoding="utf-8")
+    assert "start_scheduled_refresh(origin=config.ollama.url)" not in main_src
+    assert main_src.count("start_scheduled_refresh(origin=config.inference.url)") == 2
+    assert "origin=config.ollama.url" not in main_src
+
+    client = OllamaCloudMetadata(cfg.inference.url, opener=fake_open)
+    assert client.tags() == ()
+    assert seen_urls == ["http://127.0.0.1:11437/v1/models"]
+    assert all("11434" not in u for u in seen_urls)
+    assert seen_auth == ["Bearer si-secret-token-only-for-si"]
+    assert callable(cloud_model_refresh_schedule.start_scheduled_refresh)
+
+
+def test_reasoning_continuation_and_single_send_enforce_local_only_cloud_fence(monkeypatch):
+    """SECURITY (Round 3): reasoning_continuation and single_send on SI rungs always send X-Sonder-Local-Only: 1."""
+    import server as srv
+    from sonder_runtime.application.chat import provider_bridge
+
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "0")
+    sent_headers = []
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1):
+            return json.dumps({
+                "id": "chatcmpl-fence",
+                "object": "chat.completion",
+                "model": "gpt-oss:120b",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "local answer"},
+                    "finish_reason": "stop",
+                }],
+            }).encode("utf-8")
+
+    def fake_open(req, timeout=30):
+        sent_headers.append(dict(req.header_items()))
+        return _Resp()
+
+    monkeypatch.setattr(srv.OLLAMA_POOL, "open_url", fake_open)
+    monkeypatch.setattr(srv, "BASE", "http://127.0.0.1:11437")
+    monkeypatch.setattr(srv, "dispatch_provider", lambda provider, path, body, transport: transport())
+    monkeypatch.setattr(srv, "_HOST_MODEL_REQUEST_ADMISSION", SimpleNamespace(try_acquire=lambda: None))
+
+    payload = {
+        "model": "gpt-oss:120b",
+        "messages": [{"role": "user", "content": "private question"}],
+        "stream": False,
+        "options": {"num_predict": 256},
+    }
+    with provider_bridge.bind_rung("sonder_inference", "reasoning"):
+        _out, text = srv._chat_request(
+            dict(payload),
+            model="gpt-oss:120b",
+            cloud=False,
+            local_only=False,
+            reasoning_continuation=True,
+            reasoning_total_tokens=512,
+        )
+    assert text == "local answer"
+    assert sent_headers[-1].get("X-sonder-local-only") == "1"
+
+    with provider_bridge.bind_rung("sonder_inference", "fast"):
+        _out2, text2 = srv._chat_request(
+            {**payload, "think": False},
+            model="gpt-oss:120b",
+            cloud=False,
+            local_only=True,
+            single_send=True,
+        )
+    assert text2 == "local answer"
+    assert sent_headers[-1].get("X-sonder-local-only") == "1"
+
+    # Explicitly consented cloud call omits X-Sonder-Local-Only so SI's ollama_cloud backend can serve it.
+    monkeypatch.setenv("SONDER_ALLOW_CLOUD", "1")
+    _out3, text3 = srv._chat_request(
+        dict(payload),
+        model="gpt-oss:120b",
+        cloud=True,
+        local_only=False,
+    )
+    assert text3 == "local answer"
+    assert "X-sonder-local-only" not in sent_headers[-1]
+
+
+def test_embeddings_sends_si_bearer_only_to_configured_si_origin_never_dedicated_embed_host(tmp_path, monkeypatch):
+    """SECURITY (Round 3): embeddings never sends the SI bearer key to a separate SONDER_EMBED_BASE_URL host."""
+    from sonder_runtime.adapters import embeddings
+    from sonder_runtime.adapters.inference import ollama_endpoint
+
+    key_file = tmp_path / "si_embed.key"
+    key_file.write_text("si-only-secret-key\n", encoding="utf-8")
+    monkeypatch.delenv("SONDER_INFERENCE_API_KEY", raising=False)
+    monkeypatch.setenv("SONDER_INFERENCE_API_KEY_FILE", str(key_file))
+    monkeypatch.setenv("SONDER_INFERENCE_BASE_URL", "http://127.0.0.1:11437")
+    monkeypatch.setenv("SONDER_EMBED_BASE_URL", "http://127.0.0.1:11999")
+    ollama_endpoint.configure_typed_endpoint(None)
+
+    seen = []
+
+    class _Resp:
+        def __init__(self, body: dict):
+            self._raw = json.dumps(body).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1): return self._raw
+
+    def fake_open(req, timeout=30, allow_remote=None):
+        seen.append((req.full_url, dict(req.header_items())))
+        if "/v1/sonder/identity" in req.full_url:
+            return _Resp({"backend_identity": {"model_digest": "a" * 64}})
+        return _Resp({"data": [{"embedding": [0.1, 0.2, 0.3]}]})
+
+    monkeypatch.setattr(ollama_endpoint, "open_url", fake_open)
+    monkeypatch.setattr(embeddings, "_EMBED_CACHE", None, raising=False)
+
+    # 1. Dedicated embedder host (127.0.0.1:11999) MUST NOT receive the SI bearer key.
+    with embeddings._admitted_embeddings_response({"model": "nomic-embed-text", "input": "hi"}, "http://127.0.0.1:11999", 5):
+        pass
+    rev_dedicated = embeddings.serving_model_revision(model="nomic-embed-text", base="http://127.0.0.1:11999")
+    assert rev_dedicated.endswith("a" * 64)
+    for url, hdrs in seen:
+        assert "11999" in url
+        assert "Authorization" not in hdrs
+
+    # 2. Configured SI origin (127.0.0.1:11437) DOES receive the api_key_file bearer key.
+    seen.clear()
+    with embeddings._admitted_embeddings_response({"model": "nomic-embed-text", "input": "hi"}, "http://127.0.0.1:11437", 5):
+        pass
+    rev_si = embeddings.serving_model_revision(model="nomic-embed-text", base="http://127.0.0.1:11437")
+    assert rev_si.endswith("a" * 64)
+    assert len(seen) == 2
+    for url, hdrs in seen:
+        assert "11437" in url
+        assert hdrs.get("Authorization") == "Bearer si-only-secret-key"
+
+
+def test_api_key_file_reaches_legacy_server_post_and_get_and_startup_timeout_wires_lifecycle(tmp_path, monkeypatch):
+    """Round 3: api_key_file reaches legacy server._post/_get; [inference].startup_timeout_seconds wires lifecycle; bootstrap_engine uses unified remote opt-in."""
+    import server as srv
+    from scripts import bootstrap_engine
+    from sonder_runtime.adapters.inference import ollama_endpoint
+    from sonder_runtime.adapters.web import lifecycle
+    from sonder_runtime.platform.config import InferenceConfig, SonderConfig, StateConfig
+
+    key_file = tmp_path / "legacy_si.key"
+    key_file.write_text("legacy-si-file-token\n", encoding="utf-8")
+    monkeypatch.delenv("SONDER_INFERENCE_API_KEY", raising=False)
+    monkeypatch.setenv("SONDER_INFERENCE_API_KEY_FILE", str(key_file))
+
+    seen = []
+
+    class _Resp:
+        status = 200
+        def __init__(self, body: dict):
+            self._raw = json.dumps(body).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1): return self._raw
+
+    def fake_open(req, timeout=30, allow_remote=None):
+        seen.append((req.full_url, dict(req.header_items())))
+        if req.full_url.endswith("/v1/models"):
+            return _Resp({"object": "list", "data": []})
+        if req.full_url.endswith("/v1/sonder/health"):
+            return _Resp({"status": "ready"})
+        return _Resp({
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        })
+
+    monkeypatch.setattr(srv.OLLAMA_POOL, "open_url", fake_open)
+    monkeypatch.setattr(srv, "BASE", "http://127.0.0.1:11437")
+    monkeypatch.setattr(srv, "dispatch_provider", lambda provider, path, body, transport: transport())
+
+    srv._post("/v1/chat/completions", {"model": "qwen3.8:27b", "messages": [{"role": "user", "content": "hi"}]})
+    srv._get("/v1/models")
+    assert len(seen) == 2
+    assert seen[0][1].get("Authorization") == "Bearer legacy-si-file-token"
+    assert seen[1][1].get("Authorization") == "Bearer legacy-si-file-token"
+
+    # [inference].startup_timeout_seconds wires lifecycle probe interval & timeout.
+    lifecycle.reset_for_tests()
+    try:
+        lifecycle.configure(SonderConfig(
+            state=StateConfig(home=str(tmp_path / "state")),
+            inference=InferenceConfig(startup_timeout_seconds=24),
+        ))
+        lc = lifecycle.get()
+        assert lc._ollama_probe_interval == 6.0
+        assert lc._ollama_probe_timeout == 2.0
+    finally:
+        lifecycle.reset_for_tests()
+
+    # bootstrap_engine uses unified remote opt-in (INFERENCE=0 overrides OLLAMA=1) and api_key_file.
+    monkeypatch.setattr(ollama_endpoint, "open_url", fake_open)
+    ok_blocked, msg_blocked = bootstrap_engine.ensure_ollama_running(env={
+        "SONDER_INFERENCE_BASE_URL": "https://192.0.2.50:8443",
+        "SONDER_ALLOW_REMOTE_INFERENCE": "0",
+        "SONDER_ALLOW_REMOTE_OLLAMA": "1",
+        "SONDER_INFERENCE_API_KEY_FILE": str(key_file),
+    })
+    assert ok_blocked is False
+    assert "blocked" in msg_blocked.lower()
+
+    seen.clear()
+    ok_local, _msg_local = bootstrap_engine.ensure_ollama_running(env={
+        "SONDER_INFERENCE_BASE_URL": "http://127.0.0.1:11437",
+        "SONDER_INFERENCE_API_KEY_FILE": str(key_file),
+    })
+    assert ok_local is True
+    assert seen[0][1].get("Authorization") == "Bearer legacy-si-file-token"

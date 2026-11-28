@@ -55,11 +55,9 @@ def test_fanout_records_the_smaller_window_actually_dispatched(wire, monkeypatch
     assert server._fanout_synthesis_generate("qwen:27b", "{}") == "ok"
 
     assert len(sent) == 1
-    sent_ctx = (
-        (sent[0].get("extra_body") or {}).get("num_ctx")
-        or (sent[0].get("options") or {}).get("num_ctx")
-        or sent[0].get("num_ctx")
-    )
+    assert "extra_body" not in sent[0]
+    assert "options" not in sent[0]
+    sent_ctx = sent[0]["num_ctx"]
     assert 512 <= sent_ctx < 32768
     assert recorded == [("qwen:27b", sent_ctx)]
 
@@ -69,8 +67,6 @@ def test_dispatched_context_comes_from_serialized_bytes(wire, monkeypatch):
     payload = {"model": "qwen:27b", "messages": [{"role": "user", "content": "hi"}], "options": {"num_ctx": 4096}}
 
     def dispatch(_provider, _path, metadata, send):
-        if isinstance(metadata.get("extra_body"), dict):
-            metadata["extra_body"]["num_ctx"] = 32768
         if "num_ctx" in metadata:
             metadata["num_ctx"] = 32768
         payload["options"]["num_ctx"] = 16384
@@ -78,12 +74,9 @@ def test_dispatched_context_comes_from_serialized_bytes(wire, monkeypatch):
 
     monkeypatch.setattr(server, "dispatch_provider", dispatch)
     server._post("/v1/chat/completions", payload)
-    sent_ctx = (
-        (sent[0].get("extra_body") or {}).get("num_ctx")
-        or (sent[0].get("options") or {}).get("num_ctx")
-        or sent[0].get("num_ctx")
-    )
-    assert sent_ctx == 4096
+    assert "extra_body" not in sent[0]
+    assert "options" not in sent[0]
+    assert sent[0]["num_ctx"] == 4096
     assert recorded == [("qwen:27b", 4096)]
 
 

@@ -243,4 +243,4 @@ def test_cmd_mcp_starts_the_schedule_after_membership_in_both_branches():
     merged = sorted([(line, "m") for line in membership] + [(line, "s") for line in starts])
     assert [kind for _line, kind in merged] == ["m", "s", "m", "s"]
     for call in (n for n in ast.walk(cmd_mcp) if isinstance(n, ast.Call) and n.lineno in starts):
-        assert [ast.unparse(k.value) for k in call.keywords] == ["config.ollama.url"]
+        assert [ast.unparse(k.value) for k in call.keywords] == ["config.inference.url"]

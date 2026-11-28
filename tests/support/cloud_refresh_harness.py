@@ -112,7 +112,7 @@ class FakeOllama:
                                 "owned_by": "sonder-inference",
                                 "sonder": {
                                     "backend": "ollama_cloud",
-                                    "runtime": {"context_tokens": 262144},
+                                    "runtime": {"context": {"fitted_ctx": 262144}},
                                 },
                             })
                     for n in owner.tags:
@@ -124,7 +124,7 @@ class FakeOllama:
                                 "owned_by": "sonder-inference",
                                 "sonder": {
                                     "backend": "ollama_cloud",
-                                    "runtime": {"context_tokens": 262144},
+                                    "runtime": {"context": {"fitted_ctx": 262144}},
                                 },
                             })
                     return self._send(200, {

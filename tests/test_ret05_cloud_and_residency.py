@@ -200,10 +200,15 @@ def test_gpu_residency_and_pool_wiring_have_no_local_ollama_contention_or_api_ca
 
 
 def test_si_v1_models_envelope_parsed_by_catalog_inventory_and_pool():
-    """BLOCKING (2): real SI /v1/models envelope {'object':'list','data':[...],'sonder':{...}} works everywhere."""
+    """BLOCKING (2) + Round 3: real SI /v1/models and /v1/sonder/health envelopes work everywhere."""
     from sonder_runtime.domain.model_catalog import catalog_names, catalog_records, installed_records
     from sonder_runtime.adapters.model_inventory import inventory_rows
     from sonder_runtime.adapters.inference import ollama_pool
+    from sonder_runtime.adapters.inference.model_context_probe import (
+        extract_chat_fitness_payload,
+        parse_model_metadata,
+    )
+    from sonder_runtime.domain.chat_model_fitness import unfit_reason
 
     si_models = {
         "object": "list",
@@ -216,37 +221,100 @@ def test_si_v1_models_envelope_parsed_by_catalog_inventory_and_pool():
                     "backend": "llamacpp",
                     "default": True,
                     "synthetic": False,
-                    "runtime": {"context_tokens": 32768},
+                    "runtime": {
+                        "gpu_memory": {"status": "ok", "spilled": False},
+                        "context": {
+                            "policy": "fit",
+                            "configured_ctx": 65536,
+                            "fitted_ctx": 32768,
+                            "fit_attempts": 1,
+                            "outcome": "fitted",
+                        },
+                        "warnings": [],
+                    },
+                    "profile": {
+                        "context_length": 32768,
+                        "configured_context_length": 65536,
+                        "capabilities": ["chat", "completion"],
+                    },
                 },
             },
             {
                 "id": "nomic-embed-text:latest",
                 "object": "model",
                 "owned_by": "sonder-inference",
-                "sonder": {"backend": "llamacpp", "default": False, "synthetic": False},
+                "sonder": {
+                    "backend": "llamacpp",
+                    "default": False,
+                    "synthetic": False,
+                    "profile": {
+                        "context_length": 2048,
+                        "capabilities": ["embedding"],
+                    },
+                },
+            },
+            {
+                "id": "tiny-chat:latest",
+                "object": "model",
+                "owned_by": "sonder-inference",
+                "sonder": {
+                    "backend": "llamacpp",
+                    "default": False,
+                    "synthetic": False,
+                    "runtime": {
+                        "context": {
+                            "policy": "fit",
+                            "configured_ctx": 512,
+                            "fitted_ctx": 512,
+                            "fit_attempts": 1,
+                            "outcome": "fitted",
+                        },
+                    },
+                    "profile": {
+                        "context_length": 512,
+                        "capabilities": ["chat", "completion"],
+                    },
+                },
             },
         ],
         "sonder": {"api_version": 1},
     }
-    assert catalog_names(si_models) == ["nomic-embed-text:latest", "qwen3.6:35b"]
+    assert catalog_names(si_models) == ["nomic-embed-text:latest", "qwen3.6:35b", "tiny-chat:latest"]
     recs = catalog_records(si_models)
-    assert [name for name, _ in recs] == ["nomic-embed-text:latest", "qwen3.6:35b"]
+    assert [name for name, _ in recs] == ["nomic-embed-text:latest", "qwen3.6:35b", "tiny-chat:latest"]
     assert recs[1][1]["name"] == "qwen3.6:35b"
     inst = installed_records(si_models)
-    assert [name for name, _ in inst] == ["qwen3.6:35b", "nomic-embed-text:latest"]
+    assert [name for name, _ in inst] == ["qwen3.6:35b", "nomic-embed-text:latest", "tiny-chat:latest"]
 
     inv = inventory_rows(si_models, "/v1/models")
-    assert len(inv) == 2
+    assert len(inv) == 3
     assert inv[0]["name"] == "qwen3.6:35b"
 
-    assert ollama_pool._model_names(si_models) == ("nomic-embed-text:latest", "qwen3.6:35b")
+    assert ollama_pool._model_names(si_models) == (
+        "nomic-embed-text:latest", "qwen3.6:35b", "tiny-chat:latest",
+    )
 
-    # Prober parses SI /v1/models data[] and extracts per-model runtime context cleanly.
+    # parse_model_metadata reads real SI runtime.context.fitted_ctx and profile.context_length.
+    ctx, _param, _geom, declared = parse_model_metadata(si_models, "qwen3.6:35b")
+    assert ctx == 32768
+    assert declared == 32768
+
+    # Chat-fitness gate unwraps the matching data[] row and rejects embedding-only / tiny-context models.
+    assert unfit_reason(extract_chat_fitness_payload(si_models, "qwen3.6:35b")) == ""
+    assert "embedding" in unfit_reason(extract_chat_fitness_payload(si_models, "nomic-embed-text:latest")).lower()
+    assert "minimum" in unfit_reason(extract_chat_fitness_payload(si_models, "tiny-chat:latest")).lower()
+
+    # Prober reads /v1/sonder/health residency state/resident flags (never counting lazy/evicted rows as loaded)
+    # and extracts per-model context from real /v1/models runtime.context.fitted_ctx / profile.context_length.
     si_health = {
         "status": "ready",
         "api_version": 1,
         "version": "1.0.0",
-        "models": [{"id": "qwen3.6:35b", "state": "resident", "context_length": 32768}],
+        "models": [
+            {"id": "qwen3.6:35b", "backend": "llamacpp", "default": True, "state": "resident", "resident": True},
+            {"id": "nomic-embed-text:latest", "backend": "llamacpp", "default": False, "state": "lazy", "resident": False},
+            {"id": "tiny-chat:latest", "backend": "llamacpp", "default": False, "state": "evicted", "resident": False},
+        ],
     }
 
     class _Resp:
@@ -266,5 +334,103 @@ def test_si_v1_models_envelope_parsed_by_catalog_inventory_and_pool():
     prober = ollama_pool._default_capability_prober(allow_remote=False, open_url=fake_open)
     result = prober("http://127.0.0.1:11437")
     assert "qwen3.6:35b" in result["models"]
-    assert "qwen3.6:35b" in result["loaded_models"]
+    assert result["loaded_models"] == ("qwen3.6:35b",)
+    assert "nomic-embed-text:latest" not in result["loaded_models"]
+    assert "tiny-chat:latest" not in result["loaded_models"]
     assert result["model_contexts"]["qwen3.6:35b"] == 32768
+    assert result["model_contexts"]["nomic-embed-text:latest"] == 2048
+    assert result["model_contexts"]["tiny-chat:latest"] == 512
+
+
+def test_server_chat_model_unfit_reason_rejects_embedding_only_si_model(monkeypatch):
+    """Round 3: runtime/server.py _CHAT_FITNESS unwraps /v1/models data[] and rejects unfit models."""
+    import server as srv
+
+    si_models = {
+        "object": "list",
+        "data": [
+            {
+                "id": "nomic-embed-text:latest",
+                "object": "model",
+                "owned_by": "sonder-inference",
+                "sonder": {
+                    "backend": "llamacpp",
+                    "profile": {"context_length": 2048, "capabilities": ["embedding"]},
+                },
+            },
+            {
+                "id": "qwen3.8:27b",
+                "object": "model",
+                "owned_by": "sonder-inference",
+                "sonder": {
+                    "backend": "llamacpp",
+                    "runtime": {"context": {"fitted_ctx": 32768}},
+                    "profile": {"context_length": 32768, "capabilities": ["chat", "completion"]},
+                },
+            },
+        ],
+    }
+    monkeypatch.setattr(srv, "_get", lambda path, **_kw: si_models if path == "/v1/models" else {})
+    srv._CHAT_FITNESS._cache.clear()
+    try:
+        reason = srv.chat_model_unfit_reason("nomic-embed-text:latest")
+        assert reason, "embedding-only model must be refused for chat"
+        assert "embedding" in reason.lower()
+        assert srv.chat_model_unfit_reason("qwen3.8:27b") == ""
+    finally:
+        srv._CHAT_FITNESS._cache.clear()
+
+
+def test_cloud_metadata_show_reads_real_si_fitted_ctx_and_honors_api_key_file(tmp_path, monkeypatch):
+    """Round 3: OllamaCloudMetadata reads sonder.runtime.context.fitted_ctx and api_key_file."""
+    key_file = tmp_path / "si.key"
+    key_file.write_text("file-bearer-token-99\n", encoding="utf-8")
+    monkeypatch.delenv("SONDER_INFERENCE_API_KEY", raising=False)
+    monkeypatch.setenv("SONDER_INFERENCE_API_KEY_FILE", str(key_file))
+
+    seen_headers = []
+    si_models = {
+        "object": "list",
+        "data": [
+            {
+                "id": "kimi-k2.5:cloud",
+                "object": "model",
+                "owned_by": "sonder-inference",
+                "sonder": {
+                    "backend": "ollama_cloud",
+                    "default": False,
+                    "synthetic": False,
+                    "runtime": {
+                        "context": {
+                            "policy": "fit",
+                            "configured_ctx": 262144,
+                            "fitted_ctx": 131072,
+                            "fit_attempts": 1,
+                            "outcome": "fitted",
+                        },
+                    },
+                    "profile": {"context_length": 131072},
+                },
+            },
+        ],
+        "sonder": {
+            "api_version": 1,
+            "backends": [{"name": "ollama_cloud", "capabilities": ["chat", "tools"]}],
+        },
+    }
+
+    class _Resp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1): return json.dumps(si_models).encode("utf-8")
+
+    def fake_open(req, timeout=5.0, allow_remote=None):
+        seen_headers.append(dict(req.header_items()))
+        return _Resp()
+
+    client = OllamaCloudMetadata("http://127.0.0.1:11437", opener=fake_open)
+    result = client.show("kimi-k2.5:cloud")
+    assert result.status == ProbeStatus.LIVE
+    assert result.context_length == 131072
+    assert seen_headers[0].get("Authorization") == "Bearer file-bearer-token-99"
