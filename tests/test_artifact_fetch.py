@@ -1088,3 +1088,129 @@ def test_server_web_fetch_still_returns_real_pages(monkeypatch):
     output = server.web_fetch("https://example.com/notes")
 
     assert output == page
+
+
+# --- symlinks planted at staging / sidecar / destination paths ------------
+#
+# The staging name (``<dest>.<url digest>.part<ext>``) and the sidecar name
+# (``<dest>.provenance.json``) are predictable, so a link planted there must
+# never be written through, whatever ``resume`` says.
+
+
+@pytest.fixture()
+def outside_dir(tmp_path_factory):
+    """A directory that is not under SONDER_FILE_ROOTS (the test tmp_path)."""
+    return tmp_path_factory.mktemp("outside_roots")
+
+
+def _plant_symlink(link, target, *, directory=False):
+    try:
+        os.symlink(str(target), str(link), target_is_directory=directory)
+    except (OSError, NotImplementedError, AttributeError) as exc:
+        pytest.skip("platform cannot create symlinks here: %s" % exc)
+
+
+def _is_link(path):
+    return os.path.islink(str(path))
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_symlinked_staging_file_is_never_written_through(
+    fixture_server, tmp_path, outside_dir, resume,
+):
+    url = fixture_server.route("/staged.zip", body=ZIP_BODY)
+    dest = tmp_path / "staged.zip"
+    victim = outside_dir / "victim.bin"
+    victim.write_bytes(b"ORIGINAL-VICTIM-CONTENT")
+    part = artifact_fetch._part_path(dest, url)
+    _plant_symlink(part, victim)
+
+    result = artifact_fetch.fetch_artifact(
+        url, str(dest), expect_type="zip", resume=resume,
+    )
+
+    assert victim.read_bytes() == b"ORIGINAL-VICTIM-CONTENT"
+    assert result["ok"], result["failures"]
+    assert dest.read_bytes() == ZIP_BODY
+    assert not _is_link(dest)
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_dangling_symlinked_staging_file_does_not_create_its_target(
+    fixture_server, tmp_path, outside_dir, resume,
+):
+    url = fixture_server.route("/dangling.zip", body=ZIP_BODY)
+    dest = tmp_path / "dangling.zip"
+    victim = outside_dir / "must-not-be-created.bin"
+    part = artifact_fetch._part_path(dest, url)
+    _plant_symlink(part, victim)
+    assert not victim.exists()
+
+    artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip", resume=resume)
+
+    assert not victim.exists()
+    assert not _is_link(dest)
+
+
+def test_symlinked_sidecar_is_never_written_through(
+    fixture_server, tmp_path, outside_dir,
+):
+    url = fixture_server.route("/sidecar.zip", body=ZIP_BODY)
+    dest = tmp_path / "sidecar.zip"
+    victim = outside_dir / "victim-sidecar.json"
+    victim.write_text("ORIGINAL-VICTIM-JSON", encoding="utf-8")
+    _plant_symlink(artifact_fetch._provenance_path(dest), victim)
+
+    result = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
+
+    assert victim.read_text(encoding="utf-8") == "ORIGINAL-VICTIM-JSON"
+    assert result["ok"], result["failures"]
+    sidecar = artifact_fetch._provenance_path(dest)
+    assert not _is_link(sidecar)
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert record["sha256"] == artifact_fetch.file_sha256(dest)
+
+
+def test_dangling_symlinked_sidecar_does_not_create_its_target(
+    fixture_server, tmp_path, outside_dir,
+):
+    url = fixture_server.route("/sidecar-dangling.zip", body=ZIP_BODY)
+    dest = tmp_path / "sidecar-dangling.zip"
+    victim = outside_dir / "must-not-be-created.json"
+    _plant_symlink(artifact_fetch._provenance_path(dest), victim)
+
+    artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
+
+    assert not victim.exists()
+
+
+def test_destination_under_a_symlinked_directory_is_refused(
+    fixture_server, tmp_path,
+):
+    url = fixture_server.route("/viadir.zip", body=ZIP_BODY)
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    _plant_symlink(alias, real, directory=True)
+
+    with pytest.raises((PermissionError, artifact_fetch.ArtifactFetchError)):
+        artifact_fetch.fetch_artifact(
+            url, str(alias / "viadir.zip"), expect_type="zip",
+        )
+
+    assert list(real.iterdir()) == []
+
+
+def test_resume_still_appends_to_a_regular_partial_after_hardening(
+    fixture_server, tmp_path,
+):
+    # Guard against over-fixing: a regular (non-link) partial must still resume.
+    url = fixture_server.route("/regular-resume.zip", body=ZIP_BODY)
+    dest = tmp_path / "regular-resume.zip"
+    artifact_fetch._part_path(dest, url).write_bytes(ZIP_BODY[:64])
+
+    result = artifact_fetch.fetch_artifact(url, str(dest), expect_type="zip")
+
+    assert result["ok"], result["failures"]
+    assert result["resumed_from"] == 64
+    assert dest.read_bytes() == ZIP_BODY
