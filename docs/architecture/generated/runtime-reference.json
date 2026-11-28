@@ -1,6 +1,6 @@
 {
   "capabilities": {
-    "catalog_digest": "f8dd15485f5012cb0908281b0a8648d8fdc9f0c7545fd2db7f3ec3c60f870edd",
+    "catalog_digest": "16d2303ef0dc2dec31ce263ae3e3335c28216fa98e6ceb73e3bb6f0f0fc85af6",
     "operational": {
       "compute": {
         "configured_peer_count": "integer",
@@ -70,7 +70,7 @@
     "schema": "sonder-runtime-capability-reference-v1",
     "sdk": {
       "authorization": "runtime-evaluated",
-      "catalog_digest": "f8dd15485f5012cb0908281b0a8648d8fdc9f0c7545fd2db7f3ec3c60f870edd",
+      "catalog_digest": "16d2303ef0dc2dec31ce263ae3e3335c28216fa98e6ceb73e3bb6f0f0fc85af6",
       "mcp_versions": [
         "2025-11-25",
         "2025-06-18",
@@ -6279,7 +6279,7 @@
           "name": "permission_approve"
         },
         {
-          "description": "Show or set how much Sonder does without asking.\n\nModes, least to most autonomous: plan (reads only), manual (ask before\nanything that is not a read), acceptEdits (file changes proceed, running\nprograms still asks), auto (programs proceed too). Destructive tools ask in\nevery mode, including auto.\n\nElevation is a separate axis no mode grants; see permission_policy.\nRaising the mode above manual needs an attended caller (the console's\n/mode, or an administrator's POST /v1/permission-mode); from here an\nunattended client may only lower it or return from plan to manual.",
+          "description": "Show or set how much Sonder does without asking.\n\nModes, least to most autonomous: plan (reads only), manual (ask before\nanything that is not a read), acceptEdits (file changes proceed, running\nprograms still asks), auto (programs proceed too). Destructive tools ask in\nevery mode, including auto.\n\nElevation is a separate axis no mode grants; see permission_policy.\nRaising the mode above manual needs an attended caller (the console's\n/mode); neither this tool nor POST /v1/permission-mode (with or without\ncredentials) can raise it, only lower it or return from plan to manual.",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -23737,7 +23737,7 @@
     "schemas": 4,
     "tools": 273
   },
-  "digest": "8b084e9a05acddf9c649cb3f209762e14d463fc0a596605649219f7ce3f6dac5",
+  "digest": "30b0925cb2f15e453ade075f334cde6c4ea824226e138272f0b5c95d8597e27a",
   "events": [
     {
       "name": "session.started",
@@ -27268,9 +27268,9 @@
   ],
   "schema": "sonder-runtime-document-reference-v1",
   "schemas": {
-    "catalog_digest": "f8dd15485f5012cb0908281b0a8648d8fdc9f0c7545fd2db7f3ec3c60f870edd",
+    "catalog_digest": "16d2303ef0dc2dec31ce263ae3e3335c28216fa98e6ceb73e3bb6f0f0fc85af6",
     "client": {
-      "digest": "f8dd15485f5012cb0908281b0a8648d8fdc9f0c7545fd2db7f3ec3c60f870edd",
+      "digest": "16d2303ef0dc2dec31ce263ae3e3335c28216fa98e6ceb73e3bb6f0f0fc85af6",
       "events": [
         {
           "name": "approval.denied",
@@ -29571,7 +29571,7 @@
           {
             "name": "permission_mode",
             "schema_available": true,
-            "summary": "Show or set how much Sonder does without asking.\n\nModes, least to most autonomous: plan (reads only), manual (ask before\nanything that is not a read), acceptEdits (file changes proceed, running\nprograms still asks), auto (programs proceed too). Destructive tools ask in\nevery mode, including auto.\n\nElevation is a separate axis no mode grants; see permission_policy.\nRaising the mode above manual needs an attended caller (the console's\n/mode, or an administrator's POST /v1/permission-mode); from here an\nunattended client may only lower it or return from plan to manual."
+            "summary": "Show or set how much Sonder does without asking.\n\nModes, least to most autonomous: plan (reads only), manual (ask before\nanything that is not a read), acceptEdits (file changes proceed, running\nprograms still asks), auto (programs proceed too). Destructive tools ask in\nevery mode, including auto.\n\nElevation is a separate axis no mode grants; see permission_policy.\nRaising the mode above manual needs an attended caller (the console's\n/mode); neither this tool nor POST /v1/permission-mode (with or without\ncredentials) can raise it, only lower it or return from plan to manual."
           },
           {
             "name": "permission_policy",
@@ -36281,7 +36281,7 @@
           "name": "permission_approve"
         },
         {
-          "description": "Show or set how much Sonder does without asking.\n\nModes, least to most autonomous: plan (reads only), manual (ask before\nanything that is not a read), acceptEdits (file changes proceed, running\nprograms still asks), auto (programs proceed too). Destructive tools ask in\nevery mode, including auto.\n\nElevation is a separate axis no mode grants; see permission_policy.\nRaising the mode above manual needs an attended caller (the console's\n/mode, or an administrator's POST /v1/permission-mode); from here an\nunattended client may only lower it or return from plan to manual.",
+          "description": "Show or set how much Sonder does without asking.\n\nModes, least to most autonomous: plan (reads only), manual (ask before\nanything that is not a read), acceptEdits (file changes proceed, running\nprograms still asks), auto (programs proceed too). Destructive tools ask in\nevery mode, including auto.\n\nElevation is a separate axis no mode grants; see permission_policy.\nRaising the mode above manual needs an attended caller (the console's\n/mode); neither this tool nor POST /v1/permission-mode (with or without\ncredentials) can raise it, only lower it or return from plan to manual.",
           "effects": [],
           "execution_class": "pure",
           "input_schema": {
@@ -46909,7 +46909,7 @@
           "name": "permission_approve"
         },
         {
-          "description": "Show or set how much Sonder does without asking.\n\nModes, least to most autonomous: plan (reads only), manual (ask before\nanything that is not a read), acceptEdits (file changes proceed, running\nprograms still asks), auto (programs proceed too). Destructive tools ask in\nevery mode, including auto.\n\nElevation is a separate axis no mode grants; see permission_policy.\nRaising the mode above manual needs an attended caller (the console's\n/mode, or an administrator's POST /v1/permission-mode); from here an\nunattended client may only lower it or return from plan to manual.",
+          "description": "Show or set how much Sonder does without asking.\n\nModes, least to most autonomous: plan (reads only), manual (ask before\nanything that is not a read), acceptEdits (file changes proceed, running\nprograms still asks), auto (programs proceed too). Destructive tools ask in\nevery mode, including auto.\n\nElevation is a separate axis no mode grants; see permission_policy.\nRaising the mode above manual needs an attended caller (the console's\n/mode); neither this tool nor POST /v1/permission-mode (with or without\ncredentials) can raise it, only lower it or return from plan to manual.",
           "inputSchema": {
             "properties": {
               "explain": {
@@ -56681,7 +56681,7 @@
         },
         {
           "function": {
-            "description": "Show or set how much Sonder does without asking.\n\nModes, least to most autonomous: plan (reads only), manual (ask before\nanything that is not a read), acceptEdits (file changes proceed, running\nprograms still asks), auto (programs proceed too). Destructive tools ask in\nevery mode, including auto.\n\nElevation is a separate axis no mode grants; see permission_policy.\nRaising the mode above manual needs an attended caller (the console's\n/mode, or an administrator's POST /v1/permission-mode); from here an\nunattended client may only lower it or return from plan to manual.",
+            "description": "Show or set how much Sonder does without asking.\n\nModes, least to most autonomous: plan (reads only), manual (ask before\nanything that is not a read), acceptEdits (file changes proceed, running\nprograms still asks), auto (programs proceed too). Destructive tools ask in\nevery mode, including auto.\n\nElevation is a separate axis no mode grants; see permission_policy.\nRaising the mode above manual needs an attended caller (the console's\n/mode); neither this tool nor POST /v1/permission-mode (with or without\ncredentials) can raise it, only lower it or return from plan to manual.",
             "name": "permission_mode",
             "parameters": {
               "properties": {
@@ -60397,7 +60397,7 @@
   },
   "sources": {
     "runtime/command_catalog.py": "55f0c863b38e1801b0bc5c60b0c997f4c2d6df7251e56798667394652e68e914",
-    "runtime/server.py": "9ac443d0028ae824ab8e3839f300308e0551fcfe69a76874f5d33ed73e1a3075",
+    "runtime/server.py": "62f153aa31ca39b64813d62a46c222a48ddaeb3056b3d96655e5f7b48e437126",
     "sonder_runtime/application/tools/generated_catalogs.py": "332f23bad788ee427203c64a35f9e36affa2ec11af0ea08889ac9aaa821b0d89",
     "sonder_runtime/bootstrap/native_mcp.py": "a91fb2598788ed5f175431983f33e3b9f97d8ab8bdf50123248335d065cc1e93",
     "sonder_runtime/domain/common/events.py": "00cef1ef3a8f1add797633486103af8de9864f53a451447133a792422d52a208",
@@ -66263,7 +66263,7 @@
       }
     },
     {
-      "description": "Show or set how much Sonder does without asking.\n\nModes, least to most autonomous: plan (reads only), manual (ask before\nanything that is not a read), acceptEdits (file changes proceed, running\nprograms still asks), auto (programs proceed too). Destructive tools ask in\nevery mode, including auto.\n\nElevation is a separate axis no mode grants; see permission_policy.\nRaising the mode above manual needs an attended caller (the console's\n/mode, or an administrator's POST /v1/permission-mode); from here an\nunattended client may only lower it or return from plan to manual.",
+      "description": "Show or set how much Sonder does without asking.\n\nModes, least to most autonomous: plan (reads only), manual (ask before\nanything that is not a read), acceptEdits (file changes proceed, running\nprograms still asks), auto (programs proceed too). Destructive tools ask in\nevery mode, including auto.\n\nElevation is a separate axis no mode grants; see permission_policy.\nRaising the mode above manual needs an attended caller (the console's\n/mode); neither this tool nor POST /v1/permission-mode (with or without\ncredentials) can raise it, only lower it or return from plan to manual.",
       "name": "permission_mode",
       "parameters": {
         "properties": {
