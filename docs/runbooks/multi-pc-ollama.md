@@ -184,19 +184,21 @@ Leave the coordinator's own Ollama as the primary endpoint and add remote
 workers in its secrets environment or process environment:
 
 ```powershell
-$env:OLLAMA_HOST = "http://127.0.0.1:11434"
-$env:SONDER_ALLOW_REMOTE_OLLAMA = "1"
+$env:SONDER_INFERENCE_BASE_URL = "http://127.0.0.1:11437"
+$env:SONDER_ALLOW_REMOTE_INFERENCE = "1"
 $env:SONDER_OLLAMA_WORKERS = "https://ollama-pc2.example.internal:443;https://ollama-pc3.example.internal:443"
 python -m sonder_runtime preflight
 python -m sonder_runtime serve
 ```
 
-The equivalent TOML configuration is:
+The equivalent TOML configuration is (`SONDER_ALLOW_REMOTE_OLLAMA` is a deprecated alias for `SONDER_ALLOW_REMOTE_INFERENCE`; `OLLAMA_HOST` is ignored for inference transport):
 
 ```toml
-[ollama]
-url = "http://127.0.0.1:11434"
+[inference]
+url = "http://127.0.0.1:11437"
 allow_remote = true
+
+[ollama]
 workers = [
   "https://ollama-pc2.example.internal:443",
   "https://ollama-pc3.example.internal:443",
@@ -276,12 +278,12 @@ Ollama unloads the chat model for it. To move only the embedder to a worker:
 
 ```text
 SONDER_EMBED_BASE_URL=https://<embed-host>:443   # worker behind a TLS proxy
-SONDER_ALLOW_REMOTE_OLLAMA=1
-SONDER_OLLAMA_CA_BUNDLE=C:\path\to\worker-ca.pem
-SONDER_EMBED_MODEL=nomic-embed-text:latest     # must be installed on the worker
-SONDER_EMBED_FALLBACK=none                     # or: local (CPU on the primary)
-SONDER_EMBED_KEEP_ALIVE=24h                    # keep the embedder resident there
-SONDER_EMBED_NUM_CTX=4096                      # bound the embedder's runner context
+SONDER_ALLOW_REMOTE_INFERENCE=1                  # deprecated alias: SONDER_ALLOW_REMOTE_OLLAMA=1
+SONDER_INFERENCE_CA_BUNDLE=C:\path\to\worker-ca.pem
+SONDER_EMBED_MODEL=nomic-embed-text:latest       # must be installed on the worker
+SONDER_EMBED_FALLBACK=none                       # or: local (CPU on the primary)
+SONDER_EMBED_KEEP_ALIVE=24h                      # keep the embedder resident there
+SONDER_EMBED_NUM_CTX=4096                        # bound the embedder's runner context
 ```
 
 The knob definitions, defaults and bounds are in

@@ -34,9 +34,9 @@ Set the acknowledgement as one exact value before starting Sonder:
 ```powershell
 $env:SONDER_UNSAFE_LAB_ACK = 'I UNDERSTAND SONDER UNSAFE LAB MODE GIVES MODELS UNRESTRICTED HOST TOOL ACCESS AND I AM RUNNING IN A DISPOSABLE ISOLATED ENVIRONMENT'
 $env:SONDER_HOST = '127.0.0.1'
-$env:OLLAMA_HOST = 'http://127.0.0.1:11434'
+$env:SONDER_INFERENCE_BASE_URL = 'http://127.0.0.1:11437'
 Remove-Item Env:SONDER_ALLOW_CLOUD -ErrorAction SilentlyContinue
-$env:SONDER_ALLOW_REMOTE_OLLAMA = '0'
+$env:SONDER_ALLOW_REMOTE_INFERENCE = '0'
 python server.py
 ```
 

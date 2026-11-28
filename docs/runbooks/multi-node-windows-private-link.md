@@ -449,7 +449,8 @@ copying values from here.
    certificate, never a private key.
 
 5. **Set the coordinator worker URL** to `https://10.0.0.2:443` and set
-   `SONDER_ALLOW_REMOTE_OLLAMA=1`, as described in
+   `SONDER_ALLOW_REMOTE_INFERENCE=1` (`SONDER_ALLOW_REMOTE_OLLAMA=1` is a
+   deprecated alias), as described in
    [remote-ollama-caddy.md](remote-ollama-caddy.md#coordinator-settings).
    The URL must be an origin only (scheme, host, explicit port).
 

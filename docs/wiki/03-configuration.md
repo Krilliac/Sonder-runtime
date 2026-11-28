@@ -535,7 +535,8 @@ retry of a failed read or a read of a file a successful `context_pack`
 returned.
 
 Consent gates: `SONDER_ALLOW_CLOUD`, `SONDER_WEB_TOOLS`,
-`SONDER_ALLOW_REMOTE_OLLAMA`, and `SONDER_ALLOW_REMOTE_COMPUTE`. These are
+`SONDER_ALLOW_REMOTE_INFERENCE` (`SONDER_ALLOW_REMOTE_OLLAMA` is a deprecated
+alias that logs a warning), and `SONDER_ALLOW_REMOTE_COMPUTE`. These are
 independent: enabling private-node compute does not enable remote inference or
 hosted models. Remote compute also requires per-workload consent. See
 [Private Compute Fabric](../runbooks/compute-fabric.md). Also: `SONDER_FILE_ROOTS`,
@@ -543,27 +544,30 @@ hosted models. Remote compute also requires per-workload consent. See
 `SONDER_ALLOW_SECURITY_MODEL_TOOLS`, `SONDER_ALLOW_NON_LOOPBACK_PROXY_BACKEND`.
 
 Chat call knobs (read by `server.py` at import): `SONDER_KEEP_ALIVE` (default
-`2m`, Ollama `keep_alive` for chat requests) and `SONDER_TIMEOUT` (default `300`
+`2m`, legacy `keep_alive` hint) and `SONDER_TIMEOUT` (default `300`
 seconds, integer, per-call model timeout).
 
-### Remote Ollama and the worker pool
+### Remote inference and the worker pool
 
-Variables: `OLLAMA_HOST` (the primary), `SONDER_ALLOW_REMOTE_OLLAMA`,
+Variables: `SONDER_INFERENCE_BASE_URL` / `[inference].url` (the primary;
+legacy `OLLAMA_HOST` is ignored for inference transport with a deprecation
+warning), `SONDER_ALLOW_REMOTE_INFERENCE` (canonical remote consent gate;
+`SONDER_ALLOW_REMOTE_OLLAMA` is a deprecated alias that logs a warning),
 `SONDER_OLLAMA_WORKERS` (comma- or semicolon-separated origins; a bare
 `host:port` gets `http://`, which a remote host then rejects),
-`SONDER_OLLAMA_CA_BUNDLE`, and `SONDER_TRUSTED_ORIGINS`. The URL rules (HTTPS,
-explicit port, no credentials, no path), the Caddy setup and the coordinator
-settings are in
+`SONDER_INFERENCE_CA_BUNDLE` / `SONDER_OLLAMA_CA_BUNDLE`, and
+`SONDER_TRUSTED_ORIGINS`. The URL rules (HTTPS, explicit port, no credentials,
+no path), the Caddy setup and the coordinator settings are in
 [Remote Ollama behind Caddy](../runbooks/remote-ollama-caddy.md#coordinator-settings);
 the multi-host procedure is
 [Multi-node Ollama](../runbooks/multi-node-ollama.md). Example:
 
 ```text
-SONDER_ALLOW_REMOTE_OLLAMA=1
+SONDER_ALLOW_REMOTE_INFERENCE=1
 SONDER_OLLAMA_WORKERS=https://<worker-host>:443
 ```
 
-The coordinator keeps its normal `[ollama].url` endpoint as the first worker,
+The coordinator keeps its normal `[inference].url` endpoint as the first worker,
 then schedules requests by least in-flight count, breaking idle ties toward
 the host with the lowest observed request latency. After
 `worker_failure_threshold` consecutive transport failures (default 3) a worker
@@ -583,8 +587,8 @@ fail configuration with `[ollama].<key> must be >= 1` or `<= <max>`.
 
 | Key | Environment variable | Default | Range | Meaning |
 |---|---|---|---|---|
-| `url` | `OLLAMA_HOST` | `http://127.0.0.1:11434` | explicit port required | Primary endpoint. `host:port` without a scheme gets `http://`. A non-loopback host needs `allow_remote` and `https`. |
-| `allow_remote` | `SONDER_ALLOW_REMOTE_OLLAMA` | `false` | boolean | Remote-Ollama consent gate. |
+| `url` | `OLLAMA_HOST` *(ignored for SI transport; use `[inference].url` / `SONDER_INFERENCE_BASE_URL`)* | `http://127.0.0.1:11434` | explicit port required | Legacy setting validated for backwards compatibility only; inference transport is pinned to `[inference].url` (`http://127.0.0.1:11437` by default) and logs a deprecation warning if `OLLAMA_HOST` differs. |
+| `allow_remote` | `SONDER_ALLOW_REMOTE_INFERENCE` *(deprecated alias: `SONDER_ALLOW_REMOTE_OLLAMA`)* | `false` | boolean | Unified remote-inference consent gate (`[inference].allow_remote` / `SONDER_ALLOW_REMOTE_INFERENCE`). |
 | `workers` | `SONDER_OLLAMA_WORKERS` | none | at most `worker_pool_max_workers` unique origins including the primary | Extra origins, `https://host:port`. A duplicate of the primary or of another worker is an error. |
 | `ca_bundle` | `SONDER_OLLAMA_CA_BUNDLE`; if unset, the TOML `[ollama].ca_bundle`; if that is empty, `SSL_CERT_FILE`, then `REQUESTS_CA_BUNDLE` | none | absolute path to an existing file | PEM CA bundle that verifies private-CA HTTPS. An unusable `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` is ignored; an unusable `SONDER_OLLAMA_CA_BUNDLE` or TOML value fails configuration. |
 | `trusted_origins` | `SONDER_TRUSTED_ORIGINS` | none | CIDR list, validated | Parsed and exported, but `validate_worker_origin` does not use it to admit or refuse a worker; do not rely on it. |
@@ -665,11 +669,15 @@ on the CPU (`num_gpu: 0`). Use it when the chat model nearly fills VRAM:
 
 It pairs with Ollama's `OLLAMA_MAX_LOADED_MODELS` of 2 or more.
 
-`SONDER_EMBED_BASE_URL` sends embeddings to a dedicated Ollama origin, for
+`SONDER_EMBED_BASE_URL` sends embeddings to a dedicated inference origin, for
 example a LAN node, while chat stays on the primary. This keeps the embedder
 off the chat model's GPU entirely. The origin passes the same policy as
-`OLLAMA_HOST`: a remote host needs `https://` and `SONDER_ALLOW_REMOTE_OLLAMA=1`
-(Caddy front: [Remote Ollama behind Caddy](../runbooks/remote-ollama-caddy.md)).
+`[inference].url`: a remote host needs `https://` and
+`SONDER_ALLOW_REMOTE_INFERENCE=1` (`SONDER_ALLOW_REMOTE_OLLAMA=1` is a
+deprecated alias; Caddy front:
+[Remote Ollama behind Caddy](../runbooks/remote-ollama-caddy.md)). The Sonder
+Inference bearer key is never attached to a separate `SONDER_EMBED_BASE_URL`
+origin.
 If the host is unreachable, or a fronting proxy answers 502-504, embeddings
 stop for `SONDER_EMBED_COOLDOWN_SECONDS` (default 30). During that time
 callers use their lexical fallback. `SONDER_EMBED_FALLBACK=local` instead
