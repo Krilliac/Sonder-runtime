@@ -43,6 +43,7 @@ _ENVIRONMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _OPTION = re.compile(r"^--?[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _BOUNDED_OPTION_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_TERMINAL_RECEIPT_STATES = frozenset({"succeeded", "failed", "cancelled", "interrupted"})
 _REMOTE_JOB_STATES = frozenset({
     "pending", "claimed", "running", "paused", "cancelling",
     "cancellation_requested", "succeeded", "failed", "cancelled", "interrupted",
@@ -527,6 +528,8 @@ class RemoteJobReceipt:
             raise ValueError("receipt output watermark must be non-negative")
         if not isinstance(self.output_truncated, bool):
             raise ValueError("receipt output truncation flag must be boolean")
+        if not isinstance(self.artifact_error, str) or len(self.artifact_error) > 512:
+            raise ValueError("receipt artifact error must be a bounded string")
 
 
 def validate_remote_job_receipt(
@@ -1523,11 +1526,13 @@ class ComputeJobWorker:
                 self._by_job[remote_job_id] = refreshed
                 self._by_idempotency[receipt.idempotency_key] = refreshed
             receipt = refreshed
-        terminal = receipt.state in {"succeeded", "failed", "cancelled", "interrupted"}
+        terminal = receipt.state in _TERMINAL_RECEIPT_STATES
         try:
             receipt = self._project_output(receipt)
             try:
                 receipt = self._collect_artifacts(receipt)
+                if receipt.artifact_error:
+                    receipt = replace(receipt, artifact_error="")
             except (InvalidInput, ArtifactSpoolError, OSError) as exc:
                 if not terminal:
                     raise
@@ -1724,7 +1729,7 @@ class ComputeJobWorker:
         receipt = self.status(remote_job_id)
         if not isinstance(reason, str) or not reason.strip() or len(reason) > 512:
             raise InvalidInput("cancellation reason must be non-empty and bounded")
-        if receipt.state in {"succeeded", "failed"}:
+        if receipt.state in _TERMINAL_RECEIPT_STATES:
             logger.info(f"compute job already terminal; cancel ignored: remote_job_id={remote_job_id!r}, state={receipt.state!r}")
             return receipt
         result = self._provider.cancel(remote_job_id, reason=reason)

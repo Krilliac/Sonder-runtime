@@ -1397,6 +1397,7 @@ def test_worker_rejects_artifact_handle_opened_outside_workspace_after_path_race
     degraded = worker.status(started.remote_job_id)
     assert degraded.state == "succeeded"
     assert re.search("workspace", degraded.artifact_error)
+    assert degraded.artifacts == ()
 
 
 def _completed_provider() -> CapturingProvider:
@@ -1555,6 +1556,7 @@ def test_worker_never_publishes_digest_from_mutating_artifact(
     degraded = worker.status(started.remote_job_id)
     assert degraded.state == "succeeded"
     assert re.search("changed while hashing", degraded.artifact_error)
+    assert degraded.artifacts == ()
 
 
 def test_input_stage_cleanup_uses_python311_compatible_onerror(tmp_path: Path, monkeypatch) -> None:
